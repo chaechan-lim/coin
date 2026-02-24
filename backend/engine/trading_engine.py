@@ -373,10 +373,11 @@ class TradingEngine:
                     surges = await self._scan_volume_surges()
                     if surges:
                         await self._try_rotation(session, surges)
-                        logger.info(
-                            "surge_scan_result",
-                            top_surges=[(s, round(sc, 1)) for s, sc in surges[:3]],
-                        )
+                    logger.info(
+                        "surge_scan_complete",
+                        surge_count=len(surges),
+                        top_surges=[(s, round(sc, 1)) for s, sc in surges[:3]] if surges else [],
+                    )
 
                 await self._portfolio_manager.take_snapshot(session)
                 await session.commit()
@@ -412,9 +413,8 @@ class TradingEngine:
         signals: list[Signal] = []
 
         for name, strategy in self._strategies.items():
-            if symbol not in strategy.default_coins and symbol.split("/")[0] + "/KRW" not in strategy.default_coins:
-                if "all" not in strategy.applicable_market_types:
-                    continue
+            # tracked_coins에 있으면 모든 전략 실행 (default_coins 무시)
+            # rotation 코인은 default_coins/applicable_market_types 체크
 
             try:
                 df = await self._market_data.get_candles(
@@ -476,9 +476,7 @@ class TradingEngine:
             if symbol == self._current_surge_symbol:
                 continue
 
-            # 추세 필터: 하락장에서 매수 차단
-            if self._market_state in ("downtrend", "crash"):
-                continue
+            # 서지 로테이션은 추세 필터 무시 (서지 자체가 강한 시그널)
 
             # 거래 가능 여부 체크
             can_trade, reason = self._can_trade(symbol)
@@ -624,9 +622,13 @@ class TradingEngine:
 
     # ── 추세 필터 ──────────────────────────────────────────────────
 
-    def _is_downtrend(self) -> bool:
-        """BTC 기준 시장 상태가 하락추세이면 True → 매수 차단."""
-        return self._market_state in ("downtrend", "crash")
+    def _trend_filter_action(self) -> str:
+        """시장 상태별 매수 정책. 'block' / 'reduce' / 'allow' 반환."""
+        if self._market_state == "crash":
+            return "block"
+        elif self._market_state == "downtrend":
+            return "reduce"  # 포지션 50% 축소 매수
+        return "allow"
 
     async def _process_decision(
         self, session: AsyncSession, symbol: str, decision: CombinedDecision
@@ -639,9 +641,10 @@ class TradingEngine:
             logger.info("buy_suppressed", symbol=symbol)
             return
 
-        # 추세 필터: 하락장에서 매수 차단
-        if decision.action == SignalType.BUY and self._is_downtrend():
-            logger.info("buy_blocked_downtrend", symbol=symbol, market_state=self._market_state)
+        # 추세 필터: crash=차단, downtrend=50% 축소
+        trend_action = self._trend_filter_action()
+        if decision.action == SignalType.BUY and trend_action == "block":
+            logger.info("buy_blocked_crash", symbol=symbol, market_state=self._market_state)
             return
 
         primary_signal = max(
@@ -665,7 +668,11 @@ class TradingEngine:
 
             # 포지션 사이징: max_trade_size_pct 사용 (소액 테스트 대응)
             cash = self._portfolio_manager.cash_balance
-            amount_krw = cash * self._config.risk.max_trade_size_pct
+            size_pct = self._config.risk.max_trade_size_pct
+            if trend_action == "reduce":
+                size_pct *= 0.5  # downtrend: 50% 축소
+                logger.info("buy_reduced_downtrend", symbol=symbol, size_pct=round(size_pct, 3))
+            amount_krw = cash * size_pct
 
             # 최소 주문금액 미달 시 잔고 전체 시도
             if amount_krw < 5000 and cash >= 5000:
