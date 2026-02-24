@@ -1,14 +1,14 @@
 # 코인 자동 매매 시스템 — 구현 진행 현황
 
-> 최종 업데이트: 2026-02-24 (Windows 호환성 패치 적용)
+> 최종 업데이트: 2026-02-25
 
 ---
 
 ## 개요
 
 빗썸(Bithumb) 거래소 기반의 24시간 자동 암호화폐 트레이딩 시스템.
-7가지 전략 혼합, AI 에이전트(시장 분석 + 리스크 관리), React 대시보드 포함.
-페이퍼 트레이딩으로 시작 후 실전 전환.
+5개 활성 전략 가중 투표 + 거래량 서지 로테이션, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드 포함.
+**현재 라이브 운영 중** (BTC/KRW, 500K KRW, SQLite).
 
 ---
 
@@ -18,9 +18,9 @@
 |---|---|
 | 백엔드 | Python 3.12, FastAPI, SQLAlchemy (async), APScheduler |
 | 프론트엔드 | React 18, TypeScript, Vite, TailwindCSS, Recharts, lightweight-charts |
-| DB | PostgreSQL 16 (Docker) |
-| Cache / PubSub | Redis 7 (Docker) |
-| 거래소 연동 | ccxt (Bithumb async) |
+| DB | SQLite (개발/현재) / PostgreSQL 16 (프로덕션) |
+| Cache / PubSub | Redis 7 (Docker, 선택) |
+| 거래소 연동 | Bithumb V2 API (ccxt public + aiohttp JWT private) |
 | 기술적 지표 | pandas + pandas-ta |
 | 배포 | Docker Compose (restart: always → 24/7) |
 
@@ -54,7 +54,8 @@ coin/
 │   ├── exchange/
 │   │   ├── __init__.py          ✅
 │   │   ├── base.py              ✅ 완료
-│   │   ├── bithumb_adapter.py   ✅ 완료
+│   │   ├── bithumb_adapter.py   ✅ 완료 (V1, 미사용)
+│   │   ├── bithumb_v2_adapter.py ✅ 완료 (V2, 현재 라이브)
 │   │   ├── paper_adapter.py     ✅ 완료
 │   │   └── data_models.py       ✅ 완료
 │   ├── services/
@@ -77,6 +78,7 @@ coin/
 │   │   ├── __init__.py          ✅
 │   │   ├── market_analysis.py   ✅ 완료
 │   │   ├── risk_management.py   ✅ 완료
+│   │   ├── trade_review.py      ✅ 완료 (24h 거래 리뷰)
 │   │   └── coordinator.py       ✅ 완료
 │   ├── engine/
 │   │   ├── __init__.py          ✅
@@ -114,7 +116,8 @@ coin/
         │   ├── StrategyPerformance.tsx ✅ 완료
         │   ├── OrderLog.tsx     ✅ 완료
         │   ├── AgentStatus.tsx  ✅ 완료
-        │   └── EngineControl.tsx ✅ 완료
+        │   ├── EngineControl.tsx ✅ 완료
+        │   └── RotationMonitor.tsx ✅ 완료
         ├── hooks/
         │   ├── useWebSocket.ts  ✅ 완료
         │   └── usePortfolio.ts  ✅ 완료
@@ -216,6 +219,7 @@ coin/
 | 전략 신호 로그 (회고용) | `frontend/src/components/OrderLog.tsx` | ✅ |
 | 에이전트 상태 + 가중치 시각화 | `frontend/src/components/AgentStatus.tsx` | ✅ |
 | 엔진 제어 + 실시간 이벤트 피드 | `frontend/src/components/EngineControl.tsx` | ✅ |
+| 로테이션 모니터 (서지 바 차트) | `frontend/src/components/RotationMonitor.tsx` | ✅ |
 | 프론트엔드 Dockerfile | `frontend/Dockerfile` | ✅ |
 
 ### ⬜ Phase 5 — 안정화 (다음 단계)
@@ -246,13 +250,14 @@ coin/
 
 ### 시장 상태별 전략 가중치 프로필
 
-| 시장 상태 | 변동성돌파 | MA크로스 | MACD | RSI | 볼린저+RSI | 그리드 | DCA |
-|---|---|---|---|---|---|---|---|
-| 강한 상승장 | 0.30 | 0.25 | 0.20 | 0.10 | 0.05 | 0.05 | 0.05 |
-| 상승장 | 0.25 | 0.20 | 0.20 | 0.15 | 0.10 | 0.05 | 0.05 |
-| 횡보장 | 0.05 | 0.05 | 0.10 | 0.15 | 0.25 | 0.30 | 0.10 |
-| 하락장 | 0.05 | 0.10 | 0.10 | 0.30 | 0.20 | 0.10 | 0.15 |
-| 폭락 | 0.00 | 0.05 | 0.05 | 0.35 | 0.25 | 0.05 | 0.25 |
+> Grid/DCA는 독립 관리형이라 combiner에서 제외. 5개 활성 전략만 사용.
+
+| 시장 상태 | RSI | 볼린저+RSI | MACD | 변동성돌파 | MA크로스 |
+|---|---|---|---|---|---|
+| 강한 상승장 | 0.20 | 0.20 | 0.20 | 0.20 | 0.20 |
+| 상승장 | 0.25 | 0.30 | 0.15 | 0.15 | 0.15 |
+| 횡보장 (기본) | 0.30 | 0.35 | 0.15 | 0.10 | 0.10 |
+| 하락장 | 0.35 | 0.40 | 0.10 | 0.05 | 0.10 |
 
 ### 과매매 방지 레이어 (다중 장치)
 1. **코인당 최소 간격**: 1시간 이상 (설정 가능)
@@ -294,10 +299,14 @@ orders
 | GET | /engine/status | 엔진 상태 |
 | POST | /engine/start | 엔진 시작 |
 | POST | /engine/stop | 엔진 중지 |
+| GET | /engine/rotation-status | 로테이션 상태 + 서지 점수 |
 | GET | /agents/market-analysis/latest | 최신 시장 분석 결과 |
 | GET | /agents/market-analysis/history | 시장 분석 이력 |
 | GET | /agents/risk/alerts | 현재 리스크 경고 |
 | GET | /agents/risk/history | 리스크 경고 이력 |
+| GET | /agents/trade-review/latest | 최근 거래 리뷰 |
+| POST | /agents/trade-review/run | 수동 거래 리뷰 실행 |
+| GET | /agents/trade-review/history | 거래 리뷰 이력 |
 
 ### WebSocket
 
@@ -480,6 +489,8 @@ docker compose restart backend
 | 버전 | 날짜 | 내용 |
 |---|---|---|
 | v0.1 | 2026-02-24 | 초기 구현: 백엔드 전체 + API + React 대시보드 |
-| v0.2 | 예정 | 페이퍼 트레이딩 검증 + 버그 수정 |
-| v0.3 | 예정 | 단위 테스트 + 안정화 |
-| v1.0 | 예정 | 실전 전환 |
+| v0.2 | 2026-02-24 | 라이브 전환: Bithumb V2 어댑터, SL/TP/trailing, 동적 손절, 거래량 로테이션 |
+| v0.3 | 2026-02-24 | 백테스트-라이브 패리티 수정, crash→downtrend 통합, UTC→KST 수정 |
+| v0.4 | 2026-02-25 | 서지 임계값 2.0x, 추적코인 5종 축소, 로테이션 모니터 프론트엔드 탭 |
+| v0.5 | 예정 | 단위 테스트 + 안정화 |
+| v1.0 | 예정 | 장기 운영 안정화 |

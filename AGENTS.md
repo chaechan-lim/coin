@@ -100,20 +100,19 @@ class MyStrategy(BaseStrategy):
 - Volume: `volume_sma_20`
 
 ### Market State Detection
-`TradingEngine._detect_market_state()`:
+`TradingEngine._detect_market_state()` — 4단계 (crash는 downtrend에 통합):
 - `strong_uptrend`: SMA20 > SMA60 + ADX > 25 + RSI > 55
 - `uptrend`: SMA20 > SMA60
-- `downtrend`: SMA20 < SMA60 + (ADX > 25 or RSI < 45)
-- `crash`: SMA20 < SMA60 + ADX > 25 + RSI < 35
+- `downtrend`: SMA20 < SMA60 + (ADX > 25 or RSI < 45) → 매수 50% 축소
 - `sideways`: 나머지
 
 ### Trading Engine Cycle (5분)
-1. `_maybe_update_market_state()` — BTC 4h 기준 시장 상태 감지
-2. `_evaluate_coin()` per tracked coin:
+1. `_maybe_update_market_state()` — BTC 4h 기준 시장 상태 감지 (30분 간격)
+2. `_evaluate_coin()` per tracked coin (5종: BTC/ETH/XRP/SOL/ADA):
    - SL/TP/trailing stop 체크 → 매도
    - 5개 전략 시그널 수집 → combiner → 매수/매도 결정
-3. `_scan_volume_surges()` — 20코인 거래량 서지 스캔
-4. `_try_rotation()` — 서지 확인 + 전략 확인 → 로테이션
+3. `_scan_volume_surges()` — 20코인 거래량 서지 스캔 (전체 점수 캐시 → API 노출)
+4. `_try_rotation()` — 서지(≥2.0x) 확인 + 전략 확인 → 로테이션
 
 ### Exchange Adapter (Bithumb V2)
 - Public API (OHLCV, ticker, orderbook): ccxt 라이브러리
@@ -154,6 +153,15 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 # 엔진 시작
 curl -X POST http://localhost:8000/api/v1/engine/start
 ```
+
+---
+
+### 로테이션 모니터 API
+```
+GET /api/v1/engine/rotation-status
+→ RotationStatusResponse: 서지 점수 전체, 임계값, 시장 상태, 추적/로테이션 코인 목록
+```
+프론트엔드 `RotationMonitor.tsx`가 30초마다 폴링.
 
 ---
 

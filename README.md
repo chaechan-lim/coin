@@ -152,19 +152,19 @@ docker compose logs -f backend
 | Uptrend | 2.0x | 4% | 10% |
 | Sideways | 2.0x | 4% | 7% |
 | Downtrend | 2.0x | 4% | 7% |
-| Crash | 1.5x | 3% | 5% |
 
 ### Trend Filter
 
-하락장(SMA20 < SMA60)에서 매수 차단. 백테스트에서 불필요 거래 50% 감소.
+하락장(SMA20 < SMA60)에서 매수 50% 축소. 빗썸 현물 전용 (short 불가).
 
 ### Volume Surge Rotation
 
 - 5분마다 20개 코인 거래량 스캔
-- `volume / volume_sma_20 >= 3.0`이면 서지 감지
+- `volume / volume_sma_20 >= 2.0`이면 서지 감지 (상위 ~9.5%)
 - 서지 코인에 전략 확인(combiner) 통과 시 자동 매수
 - 더 강한 서지 발견 시 기존 매도 → 새 코인 매수
 - 쿨다운 2시간
+- 추적 코인 5종 (BTC/ETH/XRP/SOL/ADA) + 로테이션 20종
 
 ### Anti-Overtrading
 
@@ -207,8 +207,10 @@ python backtest.py --rotation
 | GET | /api/v1/trades | Trade history |
 | GET | /api/v1/strategies | Strategy list + weights |
 | GET | /api/v1/engine/status | Engine status |
+| GET | /api/v1/engine/rotation-status | Rotation status + surge scores |
 | POST | /api/v1/engine/start | Start engine |
 | POST | /api/v1/engine/stop | Stop engine |
+| GET | /api/v1/agents/trade-review/latest | Latest trade review |
 | WS | /ws/dashboard | Real-time events |
 
 ---
@@ -231,7 +233,7 @@ coin/
 │   └── api/                    # REST + WebSocket routes
 ├── frontend/
 │   └── src/
-│       ├── components/         # Dashboard, charts, controls
+│       ├── components/         # Dashboard, charts, controls, rotation monitor
 │       ├── hooks/              # WebSocket, portfolio hooks
 │       ├── api/                # API client
 │       └── types/              # TypeScript types
