@@ -1,0 +1,198 @@
+import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { format } from 'date-fns'
+import { getTrades } from '../api/client'
+import type { Order } from '../types'
+
+const STRATEGY_COLORS: Record<string, string> = {
+  volatility_breakout: 'bg-orange-800 text-orange-200',
+  ma_crossover: 'bg-blue-800 text-blue-200',
+  rsi: 'bg-purple-800 text-purple-200',
+  macd_crossover: 'bg-cyan-800 text-cyan-200',
+  bollinger_rsi: 'bg-pink-800 text-pink-200',
+  risk_management: 'bg-yellow-800 text-yellow-200',
+}
+
+function StrategyBadge({ name }: { name: string }) {
+  const cls = STRATEGY_COLORS[name] ?? 'bg-gray-700 text-gray-300'
+  return (
+    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
+      {name.replace(/_/g, ' ')}
+    </span>
+  )
+}
+
+function OrderDetail({ order }: { order: Order }) {
+  const [expanded, setExpanded] = useState(false)
+  const side = order.side === 'buy'
+  const price = order.executed_price ?? order.requested_price ?? 0
+
+  return (
+    <div className="border-b border-gray-700/50">
+      <button
+        className="w-full text-left px-4 py-3 hover:bg-gray-700/30 transition-colors"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className={`text-sm font-bold ${side ? 'text-buy' : 'text-sell'}`}>
+              {side ? '▲ 매수' : '▼ 매도'}
+            </span>
+            <span className="text-white font-medium">{order.symbol}</span>
+            <StrategyBadge name={order.strategy_name} />
+            {order.is_paper && (
+              <span className="text-xs text-gray-500 border border-gray-600 px-1 rounded">페이퍼</span>
+            )}
+          </div>
+          <div className="flex items-center gap-4 text-sm">
+            <span className="text-gray-300">{price.toLocaleString()} ₩</span>
+            <span className="text-gray-500 text-xs">
+              {format(new Date(order.created_at), 'MM/dd HH:mm')}
+            </span>
+            <span className="text-gray-600">{expanded ? '▲' : '▼'}</span>
+          </div>
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="px-4 pb-4 bg-gray-800/50 space-y-2 text-sm">
+          {/* 전략 사유 (회고 핵심 정보) */}
+          {order.signal_reason && (
+            <div className="bg-gray-900 rounded-lg p-3">
+              <div className="text-gray-400 text-xs mb-1">전략 사유</div>
+              <div className="text-gray-200 leading-relaxed">{order.signal_reason}</div>
+            </div>
+          )}
+
+          {/* 메타 정보 */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+            <div>
+              <span className="text-gray-500">신뢰도</span>
+              <div className="text-white font-medium">
+                {order.signal_confidence != null ? `${(order.signal_confidence * 100).toFixed(0)}%` : '-'}
+              </div>
+            </div>
+            <div>
+              <span className="text-gray-500">결합 점수</span>
+              <div className="text-white font-medium">
+                {order.combined_score != null ? `${(order.combined_score * 100).toFixed(0)}%` : '-'}
+              </div>
+            </div>
+            <div>
+              <span className="text-gray-500">요청 수량</span>
+              <div className="text-white font-medium">{order.requested_quantity.toFixed(6)}</div>
+            </div>
+            <div>
+              <span className="text-gray-500">수수료</span>
+              <div className="text-white font-medium">{order.fee.toLocaleString()} ₩</div>
+            </div>
+          </div>
+
+          {/* 기여 전략 목록 */}
+          {order.contributing_strategies && order.contributing_strategies.length > 1 && (
+            <div>
+              <div className="text-gray-400 text-xs mb-1">기여 전략</div>
+              <div className="space-y-1">
+                {order.contributing_strategies.map((cs, i) => (
+                  <div key={i} className="flex items-start gap-2 text-xs text-gray-300">
+                    <StrategyBadge name={cs.name} />
+                    <span className={cs.signal === 'BUY' ? 'text-buy' : cs.signal === 'SELL' ? 'text-sell' : 'text-gray-500'}>
+                      {cs.signal}
+                    </span>
+                    <span className="text-gray-500">({(cs.confidence * 100).toFixed(0)}%)</span>
+                    <span className="text-gray-400 flex-1">{cs.reason}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function TradeHistory() {
+  const [page, setPage] = useState(1)
+  const [symbol, setSymbol] = useState('')
+  const [strategy, setStrategy] = useState('')
+  const [side, setSide] = useState('')
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['trades', page, symbol, strategy, side],
+    queryFn: () =>
+      getTrades({
+        page,
+        size: 20,
+        symbol: symbol || undefined,
+        strategy: strategy || undefined,
+        side: side || undefined,
+      }),
+    staleTime: 15_000,
+  })
+
+  return (
+    <div className="bg-gray-800 rounded-xl overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-700 flex items-center gap-3 flex-wrap">
+        <h3 className="text-white font-semibold mr-2">거래 이력</h3>
+        <input
+          className="bg-gray-700 text-white text-xs px-2 py-1 rounded border border-gray-600 w-28"
+          placeholder="코인 (BTC/KRW)"
+          value={symbol}
+          onChange={(e) => { setSymbol(e.target.value); setPage(1) }}
+        />
+        <select
+          className="bg-gray-700 text-white text-xs px-2 py-1 rounded border border-gray-600"
+          value={strategy}
+          onChange={(e) => { setStrategy(e.target.value); setPage(1) }}
+        >
+          <option value="">전체 전략</option>
+          <option value="volatility_breakout">변동성 돌파</option>
+          <option value="ma_crossover">MA 크로스</option>
+          <option value="rsi">RSI</option>
+          <option value="macd_crossover">MACD</option>
+          <option value="bollinger_rsi">볼린저+RSI</option>
+          <option value="risk_management">리스크 관리</option>
+        </select>
+        <select
+          className="bg-gray-700 text-white text-xs px-2 py-1 rounded border border-gray-600"
+          value={side}
+          onChange={(e) => { setSide(e.target.value); setPage(1) }}
+        >
+          <option value="">전체</option>
+          <option value="buy">매수</option>
+          <option value="sell">매도</option>
+        </select>
+      </div>
+
+      {isLoading ? (
+        <div className="p-8 text-center text-gray-500">로딩 중...</div>
+      ) : !data || data.length === 0 ? (
+        <div className="p-8 text-center text-gray-500">거래 내역이 없습니다</div>
+      ) : (
+        <>
+          {data.map((order) => (
+            <OrderDetail key={order.id} order={order} />
+          ))}
+          <div className="flex justify-center gap-2 p-3">
+            <button
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page === 1}
+              className="px-3 py-1 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-40"
+            >
+              이전
+            </button>
+            <span className="px-3 py-1 text-gray-400 text-sm">{page}페이지</span>
+            <button
+              onClick={() => setPage((p) => p + 1)}
+              disabled={data.length < 20}
+              className="px-3 py-1 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-40"
+            >
+              다음
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}

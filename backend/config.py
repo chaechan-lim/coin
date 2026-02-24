@@ -1,0 +1,90 @@
+from pydantic_settings import BaseSettings
+from pydantic import Field
+from typing import Optional
+
+
+class ExchangeConfig(BaseSettings):
+    name: str = "bithumb"
+    api_key: str = ""
+    api_secret: str = ""
+    rate_limit_per_sec: int = 8
+
+    model_config = {"env_prefix": "EXCHANGE_"}
+
+
+class TradingConfig(BaseSettings):
+    mode: str = "paper"  # "paper" or "live"
+    evaluation_interval_sec: int = 300  # 5 minutes
+    initial_balance_krw: float = 500_000
+    tracked_coins: list[str] = [
+        "BTC/KRW",
+        "ETH/KRW",
+        "XRP/KRW",
+        "SOL/KRW",
+        "ADA/KRW",
+    ]
+    min_trade_interval_sec: int = 3600  # 1 hour per coin
+    cooldown_after_buy_sec: int = 1800  # 30 min
+    daily_trade_limit: int = 10
+    min_combined_confidence: float = 0.4
+    min_profit_vs_fee_ratio: float = 2.0  # expected return > 2x round-trip fee
+
+    # 거래량 급등 로테이션 설정
+    rotation_enabled: bool = True
+    rotation_coins: list[str] = [
+        "BTC/KRW", "ETH/KRW", "XRP/KRW", "SOL/KRW", "ADA/KRW",
+        "DOGE/KRW", "AVAX/KRW", "DOT/KRW", "LINK/KRW", "TRX/KRW",
+        "ATOM/KRW", "ETC/KRW", "XLM/KRW", "ALGO/KRW", "NEAR/KRW",
+        "SAND/KRW", "MANA/KRW", "AXS/KRW", "AAVE/KRW", "EOS/KRW",
+    ]
+    surge_threshold: float = 3.0       # 서지 감지 임계 배수 (volume / avg_volume)
+    rotation_cooldown_sec: int = 7200  # 로테이션 최소 간격 (2시간)
+
+    model_config = {"env_prefix": "TRADING_"}
+
+
+class RiskConfig(BaseSettings):
+    max_single_coin_pct: float = 0.40
+    max_drawdown_pct: float = 0.10
+    daily_loss_limit_pct: float = 0.03
+    max_trade_size_pct: float = 0.20
+    max_open_orders: int = 20
+
+    model_config = {"env_prefix": "RISK_"}
+
+
+class DatabaseConfig(BaseSettings):
+    url: str = "postgresql+asyncpg://coin:coin@localhost:5432/coin_trading"
+    echo: bool = False
+
+    model_config = {"env_prefix": "DB_"}
+
+
+class RedisConfig(BaseSettings):
+    url: str = "redis://localhost:6379/0"
+
+    model_config = {"env_prefix": "REDIS_"}
+
+
+class NotificationConfig(BaseSettings):
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    enabled: bool = False
+
+    model_config = {"env_prefix": "NOTIFY_"}
+
+
+class AppConfig(BaseSettings):
+    exchange: ExchangeConfig = Field(default_factory=ExchangeConfig)
+    trading: TradingConfig = Field(default_factory=TradingConfig)
+    risk: RiskConfig = Field(default_factory=RiskConfig)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    redis: RedisConfig = Field(default_factory=RedisConfig)
+    notification: NotificationConfig = Field(default_factory=NotificationConfig)
+    log_level: str = "INFO"
+
+    model_config = {"env_prefix": "APP_"}
+
+
+def get_config() -> AppConfig:
+    return AppConfig()
