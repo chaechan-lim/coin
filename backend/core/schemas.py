@@ -154,6 +154,17 @@ class ModeUpdate(BaseModel):
     mode: str  # "paper" or "live"
 
 
+# -- Server Events --
+class ServerEventResponse(BaseModel):
+    id: int
+    level: str
+    category: str
+    title: str
+    detail: Optional[str]
+    metadata: Optional[dict]
+    created_at: datetime
+
+
 # -- Rotation Monitor --
 class SurgeScoreItem(BaseModel):
     symbol: str

@@ -17,6 +17,7 @@ from strategies.combiner import SignalCombiner, CombinedDecision
 from engine.order_manager import OrderManager
 from engine.portfolio_manager import PortfolioManager
 from db.session import get_session_factory
+from core.event_bus import emit_event
 
 logger = structlog.get_logger(__name__)
 
@@ -118,6 +119,7 @@ class TradingEngine:
         """Start the trading engine main loop."""
         self._is_running = True
         logger.info("engine_started")
+        await emit_event("info", "engine", "엔진 시작", metadata={"mode": self._config.trading.mode})
         while self._is_running:
             try:
                 await self._evaluation_cycle()
@@ -129,10 +131,12 @@ class TradingEngine:
         """Stop the trading engine gracefully."""
         self._is_running = False
         logger.info("engine_stopping")
+        await emit_event("info", "engine", "엔진 중지")
 
     def pause_buying(self, coins: list[str]) -> None:
         self._paused_coins.update(coins)
         logger.warning("buying_paused", coins=coins)
+        asyncio.ensure_future(emit_event("warning", "risk", "매수 일시중지", metadata={"coins": coins}))
 
     def suppress_buys(self, coins: list[str]) -> None:
         self._suppressed_coins.update(coins)
@@ -229,11 +233,13 @@ class TradingEngine:
             df = await self._market_data.get_candles("BTC/KRW", "4h", 200)
             new_state = self._detect_market_state(df)
             if new_state != self._market_state:
+                old_state = self._market_state
                 logger.info(
                     "market_state_changed",
-                    old=self._market_state,
+                    old=old_state,
                     new=new_state,
                 )
+                await emit_event("info", "strategy", f"시장 상태: {old_state}→{new_state}")
                 self._combiner.apply_market_state(new_state)
 
                 # 보유 중 포지션 동적 SL 재조정 (백테스트 동일)
@@ -335,6 +341,10 @@ class TradingEngine:
                 entry=entry,
                 pnl_pct=round(pnl_pct, 2),
             )
+            await emit_event(
+                "warning", "trade", sell_reason,
+                metadata={"symbol": symbol, "pnl_pct": round(pnl_pct, 2), "price": price},
+            )
             await self._execute_stop_sell(session, symbol, position, price, sell_reason)
             return True
 
@@ -425,6 +435,7 @@ class TradingEngine:
             except Exception as e:
                 await session.rollback()
                 logger.error("evaluation_cycle_error", error=str(e), exc_info=True)
+                await emit_event("error", "engine", "평가 사이클 오류", detail=str(e))
 
     async def _evaluate_coin(self, session: AsyncSession, symbol: str) -> None:
         """Evaluate a single coin: SL/TP first, then strategy signals."""
@@ -580,6 +591,7 @@ class TradingEngine:
                     price=price,
                     quantity=position.quantity,
                 )
+                await emit_event("info", "rotation", f"로테이션 매도: {position.symbol}", metadata={"price": price})
             except Exception as e:
                 logger.error("rotation_sell_error", symbol=position.symbol, error=str(e))
 
@@ -641,6 +653,7 @@ class TradingEngine:
                 confidence=round(confidence, 3),
                 sl_pct=round(sl_pct, 2),
             )
+            await emit_event("info", "rotation", f"로테이션 매수: {symbol}", metadata={"surge_score": round(surge_score, 1), "price": price})
 
             if self._broadcast_callback:
                 await self._broadcast_callback({
@@ -747,6 +760,7 @@ class TradingEngine:
                 sl_pct=round(sl_pct, 2),
                 market_state=self._market_state,
             )
+            await emit_event("info", "trade", f"매수: {symbol}", metadata={"price": price, "sl_pct": round(sl_pct, 2)})
 
         elif decision.action == SignalType.SELL:
             result = await session.execute(
@@ -763,6 +777,7 @@ class TradingEngine:
                 session, symbol, position.quantity, price,
                 position.quantity * price, order.fee
             )
+            await emit_event("info", "trade", f"매도: {symbol}", metadata={"price": price})
 
             # 트래커 제거
             self._position_trackers.pop(symbol, None)

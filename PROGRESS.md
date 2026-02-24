@@ -7,7 +7,7 @@
 ## 개요
 
 빗썸(Bithumb) 거래소 기반의 24시간 자동 암호화폐 트레이딩 시스템.
-5개 활성 전략 가중 투표 + 거래량 서지 로테이션, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드 포함.
+5개 활성 전략 가중 투표 + 거래량 서지 로테이션, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭) 포함.
 **현재 라이브 운영 중** (BTC/KRW, 500K KRW, SQLite).
 
 ---
@@ -45,6 +45,7 @@ coin/
 │   ├── core/
 │   │   ├── __init__.py          ✅
 │   │   ├── enums.py             ✅ 완료
+│   │   ├── event_bus.py         ✅ 완료 (서버 이벤트 DB 기록 + WS 브로드캐스트)
 │   │   ├── exceptions.py        ✅ 완료
 │   │   ├── models.py            ✅ 완료
 │   │   └── schemas.py           ✅ 완료
@@ -90,6 +91,7 @@ coin/
 │   │   ├── __init__.py          ✅
 │   │   ├── router.py            ✅ 완료
 │   │   ├── dashboard.py         ✅ 완료
+│   │   ├── events.py            ✅ 완료 (서버 이벤트 조회 + 건수)
 │   │   ├── portfolio.py         ✅ 완료
 │   │   ├── trades.py            ✅ 완료
 │   │   ├── strategies.py        ✅ 완료
@@ -117,7 +119,8 @@ coin/
         │   ├── OrderLog.tsx     ✅ 완료
         │   ├── AgentStatus.tsx  ✅ 완료
         │   ├── EngineControl.tsx ✅ 완료
-        │   └── RotationMonitor.tsx ✅ 완료
+        │   ├── RotationMonitor.tsx ✅ 완료
+        │   └── SystemLog.tsx      ✅ 완료 (서버 이벤트 타임라인)
         ├── hooks/
         │   ├── useWebSocket.ts  ✅ 완료
         │   └── usePortfolio.ts  ✅ 완료
@@ -138,7 +141,7 @@ coin/
 | 설정 시스템 | `backend/config.py` (Pydantic Settings) | ✅ |
 | Docker 구성 | `docker-compose.yml` | ✅ |
 | 환경 변수 템플릿 | `.env.example` | ✅ |
-| DB ORM 모델 | `core/models.py` (7개 테이블) | ✅ |
+| DB ORM 모델 | `core/models.py` (8개 테이블) | ✅ |
 | 열거형/예외 | `core/enums.py`, `core/exceptions.py` | ✅ |
 | DB 세션 | `db/session.py` (async SQLAlchemy) | ✅ |
 | Pydantic 스키마 | `core/schemas.py` | ✅ |
@@ -220,6 +223,7 @@ coin/
 | 에이전트 상태 + 가중치 시각화 | `frontend/src/components/AgentStatus.tsx` | ✅ |
 | 엔진 제어 + 실시간 이벤트 피드 | `frontend/src/components/EngineControl.tsx` | ✅ |
 | 로테이션 모니터 (서지 바 차트) | `frontend/src/components/RotationMonitor.tsx` | ✅ |
+| 시스템 이벤트 로그 (필터+페이징) | `frontend/src/components/SystemLog.tsx` | ✅ |
 | 프론트엔드 Dockerfile | `frontend/Dockerfile` | ✅ |
 
 ### ⬜ Phase 5 — 안정화 (다음 단계)
@@ -307,6 +311,8 @@ orders
 | GET | /agents/trade-review/latest | 최근 거래 리뷰 |
 | POST | /agents/trade-review/run | 수동 거래 리뷰 실행 |
 | GET | /agents/trade-review/history | 거래 리뷰 이력 |
+| GET | /events | 서버 이벤트 로그 (페이징+필터) |
+| GET | /events/counts | 레벨별 이벤트 건수 |
 
 ### WebSocket
 
@@ -320,6 +326,7 @@ orders
 - `strategy_signal` — 전략 신호 발생 (체결 미포함)
 - `agent_alert` — 에이전트 경고/분석
 - `price_update` — 실시간 가격
+- `server_event` — 서버 이벤트 (엔진/트레이드/리스크/로테이션/전략/시스템)
 
 ---
 
@@ -492,5 +499,6 @@ docker compose restart backend
 | v0.2 | 2026-02-24 | 라이브 전환: Bithumb V2 어댑터, SL/TP/trailing, 동적 손절, 거래량 로테이션 |
 | v0.3 | 2026-02-24 | 백테스트-라이브 패리티 수정, crash→downtrend 통합, UTC→KST 수정 |
 | v0.4 | 2026-02-25 | 서지 임계값 2.0x, 추적코인 5종 축소, 로테이션 모니터 프론트엔드 탭 |
-| v0.5 | 예정 | 단위 테스트 + 안정화 |
+| v0.5 | 2026-02-25 | 서버 이벤트 로그 시스템 (DB + API + WS + 시스템 로그 탭), UTC→로컬 타임존 수정 |
+| v0.6 | 예정 | 단위 테스트 + 안정화 |
 | v1.0 | 예정 | 장기 운영 안정화 |

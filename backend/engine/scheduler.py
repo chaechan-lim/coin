@@ -1,7 +1,9 @@
 import asyncio
 import structlog
+from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from sqlalchemy import delete
 
 logger = structlog.get_logger(__name__)
 
@@ -91,6 +93,23 @@ def setup_scheduler(
         _wrap(coordinator.run_trade_review),
         name="trade_review",
         seconds=3600,  # 1 hour
+    )
+
+    # 서버 이벤트 7일 자동 정리 (24시간마다)
+    async def cleanup_old_events():
+        from core.models import ServerEvent
+        from db.session import get_session_factory
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        sf = get_session_factory()
+        async with sf() as session:
+            await session.execute(delete(ServerEvent).where(ServerEvent.created_at < cutoff))
+            await session.commit()
+        logger.info("old_events_cleaned", cutoff=cutoff.isoformat())
+
+    scheduler.add_job(
+        _wrap(cleanup_old_events),
+        name="event_cleanup",
+        seconds=86400,  # 24 hours
     )
 
     return scheduler

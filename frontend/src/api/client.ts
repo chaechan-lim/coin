@@ -12,6 +12,7 @@ import type {
   AgentLog,
   EngineStatus,
   RotationStatus,
+  ServerEvent,
 } from '../types'
 
 const api = axios.create({
@@ -99,3 +100,14 @@ export const triggerTradeReview = () =>
 
 export const getTradeReviewHistory = (limit = 50) =>
   api.get<AgentLog[]>(`/agents/trade-review/history?limit=${limit}`).then((r) => r.data)
+
+// ── Server Events ───────────────────────────────────────────
+export const getServerEvents = (params?: {
+  page?: number
+  size?: number
+  level?: string
+  category?: string
+}) => api.get<ServerEvent[]>('/events', { params }).then((r) => r.data)
+
+export const getServerEventCounts = () =>
+  api.get<Record<string, number>>('/events/counts').then((r) => r.data)

@@ -161,6 +161,17 @@ export interface RotationStatus {
   surge_scores: SurgeScore[]
 }
 
+// ── Server Events ───────────────────────────────────────────
+export interface ServerEvent {
+  id: number
+  level: 'info' | 'warning' | 'error' | 'critical'
+  category: 'engine' | 'trade' | 'risk' | 'rotation' | 'strategy' | 'system'
+  title: string
+  detail: string | null
+  metadata: Record<string, unknown> | null
+  created_at: string
+}
+
 // ── WebSocket Events ─────────────────────────────────────────
 export type WsEvent =
   | { event: 'portfolio_update'; data: PortfolioSummary }
@@ -168,4 +179,5 @@ export type WsEvent =
   | { event: 'strategy_signal'; data: { strategy: string; symbol: string; signal: string; confidence: number } }
   | { event: 'agent_alert'; data: { agent: string; level: string; message: string } }
   | { event: 'price_update'; data: { symbol: string; price: number; change_pct: number } }
+  | { event: 'server_event'; data: ServerEvent }
   | { event: 'pong' }

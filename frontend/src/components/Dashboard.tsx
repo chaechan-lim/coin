@@ -8,8 +8,9 @@ import { AgentStatus } from './AgentStatus'
 import { OrderLog } from './OrderLog'
 import { EngineControl } from './EngineControl'
 import { RotationMonitor } from './RotationMonitor'
+import { SystemLog } from './SystemLog'
 import { useWebSocket } from '../hooks/useWebSocket'
-import type { WsEvent } from '../types'
+import type { WsEvent, ServerEvent } from '../types'
 import { format } from 'date-fns'
 
 const TABS = [
@@ -19,6 +20,7 @@ const TABS = [
   { id: 'strategies', label: '전략 성과' },
   { id: 'agents', label: '에이전트' },
   { id: 'rotation', label: '로테이션' },
+  { id: 'system', label: '시스템 로그' },
 ] as const
 
 type TabId = (typeof TABS)[number]['id']
@@ -26,6 +28,7 @@ type TabId = (typeof TABS)[number]['id']
 export function Dashboard() {
   const [tab, setTab] = useState<TabId>('overview')
   const [liveEvents, setLiveEvents] = useState<string[]>([])
+  const [realtimeServerEvents, setRealtimeServerEvents] = useState<ServerEvent[]>([])
   const qc = useQueryClient()
 
   const onMessage = useCallback(
@@ -59,6 +62,10 @@ export function Dashboard() {
             ...prev.slice(0, 49),
           ])
         }
+      } else if (event.event === 'server_event') {
+        const d = event.data
+        setRealtimeServerEvents((prev) => [d, ...prev.slice(0, 99)])
+        qc.invalidateQueries({ queryKey: ['serverEvents'] })
       }
     },
     [qc]
@@ -113,6 +120,7 @@ export function Dashboard() {
         {tab === 'strategies' && <StrategyPerformance />}
         {tab === 'agents' && <AgentStatus />}
         {tab === 'rotation' && <RotationMonitor />}
+        {tab === 'system' && <SystemLog realtimeEvents={realtimeServerEvents} />}
       </main>
     </div>
   )

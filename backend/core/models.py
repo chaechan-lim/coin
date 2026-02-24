@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import (
     Column,
     Integer,
@@ -150,3 +150,19 @@ class AgentAnalysisLog(Base):
     recommended_weights = Column(JSON, nullable=True)
     risk_level = Column(String(20), nullable=True)
     analyzed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ServerEvent(Base):
+    __tablename__ = "server_events"
+    __table_args__ = (
+        Index("ix_server_events_created", "created_at"),
+        Index("ix_server_events_level_cat", "level", "category", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    level = Column(String(10), nullable=False, default="info")
+    category = Column(String(20), nullable=False, default="system")
+    title = Column(String(200), nullable=False)
+    detail = Column(Text, nullable=True)
+    metadata_ = Column("metadata", JSON, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

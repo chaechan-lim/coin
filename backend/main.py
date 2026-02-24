@@ -41,6 +41,7 @@ from api.websocket import ws_manager
 from api.portfolio import set_portfolio_manager
 from api.strategies import set_engine_and_combiner
 from api.dashboard import set_dashboard_deps
+from core.event_bus import set_broadcast as set_event_broadcast, emit_event
 
 logger = structlog.get_logger(__name__)
 
@@ -129,6 +130,7 @@ async def lifespan(app: FastAPI):
 
     # WebSocket 브로드캐스트 연결
     trading_engine.set_broadcast_callback(ws_manager.broadcast)
+    set_event_broadcast(ws_manager.broadcast)
 
     # ── 6. API 의존성 주입 ────────────────────────────────────
     set_portfolio_manager(portfolio_mgr)
@@ -154,10 +156,12 @@ async def lifespan(app: FastAPI):
         f"추적 코인: {', '.join(config.trading.tracked_coins)}"
     )
     logger.info("startup_complete")
+    await emit_event("info", "system", "서버 시작", detail=f"{config.trading.mode} 모드")
 
     yield  # ─── 앱 실행 중 ───
 
     # ── Shutdown ─────────────────────────────────────────────
+    await emit_event("info", "system", "서버 종료")
     logger.info("shutdown_begin")
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)
