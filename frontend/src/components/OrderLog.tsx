@@ -2,6 +2,9 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import { getStrategyLogs } from '../api/client'
+
+/** API 타임스탬프(UTC, timezone 미표기)를 로컬 Date로 변환 */
+const utcToLocal = (ts: string) => new Date(ts.endsWith('Z') ? ts : ts + 'Z')
 import type { StrategyLog } from '../types'
 
 const SIGNAL_STYLE: Record<string, string> = {
@@ -76,7 +79,7 @@ export function OrderLog() {
                       <span className="text-green-400 text-xs">✓ 체결</span>
                     )}
                     <span className="ml-auto text-gray-500 text-xs">
-                      {format(new Date(log.logged_at), 'MM/dd HH:mm:ss')}
+                      {format(utcToLocal(log.logged_at), 'MM/dd HH:mm:ss')}
                     </span>
                   </div>
 

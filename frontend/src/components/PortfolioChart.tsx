@@ -3,6 +3,9 @@ import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianG
 import { format } from 'date-fns'
 import { usePortfolioHistory } from '../hooks/usePortfolio'
 
+/** API 타임스탬프(UTC, timezone 미표기)를 로컬 Date로 변환 */
+const utcToLocal = (ts: string) => new Date(ts.endsWith('Z') ? ts : ts + 'Z')
+
 const PERIODS = ['1d', '7d', '30d', '90d', 'all'] as const
 
 export function PortfolioChart() {
@@ -10,7 +13,7 @@ export function PortfolioChart() {
   const { data, isLoading } = usePortfolioHistory(period)
 
   const chartData = (data ?? []).map((p) => ({
-    time: format(new Date(p.timestamp), 'MM/dd HH:mm'),
+    time: format(utcToLocal(p.timestamp), 'MM/dd HH:mm'),
     value: Math.round(p.total_value),
     pnl: Math.round(p.unrealized_pnl),
   }))

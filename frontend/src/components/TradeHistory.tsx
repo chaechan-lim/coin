@@ -2,6 +2,9 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import { getTrades } from '../api/client'
+
+/** API 타임스탬프(UTC, timezone 미표기)를 로컬 Date로 변환 */
+const utcToLocal = (ts: string) => new Date(ts.endsWith('Z') ? ts : ts + 'Z')
 import type { Order } from '../types'
 
 const STRATEGY_COLORS: Record<string, string> = {
@@ -47,7 +50,7 @@ function OrderDetail({ order }: { order: Order }) {
           <div className="flex items-center gap-4 text-sm">
             <span className="text-gray-300">{price.toLocaleString()} ₩</span>
             <span className="text-gray-500 text-xs">
-              {format(new Date(order.created_at), 'MM/dd HH:mm')}
+              {format(utcToLocal(order.created_at), 'MM/dd HH:mm')}
             </span>
             <span className="text-gray-600">{expanded ? '▲' : '▼'}</span>
           </div>
