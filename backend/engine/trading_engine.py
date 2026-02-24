@@ -98,6 +98,9 @@ class TradingEngine:
         import strategies.rsi_strategy
         import strategies.macd_crossover
         import strategies.bollinger_rsi
+        import strategies.stochastic_rsi
+        import strategies.obv_divergence
+        import strategies.supertrend
 
         self._strategies = StrategyRegistry.create_all()
 
