@@ -141,6 +141,26 @@ export interface EngineStatus {
   strategies_active: string[]
 }
 
+// ── Rotation Monitor ────────────────────────────────────────
+export interface SurgeScore {
+  symbol: string
+  score: number
+  above_threshold: boolean
+}
+
+export interface RotationStatus {
+  rotation_enabled: boolean
+  surge_threshold: number
+  market_state: string
+  current_surge_symbol: string | null
+  last_rotation_time: string | null
+  last_scan_time: string | null
+  rotation_cooldown_sec: number
+  tracked_coins: string[]
+  rotation_coins: string[]
+  surge_scores: SurgeScore[]
+}
+
 // ── WebSocket Events ─────────────────────────────────────────
 export type WsEvent =
   | { event: 'portfolio_update'; data: PortfolioSummary }

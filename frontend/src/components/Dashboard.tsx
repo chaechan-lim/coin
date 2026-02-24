@@ -7,6 +7,7 @@ import { StrategyPerformance } from './StrategyPerformance'
 import { AgentStatus } from './AgentStatus'
 import { OrderLog } from './OrderLog'
 import { EngineControl } from './EngineControl'
+import { RotationMonitor } from './RotationMonitor'
 import { useWebSocket } from '../hooks/useWebSocket'
 import type { WsEvent } from '../types'
 import { format } from 'date-fns'
@@ -17,6 +18,7 @@ const TABS = [
   { id: 'logs', label: '신호 로그' },
   { id: 'strategies', label: '전략 성과' },
   { id: 'agents', label: '에이전트' },
+  { id: 'rotation', label: '로테이션' },
 ] as const
 
 type TabId = (typeof TABS)[number]['id']
@@ -110,6 +112,7 @@ export function Dashboard() {
         {tab === 'logs' && <OrderLog />}
         {tab === 'strategies' && <StrategyPerformance />}
         {tab === 'agents' && <AgentStatus />}
+        {tab === 'rotation' && <RotationMonitor />}
       </main>
     </div>
   )

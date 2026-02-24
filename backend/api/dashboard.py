@@ -10,6 +10,8 @@ from core.schemas import (
     AgentLogResponse,
     MarketAnalysisResponse,
     RiskAlertResponse,
+    RotationStatusResponse,
+    SurgeScoreItem,
 )
 
 router = APIRouter(tags=["dashboard"])
@@ -61,6 +63,35 @@ async def stop_engine():
         raise HTTPException(status_code=500, detail="Engine not initialized")
     await _engine.stop()
     return {"status": "stopped"}
+
+
+@router.get("/engine/rotation-status", response_model=RotationStatusResponse)
+async def get_rotation_status():
+    if not _engine:
+        raise HTTPException(status_code=500, detail="Engine not initialized")
+    rs = _engine.rotation_status
+    scores = [
+        SurgeScoreItem(
+            symbol=s,
+            score=sc,
+            above_threshold=sc >= rs["surge_threshold"],
+        )
+        for s, sc in sorted(
+            rs["all_surge_scores"].items(), key=lambda x: x[1], reverse=True
+        )
+    ]
+    return RotationStatusResponse(
+        rotation_enabled=rs["rotation_enabled"],
+        surge_threshold=rs["surge_threshold"],
+        market_state=rs["market_state"],
+        current_surge_symbol=rs["current_surge_symbol"],
+        last_rotation_time=rs["last_rotation_time"],
+        last_scan_time=rs["last_scan_time"],
+        rotation_cooldown_sec=rs["rotation_cooldown_sec"],
+        tracked_coins=rs["tracked_coins"],
+        rotation_coins=rs["rotation_coins"],
+        surge_scores=scores,
+    )
 
 
 # -- Agent endpoints --

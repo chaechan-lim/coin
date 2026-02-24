@@ -152,3 +152,23 @@ class EngineStatusResponse(BaseModel):
 
 class ModeUpdate(BaseModel):
     mode: str  # "paper" or "live"
+
+
+# -- Rotation Monitor --
+class SurgeScoreItem(BaseModel):
+    symbol: str
+    score: float
+    above_threshold: bool
+
+
+class RotationStatusResponse(BaseModel):
+    rotation_enabled: bool
+    surge_threshold: float
+    market_state: str
+    current_surge_symbol: Optional[str]
+    last_rotation_time: Optional[datetime]
+    last_scan_time: Optional[datetime]
+    rotation_cooldown_sec: int
+    tracked_coins: list[str]
+    rotation_coins: list[str]
+    surge_scores: list[SurgeScoreItem]

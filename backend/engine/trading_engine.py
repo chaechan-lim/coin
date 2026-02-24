@@ -82,6 +82,8 @@ class TradingEngine:
         # 거래량 급등 로테이션 상태
         self._last_rotation_time: datetime | None = None
         self._current_surge_symbol: str | None = None
+        self._all_surge_scores: dict[str, float] = {}
+        self._last_surge_scan_time: datetime | None = None
 
         # WebSocket broadcast callback
         self._broadcast_callback = None
@@ -472,6 +474,8 @@ class TradingEngine:
     async def _scan_volume_surges(self) -> list[tuple[str, float]]:
         """20코인 거래량 서지 스캔. (symbol, surge_score) 리스트 반환."""
         surges: list[tuple[str, float]] = []
+        all_scores: dict[str, float] = {}
+        threshold = self._config.trading.surge_threshold
         for symbol in self._config.trading.rotation_coins:
             try:
                 df = await self._market_data.get_candles(symbol, "1h", 30)
@@ -482,10 +486,13 @@ class TradingEngine:
                 if avg_vol is None or avg_vol <= 0:
                     continue
                 score = current_vol / avg_vol
-                if score >= self._config.trading.surge_threshold:
+                all_scores[symbol] = round(score, 2)
+                if score >= threshold:
                     surges.append((symbol, score))
             except Exception as e:
                 logger.debug("surge_scan_error", symbol=symbol, error=str(e))
+        self._all_surge_scores = all_scores
+        self._last_surge_scan_time = datetime.now(timezone.utc)
         surges.sort(key=lambda x: x[1], reverse=True)
         return surges
 
@@ -782,3 +789,18 @@ class TradingEngine:
     @property
     def strategies(self) -> dict[str, BaseStrategy]:
         return self._strategies
+
+    @property
+    def rotation_status(self) -> dict:
+        return {
+            "all_surge_scores": self._all_surge_scores,
+            "surge_threshold": self._config.trading.surge_threshold,
+            "current_surge_symbol": self._current_surge_symbol,
+            "last_rotation_time": self._last_rotation_time,
+            "last_scan_time": self._last_surge_scan_time,
+            "rotation_enabled": self._config.trading.rotation_enabled,
+            "rotation_cooldown_sec": self._config.trading.rotation_cooldown_sec,
+            "market_state": self._market_state,
+            "tracked_coins": self._config.trading.tracked_coins,
+            "rotation_coins": self._config.trading.rotation_coins,
+        }

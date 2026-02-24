@@ -11,6 +11,7 @@ import type {
   RiskAlert,
   AgentLog,
   EngineStatus,
+  RotationStatus,
 } from '../types'
 
 const api = axios.create({
@@ -72,6 +73,9 @@ export const startEngine = () =>
 
 export const stopEngine = () =>
   api.post('/engine/stop').then((r) => r.data)
+
+export const getRotationStatus = () =>
+  api.get<RotationStatus>('/engine/rotation-status').then((r) => r.data)
 
 // ── Agents ───────────────────────────────────────────────────
 export const getMarketAnalysis = () =>
