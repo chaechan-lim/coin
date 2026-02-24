@@ -28,7 +28,6 @@ _DYNAMIC_SL_PROFILES = {
     "uptrend":        (2.0, 4.0, 10.0),
     "sideways":       (2.0, 4.0,  7.0),
     "downtrend":      (2.0, 4.0,  7.0),
-    "crash":          (1.5, 3.0,  5.0),
 }
 _DEFAULT_SL_PROFILE = (2.0, 4.0, 7.0)
 
@@ -191,8 +190,6 @@ class TradingEngine:
             return MarketState.STRONG_UPTREND.value
         elif uptrend:
             return MarketState.UPTREND.value
-        elif not uptrend and strong_trend and rsi < 35:
-            return MarketState.CRASH.value
         elif not uptrend and (strong_trend or rsi < 45):
             return MarketState.DOWNTREND.value
         else:
@@ -654,10 +651,8 @@ class TradingEngine:
     # ── 추세 필터 ──────────────────────────────────────────────────
 
     def _trend_filter_action(self) -> str:
-        """시장 상태별 매수 정책. 'block' / 'reduce' / 'allow' 반환."""
-        if self._market_state == "crash":
-            return "block"
-        elif self._market_state == "downtrend":
+        """시장 상태별 매수 정책. 'reduce' / 'allow' 반환."""
+        if self._market_state == "downtrend":
             return "reduce"  # 포지션 50% 축소 매수
         return "allow"
 
@@ -672,11 +667,8 @@ class TradingEngine:
             logger.info("buy_suppressed", symbol=symbol)
             return
 
-        # 추세 필터: crash=차단, downtrend=50% 축소
+        # 추세 필터: downtrend=50% 축소
         trend_action = self._trend_filter_action()
-        if decision.action == SignalType.BUY and trend_action == "block":
-            logger.info("buy_blocked_crash", symbol=symbol, market_state=self._market_state)
-            return
 
         primary_signal = max(
             [s for s in decision.contributing_signals if s.signal_type == decision.action],
