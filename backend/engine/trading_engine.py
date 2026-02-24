@@ -41,7 +41,8 @@ class PositionTracker:
     stop_loss_pct: float = 5.0       # 동적 SL %
     take_profit_pct: float = 10.0
     trailing_activation_pct: float = 3.0
-    trailing_stop_pct: float = 2.0
+    trailing_stop_pct: float = 3.0
+    trailing_active: bool = False     # 트레일링 활성 여부
     entered_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -216,7 +217,7 @@ class TradingEngine:
     # ── 주기적 시장 상태 업데이트 ──────────────────────────────────
 
     async def _maybe_update_market_state(self) -> None:
-        """30분마다 시장 상태 재평가 (BTC 기준)."""
+        """30분마다 시장 상태 재평가 (BTC 기준). 보유 포지션 SL도 재조정."""
         now = datetime.now(timezone.utc)
         if (self._market_state_updated
                 and (now - self._market_state_updated).total_seconds() < 1800):
@@ -232,6 +233,25 @@ class TradingEngine:
                     new=new_state,
                 )
                 self._combiner.apply_market_state(new_state)
+
+                # 보유 중 포지션 동적 SL 재조정 (백테스트 동일)
+                for symbol, tracker in self._position_trackers.items():
+                    try:
+                        sym_df = await self._market_data.get_candles(symbol, "4h", 200)
+                        price = await self._market_data.get_current_price(symbol)
+                        old_sl = tracker.stop_loss_pct
+                        tracker.stop_loss_pct = self._calc_dynamic_sl(sym_df, price, new_state)
+                        if old_sl != tracker.stop_loss_pct:
+                            logger.info(
+                                "dynamic_sl_recalculated",
+                                symbol=symbol,
+                                old_sl=round(old_sl, 2),
+                                new_sl=round(tracker.stop_loss_pct, 2),
+                                market_state=new_state,
+                            )
+                    except Exception as e:
+                        logger.debug("sl_recalc_failed", symbol=symbol, error=str(e))
+
             self._market_state = new_state
             self._market_state_updated = now
         except Exception as e:
@@ -276,22 +296,33 @@ class TradingEngine:
 
         sell_reason = None
 
-        # 1. 손절 (Stop Loss)
-        if pnl_pct <= -tracker.stop_loss_pct:
-            sell_reason = f"SL 발동: {pnl_pct:.2f}% (한도 -{tracker.stop_loss_pct:.1f}%)"
+        # 백테스트 동일 우선순위: 트레일링 활성화 → 트레일링 발동 → SL → TP(트레일링 미활성 시만)
 
-        # 2. 익절 (Take Profit)
-        elif pnl_pct >= tracker.take_profit_pct:
-            sell_reason = f"TP 발동: +{pnl_pct:.2f}% (목표 +{tracker.take_profit_pct:.1f}%)"
+        # 1. 트레일링 활성화 체크
+        if (tracker.trailing_activation_pct > 0
+                and not tracker.trailing_active
+                and pnl_pct >= tracker.trailing_activation_pct):
+            tracker.trailing_active = True
 
-        # 3. 트레일링 스탑
-        elif pnl_pct >= tracker.trailing_activation_pct:
+        # 2. 트레일링 스탑 발동
+        if tracker.trailing_active and tracker.trailing_stop_pct > 0:
             drawdown_from_peak = (tracker.highest_price - price) / tracker.highest_price * 100
             if drawdown_from_peak >= tracker.trailing_stop_pct:
                 sell_reason = (
                     f"Trailing Stop: 고점 대비 -{drawdown_from_peak:.2f}% "
-                    f"(고점 {tracker.highest_price:.0f}, 현재 {price:.0f})"
+                    f"(고점 {tracker.highest_price:.0f}, 현재 {price:.0f}, 수익 {pnl_pct:+.1f}%)"
                 )
+
+        # 3. 손절 (Stop Loss)
+        if not sell_reason and pnl_pct <= -tracker.stop_loss_pct:
+            sell_reason = f"SL 발동: {pnl_pct:.2f}% (한도 -{tracker.stop_loss_pct:.1f}%)"
+
+        # 4. 익절 — 트레일링 미활성 시에만 (활성 후에는 트레일링이 관리)
+        if (not sell_reason
+                and not tracker.trailing_active
+                and tracker.take_profit_pct > 0
+                and pnl_pct >= tracker.take_profit_pct):
+            sell_reason = f"TP 발동: +{pnl_pct:.2f}% (목표 +{tracker.take_profit_pct:.1f}%)"
 
         if sell_reason:
             logger.info(

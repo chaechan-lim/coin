@@ -60,19 +60,14 @@ def setup_scheduler(
     Create and configure the trading scheduler.
 
     Scheduled jobs:
-    - evaluation_cycle: every 5 min (main trading loop tick)
     - market_analysis:  every 15 min (AI agent)
     - risk_check:       every 5 min (risk agent)
-    - portfolio_snap:   every 1 hour
+    - trade_review:     every 1 hour
+
+    NOTE: evaluation_cycle은 engine.start() 루프에서 직접 실행.
+    스케줄러에서 중복 등록하지 않음.
     """
     scheduler = TradingScheduler()
-
-    # Main evaluation cycle
-    scheduler.add_job(
-        _wrap(engine._evaluation_cycle),
-        name="evaluation_cycle",
-        seconds=config.trading.evaluation_interval_sec,
-    )
 
     # Market analysis agent
     scheduler.add_job(
