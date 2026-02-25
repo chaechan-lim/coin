@@ -9,6 +9,7 @@ const MARKET_STATE_LABELS: Record<string, { label: string; color: string }> = {
   uptrend: { label: '상승', color: 'text-green-300' },
   sideways: { label: '횡보', color: 'text-yellow-400' },
   downtrend: { label: '하락', color: 'text-red-400' },
+  crash: { label: '폭락', color: 'text-red-600' },
 }
 
 export function RotationMonitor() {

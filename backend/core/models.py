@@ -99,6 +99,8 @@ class Position(Base):
     unrealized_pnl = Column(Float, default=0.0)
     unrealized_pnl_pct = Column(Float, default=0.0)
     is_paper = Column(Boolean, default=True)
+    is_surge = Column(Boolean, default=False)
+    entered_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 

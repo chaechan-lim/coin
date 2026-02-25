@@ -25,9 +25,11 @@ class PortfolioManager:
         self._realized_pnl = 0.0
 
     async def update_position_on_buy(
-        self, session: AsyncSession, symbol: str, quantity: float, price: float, cost: float, fee: float
+        self, session: AsyncSession, symbol: str, quantity: float, price: float, cost: float, fee: float,
+        is_surge: bool = False,
     ) -> None:
         """Update position after a buy trade."""
+        from datetime import datetime, timezone
         result = await session.execute(
             select(Position).where(Position.symbol == symbol)
         )
@@ -39,6 +41,10 @@ class PortfolioManager:
             position.quantity += quantity
             position.average_buy_price = total_cost / position.quantity if position.quantity > 0 else 0
             position.total_invested += cost + fee
+            if is_surge:
+                position.is_surge = True
+            if not position.entered_at:
+                position.entered_at = datetime.now(timezone.utc)
         else:
             position = Position(
                 symbol=symbol,
@@ -46,6 +52,8 @@ class PortfolioManager:
                 average_buy_price=price,
                 total_invested=cost + fee,
                 is_paper=self._is_paper,
+                is_surge=is_surge,
+                entered_at=datetime.now(timezone.utc),
             )
             session.add(position)
 
@@ -84,6 +92,8 @@ class PortfolioManager:
             position.quantity = 0
             position.average_buy_price = 0
             position.total_invested = 0
+            position.is_surge = False
+            position.entered_at = None
 
         self._cash_balance += sell_proceeds
         await session.flush()

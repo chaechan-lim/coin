@@ -369,19 +369,38 @@ class TradingEngine:
         """포지션의 SL/TP/trailing stop 조건 체크. 매도 시 True 반환."""
         tracker = self._position_trackers.get(symbol)
         if not tracker:
-            # 트래커 없으면 생성 (재시작 후 복원)
-            tracker = PositionTracker(
-                entry_price=position.average_buy_price,
-                highest_price=position.average_buy_price,
-            )
-            # 동적 SL 계산
-            try:
-                df = await self._market_data.get_candles(symbol, "4h", 200)
-                tracker.stop_loss_pct = self._calc_dynamic_sl(
-                    df, position.average_buy_price, self._market_state
+            # 트래커 없으면 DB에서 복원 (재시작 후)
+            if getattr(position, 'is_surge', False):
+                # 서지 코인 → 서지 프로필 복원
+                tracker = PositionTracker(
+                    entry_price=position.average_buy_price,
+                    highest_price=position.average_buy_price,
+                    stop_loss_pct=4.0,
+                    take_profit_pct=8.0,
+                    trailing_activation_pct=1.5,
+                    trailing_stop_pct=2.0,
+                    is_surge=True,
+                    max_hold_hours=48,
                 )
-            except Exception:
-                tracker.stop_loss_pct = 5.0  # fallback
+                if position.entered_at:
+                    tracker.entered_at = position.entered_at
+                logger.info("tracker_restored_surge", symbol=symbol)
+            else:
+                # 일반 코인 → 동적 SL 계산
+                tracker = PositionTracker(
+                    entry_price=position.average_buy_price,
+                    highest_price=position.average_buy_price,
+                )
+                if position.entered_at:
+                    tracker.entered_at = position.entered_at
+                try:
+                    df = await self._market_data.get_candles(symbol, "4h", 200)
+                    tracker.stop_loss_pct = self._calc_dynamic_sl(
+                        df, position.average_buy_price, self._market_state
+                    )
+                except Exception:
+                    tracker.stop_loss_pct = 5.0
+                logger.info("tracker_restored_normal", symbol=symbol, sl=round(tracker.stop_loss_pct, 2))
             self._position_trackers[symbol] = tracker
 
         # 현재 가격
@@ -764,6 +783,7 @@ class TradingEngine:
             )
             await self._portfolio_manager.update_position_on_buy(
                 session, symbol, amount, price, amount_krw, order.fee,
+                is_surge=True,
             )
 
             # 서지 전용 포지션 트래커 (백테스트 C 프로필)
