@@ -68,10 +68,10 @@ class SignalCombiner:
         },
     }
 
-    def update_weights(self, new_weights: dict[str, float]) -> None:
-        """Update strategy weights (typically called by Market Analysis Agent)."""
+    def update_weights(self, new_weights: dict[str, float], source: str = "unknown") -> None:
+        """Update strategy weights. source: 호출 출처 (backtest/engine 등)."""
         self.weights.update(new_weights)
-        logger.info("weights_updated", weights=self.weights)
+        logger.info("weights_updated", weights=self.weights, source=source)
 
     def apply_market_state(self, market_state: str) -> None:
         """시장 상태에 맞는 적응형 가중치 적용."""
@@ -82,14 +82,18 @@ class SignalCombiner:
             self.weights.update(filtered)
             logger.info("adaptive_weights_applied", market_state=market_state)
 
+    # HOLD = 기권. BUY/SELL만 경쟁하고, 참여 전략 가중치로 정규화.
+    # 참여 가중치가 너무 낮으면 (소수 약한 전략만 의견) → HOLD.
+    MIN_ACTIVE_WEIGHT = 0.12
+
     def combine(self, signals: list[Signal]) -> CombinedDecision:
         """
-        Weighted voting to combine signals.
+        Weighted voting to combine signals (HOLD = abstain).
 
-        1. Group signals by type (BUY/SELL/HOLD)
-        2. Sum weight * confidence for each group
-        3. Highest scoring group wins
-        4. Only act if combined confidence > min_confidence
+        1. BUY/SELL 시그널만 투표 참여, HOLD는 기권 처리
+        2. 참여 전략 가중치로 정규화 → 소수 확신 전략도 기회
+        3. 참여 가중치 < MIN_ACTIVE_WEIGHT → 의견 부족으로 HOLD
+        4. 승리 스코어 < min_confidence → HOLD
         """
         if not signals:
             return CombinedDecision(
@@ -99,27 +103,41 @@ class SignalCombiner:
                 final_reason="No signals to combine",
             )
 
-        # Calculate weighted score per signal type
-        scores: dict[SignalType, float] = {
-            SignalType.BUY: 0.0,
-            SignalType.SELL: 0.0,
-            SignalType.HOLD: 0.0,
-        }
-        total_weight = 0.0
+        # Calculate weighted score: HOLD = abstain
+        buy_score = 0.0
+        sell_score = 0.0
+        active_weight = 0.0  # BUY/SELL 전략의 가중치 합
 
         for signal in signals:
             weight = self.weights.get(signal.strategy_name, 0.1)
-            scores[signal.signal_type] += weight * signal.confidence
-            total_weight += weight
+            if signal.signal_type == SignalType.BUY:
+                buy_score += weight * signal.confidence
+                active_weight += weight
+            elif signal.signal_type == SignalType.SELL:
+                sell_score += weight * signal.confidence
+                active_weight += weight
+            # HOLD: 기권 — 투표 미참여
 
-        # Normalize scores
-        if total_weight > 0:
-            for sig_type in scores:
-                scores[sig_type] /= total_weight
+        # 의견을 낸 전략이 너무 적으면 HOLD
+        if active_weight < self.MIN_ACTIVE_WEIGHT:
+            return CombinedDecision(
+                action=SignalType.HOLD,
+                combined_confidence=0.0,
+                contributing_signals=signals,
+                final_reason=f"Active weight {active_weight:.2f} below {self.MIN_ACTIVE_WEIGHT} (all abstain)",
+            )
 
-        # Find winning signal type
-        winning_type = max(scores, key=scores.get)
-        winning_score = scores[winning_type]
+        # 참여 가중치로 정규화
+        buy_norm = buy_score / active_weight
+        sell_norm = sell_score / active_weight
+
+        # 승리 타입 결정
+        if buy_norm >= sell_norm:
+            winning_type = SignalType.BUY
+            winning_score = buy_norm
+        else:
+            winning_type = SignalType.SELL
+            winning_score = sell_norm
 
         # Collect contributing signals for the winning type
         contributors = [s for s in signals if s.signal_type == winning_type]
@@ -144,6 +162,7 @@ class SignalCombiner:
             "signals_combined",
             action=winning_type.value,
             confidence=winning_score,
+            active_weight=round(active_weight, 3),
             num_signals=len(signals),
             num_contributors=len(contributors),
         )

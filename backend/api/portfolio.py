@@ -25,6 +25,7 @@ async def get_portfolio_summary(session: AsyncSession = Depends(get_db)):
         return PortfolioSummaryResponse(
             total_value_krw=0, cash_balance_krw=0, invested_value_krw=0,
             realized_pnl=0, unrealized_pnl=0, total_pnl=0, total_pnl_pct=0,
+            total_fees=0, trade_count=0,
             peak_value=0, drawdown_pct=0, positions=[],
         )
     summary = await _portfolio_manager.get_portfolio_summary(session)

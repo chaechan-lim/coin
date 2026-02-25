@@ -1,6 +1,7 @@
 """
 서버 이벤트 버스 — DB 기록 + WebSocket 브로드캐스트
 """
+import asyncio
 import structlog
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine
@@ -30,34 +31,39 @@ async def emit_event(
 
     오류 시 silent fail — 이벤트 시스템이 엔진을 크래시시키면 안 됨.
     """
-    try:
-        sf = get_session_factory()
-        async with sf() as session:
-            event = ServerEvent(
-                level=level,
-                category=category,
-                title=title,
-                detail=detail,
-                metadata_=metadata,
-                created_at=datetime.now(timezone.utc),
-            )
-            session.add(event)
-            await session.commit()
-            await session.refresh(event)
+    for attempt in range(3):
+        try:
+            sf = get_session_factory()
+            async with sf() as session:
+                event = ServerEvent(
+                    level=level,
+                    category=category,
+                    title=title,
+                    detail=detail,
+                    metadata_=metadata,
+                    created_at=datetime.now(timezone.utc),
+                )
+                session.add(event)
+                await session.commit()
+                await session.refresh(event)
 
-            # WebSocket broadcast
-            if _broadcast_fn:
-                await _broadcast_fn({
-                    "event": "server_event",
-                    "data": {
-                        "id": event.id,
-                        "level": event.level,
-                        "category": event.category,
-                        "title": event.title,
-                        "detail": event.detail,
-                        "metadata": event.metadata_,
-                        "created_at": event.created_at.isoformat(),
-                    },
-                })
-    except Exception as e:
-        logger.warning("emit_event_failed", error=str(e), title=title)
+                # WebSocket broadcast
+                if _broadcast_fn:
+                    await _broadcast_fn({
+                        "event": "server_event",
+                        "data": {
+                            "id": event.id,
+                            "level": event.level,
+                            "category": event.category,
+                            "title": event.title,
+                            "detail": event.detail,
+                            "metadata": event.metadata_,
+                            "created_at": event.created_at.isoformat(),
+                        },
+                    })
+                return
+        except Exception as e:
+            if attempt < 2 and "database is locked" in str(e):
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
+            logger.warning("emit_event_failed", error=str(e), title=title)

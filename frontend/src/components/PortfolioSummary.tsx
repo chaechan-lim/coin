@@ -65,7 +65,12 @@ export function PortfolioSummary() {
         <StatCard label="실현 손익" value={fmt(data.realized_pnl)} color={data.realized_pnl >= 0 ? 'text-buy' : 'text-sell'} />
         <StatCard label="미실현 손익" value={fmt(data.unrealized_pnl)} color={data.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'} />
         <StatCard label="투자 금액" value={fmt(data.invested_value_krw)} />
-        <StatCard label="보유 종목" value={`${data.positions.length}개`} />
+        <StatCard
+          label="수수료 지출"
+          value={fmt(data.total_fees)}
+          sub={`${data.trade_count}건 거래`}
+          color="text-orange-400"
+        />
       </div>
 
       {data.positions.length > 0 && (

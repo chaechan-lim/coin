@@ -1,3 +1,4 @@
+import asyncio
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -38,6 +39,31 @@ class OrderManager:
         self._exchange = exchange
         self._is_paper = is_paper
 
+    async def _poll_fill(self, order_id: str, symbol: str, timeout: float = 8) -> OrderResult:
+        """Poll exchange until order is filled or timeout."""
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            await asyncio.sleep(0.5)
+            try:
+                r = await self._exchange.fetch_order(order_id, symbol)
+                if r.status in ("closed", "canceled"):
+                    return r
+            except Exception as e:
+                logger.warning("poll_fill_error", oid=order_id, error=str(e))
+                break
+        # 타임아웃: 마지막 상태 반환
+        try:
+            return await self._exchange.fetch_order(order_id, symbol)
+        except Exception:
+            # 폴링 실패 시 원본 결과 유지 — 호출자가 처리
+            from exchange.data_models import OrderResult
+            return OrderResult(
+                order_id=order_id, symbol=symbol, side="", order_type="limit",
+                status="open", price=0, amount=0, filled=0, remaining=0,
+                cost=0, fee=0, fee_currency="KRW", timestamp=None, info={},
+            )
+
     async def create_order(
         self,
         session: AsyncSession,
@@ -55,6 +81,10 @@ class OrderManager:
             result = await self._exchange.create_limit_buy(symbol, amount, price)
         else:
             result = await self._exchange.create_limit_sell(symbol, amount, price)
+
+        # 지정가 주문이 즉시 체결 안 됐으면 짧게 폴링
+        if result.status != "closed" and result.order_id:
+            result = await self._poll_fill(result.order_id, symbol, timeout=8)
 
         # Determine status
         status = OrderStatus.FILLED.value if result.status == "closed" else OrderStatus.OPEN.value

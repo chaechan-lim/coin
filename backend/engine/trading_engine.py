@@ -78,6 +78,7 @@ class TradingEngine:
         # SL/TP/trailing stop tracking
         self._position_trackers: dict[str, PositionTracker] = {}
         self._market_state: str = MarketState.SIDEWAYS.value
+        self._market_confidence: float = 0.5
         self._market_state_updated: datetime | None = None
 
         # 거래량 급등 로테이션 상태
@@ -174,35 +175,111 @@ class TradingEngine:
 
         return True, "OK"
 
-    # ── 시장 상태 감지 ──────────────────────────────────────────────
+    # ── 시장 상태 감지 (5요소 스코어링 — 에이전트 방식) ────────────────
 
-    def _detect_market_state(self, df: pd.DataFrame) -> str:
-        """SMA20/SMA60 + ADX + RSI로 시장 상태 감지."""
+    def _detect_market_state(self, df: pd.DataFrame) -> tuple[str, float]:
+        """5요소 스코어링 시장 상태 감지.
+
+        Factors: Price vs SMA20, SMA20/SMA50 정렬, RSI, 7일 가격변동, 거래량/SMA20.
+        Returns: (state_str, confidence)
+        """
         if df is None or len(df) < 60:
-            return MarketState.SIDEWAYS.value
+            return MarketState.SIDEWAYS.value, 0.3
+
+        scores = {
+            MarketState.STRONG_UPTREND: 0.0,
+            MarketState.UPTREND: 0.0,
+            MarketState.SIDEWAYS: 0.0,
+            MarketState.DOWNTREND: 0.0,
+        }
 
         row = df.iloc[-1]
+        current_price = float(row["close"])
+
+        # 1. Price vs SMA20 거리
         sma20 = row.get("sma_20")
-        sma60 = row.get("sma_60")
-        adx = row.get("ADX_14")
+        if sma20 is not None and not (isinstance(sma20, float) and pd.isna(sma20)):
+            sma20 = float(sma20)
+            if sma20 > 0:
+                if current_price > sma20 * 1.05:
+                    scores[MarketState.STRONG_UPTREND] += 2
+                elif current_price > sma20:
+                    scores[MarketState.UPTREND] += 1.5
+                elif current_price < sma20 * 0.95:
+                    scores[MarketState.DOWNTREND] += 1.5
+                elif current_price < sma20:
+                    scores[MarketState.DOWNTREND] += 1.5
+
+        # 2. SMA20 vs SMA50 정렬
+        sma50 = row.get("sma_50")
+        if (sma20 is not None and sma50 is not None
+                and not (isinstance(sma20, float) and pd.isna(sma20))
+                and not (isinstance(sma50, float) and pd.isna(sma50))):
+            sma50_f = float(sma50)
+            sma20_f = float(sma20) if not isinstance(sma20, float) else sma20
+            if sma20_f > sma50_f:
+                scores[MarketState.UPTREND] += 1
+                scores[MarketState.STRONG_UPTREND] += 0.5
+            else:
+                scores[MarketState.DOWNTREND] += 1
+
+        # 3. RSI
         rsi = row.get("rsi_14")
+        if rsi is not None and not (isinstance(rsi, float) and pd.isna(rsi)):
+            rsi = float(rsi)
+            if rsi > 70:
+                scores[MarketState.STRONG_UPTREND] += 1
+            elif rsi > 55:
+                scores[MarketState.UPTREND] += 1
+            elif rsi < 30:
+                scores[MarketState.DOWNTREND] += 1.5
+            elif rsi < 45:
+                scores[MarketState.DOWNTREND] += 1
+            else:
+                scores[MarketState.SIDEWAYS] += 1.5
 
-        if any(v is None or (isinstance(v, float) and pd.isna(v))
-               for v in [sma20, sma60, adx, rsi]):
-            return MarketState.SIDEWAYS.value
+        # 4. 7일 가격변동 (4h=42캔들)
+        if len(df) > 1:
+            td = (df.index[1] - df.index[0]).total_seconds() / 3600
+            candles_per_7d = int(7 * 24 / td) if td > 0 else 42
+            lookback_idx = max(0, len(df) - 1 - candles_per_7d)
+            week_ago_price = float(df.iloc[lookback_idx]["close"])
+            if week_ago_price > 0:
+                week_change_pct = (current_price - week_ago_price) / week_ago_price * 100
+                if week_change_pct > 10:
+                    scores[MarketState.STRONG_UPTREND] += 2
+                elif week_change_pct > 3:
+                    scores[MarketState.UPTREND] += 1.5
+                elif week_change_pct < -10:
+                    scores[MarketState.DOWNTREND] += 2
+                elif week_change_pct < -3:
+                    scores[MarketState.DOWNTREND] += 1.5
+                else:
+                    scores[MarketState.SIDEWAYS] += 2
 
-        sma20, sma60, adx, rsi = float(sma20), float(sma60), float(adx), float(rsi)
-        uptrend = sma20 > sma60
-        strong_trend = adx > 25
+        # 5. 거래량 / volume_sma_20
+        vol_sma = row.get("volume_sma_20")
+        cur_vol = row.get("volume")
+        if (vol_sma is not None and cur_vol is not None
+                and not (isinstance(vol_sma, float) and pd.isna(vol_sma))
+                and not (isinstance(cur_vol, float) and pd.isna(cur_vol))):
+            vol_sma_f = float(vol_sma)
+            if vol_sma_f > 0:
+                vol_ratio = float(cur_vol) / vol_sma_f
+                if vol_ratio > 2.0:
+                    scores[MarketState.STRONG_UPTREND] += 0.5
+                    scores[MarketState.DOWNTREND] += 0.5
 
-        if uptrend and strong_trend and rsi > 55:
-            return MarketState.STRONG_UPTREND.value
-        elif uptrend:
-            return MarketState.UPTREND.value
-        elif not uptrend and (strong_trend or rsi < 45):
-            return MarketState.DOWNTREND.value
-        else:
-            return MarketState.SIDEWAYS.value
+        # 최고 스코어 상태 결정
+        best_state = max(scores, key=scores.get)
+        total = sum(scores.values())
+        confidence = scores[best_state] / total if total > 0 else 0.3
+
+        # CRASH 매핑: downtrend + 높은 신뢰도 + 높은 raw score
+        if best_state == MarketState.DOWNTREND and confidence >= 0.55 and scores[MarketState.DOWNTREND] >= 5.0:
+            return MarketState.CRASH.value, round(confidence, 2)
+
+        return best_state.value, round(confidence, 2)
 
     def _calc_dynamic_sl(self, df: pd.DataFrame, price: float, market_state: str) -> float:
         """ATR + 시장 상태 기반 동적 손절 % 계산."""
@@ -231,15 +308,32 @@ class TradingEngine:
 
         try:
             df = await self._market_data.get_candles("BTC/KRW", "4h", 200)
-            new_state = self._detect_market_state(df)
+            new_state, new_confidence = self._detect_market_state(df)
+            self._market_confidence = new_confidence
+
             if new_state != self._market_state:
                 old_state = self._market_state
+
+                # 에이전트의 마지막 분석도 참고 로깅
+                agent_state = None
+                if self._agent_coordinator and self._agent_coordinator.last_market_analysis:
+                    agent_state = self._agent_coordinator.last_market_analysis.state.value
+
                 logger.info(
                     "market_state_changed",
                     old=old_state,
                     new=new_state,
+                    confidence=new_confidence,
+                    agent_state=agent_state,
                 )
-                await emit_event("info", "strategy", f"시장 상태: {old_state}→{new_state}")
+                await emit_event(
+                    "info", "strategy",
+                    f"시장 상태: {old_state}→{new_state} (신뢰도 {new_confidence:.0%})",
+                    metadata={
+                        "old": old_state, "new": new_state,
+                        "confidence": new_confidence, "agent_state": agent_state,
+                    },
+                )
                 self._combiner.apply_market_state(new_state)
 
                 # 보유 중 포지션 동적 SL 재조정 (백테스트 동일)
@@ -511,7 +605,7 @@ class TradingEngine:
         return surges
 
     async def _try_rotation(self, session: AsyncSession, surges: list[tuple[str, float]]) -> None:
-        """서지 코인 중 최고 점수로 로테이션 시도."""
+        """서지 코인을 현금으로 매수 (기존 포지션 유지)."""
         now = datetime.now(timezone.utc)
 
         # 쿨다운 체크
@@ -520,27 +614,36 @@ class TradingEngine:
             if elapsed < self._config.trading.rotation_cooldown_sec:
                 return
 
-        for symbol, score in surges:
-            # 현재 보유 코인이면 스킵
-            if symbol == self._current_surge_symbol:
-                continue
+        # 현금 부족 시 스킵
+        cash = self._portfolio_manager.cash_balance
+        if cash < 5000:
+            return
 
-            # 서지 로테이션은 추세 필터 무시 (서지 자체가 강한 시그널)
+        # 이미 보유 중인 심볼 조회
+        result = await session.execute(
+            select(Position.symbol).where(Position.quantity > 0)
+        )
+        held_symbols = {r[0] for r in result.all()}
+
+        for symbol, score in surges:
+            # 이미 보유 중이면 스킵
+            if symbol in held_symbols:
+                logger.debug("rotation_skip_held", symbol=symbol)
+                continue
 
             # 거래 가능 여부 체크
             can_trade, reason = self._can_trade(symbol)
             if not can_trade:
+                logger.info("rotation_skip_cant_trade", symbol=symbol, reason=reason)
                 continue
 
-            # 전략 확인 (combiner)
+            # 전략 확인 (combiner) — 서지는 임계값 완화
             confirmed, confidence = await self._get_surge_confirmation(session, symbol)
             if not confirmed:
+                logger.info("rotation_skip_not_confirmed", symbol=symbol, score=round(score, 1))
                 continue
 
-            # 기존 포지션 매도 (로테이션)
-            await self._execute_rotation_sell(session)
-
-            # 새 코인 매수
+            # 현금으로 서지 코인 매수 (기존 포지션 유지)
             await self._execute_rotation_buy(session, symbol, score, confidence)
 
             self._last_rotation_time = now
@@ -548,7 +651,11 @@ class TradingEngine:
             break  # 최고 서지 1개만
 
     async def _get_surge_confirmation(self, session: AsyncSession, symbol: str) -> tuple[bool, float]:
-        """서지 코인에 대해 기존 전략 파이프라인으로 BUY 확인."""
+        """서지 코인에 대해 기존 전략 파이프라인으로 BUY 확인.
+
+        서지는 그 자체로 강한 시그널이므로 임계값을 일반 매수보다 낮춤 (0.20).
+        BUY 시그널이 1개라도 있으면 확인 통과.
+        """
         signals: list[Signal] = []
         for name, strategy in self._strategies.items():
             try:
@@ -566,10 +673,32 @@ class TradingEngine:
             return False, 0.0
 
         decision = self._combiner.combine(signals)
+
+        # BUY 시그널이 있으면 즉시 확인
         if (decision.action == SignalType.BUY
-                and decision.combined_confidence >= self._config.trading.min_combined_confidence):
+                and decision.combined_confidence >= 0.20):
+            logger.info(
+                "surge_confirmed", symbol=symbol,
+                confidence=round(decision.combined_confidence, 3),
+                method="strategy_buy",
+            )
             return True, float(decision.combined_confidence)
-        return False, 0.0
+
+        # BUY 시그널 없어도, SELL이 아니면 (HOLD) 서지 자체를 신뢰
+        # → 단, 명시적 SELL이면 거부
+        if decision.action == SignalType.SELL:
+            logger.info(
+                "surge_rejected_sell", symbol=symbol,
+                confidence=round(decision.combined_confidence, 3),
+            )
+            return False, 0.0
+
+        # 전략이 전원 HOLD (기권) → 서지 점수만으로 진입 허용 (낮은 신뢰도)
+        logger.info(
+            "surge_confirmed_by_volume", symbol=symbol,
+            strategy_action=decision.action.value,
+        )
+        return True, 0.30
 
     async def _execute_rotation_sell(self, session: AsyncSession) -> None:
         """로테이션을 위한 기존 포지션 전량 매도."""
@@ -598,15 +727,14 @@ class TradingEngine:
     async def _execute_rotation_buy(
         self, session: AsyncSession, symbol: str, surge_score: float, confidence: float,
     ) -> None:
-        """서지 코인 매수. 기존 _process_decision BUY 로직 재사용."""
+        """서지 코인을 현금의 15%로 매수 (기존 포지션 유지)."""
         try:
             ticker = await self._market_data.get_ticker(symbol)
             price = ticker.last
 
             cash = self._portfolio_manager.cash_balance
-            amount_krw = cash * self._config.risk.max_trade_size_pct
-            if amount_krw < 5000 and cash >= 5000:
-                amount_krw = cash
+            surge_size_pct = 0.15  # 현금의 15%
+            amount_krw = cash * surge_size_pct
             amount_krw = amount_krw / 1.003  # 수수료 마진
 
             min_order_krw = 500
@@ -674,9 +802,11 @@ class TradingEngine:
     # ── 추세 필터 ──────────────────────────────────────────────────
 
     def _trend_filter_action(self) -> str:
-        """시장 상태별 매수 정책. 'reduce' / 'allow' 반환."""
+        """시장 상태별 매수 정책. 'heavy_reduce' / 'reduce' / 'allow' 반환."""
+        if self._market_state == "crash":
+            return "heavy_reduce"  # crash: 25% 축소 매수
         if self._market_state == "downtrend":
-            return "reduce"  # 포지션 50% 축소 매수
+            return "reduce"        # downtrend: 50% 축소 매수
         return "allow"
 
     async def _process_decision(
@@ -690,7 +820,7 @@ class TradingEngine:
             logger.info("buy_suppressed", symbol=symbol)
             return
 
-        # 추세 필터: downtrend=50% 축소
+        # 추세 필터: crash=차단, downtrend=50% 축소
         trend_action = self._trend_filter_action()
 
         primary_signal = max(
@@ -705,6 +835,19 @@ class TradingEngine:
         price = ticker.last
 
         if decision.action == SignalType.BUY:
+            # 시장 신뢰도 낮으면 진입 기준 상향 (불확실 시 진입 억제)
+            min_conf = self._config.trading.min_combined_confidence
+            if self._market_confidence < 0.35:
+                min_conf += 0.10
+            if decision.combined_confidence < min_conf:
+                logger.debug(
+                    "buy_confidence_too_low", symbol=symbol,
+                    combined=round(decision.combined_confidence, 3),
+                    threshold=round(min_conf, 3),
+                    market_confidence=self._market_confidence,
+                )
+                return
+
             # 이미 포지션 있으면 추가 매수 안 함
             result = await session.execute(
                 select(Position).where(Position.symbol == symbol, Position.quantity > 0)
@@ -715,7 +858,10 @@ class TradingEngine:
             # 포지션 사이징: max_trade_size_pct 사용 (소액 테스트 대응)
             cash = self._portfolio_manager.cash_balance
             size_pct = self._config.risk.max_trade_size_pct
-            if trend_action == "reduce":
+            if trend_action == "heavy_reduce":
+                size_pct *= 0.25  # crash: 25% 축소
+                logger.info("buy_reduced_crash", symbol=symbol, size_pct=round(size_pct, 3))
+            elif trend_action == "reduce":
                 size_pct *= 0.5  # downtrend: 50% 축소
                 logger.info("buy_reduced_downtrend", symbol=symbol, size_pct=round(size_pct, 3))
             amount_krw = cash * size_pct
@@ -819,6 +965,7 @@ class TradingEngine:
             "rotation_enabled": self._config.trading.rotation_enabled,
             "rotation_cooldown_sec": self._config.trading.rotation_cooldown_sec,
             "market_state": self._market_state,
+            "market_confidence": self._market_confidence,
             "tracked_coins": self._config.trading.tracked_coins,
             "rotation_coins": self._config.trading.rotation_coins,
         }

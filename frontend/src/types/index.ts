@@ -17,6 +17,8 @@ export interface PortfolioSummary {
   unrealized_pnl: number
   total_pnl: number
   total_pnl_pct: number
+  total_fees: number
+  trade_count: number
   peak_value: number
   drawdown_pct: number
   positions: Position[]

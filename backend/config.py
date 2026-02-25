@@ -29,13 +29,13 @@ class TradingConfig(BaseSettings):
     min_combined_confidence: float = 0.25
     min_profit_vs_fee_ratio: float = 2.0  # expected return > 2x round-trip fee
 
-    # 거래량 급등 로테이션 설정
+    # 거래량 급등 로테이션 설정 (tracked_coins와 별도 — 서지 전용)
     rotation_enabled: bool = True
     rotation_coins: list[str] = [
-        "BTC/KRW", "ETH/KRW", "XRP/KRW", "SOL/KRW", "ADA/KRW",
         "DOGE/KRW", "AVAX/KRW", "DOT/KRW", "LINK/KRW", "TRX/KRW",
         "ATOM/KRW", "ETC/KRW", "XLM/KRW", "ALGO/KRW", "NEAR/KRW",
         "SAND/KRW", "MANA/KRW", "AXS/KRW", "AAVE/KRW", "BCH/KRW",
+        "USDT/KRW", "USDC/KRW",  # 스테이블코인 (헤지)
     ]
     surge_threshold: float = 2.0       # 서지 감지 임계 배수 (volume / avg_volume)
     rotation_cooldown_sec: int = 7200  # 로테이션 최소 간격 (2시간)

@@ -234,6 +234,8 @@ async def fetch_history(
     df.ta.atr(length=14,  append=True)
     df.ta.adx(length=14,  append=True)
 
+    df["Volume_SMA_20"] = df["volume"].rolling(window=20).mean()
+
     df.dropna(inplace=True)
 
     # 날짜 필터: 최근 N일
@@ -261,6 +263,7 @@ class Backtester:
         trailing_stop: float = 3.0,         # 고점 대비 하락 % (트레일링)
         adaptive_weights: bool = True,      # 적응형 가중치
         dynamic_sl: bool = False,           # ATR+시장상태 동적 손절
+        agent_market: bool = True,          # Agent 스코어링 시장 감지
     ):
         self._exchange = exchange
         self._initial_balance = initial_balance
@@ -272,6 +275,7 @@ class Backtester:
         self._trailing_stop = trailing_stop
         self._adaptive_weights = adaptive_weights
         self._dynamic_sl = dynamic_sl
+        self._agent_market = agent_market
 
         # 전략 로드 (인스턴스 생성)
         all_strats = StrategyRegistry.create_all()
@@ -337,8 +341,10 @@ class Backtester:
         trail_str = (f"활성 +{self._trailing_activation}% / 스탑 -{self._trailing_stop}%"
                      if self._trailing_activation > 0 else "OFF")
         aw_str = "ON" if self._adaptive_weights else "OFF"
+        mm_str = "Agent(5-factor)" if self._agent_market else "Legacy(SMA+ADX)"
         print(f"  손절: {sl_str} | 익절: {tp_str} | 최소 신뢰도: {self._min_confidence}")
         print(f"  추세 필터: {tf_str} | 트레일링: {trail_str} | 적응형 가중치: {aw_str}")
+        print(f"  시장 감지: {mm_str}")
         print(f"{'='*60}")
 
         df = await self.fetch_history(symbol, timeframe, days)
@@ -372,6 +378,8 @@ class Backtester:
         total_win_pct = 0.0
         total_loss_pct = 0.0
 
+        market_confidence = 0.5  # 시장 상태 신뢰도
+
         # 적응형 가중치: 마지막 재평가 인덱스
         last_weight_eval_idx = -9999
 
@@ -379,6 +387,7 @@ class Backtester:
         rows = list(df.iterrows())
         for i, (ts, row) in enumerate(rows):
             current_price = float(row["close"])
+
             current_equity = cash + holdings * current_price
 
             # 에쿼티 곡선 / 낙폭 계산
@@ -394,10 +403,15 @@ class Backtester:
 
             # ── 24캔들(≈1일)마다 시장 상태 재평가 ─────────────────
             if i - last_weight_eval_idx >= 24:
-                current_market_state = _detect_market_state(row)
+                prev_state = current_market_state
+                current_market_state, market_confidence = _detect_market_state(
+                    row, df, i, use_agent_scoring=self._agent_market,
+                )
+                if current_market_state != prev_state:
+                    print(f"  [{ts.strftime('%m/%d %H:%M')}] 시장: {current_market_state} (신뢰도 {market_confidence:.0%})")
                 if self._adaptive_weights:
                     new_weights = _get_adaptive_weights(current_market_state, list(self._strategies.keys()))
-                    self._combiner.update_weights(new_weights)
+                    self._combiner.update_weights(new_weights, source="backtest")
                 # 보유 중이면 동적 손절도 시장 상태에 맞게 갱신
                 if self._dynamic_sl and holdings > 0:
                     dynamic_sl_pct = _calc_dynamic_sl(row, current_price, current_market_state)
@@ -522,7 +536,11 @@ class Backtester:
 
             # ── 매수 ──────────────────────────────────────────
             if decision.action == SignalType.BUY and holdings == 0:
-                if decision.combined_confidence < self._min_confidence:
+                # 시장 신뢰도 낮으면 진입 기준 상향 (불확실 시 진입 억제)
+                buy_threshold = self._min_confidence
+                if market_confidence < 0.35:
+                    buy_threshold = self._min_confidence + 0.10
+                if decision.combined_confidence < buy_threshold:
                     continue
 
                 trade_size = cash * 0.95
@@ -663,8 +681,8 @@ def _is_downtrend(row) -> bool:
     return float(sma20) < float(sma60)
 
 
-def _detect_market_state(row) -> str:
-    """SMA20/SMA60 + ADX + RSI로 시장 상태 감지.
+def _detect_market_state_legacy(row) -> str:
+    """SMA20/SMA60 + ADX + RSI로 시장 상태 감지 (레거시 3요소).
 
     Returns: 'strong_uptrend', 'uptrend', 'sideways', 'downtrend', 'crash'
     """
@@ -695,6 +713,123 @@ def _detect_market_state(row) -> str:
         return MarketState.DOWNTREND.value
     else:
         return MarketState.SIDEWAYS.value
+
+
+def _detect_market_state_v2(row, df: pd.DataFrame, i: int) -> tuple[str, float]:
+    """에이전트 스타일 5요소 스코어링 시장 상태 감지.
+
+    Factors: Price vs SMA20, SMA20/SMA50 정렬, RSI, 7일 가격변동, 거래량/SMA20.
+    Returns: (state_str, confidence)
+    """
+    from core.enums import MarketState
+
+    scores = {
+        MarketState.STRONG_UPTREND: 0.0,
+        MarketState.UPTREND: 0.0,
+        MarketState.SIDEWAYS: 0.0,
+        MarketState.DOWNTREND: 0.0,
+    }
+
+    current_price = float(row["close"])
+
+    # 1. Price vs SMA20 거리
+    sma20 = row.get("SMA_20")
+    if sma20 is not None and not (isinstance(sma20, float) and pd.isna(sma20)):
+        sma20 = float(sma20)
+        if sma20 > 0:
+            if current_price > sma20 * 1.05:
+                scores[MarketState.STRONG_UPTREND] += 2
+            elif current_price > sma20:
+                scores[MarketState.UPTREND] += 1.5
+            elif current_price < sma20 * 0.95:
+                scores[MarketState.DOWNTREND] += 1.5
+            elif current_price < sma20:
+                scores[MarketState.DOWNTREND] += 1.5
+
+    # 2. SMA20 vs SMA50 정렬
+    sma50 = row.get("SMA_50")
+    if (sma20 is not None and sma50 is not None
+            and not (isinstance(sma20, float) and pd.isna(sma20))
+            and not (isinstance(sma50, float) and pd.isna(sma50))):
+        sma50_f = float(sma50)
+        sma20_f = float(sma20) if not isinstance(sma20, float) else sma20
+        if sma20_f > sma50_f:
+            scores[MarketState.UPTREND] += 1
+            scores[MarketState.STRONG_UPTREND] += 0.5
+        else:
+            scores[MarketState.DOWNTREND] += 1
+
+    # 3. RSI
+    rsi = row.get("RSI_14")
+    if rsi is not None and not (isinstance(rsi, float) and pd.isna(rsi)):
+        rsi = float(rsi)
+        if rsi > 70:
+            scores[MarketState.STRONG_UPTREND] += 1
+        elif rsi > 55:
+            scores[MarketState.UPTREND] += 1
+        elif rsi < 30:
+            scores[MarketState.DOWNTREND] += 1.5
+        elif rsi < 45:
+            scores[MarketState.DOWNTREND] += 1
+        else:
+            scores[MarketState.SIDEWAYS] += 1.5
+
+    # 4. 7일 가격변동 (캔들 간격에서 자동 계산)
+    if len(df) > 1:
+        # 타임프레임 자동 감지: 첫 두 캔들 간격으로 추정
+        td = (df.index[1] - df.index[0]).total_seconds() / 3600  # hours
+        candles_per_7d = int(7 * 24 / td) if td > 0 else 42
+        lookback_idx = max(0, i - candles_per_7d)
+        if lookback_idx < len(df):
+            week_ago_price = float(df.iloc[lookback_idx]["close"])
+            if week_ago_price > 0:
+                week_change_pct = (current_price - week_ago_price) / week_ago_price * 100
+                if week_change_pct > 10:
+                    scores[MarketState.STRONG_UPTREND] += 2
+                elif week_change_pct > 3:
+                    scores[MarketState.UPTREND] += 1.5
+                elif week_change_pct < -10:
+                    scores[MarketState.DOWNTREND] += 2
+                elif week_change_pct < -3:
+                    scores[MarketState.DOWNTREND] += 1.5
+                else:
+                    scores[MarketState.SIDEWAYS] += 2
+
+    # 5. 거래량 / Volume_SMA_20
+    vol_sma = row.get("Volume_SMA_20")
+    cur_vol = row.get("volume")
+    if (vol_sma is not None and cur_vol is not None
+            and not (isinstance(vol_sma, float) and pd.isna(vol_sma))
+            and not (isinstance(cur_vol, float) and pd.isna(cur_vol))):
+        vol_sma_f = float(vol_sma)
+        if vol_sma_f > 0:
+            vol_ratio = float(cur_vol) / vol_sma_f
+            if vol_ratio > 2.0:
+                scores[MarketState.STRONG_UPTREND] += 0.5
+                scores[MarketState.DOWNTREND] += 0.5
+
+    # 최고 스코어 상태 결정
+    best_state = max(scores, key=scores.get)
+    total = sum(scores.values())
+    confidence = scores[best_state] / total if total > 0 else 0.3
+
+    # CRASH 매핑: downtrend + 높은 신뢰도 + 높은 raw score
+    if best_state == MarketState.DOWNTREND and confidence >= 0.55 and scores[MarketState.DOWNTREND] >= 5.0:
+        return MarketState.CRASH.value, round(confidence, 2)
+
+    return best_state.value, round(confidence, 2)
+
+
+def _detect_market_state(row, df=None, i: int = 0, use_agent_scoring: bool = True) -> tuple[str, float]:
+    """시장 상태 감지 디스패처.
+
+    use_agent_scoring=True (기본): 5요소 스코어링 (에이전트 방식)
+    use_agent_scoring=False:       레거시 3요소 (SMA+ADX+RSI)
+    Returns: (state_str, confidence)
+    """
+    if use_agent_scoring and df is not None:
+        return _detect_market_state_v2(row, df, i)
+    return _detect_market_state_legacy(row), 0.5
 
 
 # 시장 상태별 적응형 가중치 프로필 (8전략)
@@ -875,6 +1010,7 @@ class RotationBacktester:
         trailing_stop: float = 3.0,
         adaptive_weights: bool = True,
         dynamic_sl: bool = False,
+        agent_market: bool = True,
         surge_threshold: float = 3.0,
         rotation_cooldown: int = 6,
         require_strategy_confirm: bool = True,
@@ -889,6 +1025,7 @@ class RotationBacktester:
         self._trailing_stop = trailing_stop
         self._adaptive_weights = adaptive_weights
         self._dynamic_sl = dynamic_sl
+        self._agent_market = agent_market
         self._surge_threshold = surge_threshold
         self._rotation_cooldown = rotation_cooldown
         self._require_strategy_confirm = require_strategy_confirm
@@ -980,7 +1117,9 @@ class RotationBacktester:
         tp_str = f"{self._take_profit_pct}%" if self._take_profit_pct > 0 else "OFF"
         trail_str = (f"+{self._trailing_activation}%/-{self._trailing_stop}%"
                      if self._trailing_activation > 0 else "OFF")
+        mm_str = "Agent(5-factor)" if self._agent_market else "Legacy(SMA+ADX)"
         print(f"  손절: {sl_str} | 익절: {tp_str} | 트레일링: {trail_str}")
+        print(f"  시장 감지: {mm_str}")
         print(f"{'='*60}")
 
         # 1. 데이터 프리페치
@@ -1025,6 +1164,7 @@ class RotationBacktester:
         total_win_pct = 0.0
         total_loss_pct = 0.0
 
+        market_confidence = 0.5  # 시장 상태 신뢰도
         last_rotation_idx = -9999
         last_weight_eval_idx = -9999
 
@@ -1055,10 +1195,19 @@ class RotationBacktester:
             if candle_idx - last_weight_eval_idx >= 24:
                 # BTC 기준으로 시장 상태 판단
                 if btc_df is not None and ts in btc_df.index:
-                    current_market_state = _detect_market_state(btc_df.loc[ts])
+                    prev_state = current_market_state
+                    btc_iloc = btc_df.index.get_loc(ts)
+                    if isinstance(btc_iloc, slice):
+                        btc_iloc = btc_iloc.start
+                    current_market_state, market_confidence = _detect_market_state(
+                        btc_df.loc[ts], btc_df, btc_iloc,
+                        use_agent_scoring=self._agent_market,
+                    )
+                    if current_market_state != prev_state:
+                        print(f"  [{ts.strftime('%m/%d %H:%M')}] 시장: {current_market_state} (신뢰도 {market_confidence:.0%})")
                     if self._adaptive_weights:
                         new_weights = _get_adaptive_weights(current_market_state, list(self._strategies.keys()))
-                        self._combiner.update_weights(new_weights)
+                        self._combiner.update_weights(new_weights, source="backtest")
                     # 보유 중이면 동적 손절도 시장 상태에 맞게 갱신
                     if self._dynamic_sl and current_symbol and holdings > 0:
                         if current_symbol in all_data and ts in all_data[current_symbol].index:
@@ -1454,6 +1603,11 @@ async def main():
                         help="ATR+시장상태 기반 동적 손절 ON")
     parser.add_argument("--no-dynamic-sl",      dest="dynamic_sl", action="store_false",
                         help="동적 손절 OFF (고정 %%사용, 기본)")
+    # Agent 스코어링 시장 감지
+    parser.add_argument("--agent-market",       dest="agent_market", action="store_true", default=True,
+                        help="Agent 스코어링 시장 감지 (기본 ON)")
+    parser.add_argument("--no-agent-market",    dest="agent_market", action="store_false",
+                        help="레거시(SMA+ADX) 시장 감지")
     # 로테이션 모드
     parser.add_argument("--rotation",       action="store_true",
                         help="거래량 서지 코인 로테이션 모드")
@@ -1507,6 +1661,7 @@ async def main():
             trailing_stop=args.trailing_stop,
             adaptive_weights=args.adaptive_weights,
             dynamic_sl=args.dynamic_sl,
+            agent_market=args.agent_market,
             surge_threshold=args.surge_threshold,
             rotation_cooldown=args.rotation_cooldown,
             require_strategy_confirm=args.strategy_confirm,
@@ -1529,6 +1684,7 @@ async def main():
         trailing_stop=args.trailing_stop,
         adaptive_weights=args.adaptive_weights,
         dynamic_sl=args.dynamic_sl,
+        agent_market=args.agent_market,
     )
 
     symbols = (

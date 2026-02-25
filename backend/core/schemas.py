@@ -22,6 +22,8 @@ class PortfolioSummaryResponse(BaseModel):
     unrealized_pnl: float
     total_pnl: float
     total_pnl_pct: float
+    total_fees: float
+    trade_count: int
     peak_value: float
     drawdown_pct: float
     positions: list[PositionResponse]

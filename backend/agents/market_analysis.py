@@ -17,42 +17,28 @@ class MarketAnalysis:
     indicators: dict
 
 
-# Strategy weight profiles per market state (역발상 전략 중심)
+# Strategy weight profiles per market state (8전략 — combiner ADAPTIVE_PROFILES와 동기화)
+# 정보 표시용 (가중치 변경은 엔진이 관리). CRASH 제거 → DOWNTREND에 통합.
 WEIGHT_PROFILES: dict[MarketState, dict[str, float]] = {
     MarketState.STRONG_UPTREND: {
-        "volatility_breakout": 0.15,
-        "ma_crossover": 0.15,
-        "rsi": 0.20,
-        "macd_crossover": 0.20,
-        "bollinger_rsi": 0.30,
+        "volatility_breakout": 0.10, "ma_crossover": 0.10,
+        "rsi": 0.15, "macd_crossover": 0.15, "bollinger_rsi": 0.18,
+        "stochastic_rsi": 0.10, "obv_divergence": 0.07, "supertrend": 0.15,
     },
     MarketState.UPTREND: {
-        "volatility_breakout": 0.10,
-        "ma_crossover": 0.15,
-        "rsi": 0.25,
-        "macd_crossover": 0.20,
-        "bollinger_rsi": 0.30,
+        "volatility_breakout": 0.08, "ma_crossover": 0.10,
+        "rsi": 0.18, "macd_crossover": 0.13, "bollinger_rsi": 0.22,
+        "stochastic_rsi": 0.10, "obv_divergence": 0.08, "supertrend": 0.11,
     },
     MarketState.SIDEWAYS: {
-        "volatility_breakout": 0.05,
-        "ma_crossover": 0.05,
-        "rsi": 0.35,
-        "macd_crossover": 0.15,
-        "bollinger_rsi": 0.40,
+        "volatility_breakout": 0.04, "ma_crossover": 0.04,
+        "rsi": 0.25, "macd_crossover": 0.10, "bollinger_rsi": 0.28,
+        "stochastic_rsi": 0.13, "obv_divergence": 0.10, "supertrend": 0.06,
     },
     MarketState.DOWNTREND: {
-        "volatility_breakout": 0.00,
-        "ma_crossover": 0.10,
-        "rsi": 0.35,
-        "macd_crossover": 0.15,
-        "bollinger_rsi": 0.40,
-    },
-    MarketState.CRASH: {
-        "volatility_breakout": 0.00,
-        "ma_crossover": 0.05,
-        "rsi": 0.40,
-        "macd_crossover": 0.10,
-        "bollinger_rsi": 0.45,
+        "volatility_breakout": 0.00, "ma_crossover": 0.06,
+        "rsi": 0.25, "macd_crossover": 0.10, "bollinger_rsi": 0.28,
+        "stochastic_rsi": 0.14, "obv_divergence": 0.10, "supertrend": 0.07,
     },
 }
 
@@ -133,7 +119,7 @@ class MarketAnalysisAgent:
                 scores[MarketState.UPTREND] += 1.5
                 reasons.append(f"가격이 SMA20 상회")
             elif current_price < sma_20 * 0.95:
-                scores[MarketState.CRASH] += 1.5
+                scores[MarketState.DOWNTREND] += 1.5
                 reasons.append(f"가격이 SMA20 대비 5% 이상 하회")
             elif current_price < sma_20:
                 scores[MarketState.DOWNTREND] += 1.5
@@ -157,7 +143,7 @@ class MarketAnalysisAgent:
             elif rsi > 55:
                 scores[MarketState.UPTREND] += 1
             elif rsi < 30:
-                scores[MarketState.CRASH] += 1.5
+                scores[MarketState.DOWNTREND] += 1.5
                 reasons.append(f"RSI={rsi:.0f} (과매도)")
             elif rsi < 45:
                 scores[MarketState.DOWNTREND] += 1
@@ -177,7 +163,7 @@ class MarketAnalysisAgent:
                 scores[MarketState.UPTREND] += 1.5
                 reasons.append(f"주간 변동: +{week_change_pct:.1f}%")
             elif week_change_pct < -10:
-                scores[MarketState.CRASH] += 2
+                scores[MarketState.DOWNTREND] += 2
                 reasons.append(f"주간 변동: {week_change_pct:.1f}%")
             elif week_change_pct < -3:
                 scores[MarketState.DOWNTREND] += 1.5
@@ -195,7 +181,7 @@ class MarketAnalysisAgent:
                 if vol_ratio > 2.0:
                     # High volume suggests trend change or strong trend
                     scores[MarketState.STRONG_UPTREND] += 0.5
-                    scores[MarketState.CRASH] += 0.5
+                    scores[MarketState.DOWNTREND] += 0.5
                     reasons.append(f"거래량 {vol_ratio:.1f}x (급증)")
 
         # Find winning state

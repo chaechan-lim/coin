@@ -41,12 +41,12 @@ class AgentCoordinator:
         self._engine = engine
 
     async def run_market_analysis(self) -> MarketAnalysis:
-        """Run market analysis and update strategy weights."""
+        """Run market analysis (정보 제공용 — 가중치는 엔진 _maybe_update_market_state()가 관리)."""
         analysis = await self._market_agent.analyze()
         self._last_market_analysis = analysis
 
-        # Update combiner weights
-        self._combiner.update_weights(analysis.recommended_weights)
+        # 가중치 변경 제거: 엔진이 단일 권한으로 apply_market_state() 호출
+        # 에이전트 분석 결과는 DB 저장 + 대시보드 표시용
 
         # Persist analysis
         try:
@@ -70,9 +70,9 @@ class AgentCoordinator:
             logger.error("failed_to_persist_market_analysis", error=str(e))
 
         logger.info(
-            "market_analysis_applied",
+            "market_analyzed",
             state=analysis.state.value,
-            weights=analysis.recommended_weights,
+            confidence=analysis.confidence,
         )
         return analysis
 

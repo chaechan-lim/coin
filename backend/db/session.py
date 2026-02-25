@@ -1,3 +1,4 @@
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from config import get_config
 
@@ -5,15 +6,29 @@ _engine = None
 _session_factory = None
 
 
+def _set_sqlite_pragmas(dbapi_conn, connection_record):
+    """SQLite 연결 시 WAL 모드 + busy_timeout 설정."""
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.close()
+
+
 def get_engine():
     global _engine
     if _engine is None:
         config = get_config()
         kwargs = {"echo": config.database.echo}
-        # SQLite는 connection pool 미지원
-        if "sqlite" not in config.database.url:
+        if "sqlite" in config.database.url:
+            # SQLite: WAL 모드로 동시 읽기/쓰기 지원
+            pass
+        else:
             kwargs.update(pool_size=10, max_overflow=20, pool_pre_ping=True)
         _engine = create_async_engine(config.database.url, **kwargs)
+        # SQLite인 경우 WAL pragma 적용
+        if "sqlite" in config.database.url:
+            event.listen(_engine.sync_engine, "connect", _set_sqlite_pragmas)
     return _engine
 
 

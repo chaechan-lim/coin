@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from core.utils import utcnow
 
-from core.models import Position, PortfolioSnapshot, Trade
+from core.models import Position, PortfolioSnapshot, Trade, Order
 from services.market_data import MarketDataService
 
 logger = structlog.get_logger(__name__)
@@ -138,6 +138,23 @@ class PortfolioManager:
             except Exception as e:
                 logger.warning("price_fetch_failed", symbol=pos.symbol, error=str(e))
 
+        # 총 수수료 / 거래 횟수 집계 (orders + trades 양쪽에서)
+        fee_result = await session.execute(
+            select(
+                func.coalesce(func.sum(Order.fee), 0),
+                func.count(Order.id),
+            )
+        )
+        fee_row = fee_result.one()
+        total_fees = float(fee_row[0])
+        trade_count = int(fee_row[1])
+        # orders.fee=0인 경우 trades 테이블에서 보충
+        if total_fees == 0 and trade_count > 0:
+            trade_fee_result = await session.execute(
+                select(func.coalesce(func.sum(Trade.fee), 0))
+            )
+            total_fees = float(trade_fee_result.scalar())
+
         total_value = self._cash_balance + total_current_value
         total_unrealized_pnl = total_current_value - total_invested
 
@@ -159,6 +176,8 @@ class PortfolioManager:
             "total_pnl_pct": round(
                 (self._realized_pnl + total_unrealized_pnl) / self._peak_value * 100, 2
             ) if self._peak_value > 0 else 0,
+            "total_fees": round(total_fees, 0),
+            "trade_count": trade_count,
             "peak_value": round(self._peak_value, 0),
             "drawdown_pct": round(drawdown_pct, 2),
             "positions": position_details,

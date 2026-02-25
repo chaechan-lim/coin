@@ -7,8 +7,8 @@
 ## 개요
 
 빗썸(Bithumb) 거래소 기반의 24시간 자동 암호화폐 트레이딩 시스템.
-5개 활성 전략 가중 투표 + 거래량 서지 로테이션, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭) 포함.
-**현재 라이브 운영 중** (BTC/KRW, 500K KRW, SQLite).
+8개 전략 가중 투표 (HOLD=기권 방식) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭) 포함.
+**현재 라이브 운영 중** (5종 추적 + 20종 로테이션, 500K KRW, SQLite WAL).
 
 ---
 
@@ -18,7 +18,7 @@
 |---|---|
 | 백엔드 | Python 3.12, FastAPI, SQLAlchemy (async), APScheduler |
 | 프론트엔드 | React 18, TypeScript, Vite, TailwindCSS, Recharts, lightweight-charts |
-| DB | SQLite (개발/현재) / PostgreSQL 16 (프로덕션) |
+| DB | SQLite + WAL (현재) / PostgreSQL 16 (마이그레이션 예정) |
 | Cache / PubSub | Redis 7 (Docker, 선택) |
 | 거래소 연동 | Bithumb V2 API (ccxt public + aiohttp JWT private) |
 | 기술적 지표 | pandas + pandas-ta |
@@ -45,7 +45,7 @@ coin/
 │   ├── core/
 │   │   ├── __init__.py          ✅
 │   │   ├── enums.py             ✅ 완료
-│   │   ├── event_bus.py         ✅ 완료 (서버 이벤트 DB 기록 + WS 브로드캐스트)
+│   │   ├── event_bus.py         ✅ 완료 (서버 이벤트 DB 기록 + WS 브로드캐스트 + 재시도)
 │   │   ├── exceptions.py        ✅ 완료
 │   │   ├── models.py            ✅ 완료
 │   │   └── schemas.py           ✅ 완료
@@ -73,8 +73,11 @@ coin/
 │   │   ├── rsi_strategy.py      ✅ 완료
 │   │   ├── macd_crossover.py    ✅ 완료
 │   │   ├── bollinger_rsi.py     ✅ 완료
-│   │   ├── grid_trading.py      ✅ 완료
-│   │   └── dca_momentum.py      ✅ 완료
+│   │   ├── stochastic_rsi.py   ✅ 완료
+│   │   ├── obv_divergence.py   ✅ 완료
+│   │   ├── supertrend.py       ✅ 완료
+│   │   ├── grid_trading.py      ✅ 완료 (독립 관리형, combiner 미사용)
+│   │   └── dca_momentum.py      ✅ 완료 (독립 관리형, combiner 미사용)
 │   ├── agents/
 │   │   ├── __init__.py          ✅
 │   │   ├── market_analysis.py   ✅ 완료
@@ -143,7 +146,7 @@ coin/
 | 환경 변수 템플릿 | `.env.example` | ✅ |
 | DB ORM 모델 | `core/models.py` (8개 테이블) | ✅ |
 | 열거형/예외 | `core/enums.py`, `core/exceptions.py` | ✅ |
-| DB 세션 | `db/session.py` (async SQLAlchemy) | ✅ |
+| DB 세션 | `db/session.py` (async SQLAlchemy + WAL) | ✅ |
 | Pydantic 스키마 | `core/schemas.py` | ✅ |
 
 ### ✅ Phase 2 — 거래소 어댑터 + 시장 데이터 (완료)
@@ -168,8 +171,11 @@ coin/
 | 전략 3: RSI | `strategies/rsi_strategy.py` | ✅ |
 | 전략 4: MACD | `strategies/macd_crossover.py` | ✅ |
 | 전략 5: 볼린저+RSI | `strategies/bollinger_rsi.py` | ✅ |
-| 전략 6: 그리드 | `strategies/grid_trading.py` | ✅ |
-| 전략 7: DCA+모멘텀 | `strategies/dca_momentum.py` | ✅ |
+| 전략 6: Stochastic RSI | `strategies/stochastic_rsi.py` | ✅ |
+| 전략 7: OBV 다이버전스 | `strategies/obv_divergence.py` | ✅ |
+| 전략 8: Supertrend | `strategies/supertrend.py` | ✅ |
+| (독립) 그리드 | `strategies/grid_trading.py` | ✅ (combiner 미사용) |
+| (독립) DCA+모멘텀 | `strategies/dca_momentum.py` | ✅ (combiner 미사용) |
 | 주문 관리자 | `engine/order_manager.py` | ✅ |
 | 포트폴리오 관리자 | `engine/portfolio_manager.py` | ✅ |
 | 트레이딩 엔진 | `engine/trading_engine.py` | ✅ |
@@ -226,49 +232,79 @@ coin/
 | 시스템 이벤트 로그 (필터+페이징) | `frontend/src/components/SystemLog.tsx` | ✅ |
 | 프론트엔드 Dockerfile | `frontend/Dockerfile` | ✅ |
 
-### ⬜ Phase 5 — 안정화 (다음 단계)
+### 🔄 Phase 5 — 안정화 (진행 중)
 
 | 항목 | 상태 |
 |---|---|
-| 구조화된 로깅 (structlog) | 코드 내 적용 완료 |
-| 에러 핸들링 / 재연결 | 기본 구현 완료 |
+| 구조화된 로깅 (structlog) | ✅ 코드 내 적용 완료 |
+| 에러 핸들링 / 재연결 | ✅ 기본 구현 완료 |
 | 텔레그램 알림 | ✅ 구현 완료 (설정만 필요) |
+| SQLite WAL 모드 | ✅ 동시 접근 안정화 |
+| 주문 fill 폴링 | ✅ 지정가 주문 체결/수수료 추적 |
+| emit_event 재시도 | ✅ DB locked 3회 재시도 |
+| Signal Combiner 개선 | ✅ HOLD=기권 방식 |
+| 5요소 시장 감지 | ✅ backtest + live 동기화 |
+| 서지 매수 방식 개선 | ✅ 전량매도→현금매수로 변경 |
+| 수수료 추적 UI | ✅ 개요 페이지 수수료 지출 카드 |
 | 단위 테스트 | ⬜ 작성 필요 |
-| 페이퍼 트레이딩 검증 | ⬜ 실행 후 검증 필요 |
+| PostgreSQL 마이그레이션 | ⬜ 향후 스케일업 시 |
 
 ---
 
 ## 핵심 설계 결정 사항
 
-### 전략 신호 결합 방식
+### 전략 신호 결합 방식 (HOLD=기권)
 ```
-각 전략 → Signal(type, confidence, reason)
-                  ↓
-         SignalCombiner (가중 투표)
-         score = Σ(weight × confidence) per signal type
-         임계값(0.4) 이상만 실행
-                  ↓
-         Market Analysis Agent가 가중치 자동 조정
-         Risk Management Agent가 실행 필터링
+8개 전략 → Signal(type, confidence, reason)
+                    ↓
+           SignalCombiner (가중 투표, HOLD=기권)
+           BUY/SELL만 경쟁 — HOLD는 투표 미참여
+           참여 가중치(active_weight)로 정규화
+           active_weight < 0.12 → 의견 부족 HOLD
+           임계값(0.25) 이상만 실행
+                    ↓
+           5요소 시장 감지 → 적응형 가중치 자동 적용
+           market_confidence < 0.35 → 임계값 +0.10 상향
+           crash=25% 사이징 / downtrend=50% / 나머지=100%
 ```
 
-### 시장 상태별 전략 가중치 프로필
+### 시장 상태별 전략 가중치 프로필 (8전략)
 
-> Grid/DCA는 독립 관리형이라 combiner에서 제외. 5개 활성 전략만 사용.
+> Grid/DCA는 독립 관리형이라 combiner에서 제외. 8개 활성 전략만 사용.
 
-| 시장 상태 | RSI | 볼린저+RSI | MACD | 변동성돌파 | MA크로스 |
-|---|---|---|---|---|---|
-| 강한 상승장 | 0.20 | 0.20 | 0.20 | 0.20 | 0.20 |
-| 상승장 | 0.25 | 0.30 | 0.15 | 0.15 | 0.15 |
-| 횡보장 (기본) | 0.30 | 0.35 | 0.15 | 0.10 | 0.10 |
-| 하락장 | 0.35 | 0.40 | 0.10 | 0.05 | 0.10 |
+| 시장 상태 | Vol | MA | RSI | MACD | Boll+RSI | StochRSI | OBV | Supertrend |
+|---|---|---|---|---|---|---|---|---|
+| 강한 상승장 | 0.10 | 0.10 | 0.15 | 0.15 | 0.18 | 0.10 | 0.07 | 0.15 |
+| 상승장 | 0.08 | 0.10 | 0.18 | 0.13 | 0.22 | 0.10 | 0.08 | 0.11 |
+| 횡보장 (기본) | 0.04 | 0.04 | 0.25 | 0.10 | 0.28 | 0.13 | 0.10 | 0.06 |
+| 하락장 | 0.00 | 0.06 | 0.25 | 0.10 | 0.28 | 0.14 | 0.10 | 0.07 |
+| 폭락장 | 0.00 | 0.04 | 0.28 | 0.08 | 0.30 | 0.14 | 0.10 | 0.06 |
+
+### 5요소 시장 상태 감지 (Agent-style)
+
+| 요소 | 판단 기준 |
+|---|---|
+| Price vs SMA20 거리 | >5% 상회→strong_up, 상회→up, <5% 하회→down |
+| SMA20 vs SMA50 정렬 | 위→up, 아래→down |
+| RSI | >70→strong, >55→up, <30→down, <45→down, else→sideways |
+| 7일 가격변동 | >10%→strong, >3%→up, <-10%→down, <-3%→down |
+| 거래량/SMA20 | >2x→strong+down 동시 (변동성) |
+
+### 서지 로테이션 (현금 매수 방식)
+
+서지 발견 시 기존 포지션을 유지하고 현금의 15%로 서지 코인 매수:
+1. 이미 보유 코인이면 스킵
+2. 전략 확인: BUY→즉시, 전원 HOLD→서지로 허용, SELL→거부
+3. 현금 < 5,000원이면 스킵
+4. 쿨다운: `rotation_cooldown_sec` (기본 1800초)
 
 ### 과매매 방지 레이어 (다중 장치)
 1. **코인당 최소 간격**: 1시간 이상 (설정 가능)
 2. **매수 후 쿨다운**: 30분 (손절 제외)
 3. **일일 매매 상한**: 최대 10건
-4. **신뢰도 임계값**: 결합 신뢰도 0.4 이상만 실행
-5. **수수료 대비 수익성**: 왕복 수수료(~1%) 이상 기대수익 시만 실행
+4. **신뢰도 임계값**: 결합 신뢰도 0.25 이상만 실행
+5. **시장 신뢰도 게이팅**: confidence < 0.35 → 임계값 +0.10
+6. **시장 상태 사이징**: crash 25%, downtrend 50%
 
 ### DB 주문 테이블 핵심 컬럼 (전략 귀속)
 ```sql
@@ -500,5 +536,7 @@ docker compose restart backend
 | v0.3 | 2026-02-24 | 백테스트-라이브 패리티 수정, crash→downtrend 통합, UTC→KST 수정 |
 | v0.4 | 2026-02-25 | 서지 임계값 2.0x, 추적코인 5종 축소, 로테이션 모니터 프론트엔드 탭 |
 | v0.5 | 2026-02-25 | 서버 이벤트 로그 시스템 (DB + API + WS + 시스템 로그 탭), UTC→로컬 타임존 수정 |
-| v0.6 | 예정 | 단위 테스트 + 안정화 |
-| v1.0 | 예정 | 장기 운영 안정화 |
+| v0.6 | 2026-02-25 | 8전략 combiner 개편 (HOLD=기권), 5요소 시장 감지, Bithumb V2 API 수정, SQLite WAL |
+| v0.7 | 2026-02-25 | 수수료 추적 UI, 주문 fill 폴링, 서지 매수→현금 방식, emit_event 재시도 |
+| v0.8 | 예정 | PostgreSQL 마이그레이션 |
+| v1.0 | 예정 | 장기 운영 안정화 + 단위 테스트 |

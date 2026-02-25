@@ -79,7 +79,8 @@ class BithumbV2Adapter(BithumbAdapter):
                 if method == "GET":
                     r = await self._http.get(url, params=params, headers=headers)
                 elif method == "POST":
-                    r = await self._http.post(url, data=params, headers=headers)
+                    # Bithumb V2 (Upbit-style): POST body = JSON, query_hash = urlencode(params)
+                    r = await self._http.post(url, json=params, headers=headers)
                 elif method == "DELETE":
                     r = await self._http.delete(url, params=params, headers=headers)
                 else:
@@ -190,7 +191,7 @@ class BithumbV2Adapter(BithumbAdapter):
         p = {
             "market": self._to_market(symbol), "side": "bid",
             "volume": str(amount), "price": str(int(price)),
-            "ord_type": "limit",
+            "order_type": "limit",
         }
         d = await self._v2("POST", "/v2/orders", p)
         oid = d.get("uuid") or d.get("order_id", "")
@@ -203,7 +204,7 @@ class BithumbV2Adapter(BithumbAdapter):
         p = {
             "market": self._to_market(symbol), "side": "ask",
             "volume": str(amount), "price": str(int(price)),
-            "ord_type": "limit",
+            "order_type": "limit",
         }
         d = await self._v2("POST", "/v2/orders", p)
         oid = d.get("uuid") or d.get("order_id", "")
@@ -216,7 +217,7 @@ class BithumbV2Adapter(BithumbAdapter):
         krw = int(amount * ticker.ask)
         p = {
             "market": self._to_market(symbol), "side": "bid",
-            "price": str(krw), "ord_type": "price",
+            "price": str(krw), "order_type": "price",
         }
         d = await self._v2("POST", "/v2/orders", p)
         oid = d.get("uuid") or d.get("order_id", "")
@@ -227,7 +228,7 @@ class BithumbV2Adapter(BithumbAdapter):
         """Market sell: ord_type=market, volume = base currency amount."""
         p = {
             "market": self._to_market(symbol), "side": "ask",
-            "volume": str(amount), "ord_type": "market",
+            "volume": str(amount), "order_type": "market",
         }
         d = await self._v2("POST", "/v2/orders", p)
         oid = d.get("uuid") or d.get("order_id", "")
