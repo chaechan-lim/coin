@@ -76,28 +76,28 @@ export function Dashboard() {
   return (
     <div className="min-h-screen bg-gray-900 text-white">
       {/* Header */}
-      <header className="border-b border-gray-700 px-4 md:px-6 py-3 flex items-center justify-between">
+      <header className="border-b border-gray-700 px-3 md:px-6 py-2.5 md:py-3 flex items-center justify-between">
         <div className="flex items-center gap-2 md:gap-3 min-w-0">
-          <span className="text-lg md:text-xl font-bold whitespace-nowrap">🪙 코인 자동 매매</span>
+          <span className="text-base md:text-xl font-bold whitespace-nowrap">🪙 코인 자동 매매</span>
           <span className="text-xs text-gray-500 hidden md:block">빗썸 기반 24시간 트레이딩</span>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0">
           <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
-          <span className="text-xs text-gray-400 hidden sm:inline">{connected ? '연결됨' : '연결 중...'}</span>
+          <span className="text-xs text-gray-400">{connected ? '연결됨' : '연결 중...'}</span>
         </div>
       </header>
 
       {/* Tabs - horizontal scroll on mobile */}
-      <nav className="border-b border-gray-700 px-2 md:px-6">
-        <div className="flex gap-0.5 md:gap-1 overflow-x-auto scrollbar-hide">
+      <nav className="border-b border-gray-700">
+        <div className="flex overflow-x-auto scrollbar-hide">
           {TABS.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
-              className={`px-3 md:px-4 py-3 text-xs md:text-sm font-medium transition-colors border-b-2 -mb-px whitespace-nowrap ${
+              className={`shrink-0 px-3 md:px-4 py-2.5 md:py-3 text-xs md:text-sm font-medium transition-colors border-b-2 -mb-px whitespace-nowrap ${
                 tab === t.id
                   ? 'border-blue-500 text-blue-400'
-                  : 'border-transparent text-gray-400 hover:text-white'
+                  : 'border-transparent text-gray-400 hover:text-white active:text-white'
               }`}
             >
               {t.label}

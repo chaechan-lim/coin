@@ -16,11 +16,14 @@
   ::-webkit-scrollbar-thumb {
     @apply bg-gray-600 rounded-full;
   }
+}
 
-  /* Hide scrollbar for horizontal tab navigation on mobile */
+@layer utilities {
+  /* Hide scrollbar but keep scroll functionality */
   .scrollbar-hide {
     -ms-overflow-style: none;
     scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
   }
   .scrollbar-hide::-webkit-scrollbar {
     display: none;
