@@ -1,6 +1,6 @@
 # 코인 자동 매매 시스템 — 구현 진행 현황
 
-> 최종 업데이트: 2026-02-25
+> 최종 업데이트: 2026-02-26
 
 ---
 
@@ -99,8 +99,15 @@ coin/
 │   │   ├── trades.py            ✅ 완료
 │   │   ├── strategies.py        ✅ 완료
 │   │   └── websocket.py         ✅ 완료
-│   └── tests/
-│       └── __init__.py          ✅
+│   ├── tests/
+│   │   ├── __init__.py          ✅
+│   │   ├── conftest.py          ✅ 완료 (인메모리 SQLite 픽스처)
+│   │   ├── test_api_strategies.py ✅ 완료 (7 tests)
+│   │   ├── test_api_trades.py   ✅ 완료 (5 tests)
+│   │   ├── test_api_portfolio.py ✅ 완료 (4 tests)
+│   │   ├── test_portfolio_manager.py ✅ 완료 (9 tests)
+│   │   └── test_risk_management.py ✅ 완료 (5 tests)
+│   └── pytest.ini               ✅ 완료
 └── frontend/
     ├── package.json             ✅ 완료
     ├── tsconfig.json            ✅ 완료
@@ -220,8 +227,8 @@ coin/
 | WebSocket 훅 | `frontend/src/hooks/useWebSocket.ts` | ✅ |
 | 포트폴리오 훅 | `frontend/src/hooks/usePortfolio.ts` | ✅ |
 | 앱 진입점 | `frontend/src/main.tsx` | ✅ |
-| 대시보드 + 탭 네비 | `frontend/src/components/Dashboard.tsx` | ✅ |
-| 포트폴리오 요약 + 포지션 | `frontend/src/components/PortfolioSummary.tsx` | ✅ |
+| 대시보드 + 탭 네비 (모바일 스크롤) | `frontend/src/components/Dashboard.tsx` | ✅ |
+| 포트폴리오 요약 + 포지션 (모바일 카드) | `frontend/src/components/PortfolioSummary.tsx` | ✅ |
 | 포트폴리오 추이 차트 | `frontend/src/components/PortfolioChart.tsx` | ✅ |
 | 거래 이력 (전략 귀속 상세) | `frontend/src/components/TradeHistory.tsx` | ✅ |
 | 전략 성과 비교 | `frontend/src/components/StrategyPerformance.tsx` | ✅ |
@@ -249,8 +256,19 @@ coin/
 | 서지 평가 버그 수정 | ✅ held_symbols 포함 |
 | 수수료 추적 UI | ✅ 개요 페이지 수수료 지출 카드 |
 | 낙폭 UI 개선 | ✅ 고점 대비 음수 표시 + 3단계 색상 |
-| 단위 테스트 | ⬜ 작성 필요 |
+| 리스크 에이전트 낙폭 수정 | ✅ peak = MAX(total_value_krw), 단계별 대응 (WARNING/CRITICAL) |
+| 매수 차단 시 매도 허용 | ✅ buying_paused 상태에서도 SELL 신호 실행 |
+| 시장 상태 동기화 | ✅ 엔진↔에이전트 즉시 동기화 |
+| 미체결 주문 표시 수정 | ✅ was_executed = (status == FILLED) |
+| 매수 비중 상향 | ✅ max_trade_size_pct 0.30 → 0.50 |
+| 원금 대비 수익 표시 | ✅ initial_balance_krw + total_pnl_pct 원금 기준 |
+| 전략 성과 P&L 수정 | ✅ FIFO 원가 매칭 (기존: sell.requested_price 비교 → 오계산) |
+| 모바일 반응형 UI | ✅ 탭 스크롤, 테이블→카드, 터치 타겟, 전 컴포넌트 |
+| 단위 테스트 | ✅ 30개 (pytest + 인메모리 SQLite) |
+| 거래 기본 필터 | ✅ 체결(filled)만 기본 표시, status 파라미터 |
+| 시작 시 현금 보정 | ✅ reconcile_cash_from_db at startup (peak 오염 방지) |
 | PostgreSQL 마이그레이션 | ⬜ 향후 스케일업 시 |
+| 라즈베리파이 배포 | ⬜ 예정 |
 
 ---
 
@@ -297,9 +315,9 @@ coin/
 
 서지 발견 시 기존 포지션을 유지하고 현금의 15%로 서지 코인 매수:
 1. 이미 보유 코인이면 스킵
-2. 전략 확인: BUY→즉시, 전원 HOLD→서지로 허용, SELL→거부
+2. 전략 확인: **BUY만 허용** (HOLD/SELL 거부) — 백테스트 결과 엄격 확인이 최적
 3. 현금 < 5,000원이면 스킵
-4. 쿨다운: `rotation_cooldown_sec` (기본 1800초)
+4. 쿨다운: `rotation_cooldown_sec` (기본 7200초 = 2시간)
 
 ### 서지 코인 매도 프로필 (백테스트 C — 엄격 확인)
 
@@ -319,6 +337,17 @@ coin/
 - 보유 포지션은 평가 사이클에서 tracked_coins + held_symbols 모두 평가
 - 백테스트 180일 하락장: -4.27% (BTC B&H -37.71%, **알파 +33.44%**)
 - PF 1.04, 승률 44.8%, MDD 10.44%
+
+### 리스크 관리 — 낙폭 단계별 대응
+
+| 낙폭 수준 | 레벨 | 동작 |
+|---|---|---|
+| 10-20% | WARNING | `reduce_buying` (경고 로그만, 매수 차단 안 함) |
+| 20-50% | CRITICAL | `stop_buying` (해당 코인 매수 차단, **매도는 허용**) |
+| 50%+ | CRITICAL | `emergency_sell` (전량 청산) |
+
+- peak 계산: `MAX(PortfolioSnapshot.total_value_krw)` (인메모리 peak_value 대신 DB 기반)
+- 매수 차단 시에도 SELL 신호는 통과 (`_can_trade=False`여도 SELL 실행)
 
 ### 과매매 방지 레이어 (다중 장치)
 1. **코인당 최소 간격**: 1시간 이상 (설정 가능)
@@ -514,6 +543,9 @@ docker compose down -v
 
 # 프론트엔드 로그 (로컬 개발 시)
 tail -f /tmp/frontend.log
+
+# 단위 테스트 실행 (30개, ~1초)
+cd backend && .venv/bin/python -m pytest tests/ -v
 ```
 
 ---
@@ -543,7 +575,7 @@ docker compose restart backend
 | 단일 코인 최대 비중 | 40% | 초과 시 WARNING → CRITICAL |
 | 최대 낙폭 한도 | 10% | 초과 시 매수 중단 |
 | 일일 손실 한도 | 3% | 초과 시 당일 매매 중단 |
-| 단일 거래 최대 크기 | 20% (잔액) | 포지션 사이징 기준 |
+| 단일 거래 최대 크기 | 50% (잔액) | 포지션 사이징 기준 (.env 설정) |
 | 최대 일일 거래 수 | 10건 | 과매매 방지 |
 | 코인당 최소 매매 간격 | 1시간 | 과매매 방지 |
 
@@ -561,5 +593,8 @@ docker compose restart backend
 | v0.6 | 2026-02-25 | 8전략 combiner 개편 (HOLD=기권), 5요소 시장 감지, Bithumb V2 API 수정, SQLite WAL |
 | v0.7 | 2026-02-25 | 수수료 추적 UI, 주문 fill 폴링, 서지 매수→현금 방식, emit_event 재시도 |
 | v0.8 | 2026-02-25 | 서지 매도 프로필 C (SL4/TP8/트레일1.5-2/48h/BUY확인/3.0x), 낙폭 UI 개선, 서지 평가 버그 수정 |
-| v0.9 | 예정 | PostgreSQL 마이그레이션 |
-| v1.0 | 예정 | 장기 운영 안정화 + 단위 테스트 |
+| v0.9 | 2026-02-25 | 리스크 에이전트 수정 (peak DB기반, 단계별 대응, SELL 허용), 시장 상태 동기화, was_executed 수정 |
+| v0.10 | 2026-02-25 | 원금 대비 수익 표시, max_trade_size_pct 0.50, 거래 기본 필터 filled, 시작 시 cash reconcile |
+| v0.11 | 2026-02-26 | 모바일 반응형 UI (전 컴포넌트), 전략 성과 P&L FIFO 원가 매칭 수정, 유닛 테스트 30개 |
+| v0.12 | 예정 | PostgreSQL 마이그레이션 |
+| v1.0 | 예정 | 라즈베리파이 배포 + 장기 운영 안정화 |
