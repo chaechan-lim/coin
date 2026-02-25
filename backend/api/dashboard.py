@@ -1,9 +1,11 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 
 from db.session import get_db
-from core.models import AgentAnalysisLog
+from core.models import AgentAnalysisLog, Order
 from core.schemas import (
     EngineStatusResponse,
     ModeUpdate,
@@ -30,18 +32,25 @@ def set_dashboard_deps(engine, coordinator, config):
 
 
 @router.get("/engine/status", response_model=EngineStatusResponse)
-async def get_engine_status():
+async def get_engine_status(session: AsyncSession = Depends(get_db)):
     if not _engine:
         return EngineStatusResponse(
             is_running=False, mode="paper", evaluation_interval_sec=300,
             tracked_coins=[], daily_trade_count=0, strategies_active=[],
         )
+    # DB 기반 오늘 거래 횟수 (UTC 0시 기준)
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    result = await session.execute(
+        select(func.count(Order.id)).where(Order.created_at >= today_start)
+    )
+    daily_count = result.scalar() or 0
+
     return EngineStatusResponse(
         is_running=_engine.is_running,
         mode=_config.trading.mode,
         evaluation_interval_sec=_config.trading.evaluation_interval_sec,
         tracked_coins=_config.trading.tracked_coins,
-        daily_trade_count=_engine._daily_trade_count,
+        daily_trade_count=daily_count,
         strategies_active=list(_engine.strategies.keys()),
     )
 
