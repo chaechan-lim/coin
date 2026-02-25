@@ -65,6 +65,10 @@ class BithumbAdapter(ExchangeAdapter):
             except ccxt.ExchangeError as e:
                 raise ExchangeError(str(e))
 
+    async def fetch_tickers(self) -> dict:
+        """전체 마켓 티커 조회 (거래대금 순위 등에 사용)."""
+        return await self._call(self._exchange.fetch_tickers)
+
     async def fetch_ticker(self, symbol: str) -> Ticker:
         data = await self._call(self._exchange.fetch_ticker, symbol)
         return Ticker(

@@ -70,9 +70,18 @@ ALL_STRATEGIES_5 = [
     "macd_crossover", "bollinger_rsi",
 ]
 
-ALL_STRATEGIES = ALL_STRATEGIES_5 + [
+ALL_STRATEGIES_8 = ALL_STRATEGIES_5 + [
     "stochastic_rsi", "obv_divergence", "supertrend",
 ]
+
+# 6전략 (0% 승률 전략 제거: volatility_breakout, supertrend)
+ALL_STRATEGIES_6 = [
+    "ma_crossover", "rsi", "macd_crossover",
+    "bollinger_rsi", "stochastic_rsi", "obv_divergence",
+]
+
+# 전체 사용 가능 전략 (CLI 유효성 검사용)
+ALL_STRATEGIES = ALL_STRATEGIES_8
 
 # 5전략 가중치 (기존)
 WEIGHTS_5 = {
@@ -81,6 +90,16 @@ WEIGHTS_5 = {
     "rsi":                 0.30,
     "macd_crossover":      0.15,
     "bollinger_rsi":       0.35,
+}
+
+# 6전략 가중치 (역추세 중심 — vol_breakout/supertrend 제거)
+WEIGHTS_6 = {
+    "ma_crossover":        0.08,
+    "rsi":                 0.25,
+    "macd_crossover":      0.12,
+    "bollinger_rsi":       0.27,
+    "stochastic_rsi":      0.15,
+    "obv_divergence":      0.13,
 }
 
 # 8전략 가중치 (역발상 중심 유지 + 신규 3종 배분)
@@ -95,8 +114,8 @@ WEIGHTS_8 = {
     "supertrend":          0.08,
 }
 
-# 기본값 = 8전략
-DEFAULT_WEIGHTS = WEIGHTS_8
+# 기본값 = 6전략
+DEFAULT_WEIGHTS = WEIGHTS_6
 
 
 # ── 데이터 클래스 ──────────────────────────────────────────────
@@ -255,7 +274,7 @@ class Backtester:
         exchange: BithumbAdapter,
         strategy_names: list[str],
         initial_balance: float = 500_000,
-        min_confidence: float = 0.35,
+        min_confidence: float = 0.50,
         stop_loss_pct: float = 5.0,       # 고정 손절 퍼센트 (0이면 비활성)
         take_profit_pct: float = 10.0,     # 익절 퍼센트 (0이면 비활성)
         trend_filter: bool = True,          # 글로벌 추세 필터
@@ -264,6 +283,7 @@ class Backtester:
         adaptive_weights: bool = True,      # 적응형 가중치
         dynamic_sl: bool = False,           # ATR+시장상태 동적 손절
         agent_market: bool = True,          # Agent 스코어링 시장 감지
+        trade_cooldown: int = 12,           # 매매 간 최소 캔들 수
     ):
         self._exchange = exchange
         self._initial_balance = initial_balance
@@ -276,6 +296,7 @@ class Backtester:
         self._adaptive_weights = adaptive_weights
         self._dynamic_sl = dynamic_sl
         self._agent_market = agent_market
+        self._trade_cooldown = trade_cooldown
 
         # 전략 로드 (인스턴스 생성)
         all_strats = StrategyRegistry.create_all()
@@ -286,6 +307,8 @@ class Backtester:
         # 전략 수에 맞는 가중치 선택
         if set(strategy_names) <= set(WEIGHTS_5.keys()):
             base_weights = WEIGHTS_5
+        elif set(strategy_names) <= set(WEIGHTS_6.keys()):
+            base_weights = WEIGHTS_6
         else:
             base_weights = WEIGHTS_8
         weights = {k: v for k, v in base_weights.items() if k in strategy_names}
@@ -344,7 +367,7 @@ class Backtester:
         mm_str = "Agent(5-factor)" if self._agent_market else "Legacy(SMA+ADX)"
         print(f"  손절: {sl_str} | 익절: {tp_str} | 최소 신뢰도: {self._min_confidence}")
         print(f"  추세 필터: {tf_str} | 트레일링: {trail_str} | 적응형 가중치: {aw_str}")
-        print(f"  시장 감지: {mm_str}")
+        print(f"  시장 감지: {mm_str} | 쿨다운: {self._trade_cooldown}캔들")
         print(f"{'='*60}")
 
         df = await self.fetch_history(symbol, timeframe, days)
@@ -498,8 +521,8 @@ class Backtester:
                     last_trade_idx = i
                     continue
 
-            # 쿨다운: 마지막 매매로부터 최소 3캔들 후
-            if i - last_trade_idx < 3:
+            # 쿨다운: 마지막 매매로부터 최소 N캔들 후
+            if i - last_trade_idx < self._trade_cooldown:
                 continue
 
             # ── 전략 신호 수집 ─────────────────────────────────
@@ -832,32 +855,27 @@ def _detect_market_state(row, df=None, i: int = 0, use_agent_scoring: bool = Tru
     return _detect_market_state_legacy(row), 0.5
 
 
-# 시장 상태별 적응형 가중치 프로필 (8전략)
+# 시장 상태별 적응형 가중치 프로필 (6전략 — vol_breakout/supertrend 제거)
 _ADAPTIVE_WEIGHT_PROFILES = {
     "strong_uptrend": {
-        "volatility_breakout": 0.10, "ma_crossover": 0.10,
-        "rsi": 0.15, "macd_crossover": 0.15, "bollinger_rsi": 0.18,
-        "stochastic_rsi": 0.10, "obv_divergence": 0.07, "supertrend": 0.15,
+        "ma_crossover": 0.12, "rsi": 0.18, "macd_crossover": 0.18,
+        "bollinger_rsi": 0.22, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
     },
     "uptrend": {
-        "volatility_breakout": 0.08, "ma_crossover": 0.10,
-        "rsi": 0.18, "macd_crossover": 0.13, "bollinger_rsi": 0.22,
-        "stochastic_rsi": 0.10, "obv_divergence": 0.08, "supertrend": 0.11,
+        "ma_crossover": 0.10, "rsi": 0.22, "macd_crossover": 0.13,
+        "bollinger_rsi": 0.25, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
     },
     "sideways": {
-        "volatility_breakout": 0.04, "ma_crossover": 0.04,
-        "rsi": 0.25, "macd_crossover": 0.10, "bollinger_rsi": 0.28,
-        "stochastic_rsi": 0.13, "obv_divergence": 0.10, "supertrend": 0.06,
+        "ma_crossover": 0.05, "rsi": 0.27, "macd_crossover": 0.10,
+        "bollinger_rsi": 0.30, "stochastic_rsi": 0.15, "obv_divergence": 0.13,
     },
     "downtrend": {
-        "volatility_breakout": 0.00, "ma_crossover": 0.06,
-        "rsi": 0.25, "macd_crossover": 0.10, "bollinger_rsi": 0.28,
-        "stochastic_rsi": 0.14, "obv_divergence": 0.10, "supertrend": 0.07,
+        "ma_crossover": 0.06, "rsi": 0.27, "macd_crossover": 0.10,
+        "bollinger_rsi": 0.30, "stochastic_rsi": 0.15, "obv_divergence": 0.12,
     },
     "crash": {
-        "volatility_breakout": 0.00, "ma_crossover": 0.04,
-        "rsi": 0.28, "macd_crossover": 0.08, "bollinger_rsi": 0.30,
-        "stochastic_rsi": 0.14, "obv_divergence": 0.10, "supertrend": 0.06,
+        "ma_crossover": 0.04, "rsi": 0.28, "macd_crossover": 0.08,
+        "bollinger_rsi": 0.32, "stochastic_rsi": 0.15, "obv_divergence": 0.13,
     },
 }
 
@@ -1524,10 +1542,14 @@ async def main():
     parser.add_argument("--timeframe",      default="1h",        help="캔들 단위 (1h/4h/1d, 기본 1h)")
     parser.add_argument("--balance",        type=float, default=500_000, help="초기 잔액 (원, 기본 50만)")
     parser.add_argument("--strategies",     nargs="+", default=None,
-                        help=f"사용할 전략 목록 (기본: 8전략)\n선택: {', '.join(ALL_STRATEGIES)}")
+                        help=f"사용할 전략 목록 (기본: 6전략)\n선택: {', '.join(ALL_STRATEGIES)}")
     parser.add_argument("--use-5",          action="store_true",
                         help="기존 5전략만 사용 (비교용)")
-    parser.add_argument("--min-confidence", type=float, default=0.25, help="최소 신뢰도 임계값 (기본 0.25)")
+    parser.add_argument("--use-8",          action="store_true",
+                        help="8전략 전체 사용 (비교용)")
+    parser.add_argument("--min-confidence", type=float, default=0.50, help="최소 신뢰도 임계값 (기본 0.50)")
+    parser.add_argument("--trade-cooldown", type=int, default=12,
+                        help="매매 간 최소 캔들 수 (기본 12)")
     parser.add_argument("--stop-loss",      type=float, default=5.0,  help="손절 %% (0=비활성, 기본 5)")
     parser.add_argument("--take-profit",    type=float, default=10.0, help="익절 %% (0=비활성, 기본 10)")
     # 추세 필터
@@ -1574,14 +1596,20 @@ async def main():
                         help="서지 매수 시 현금 비율 (기본 0.15=15%%)")
     parser.add_argument("--surge-max-hold", type=float, default=24,
                         help="서지 최대 보유 시간 (기본 24h, 0=무제한)")
+    parser.add_argument("--dynamic-rotation", action="store_true", default=False,
+                        help="빗썸 거래대금 상위 코인 자동 선정 (기본 OFF=하드코딩 20개)")
+    parser.add_argument("--min-volume-krw", type=float, default=1e9,
+                        help="동적 로테이션 최소 24h 거래대금 (기본 10억원)")
 
     args = parser.parse_args()
 
-    # --use-5 플래그 처리
+    # 전략 세트 선택
     if args.use_5:
         args.strategies = ALL_STRATEGIES_5
+    elif args.use_8:
+        args.strategies = ALL_STRATEGIES_8
     elif args.strategies is None:
-        args.strategies = ALL_STRATEGIES
+        args.strategies = ALL_STRATEGIES_6  # 기본: 6전략 (0% 승률 전략 제거)
 
     # 전략 유효성 검사
     invalid = set(args.strategies) - set(ALL_STRATEGIES)
@@ -1601,6 +1629,28 @@ async def main():
             rotation_coins = [
                 c if "/" in c else f"{c}/KRW" for c in rotation_coins
             ]
+        elif args.dynamic_rotation:
+            # 빗썸 거래대금 상위 코인 자동 선정
+            print("거래대금 기준 로테이션 코인 선정 중...")
+            tickers = await exchange._exchange.fetch_tickers()
+            tracked = {"BTC/KRW", "ETH/KRW", "XRP/KRW", "SOL/KRW", "ADA/KRW"}
+            stables = {"USDT/KRW", "USDC/KRW", "DAI/KRW", "TUSD/KRW"}
+            ranked = []
+            for sym, t in tickers.items():
+                if not sym.endswith("/KRW"):
+                    continue
+                if sym in tracked or sym in stables:
+                    continue
+                vol = t.get("quoteVolume") or 0
+                if vol >= args.min_volume_krw:
+                    ranked.append((sym, vol))
+            ranked.sort(key=lambda x: x[1], reverse=True)
+            rotation_coins = [s for s, _ in ranked]
+            print(f"  {len(rotation_coins)}개 코인 선정 (거래대금 > {args.min_volume_krw/1e8:.0f}억원)")
+            if ranked[:5]:
+                for s, v in ranked[:5]:
+                    print(f"    {s:12s} {v/1e8:>8.1f}억원")
+                print(f"    ...")
 
         # 서지 전용 프로필 — CLI 기본값(5/10/3/3)과 다르면 사용자 지정으로 판단
         rot_kwargs: dict = {}
@@ -1650,6 +1700,7 @@ async def main():
         adaptive_weights=args.adaptive_weights,
         dynamic_sl=args.dynamic_sl,
         agent_market=args.agent_market,
+        trade_cooldown=args.trade_cooldown,
     )
 
     symbols = (

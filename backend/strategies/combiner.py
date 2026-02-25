@@ -19,22 +19,20 @@ class CombinedDecision:
 class SignalCombiner:
     """Combines multiple strategy signals using weighted voting."""
 
-    # Default strategy weights — 8전략 (역발상 중심 + StochRSI/OBV/Supertrend)
+    # Default strategy weights — 6전략 (0% 승률 전략 제거: vol_breakout, supertrend)
     DEFAULT_WEIGHTS = {
-        "volatility_breakout": 0.07,
-        "ma_crossover": 0.07,
-        "rsi": 0.22,
-        "macd_crossover": 0.11,
-        "bollinger_rsi": 0.25,
-        "stochastic_rsi": 0.12,
-        "obv_divergence": 0.08,
-        "supertrend": 0.08,
+        "ma_crossover": 0.08,
+        "rsi": 0.25,
+        "macd_crossover": 0.12,
+        "bollinger_rsi": 0.27,
+        "stochastic_rsi": 0.15,
+        "obv_divergence": 0.13,
     }
 
     def __init__(
         self,
         strategy_weights: dict[str, float] | None = None,
-        min_confidence: float = 0.25,
+        min_confidence: float = 0.50,
     ):
         self.weights = strategy_weights or self.DEFAULT_WEIGHTS.copy()
         self.min_confidence = min_confidence
@@ -42,29 +40,24 @@ class SignalCombiner:
     # 시장 상태별 적응형 가중치 프로필 (8전략)
     ADAPTIVE_PROFILES: dict[str, dict[str, float]] = {
         MarketState.STRONG_UPTREND.value: {
-            "volatility_breakout": 0.10, "ma_crossover": 0.10,
-            "rsi": 0.15, "macd_crossover": 0.15, "bollinger_rsi": 0.18,
-            "stochastic_rsi": 0.10, "obv_divergence": 0.07, "supertrend": 0.15,
+            "ma_crossover": 0.12, "rsi": 0.18, "macd_crossover": 0.18,
+            "bollinger_rsi": 0.22, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
         },
         MarketState.UPTREND.value: {
-            "volatility_breakout": 0.08, "ma_crossover": 0.10,
-            "rsi": 0.18, "macd_crossover": 0.13, "bollinger_rsi": 0.22,
-            "stochastic_rsi": 0.10, "obv_divergence": 0.08, "supertrend": 0.11,
+            "ma_crossover": 0.10, "rsi": 0.22, "macd_crossover": 0.13,
+            "bollinger_rsi": 0.25, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
         },
         MarketState.SIDEWAYS.value: {
-            "volatility_breakout": 0.04, "ma_crossover": 0.04,
-            "rsi": 0.25, "macd_crossover": 0.10, "bollinger_rsi": 0.28,
-            "stochastic_rsi": 0.13, "obv_divergence": 0.10, "supertrend": 0.06,
+            "ma_crossover": 0.05, "rsi": 0.27, "macd_crossover": 0.10,
+            "bollinger_rsi": 0.30, "stochastic_rsi": 0.15, "obv_divergence": 0.13,
         },
         MarketState.DOWNTREND.value: {
-            "volatility_breakout": 0.00, "ma_crossover": 0.06,
-            "rsi": 0.25, "macd_crossover": 0.10, "bollinger_rsi": 0.28,
-            "stochastic_rsi": 0.14, "obv_divergence": 0.10, "supertrend": 0.07,
+            "ma_crossover": 0.06, "rsi": 0.27, "macd_crossover": 0.10,
+            "bollinger_rsi": 0.30, "stochastic_rsi": 0.15, "obv_divergence": 0.12,
         },
         MarketState.CRASH.value: {
-            "volatility_breakout": 0.00, "ma_crossover": 0.04,
-            "rsi": 0.28, "macd_crossover": 0.08, "bollinger_rsi": 0.30,
-            "stochastic_rsi": 0.14, "obv_divergence": 0.10, "supertrend": 0.06,
+            "ma_crossover": 0.04, "rsi": 0.28, "macd_crossover": 0.08,
+            "bollinger_rsi": 0.32, "stochastic_rsi": 0.15, "obv_divergence": 0.13,
         },
     }
 

@@ -7,7 +7,7 @@
 ## 개요
 
 빗썸(Bithumb) 거래소 기반의 24시간 자동 암호화폐 트레이딩 시스템.
-8개 전략 가중 투표 (HOLD=기권 방식) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭) 포함.
+6개 전략 가중 투표 (HOLD=기권 방식) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭) 포함.
 **현재 라이브 운영 중** (5종 추적 + 20종 로테이션, 500K KRW, SQLite WAL).
 
 ---
@@ -267,6 +267,10 @@ coin/
 | 단위 테스트 | ✅ 30개 (pytest + 인메모리 SQLite) |
 | 거래 기본 필터 | ✅ 체결(filled)만 기본 표시, status 파라미터 |
 | 시작 시 현금 보정 | ✅ reconcile_cash_from_db at startup (peak 오염 방지) |
+| 0% 승률 전략 제거 | ✅ volatility_breakout/supertrend 비활성 → 6전략 체제 |
+| 진입 기준 상향 | ✅ min_confidence 0.25→0.50, 쿨다운 3→12캔들 |
+| 시장 상태별 전략 on/off | ⬜ 횡보 시 추세추종 완전 비활성 (향후) |
+| 멀티 타임프레임 확인 | ⬜ 4h+1h 이중 확인 (향후) |
 | PostgreSQL 마이그레이션 | ⬜ 향후 스케일업 시 |
 | 라즈베리파이 배포 | ⬜ 예정 |
 
@@ -276,7 +280,7 @@ coin/
 
 ### 전략 신호 결합 방식 (HOLD=기권)
 ```
-8개 전략 → Signal(type, confidence, reason)
+6개 전략 → Signal(type, confidence, reason)
                     ↓
            SignalCombiner (가중 투표, HOLD=기권)
            BUY/SELL만 경쟁 — HOLD는 투표 미참여
@@ -596,5 +600,6 @@ docker compose restart backend
 | v0.9 | 2026-02-25 | 리스크 에이전트 수정 (peak DB기반, 단계별 대응, SELL 허용), 시장 상태 동기화, was_executed 수정 |
 | v0.10 | 2026-02-25 | 원금 대비 수익 표시, max_trade_size_pct 0.50, 거래 기본 필터 filled, 시작 시 cash reconcile |
 | v0.11 | 2026-02-26 | 모바일 반응형 UI (전 컴포넌트), 전략 성과 P&L FIFO 원가 매칭 수정, 유닛 테스트 30개 |
-| v0.12 | 예정 | PostgreSQL 마이그레이션 |
+| v0.12 | 2026-02-26 | 전략 개선: 0%승률 전략 제거(8→6전략), min_confidence 0.50, 쿨다운 12캔들 (BTC 540d: -55%→+7.5%) |
+| v0.13 | 예정 | PostgreSQL 마이그레이션 |
 | v1.0 | 예정 | 라즈베리파이 배포 + 장기 운영 안정화 |

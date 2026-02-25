@@ -17,28 +17,24 @@ class MarketAnalysis:
     indicators: dict
 
 
-# Strategy weight profiles per market state (8전략 — combiner ADAPTIVE_PROFILES와 동기화)
-# 정보 표시용 (가중치 변경은 엔진이 관리). CRASH 제거 → DOWNTREND에 통합.
+# Strategy weight profiles per market state (6전략 — combiner ADAPTIVE_PROFILES와 동기화)
+# 정보 표시용 (가중치 변경은 엔진이 관리). vol_breakout/supertrend 제거.
 WEIGHT_PROFILES: dict[MarketState, dict[str, float]] = {
     MarketState.STRONG_UPTREND: {
-        "volatility_breakout": 0.10, "ma_crossover": 0.10,
-        "rsi": 0.15, "macd_crossover": 0.15, "bollinger_rsi": 0.18,
-        "stochastic_rsi": 0.10, "obv_divergence": 0.07, "supertrend": 0.15,
+        "ma_crossover": 0.12, "rsi": 0.18, "macd_crossover": 0.18,
+        "bollinger_rsi": 0.22, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
     },
     MarketState.UPTREND: {
-        "volatility_breakout": 0.08, "ma_crossover": 0.10,
-        "rsi": 0.18, "macd_crossover": 0.13, "bollinger_rsi": 0.22,
-        "stochastic_rsi": 0.10, "obv_divergence": 0.08, "supertrend": 0.11,
+        "ma_crossover": 0.10, "rsi": 0.22, "macd_crossover": 0.13,
+        "bollinger_rsi": 0.25, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
     },
     MarketState.SIDEWAYS: {
-        "volatility_breakout": 0.04, "ma_crossover": 0.04,
-        "rsi": 0.25, "macd_crossover": 0.10, "bollinger_rsi": 0.28,
-        "stochastic_rsi": 0.13, "obv_divergence": 0.10, "supertrend": 0.06,
+        "ma_crossover": 0.05, "rsi": 0.27, "macd_crossover": 0.10,
+        "bollinger_rsi": 0.30, "stochastic_rsi": 0.15, "obv_divergence": 0.13,
     },
     MarketState.DOWNTREND: {
-        "volatility_breakout": 0.00, "ma_crossover": 0.06,
-        "rsi": 0.25, "macd_crossover": 0.10, "bollinger_rsi": 0.28,
-        "stochastic_rsi": 0.14, "obv_divergence": 0.10, "supertrend": 0.07,
+        "ma_crossover": 0.06, "rsi": 0.27, "macd_crossover": 0.10,
+        "bollinger_rsi": 0.30, "stochastic_rsi": 0.15, "obv_divergence": 0.12,
     },
 }
 

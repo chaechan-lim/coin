@@ -88,8 +88,8 @@ export function Dashboard() {
       </header>
 
       {/* Tabs - horizontal scroll on mobile */}
-      <nav className="border-b border-gray-700">
-        <div className="flex overflow-x-auto scrollbar-hide">
+      <nav className="border-b border-gray-700 overflow-x-auto scrollbar-hide">
+        <div className="flex min-w-max">
           {TABS.map((t) => (
             <button
               key={t.id}

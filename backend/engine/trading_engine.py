@@ -89,6 +89,10 @@ class TradingEngine:
         self._all_surge_scores: dict[str, float] = {}
         self._last_surge_scan_time: datetime | None = None
 
+        # 동적 로테이션 코인 (거래대금 상위 자동 선정)
+        self._dynamic_rotation_coins: list[str] = []
+        self._rotation_coins_updated: datetime | None = None
+
         # WebSocket broadcast callback
         self._broadcast_callback = None
 
@@ -108,8 +112,10 @@ class TradingEngine:
 
         self._strategies = StrategyRegistry.create_all()
 
-        # Grid/DCA는 combiner에서 제외 — 독립 전략이므로 라이브에서도 비활성
-        for excluded in ("grid_trading", "dca_momentum"):
+        # 비활성 전략 제거:
+        # - Grid/DCA: 독립 관리형 (combiner 부적합)
+        # - volatility_breakout/supertrend: 백테스트 0% 승률 → 잡음만 유발
+        for excluded in ("grid_trading", "dca_momentum", "volatility_breakout", "supertrend"):
             self._strategies.pop(excluded, None)
 
         logger.info(
@@ -648,12 +654,59 @@ class TradingEngine:
 
     # ── 거래량 급등 로테이션 ──────────────────────────────────────
 
+    _STABLECOINS = {"USDT/KRW", "USDC/KRW", "DAI/KRW", "TUSD/KRW"}
+    _ROTATION_REFRESH_SEC = 6 * 3600  # 6시간마다 갱신
+    _MIN_QUOTE_VOLUME = 1e9  # 최소 24h 거래대금 10억원
+
+    async def _refresh_rotation_coins(self) -> None:
+        """빗썸 전체 마켓에서 24h 거래대금 상위 코인을 로테이션 대상으로 선정."""
+        now = datetime.now(timezone.utc)
+        if (self._rotation_coins_updated
+                and (now - self._rotation_coins_updated).total_seconds() < self._ROTATION_REFRESH_SEC):
+            return
+
+        try:
+            tickers = await self._exchange.fetch_tickers()
+            tracked = set(self._config.trading.tracked_coins)
+
+            ranked = []
+            for sym, t in tickers.items():
+                if not sym.endswith("/KRW"):
+                    continue
+                if sym in tracked or sym in self._STABLECOINS:
+                    continue
+                vol = t.get("quoteVolume") or 0
+                if vol >= self._MIN_QUOTE_VOLUME:
+                    ranked.append((sym, vol))
+
+            ranked.sort(key=lambda x: x[1], reverse=True)
+            self._dynamic_rotation_coins = [sym for sym, _ in ranked]
+            self._rotation_coins_updated = now
+
+            logger.info(
+                "rotation_coins_refreshed",
+                count=len(self._dynamic_rotation_coins),
+                top5=[s for s, _ in ranked[:5]],
+            )
+        except Exception as e:
+            logger.warning("rotation_coins_refresh_failed", error=str(e))
+            # 실패 시 config 폴백
+            if not self._dynamic_rotation_coins:
+                self._dynamic_rotation_coins = list(self._config.trading.rotation_coins)
+
+    def _get_rotation_coins(self) -> list[str]:
+        """동적 코인이 있으면 사용, 없으면 config 폴백."""
+        if self._dynamic_rotation_coins:
+            return self._dynamic_rotation_coins
+        return list(self._config.trading.rotation_coins)
+
     async def _scan_volume_surges(self) -> list[tuple[str, float]]:
-        """20코인 거래량 서지 스캔. (symbol, surge_score) 리스트 반환."""
+        """거래대금 상위 코인 거래량 서지 스캔. (symbol, surge_score) 리스트 반환."""
+        await self._refresh_rotation_coins()
         surges: list[tuple[str, float]] = []
         all_scores: dict[str, float] = {}
         threshold = self._config.trading.surge_threshold
-        for symbol in self._config.trading.rotation_coins:
+        for symbol in self._get_rotation_coins():
             try:
                 df = await self._market_data.get_candles(symbol, "1h", 30)
                 if df is None or len(df) < 21:
@@ -1081,5 +1134,7 @@ class TradingEngine:
             "market_state": self._market_state,
             "market_confidence": self._market_confidence,
             "tracked_coins": self._config.trading.tracked_coins,
-            "rotation_coins": self._config.trading.rotation_coins,
+            "rotation_coins": self._get_rotation_coins(),
+            "rotation_coins_count": len(self._get_rotation_coins()),
+            "rotation_coins_updated": self._rotation_coins_updated,
         }

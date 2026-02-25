@@ -26,7 +26,7 @@ class TradingConfig(BaseSettings):
     min_trade_interval_sec: int = 3600  # 1 hour per coin
     cooldown_after_buy_sec: int = 1800  # 30 min
     daily_trade_limit: int = 10
-    min_combined_confidence: float = 0.25
+    min_combined_confidence: float = 0.50
     min_profit_vs_fee_ratio: float = 2.0  # expected return > 2x round-trip fee
 
     # 거래량 급등 로테이션 설정 (tracked_coins와 별도 — 서지 전용)
