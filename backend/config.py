@@ -37,7 +37,7 @@ class TradingConfig(BaseSettings):
         "SAND/KRW", "MANA/KRW", "AXS/KRW", "AAVE/KRW", "BCH/KRW",
         "USDT/KRW", "USDC/KRW",  # 스테이블코인 (헤지)
     ]
-    surge_threshold: float = 2.0       # 서지 감지 임계 배수 (volume / avg_volume)
+    surge_threshold: float = 3.0       # 서지 감지 임계 배수 (백테스트 C 결과 적용)
     rotation_cooldown_sec: int = 7200  # 로테이션 최소 간격 (2시간)
 
     model_config = {"env_prefix": "TRADING_"}

@@ -43,7 +43,7 @@ export function PortfolioSummary() {
   }
 
   const pnlColor = data.total_pnl >= 0 ? 'text-buy' : 'text-sell'
-  const drawdownColor = data.drawdown_pct > 5 ? 'text-sell' : 'text-gray-300'
+  const drawdownColor = data.drawdown_pct > 5 ? 'text-sell' : data.drawdown_pct > 2 ? 'text-yellow-400' : 'text-gray-300'
 
   return (
     <div className="space-y-4">
@@ -57,8 +57,8 @@ export function PortfolioSummary() {
         />
         <StatCard label="현금 잔액" value={fmt(data.cash_balance_krw)} />
         <StatCard
-          label="최대 낙폭"
-          value={fmtPct(data.drawdown_pct)}
+          label="고점 대비"
+          value={data.drawdown_pct > 0 ? `-${data.drawdown_pct.toFixed(2)}%` : '0.00%'}
           sub={`고점: ${fmt(data.peak_value)}`}
           color={drawdownColor}
         />

@@ -960,6 +960,21 @@ def _calc_surge_score(df: pd.DataFrame, index: int, lookback: int = 20) -> float
     return float(df.iloc[index]["volume"]) / avg_vol
 
 
+# ── 서지 포지션 (로테이션 백테스트 내부) ──────────────────────────
+@dataclass
+class _SurgePosition:
+    symbol: str
+    quantity: float
+    avg_buy_price: float
+    entry_candle_idx: int
+    peak_price: float
+    trailing_active: bool = False
+    stop_loss_pct: float = 2.5
+    take_profit_pct: float = 5.0
+    trailing_activation_pct: float = 1.5
+    trailing_stop_pct: float = 2.0
+
+
 # ── 로테이션 백테스트 결과 ────────────────────────────────────────
 @dataclass
 class RotationResult:
@@ -1003,17 +1018,20 @@ class RotationBacktester:
         symbols: list[str] | None = None,
         initial_balance: float = 500_000,
         min_confidence: float = 0.35,
-        stop_loss_pct: float = 5.0,
-        take_profit_pct: float = 10.0,
+        stop_loss_pct: float = 4.0,
+        take_profit_pct: float = 8.0,
         trend_filter: bool = True,
-        trailing_activation: float = 3.0,
-        trailing_stop: float = 3.0,
+        trailing_activation: float = 1.5,
+        trailing_stop: float = 2.0,
         adaptive_weights: bool = True,
         dynamic_sl: bool = False,
         agent_market: bool = True,
         surge_threshold: float = 3.0,
         rotation_cooldown: int = 6,
         require_strategy_confirm: bool = True,
+        surge_buy_pct: float = 0.15,
+        surge_max_hold_hours: float = 48,
+        strict_confirm: bool = True,
     ):
         self._exchange = exchange
         self._initial_balance = initial_balance
@@ -1029,6 +1047,9 @@ class RotationBacktester:
         self._surge_threshold = surge_threshold
         self._rotation_cooldown = rotation_cooldown
         self._require_strategy_confirm = require_strategy_confirm
+        self._surge_buy_pct = surge_buy_pct
+        self._surge_max_hold_hours = surge_max_hold_hours
+        self._strict_confirm = strict_confirm
         self._symbols = symbols or DEFAULT_ROTATION_COINS
 
         all_strats = StrategyRegistry.create_all()
@@ -1078,9 +1099,12 @@ class RotationBacktester:
     async def _get_strategy_confirmation(
         self, df: pd.DataFrame, ticker: Ticker, i: int,
     ) -> tuple[bool, float]:
-        """기존 전략 파이프라인으로 BUY 신호 확인.
+        """서지 매수 전략 확인 (완화 모드).
 
-        Returns: (confirmed, confidence)
+        서지 코인은 거래량으로 이미 검증됨:
+        - BUY 시그널 → 허용 (전략 신뢰도)
+        - HOLD (추상) → 허용 (기본 0.30)
+        - SELL 시그널 → 거부
         """
         row = df.iloc[i]
 
@@ -1098,27 +1122,34 @@ class RotationBacktester:
                 pass
 
         if not signals:
-            return False, 0.0
+            return (False, 0.0) if self._strict_confirm else (True, 0.30)
 
         decision = self._combiner.combine(signals)
+        if decision.action == SignalType.SELL:
+            return False, 0.0
         if decision.action == SignalType.BUY and decision.combined_confidence >= self._min_confidence:
             return True, float(decision.combined_confidence)
-        return False, 0.0
+        if self._strict_confirm:
+            return False, 0.0  # BUY만 허용
+        # HOLD 또는 낮은 신뢰도 → 서지가 이미 확인, 기본 허용
+        return True, 0.30
 
     async def run(self, timeframe: str = "4h", days: int = 180) -> RotationResult:
-        """로테이션 백테스트 실행."""
+        """로테이션 백테스트 실행 (다중 포지션, 서지 전용 프로필)."""
+        tf_hours = _tf_hours(timeframe)
+        max_hold_candles = int(self._surge_max_hold_hours / tf_hours) if self._surge_max_hold_hours > 0 else 0
+
         print(f"\n{'='*60}")
         print(f"  로테이션 백테스트 | {timeframe} | {days}일")
         print(f"  대상: {len(self._symbols)}개 코인")
         print(f"  서지 임계: {self._surge_threshold}x | 쿨다운: {self._rotation_cooldown}캔들")
-        print(f"  전략 확인: {'ON' if self._require_strategy_confirm else 'OFF'}")
-        sl_str = "동적(ATR+시장)" if self._dynamic_sl else (
-            f"고정 {self._stop_loss_pct}%" if self._stop_loss_pct > 0 else "OFF")
-        tp_str = f"{self._take_profit_pct}%" if self._take_profit_pct > 0 else "OFF"
-        trail_str = (f"+{self._trailing_activation}%/-{self._trailing_stop}%"
-                     if self._trailing_activation > 0 else "OFF")
+        confirm_str = "OFF" if not self._require_strategy_confirm else ("BUY만" if self._strict_confirm else "완화(HOLD허용)")
+        print(f"  전략 확인: {confirm_str}")
+        print(f"  서지 프로필: SL {self._stop_loss_pct}% | TP {self._take_profit_pct}% | "
+              f"트레일 +{self._trailing_activation}%/-{self._trailing_stop}%")
+        hold_str = f"{self._surge_max_hold_hours:.0f}h ({max_hold_candles}캔들)" if max_hold_candles > 0 else "무제한"
+        print(f"  최대 보유: {hold_str} | 매수 비율: 현금의 {self._surge_buy_pct*100:.0f}%")
         mm_str = "Agent(5-factor)" if self._agent_market else "Legacy(SMA+ADX)"
-        print(f"  손절: {sl_str} | 익절: {tp_str} | 트레일링: {trail_str}")
         print(f"  시장 감지: {mm_str}")
         print(f"{'='*60}")
 
@@ -1138,16 +1169,11 @@ class RotationBacktester:
         all_timestamps = sorted(set().union(*(df.index for df in all_data.values())))
         print(f"  타임라인: {len(all_timestamps)}개 캔들 ({all_timestamps[0].date()} ~ {all_timestamps[-1].date()})")
 
-        # 3. 시뮬레이션 상태
+        # 3. 시뮬레이션 상태 — 다중 포지션
         cash = self._initial_balance
-        current_symbol: str | None = None
-        holdings = 0.0
-        avg_buy_price = 0.0
-        dynamic_sl_pct = self._stop_loss_pct
+        positions: dict[str, _SurgePosition] = {}
         current_market_state = "sideways"
-        peak_price_since_entry = 0.0
-        trailing_active = False
-        entry_candle_idx = 0
+        market_confidence = 0.5
 
         trades: list[BacktestTrade] = []
         rotation_log: list[dict] = []
@@ -1164,27 +1190,22 @@ class RotationBacktester:
         total_win_pct = 0.0
         total_loss_pct = 0.0
 
-        market_confidence = 0.5  # 시장 상태 신뢰도
         last_rotation_idx = -9999
         last_weight_eval_idx = -9999
 
         # 4. 캔들 루프
         for candle_idx, ts in enumerate(all_timestamps):
-            # 에쿼티 계산
-            if current_symbol and holdings > 0 and current_symbol in all_data:
-                sym_df = all_data[current_symbol]
-                if ts in sym_df.index:
-                    cur_price = float(sym_df.loc[ts, "close"])
+            # 에쿼티 계산 — 전 포지션 합산
+            equity = cash
+            for sym, pos in positions.items():
+                if sym in all_data and ts in all_data[sym].index:
+                    equity += pos.quantity * float(all_data[sym].loc[ts, "close"])
                 else:
-                    cur_price = avg_buy_price  # 해당 캔들 없으면 매입가 유지
-                current_equity = cash + holdings * cur_price
-            else:
-                cur_price = 0.0
-                current_equity = cash
+                    equity += pos.quantity * pos.avg_buy_price
 
-            if current_equity > peak_equity:
-                peak_equity = current_equity
-            drawdown = (peak_equity - current_equity) / peak_equity * 100
+            if equity > peak_equity:
+                peak_equity = equity
+            drawdown = (peak_equity - equity) / peak_equity * 100
             if drawdown > max_drawdown:
                 max_drawdown = drawdown
 
@@ -1193,7 +1214,6 @@ class RotationBacktester:
 
             # ── 24캔들마다 시장 상태 재평가 ─────────────────────
             if candle_idx - last_weight_eval_idx >= 24:
-                # BTC 기준으로 시장 상태 판단
                 if btc_df is not None and ts in btc_df.index:
                     prev_state = current_market_state
                     btc_iloc = btc_df.index.get_loc(ts)
@@ -1208,117 +1228,80 @@ class RotationBacktester:
                     if self._adaptive_weights:
                         new_weights = _get_adaptive_weights(current_market_state, list(self._strategies.keys()))
                         self._combiner.update_weights(new_weights, source="backtest")
-                    # 보유 중이면 동적 손절도 시장 상태에 맞게 갱신
-                    if self._dynamic_sl and current_symbol and holdings > 0:
-                        if current_symbol in all_data and ts in all_data[current_symbol].index:
-                            sym_row = all_data[current_symbol].loc[ts]
-                            cur_p = float(sym_row["close"])
-                            dynamic_sl_pct = _calc_dynamic_sl(sym_row, cur_p, current_market_state)
                 last_weight_eval_idx = candle_idx
 
-            # ── 보유 중: SL/TP/트레일링 체크 ──────────────────
-            if current_symbol and holdings > 0 and current_symbol in all_data:
-                sym_df = all_data[current_symbol]
-                if ts not in sym_df.index:
-                    continue  # 해당 코인 캔들 없음
-
-                cur_price = float(sym_df.loc[ts, "close"])
-                unrealized_pct = (cur_price - avg_buy_price) / avg_buy_price * 100
-
-                if cur_price > peak_price_since_entry:
-                    peak_price_since_entry = cur_price
-
-                # 트레일링 활성화
-                if (self._trailing_activation > 0
-                        and not trailing_active
-                        and unrealized_pct >= self._trailing_activation):
-                    trailing_active = True
-
-                # 트레일링 스탑 발동
-                if trailing_active and self._trailing_stop > 0:
-                    drop_from_peak = (peak_price_since_entry - cur_price) / peak_price_since_entry * 100
-                    if drop_from_peak >= self._trailing_stop:
-                        exec_price = cur_price * (1 - SLIPPAGE)
-                        cost = holdings * exec_price
-                        fee = cost * TAKER_FEE
-                        proceeds = cost - fee
-                        pnl = proceeds - (avg_buy_price * holdings)
-                        pnl_pct = pnl / (avg_buy_price * holdings) * 100
-
-                        t = BacktestTrade(
-                            timestamp=ts, side="sell(trail)", symbol=current_symbol,
-                            price=exec_price, quantity=holdings, cost=cost, fee=fee,
-                            strategy="trailing_stop", confidence=0,
-                            reason=f"트레일링 스탑 ({current_symbol}) "
-                                   f"고점 대비 -{drop_from_peak:.1f}%",
-                            pnl=pnl, pnl_pct=round(pnl_pct, 2),
-                        )
-                        trades.append(t)
-                        cash += proceeds
-                        total_hold_candles += candle_idx - entry_candle_idx
-                        num_completed_trades += 1
-                        if pnl > 0:
-                            win_count += 1; total_win_pct += abs(pnl_pct)
-                        else:
-                            loss_count += 1; total_loss_pct += abs(pnl_pct)
-                        current_symbol = None; holdings = 0; avg_buy_price = 0
-                        peak_price_since_entry = 0; trailing_active = False
-                        last_rotation_idx = candle_idx
-                        continue
-
-                # 손절 (동적 ATR 또는 고정 %)
-                if dynamic_sl_pct > 0 and unrealized_pct <= -dynamic_sl_pct:
-                    exec_price = cur_price * (1 - SLIPPAGE)
-                    cost = holdings * exec_price
-                    fee = cost * TAKER_FEE
-                    proceeds = cost - fee
-                    pnl = proceeds - (avg_buy_price * holdings)
-                    pnl_pct = pnl / (avg_buy_price * holdings) * 100
-
-                    t = BacktestTrade(
-                        timestamp=ts, side="sell(sl)", symbol=current_symbol,
-                        price=exec_price, quantity=holdings, cost=cost, fee=fee,
-                        strategy="stop_loss", confidence=0,
-                        reason=f"손절 ({current_symbol}) {unrealized_pct:.1f}% (한도 -{dynamic_sl_pct:.1f}%)",
-                        pnl=pnl, pnl_pct=round(pnl_pct, 2),
-                    )
-                    trades.append(t)
-                    cash += proceeds
-                    total_hold_candles += candle_idx - entry_candle_idx
-                    num_completed_trades += 1
-                    loss_count += 1; total_loss_pct += abs(pnl_pct)
-                    current_symbol = None; holdings = 0; avg_buy_price = 0
-                    peak_price_since_entry = 0; trailing_active = False
-                    last_rotation_idx = candle_idx
+            # ── 보유 포지션 SL/TP/트레일링/시간 체크 ──────────
+            to_close: list[str] = []
+            for sym, pos in positions.items():
+                if sym not in all_data or ts not in all_data[sym].index:
                     continue
 
-                # 익절
-                if (not trailing_active
-                        and self._take_profit_pct > 0
-                        and unrealized_pct >= self._take_profit_pct):
+                cur_price = float(all_data[sym].loc[ts, "close"])
+                unrealized_pct = (cur_price - pos.avg_buy_price) / pos.avg_buy_price * 100
+
+                if cur_price > pos.peak_price:
+                    pos.peak_price = cur_price
+
+                sell_tag = None
+                sell_text = None
+
+                # 1) 트레일링 활성화
+                if (pos.trailing_activation_pct > 0
+                        and not pos.trailing_active
+                        and unrealized_pct >= pos.trailing_activation_pct):
+                    pos.trailing_active = True
+
+                # 2) 트레일링 스탑
+                if pos.trailing_active and pos.trailing_stop_pct > 0:
+                    drop = (pos.peak_price - cur_price) / pos.peak_price * 100
+                    if drop >= pos.trailing_stop_pct:
+                        sell_tag = "sell(trail)"
+                        sell_text = f"트레일링 ({sym}) 고점 대비 -{drop:.1f}%"
+
+                # 3) 손절
+                if not sell_tag and pos.stop_loss_pct > 0 and unrealized_pct <= -pos.stop_loss_pct:
+                    sell_tag = "sell(sl)"
+                    sell_text = f"손절 ({sym}) {unrealized_pct:.1f}% (한도 -{pos.stop_loss_pct:.1f}%)"
+
+                # 4) 익절 (트레일링 미활성 시)
+                if (not sell_tag and not pos.trailing_active
+                        and pos.take_profit_pct > 0
+                        and unrealized_pct >= pos.take_profit_pct):
+                    sell_tag = "sell(tp)"
+                    sell_text = f"익절 ({sym}) +{unrealized_pct:.1f}%"
+
+                # 5) 시간 기반 강제 청산
+                if not sell_tag and max_hold_candles > 0:
+                    held = candle_idx - pos.entry_candle_idx
+                    if held >= max_hold_candles:
+                        sell_tag = "sell(time)"
+                        sell_text = f"시간 초과 ({sym}) {held}캔들/{max_hold_candles} (수익 {unrealized_pct:+.1f}%)"
+
+                if sell_tag:
                     exec_price = cur_price * (1 - SLIPPAGE)
-                    cost = holdings * exec_price
+                    cost = pos.quantity * exec_price
                     fee = cost * TAKER_FEE
                     proceeds = cost - fee
-                    pnl = proceeds - (avg_buy_price * holdings)
-                    pnl_pct = pnl / (avg_buy_price * holdings) * 100
+                    pnl = proceeds - (pos.avg_buy_price * pos.quantity)
+                    pnl_pct = pnl / (pos.avg_buy_price * pos.quantity) * 100
 
-                    t = BacktestTrade(
-                        timestamp=ts, side="sell(tp)", symbol=current_symbol,
-                        price=exec_price, quantity=holdings, cost=cost, fee=fee,
-                        strategy="take_profit", confidence=0,
-                        reason=f"익절 ({current_symbol}) +{unrealized_pct:.1f}%",
-                        pnl=pnl, pnl_pct=round(pnl_pct, 2),
-                    )
-                    trades.append(t)
+                    trades.append(BacktestTrade(
+                        timestamp=ts, side=sell_tag, symbol=sym,
+                        price=exec_price, quantity=pos.quantity, cost=cost, fee=fee,
+                        strategy="surge_rotation", confidence=0,
+                        reason=sell_text, pnl=pnl, pnl_pct=round(pnl_pct, 2),
+                    ))
                     cash += proceeds
-                    total_hold_candles += candle_idx - entry_candle_idx
+                    total_hold_candles += candle_idx - pos.entry_candle_idx
                     num_completed_trades += 1
-                    win_count += 1; total_win_pct += abs(pnl_pct)
-                    current_symbol = None; holdings = 0; avg_buy_price = 0
-                    peak_price_since_entry = 0; trailing_active = False
-                    last_rotation_idx = candle_idx
-                    continue
+                    if pnl > 0:
+                        win_count += 1; total_win_pct += abs(pnl_pct)
+                    else:
+                        loss_count += 1; total_loss_pct += abs(pnl_pct)
+                    to_close.append(sym)
+
+            for sym in to_close:
+                del positions[sym]
 
             # ── 서지 스캔 ─────────────────────────────────────
             surges = self._scan_surges(all_data, ts)
@@ -1330,8 +1313,8 @@ class RotationBacktester:
                 continue
 
             for surge_sym, surge_score in surges:
-                if surge_sym == current_symbol:
-                    continue  # 현재 보유 코인은 스킵
+                if surge_sym in positions:
+                    continue  # 이미 보유 중
 
                 sym_df = all_data[surge_sym]
                 if ts not in sym_df.index:
@@ -1343,7 +1326,7 @@ class RotationBacktester:
                 sym_row = sym_df.iloc[sym_idx]
                 surge_price = float(sym_row["close"])
 
-                # 전략 확인
+                # 전략 확인 (서지 완화)
                 if self._require_strategy_confirm:
                     ticker = Ticker(
                         symbol=surge_sym,
@@ -1361,43 +1344,10 @@ class RotationBacktester:
                     if not confirmed:
                         continue
                 else:
-                    confidence = surge_score / 10.0  # 서지만으로 신뢰도 추정
+                    confidence = surge_score / 10.0
 
-                # ── 기존 포지션 매도 (로테이션) ──────────────
-                prev_sym = current_symbol
-                if current_symbol and holdings > 0:
-                    sell_df = all_data[current_symbol]
-                    if ts in sell_df.index:
-                        sell_price = float(sell_df.loc[ts, "close"])
-                    else:
-                        sell_price = avg_buy_price
-
-                    exec_price = sell_price * (1 - SLIPPAGE)
-                    cost = holdings * exec_price
-                    fee = cost * TAKER_FEE
-                    proceeds = cost - fee
-                    pnl = proceeds - (avg_buy_price * holdings)
-                    pnl_pct = pnl / (avg_buy_price * holdings) * 100
-
-                    t = BacktestTrade(
-                        timestamp=ts, side="sell(rot)", symbol=current_symbol,
-                        price=exec_price, quantity=holdings, cost=cost, fee=fee,
-                        strategy="rotation", confidence=0,
-                        reason=f"로테이션 → {surge_sym} (서지 {surge_score:.1f}x)",
-                        pnl=pnl, pnl_pct=round(pnl_pct, 2),
-                    )
-                    trades.append(t)
-                    cash += proceeds
-                    total_hold_candles += candle_idx - entry_candle_idx
-                    num_completed_trades += 1
-                    if pnl > 0:
-                        win_count += 1; total_win_pct += abs(pnl_pct)
-                    else:
-                        loss_count += 1; total_loss_pct += abs(pnl_pct)
-                    total_rotations += 1
-
-                # ── 서지 코인 매수 ────────────────────────────
-                trade_size = cash * 0.95
+                # ── 서지 코인 매수 (현금의 일부) ──────────────
+                trade_size = cash * self._surge_buy_pct
                 if trade_size < MIN_TRADE_KRW:
                     continue
 
@@ -1407,60 +1357,57 @@ class RotationBacktester:
                 cost = qty * exec_price
 
                 cash -= (cost + fee)
-                holdings = qty
-                avg_buy_price = exec_price
-                peak_price_since_entry = surge_price
-                trailing_active = False
-                current_symbol = surge_sym
-                entry_candle_idx = candle_idx
+                positions[surge_sym] = _SurgePosition(
+                    symbol=surge_sym,
+                    quantity=qty,
+                    avg_buy_price=exec_price,
+                    entry_candle_idx=candle_idx,
+                    peak_price=surge_price,
+                    stop_loss_pct=self._stop_loss_pct,
+                    take_profit_pct=self._take_profit_pct,
+                    trailing_activation_pct=self._trailing_activation,
+                    trailing_stop_pct=self._trailing_stop,
+                )
                 symbols_traded.add(surge_sym)
+                total_rotations += 1
 
-                # 동적 손절 계산
-                if self._dynamic_sl:
-                    dynamic_sl_pct = _calc_dynamic_sl(sym_row, surge_price, current_market_state)
-                else:
-                    dynamic_sl_pct = self._stop_loss_pct
-
-                t = BacktestTrade(
+                trades.append(BacktestTrade(
                     timestamp=ts, side="buy", symbol=surge_sym,
                     price=exec_price, quantity=qty, cost=cost, fee=fee,
                     strategy="surge_rotation", confidence=confidence,
-                    reason=f"서지 {surge_score:.1f}x"
-                           + (f" (← {prev_sym})" if prev_sym else ""),
-                )
-                trades.append(t)
+                    reason=f"서지 {surge_score:.1f}x (현금 {self._surge_buy_pct*100:.0f}%)",
+                ))
 
                 rotation_log.append({
                     "timestamp": ts,
-                    "from": prev_sym,
+                    "from": None,
                     "to": surge_sym,
                     "surge_score": round(surge_score, 1),
                     "confidence": round(confidence, 2),
                 })
                 last_rotation_idx = candle_idx
-                break  # 최고 서지 코인 1개만
+                # 같은 캔들에 여러 서지 매수 가능 (현금 잔여 시)
 
-        # 5. 종료 시 강제 청산
-        if current_symbol and holdings > 0:
-            sym_df = all_data[current_symbol]
+        # 5. 종료 시 전체 청산
+        for sym, pos in list(positions.items()):
+            sym_df = all_data[sym]
             last_price = float(sym_df.iloc[-1]["close"])
             exec_price = last_price * (1 - SLIPPAGE)
-            cost = holdings * exec_price
+            cost = pos.quantity * exec_price
             fee = cost * TAKER_FEE
             proceeds = cost - fee
-            pnl = proceeds - (avg_buy_price * holdings)
-            pnl_pct = pnl / (avg_buy_price * holdings) * 100 if avg_buy_price * holdings > 0 else 0
+            pnl = proceeds - (pos.avg_buy_price * pos.quantity)
+            pnl_pct = pnl / (pos.avg_buy_price * pos.quantity) * 100 if pos.avg_buy_price * pos.quantity > 0 else 0
 
-            t = BacktestTrade(
-                timestamp=all_timestamps[-1], side="sell(close)", symbol=current_symbol,
-                price=exec_price, quantity=holdings, cost=cost, fee=fee,
+            trades.append(BacktestTrade(
+                timestamp=all_timestamps[-1], side="sell(close)", symbol=sym,
+                price=exec_price, quantity=pos.quantity, cost=cost, fee=fee,
                 strategy="forced_close", confidence=0,
-                reason=f"백테스트 종료 강제 청산 ({current_symbol})",
+                reason=f"백테스트 종료 강제 청산 ({sym})",
                 pnl=pnl, pnl_pct=round(pnl_pct, 2),
-            )
-            trades.append(t)
+            ))
             cash += proceeds
-            total_hold_candles += len(all_timestamps) - 1 - entry_candle_idx
+            total_hold_candles += len(all_timestamps) - 1 - pos.entry_candle_idx
             num_completed_trades += 1
             if pnl > 0:
                 win_count += 1; total_win_pct += abs(pnl_pct)
@@ -1520,7 +1467,7 @@ def print_rotation_result(r: RotationResult):
     print(f"  BTC B&H      : {bh_sign}{r.buy_hold_btc_pnl_pct:.2f}%")
     print(f"  초과 수익(a) : {alpha_sign}{alpha:.2f}%")
     print(f"{'─'*60}")
-    print(f"  총 매매      : {r.total_trades}회  (로테이션 {r.total_rotations}회)")
+    print(f"  총 매매      : {r.total_trades}회  (서지 매수 {r.total_rotations}회)")
     print(f"  승리 / 패배  : {r.winning_trades}승 / {r.losing_trades}패")
     print(f"  승률         : {r.win_rate:.1f}%")
     print(f"  평균 수익    : +{r.avg_win_pct:.2f}% | 평균 손실: -{r.avg_loss_pct:.2f}%")
@@ -1549,7 +1496,7 @@ def print_rotation_result(r: RotationResult):
             sym_short = t.symbol.replace("/KRW", "")
             tag = {"sell(sl)": "손절", "sell(tp)": "익절",
                    "sell(trail)": "트레일", "sell(rot)": "로테",
-                   "sell(close)": "청산"}.get(t.side, "신호")
+                   "sell(time)": "시간", "sell(close)": "청산"}.get(t.side, "신호")
             print(f"    {t.timestamp.strftime('%m/%d %H:%M')}  {sym_short:>6}  "
                   f"{t.pnl_pct:>+6.1f}%  [{tag}] {t.reason[:45]}")
     print(f"{'='*60}\n")
@@ -1620,6 +1567,13 @@ async def main():
     parser.add_argument("--no-strategy-confirm", dest="strategy_confirm",
                         action="store_false", default=True,
                         help="전략 확인 없이 서지만으로 매매")
+    parser.add_argument("--strict-confirm", dest="strict_confirm",
+                        action="store_true", default=False,
+                        help="서지 확인 강화: BUY 시그널만 허용 (HOLD 불가)")
+    parser.add_argument("--surge-buy-pct",  type=float, default=0.15,
+                        help="서지 매수 시 현금 비율 (기본 0.15=15%%)")
+    parser.add_argument("--surge-max-hold", type=float, default=24,
+                        help="서지 최대 보유 시간 (기본 24h, 0=무제한)")
 
     args = parser.parse_args()
 
@@ -1648,23 +1602,36 @@ async def main():
                 c if "/" in c else f"{c}/KRW" for c in rotation_coins
             ]
 
+        # 서지 전용 프로필 — CLI 기본값(5/10/3/3)과 다르면 사용자 지정으로 판단
+        rot_kwargs: dict = {}
+        if args.stop_loss != 5.0:
+            rot_kwargs["stop_loss_pct"] = args.stop_loss
+        if args.take_profit != 10.0:
+            rot_kwargs["take_profit_pct"] = args.take_profit
+        if args.trailing_activation != 3.0:
+            rot_kwargs["trailing_activation"] = args.trailing_activation
+        if args.trailing_stop != 3.0:
+            rot_kwargs["trailing_stop"] = args.trailing_stop
+        if args.strict_confirm:
+            rot_kwargs["strict_confirm"] = True
+
         rot = RotationBacktester(
             exchange=exchange,
             strategy_names=args.strategies,
             symbols=rotation_coins,
             initial_balance=args.balance,
             min_confidence=args.min_confidence,
-            stop_loss_pct=args.stop_loss,
-            take_profit_pct=args.take_profit,
             trend_filter=args.trend_filter,
-            trailing_activation=args.trailing_activation,
-            trailing_stop=args.trailing_stop,
             adaptive_weights=args.adaptive_weights,
             dynamic_sl=args.dynamic_sl,
             agent_market=args.agent_market,
             surge_threshold=args.surge_threshold,
             rotation_cooldown=args.rotation_cooldown,
             require_strategy_confirm=args.strategy_confirm,
+            surge_buy_pct=args.surge_buy_pct,
+            surge_max_hold_hours=args.surge_max_hold,
+            strict_confirm=args.strict_confirm,
+            **rot_kwargs,
         )
         result = await rot.run(args.timeframe, args.days)
         print_rotation_result(result)

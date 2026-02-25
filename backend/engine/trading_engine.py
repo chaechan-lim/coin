@@ -43,6 +43,8 @@ class PositionTracker:
     trailing_activation_pct: float = 3.0
     trailing_stop_pct: float = 3.0
     trailing_active: bool = False     # 트레일링 활성 여부
+    is_surge: bool = False            # 서지 코인 여부
+    max_hold_hours: float = 0        # 최대 보유 시간 (0=무제한)
     entered_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -426,6 +428,12 @@ class TradingEngine:
                 and pnl_pct >= tracker.take_profit_pct):
             sell_reason = f"TP 발동: +{pnl_pct:.2f}% (목표 +{tracker.take_profit_pct:.1f}%)"
 
+        # 5. 시간 기반 강제 청산 (서지 코인 등)
+        if not sell_reason and tracker.max_hold_hours > 0:
+            held_hours = (datetime.now(timezone.utc) - tracker.entered_at).total_seconds() / 3600
+            if held_hours >= tracker.max_hold_hours:
+                sell_reason = f"보유 시간 초과: {held_hours:.1f}h (한도 {tracker.max_hold_hours:.0f}h, 수익 {pnl_pct:+.1f}%)"
+
         if sell_reason:
             logger.info(
                 "stop_condition_triggered",
@@ -500,9 +508,16 @@ class TradingEngine:
         session_factory = get_session_factory()
         async with session_factory() as session:
             try:
-                coins = self._config.trading.tracked_coins
+                coins = set(self._config.trading.tracked_coins)
 
-                for symbol in coins:
+                # 보유 중인 포지션도 평가 대상에 포함 (서지 코인 SL/TP/SELL)
+                result = await session.execute(
+                    select(Position.symbol).where(Position.quantity > 0)
+                )
+                held = {r[0] for r in result.all()}
+                all_coins = list(coins | held)
+
+                for symbol in all_coins:
                     await self._evaluate_coin(session, symbol)
 
                 # 거래량 급등 로테이션 모드
@@ -684,21 +699,14 @@ class TradingEngine:
             )
             return True, float(decision.combined_confidence)
 
-        # BUY 시그널 없어도, SELL이 아니면 (HOLD) 서지 자체를 신뢰
-        # → 단, 명시적 SELL이면 거부
-        if decision.action == SignalType.SELL:
-            logger.info(
-                "surge_rejected_sell", symbol=symbol,
-                confidence=round(decision.combined_confidence, 3),
-            )
-            return False, 0.0
-
-        # 전략이 전원 HOLD (기권) → 서지 점수만으로 진입 허용 (낮은 신뢰도)
+        # BUY만 허용 (엄격 모드) — 백테스트 C 프로필 결과 적용
+        # HOLD/SELL 모두 거부: 승률 44.8%, PF 1.04, 알파 +33.44%
         logger.info(
-            "surge_confirmed_by_volume", symbol=symbol,
+            "surge_rejected_no_buy", symbol=symbol,
             strategy_action=decision.action.value,
+            confidence=round(decision.combined_confidence, 3),
         )
-        return True, 0.30
+        return False, 0.0
 
     async def _execute_rotation_sell(self, session: AsyncSession) -> None:
         """로테이션을 위한 기존 포지션 전량 매도."""
@@ -758,16 +766,16 @@ class TradingEngine:
                 session, symbol, amount, price, amount_krw, order.fee,
             )
 
-            # 포지션 트래커 생성
-            try:
-                df = await self._market_data.get_candles(symbol, "4h", 200)
-                sl_pct = self._calc_dynamic_sl(df, price, self._market_state)
-            except Exception:
-                sl_pct = 5.0
+            # 서지 전용 포지션 트래커 (백테스트 C 프로필)
             self._position_trackers[symbol] = PositionTracker(
                 entry_price=price,
                 highest_price=price,
-                stop_loss_pct=sl_pct,
+                stop_loss_pct=4.0,
+                take_profit_pct=8.0,
+                trailing_activation_pct=1.5,
+                trailing_stop_pct=2.0,
+                is_surge=True,
+                max_hold_hours=48,
             )
 
             self._last_trade_time[symbol] = datetime.now(timezone.utc)
