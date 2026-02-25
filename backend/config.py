@@ -25,7 +25,9 @@ class TradingConfig(BaseSettings):
     ]
     min_trade_interval_sec: int = 3600  # 1 hour per coin
     cooldown_after_buy_sec: int = 1800  # 30 min
-    daily_trade_limit: int = 10
+    daily_buy_limit: int = 20          # 일일 매수 상한 (매도는 무제한)
+    max_daily_coin_buys: int = 3       # 코인당 일일 매수 상한 (왕복 3회)
+    daily_trade_limit: int = 10        # (레거시, 미사용) 하위 호환용
     min_combined_confidence: float = 0.50
     min_profit_vs_fee_ratio: float = 2.0  # expected return > 2x round-trip fee
 

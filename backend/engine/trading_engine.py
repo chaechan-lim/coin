@@ -74,7 +74,9 @@ class TradingEngine:
         self._paused_coins: set[str] = set()
         self._suppressed_coins: set[str] = set()
         self._last_trade_time: dict[str, datetime] = {}
-        self._daily_trade_count = 0
+        self._daily_buy_count = 0                       # 일일 총 매수 횟수
+        self._daily_coin_buy_count: dict[str, int] = {} # 코인별 일일 매수 횟수
+        self._daily_trade_count = 0                     # 레거시 (호환)
         self._daily_reset_date = datetime.now(timezone.utc).date()
 
         # SL/TP/trailing stop tracking
@@ -161,25 +163,41 @@ class TradingEngine:
     def _reset_daily_counter(self) -> None:
         today = datetime.now(timezone.utc).date()
         if today != self._daily_reset_date:
+            self._daily_buy_count = 0
+            self._daily_coin_buy_count.clear()
             self._daily_trade_count = 0
             self._daily_reset_date = today
 
-    def _can_trade(self, symbol: str) -> tuple[bool, str]:
-        """Check anti-overtrading constraints."""
+    def _can_trade(self, symbol: str, side: str = "buy") -> tuple[bool, str]:
+        """Check anti-overtrading constraints.
+
+        매도(sell)는 일일 제한/코인별 제한을 받지 않음 (손절·익절은 무조건 실행).
+        매수(buy)만 일일 총 매수 상한 + 코인별 매수 상한 적용.
+        코인당 최소 거래 간격 및 리스크 에이전트 일시중지는 매수에만 적용.
+        """
         self._reset_daily_counter()
 
-        if self._daily_trade_count >= self._config.trading.daily_trade_limit:
-            return False, f"Daily trade limit reached ({self._config.trading.daily_trade_limit})"
+        if side == "buy":
+            # 일일 총 매수 상한
+            if self._daily_buy_count >= self._config.trading.daily_buy_limit:
+                return False, f"Daily buy limit reached ({self._config.trading.daily_buy_limit})"
 
-        last = self._last_trade_time.get(symbol)
-        if last:
-            elapsed = (datetime.now(timezone.utc) - last).total_seconds()
-            if elapsed < self._config.trading.min_trade_interval_sec:
-                remaining = self._config.trading.min_trade_interval_sec - elapsed
-                return False, f"Coin cooldown: {remaining:.0f}s remaining"
+            # 코인별 일일 매수 상한
+            coin_buys = self._daily_coin_buy_count.get(symbol, 0)
+            if coin_buys >= self._config.trading.max_daily_coin_buys:
+                return False, f"Coin daily buy limit reached ({symbol}: {coin_buys}/{self._config.trading.max_daily_coin_buys})"
 
-        if symbol in self._paused_coins:
-            return False, "Buying paused by risk agent"
+            # 코인당 최소 거래 간격
+            last = self._last_trade_time.get(symbol)
+            if last:
+                elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+                if elapsed < self._config.trading.min_trade_interval_sec:
+                    remaining = self._config.trading.min_trade_interval_sec - elapsed
+                    return False, f"Coin cooldown: {remaining:.0f}s remaining"
+
+            # 리스크 에이전트에 의한 매수 중지
+            if symbol in self._paused_coins:
+                return False, "Buying paused by risk agent"
 
         return True, "OK"
 
@@ -531,7 +549,7 @@ class TradingEngine:
         # 트래커 제거
         self._position_trackers.pop(symbol, None)
 
-        # 매매 추적
+        # 매매 추적 (매도는 buy 카운터에 포함하지 않음)
         self._last_trade_time[symbol] = datetime.now(timezone.utc)
         self._daily_trade_count += 1
 
@@ -617,8 +635,8 @@ class TradingEngine:
             if stopped:
                 return  # 이미 매도했으므로 스킵
 
-        # ── 2. 거래 가능 여부 체크 ──
-        can_trade, reason = self._can_trade(symbol)
+        # ── 2. 매수 가능 여부 체크 (매도는 항상 허용) ──
+        can_buy, buy_block_reason = self._can_trade(symbol, side="buy")
 
         # ── 3. 전략 시그널 수집 ──
         signals: list[Signal] = []
@@ -648,8 +666,8 @@ class TradingEngine:
         # ── 4. 결합 판단 + 실행 ──
         if signals:
             decision = self._combiner.combine(signals)
-            # can_trade=False → 매수만 차단, 매도는 허용
-            if can_trade or decision.action == SignalType.SELL:
+            # can_buy=False → 매수만 차단, 매도는 항상 허용
+            if can_buy or decision.action == SignalType.SELL:
                 await self._process_decision(session, symbol, decision)
 
     # ── 거래량 급등 로테이션 ──────────────────────────────────────
@@ -753,9 +771,9 @@ class TradingEngine:
                 logger.debug("rotation_skip_held", symbol=symbol)
                 continue
 
-            # 거래 가능 여부 체크
-            can_trade, reason = self._can_trade(symbol)
-            if not can_trade:
+            # 매수 가능 여부 체크
+            can_buy, reason = self._can_trade(symbol, side="buy")
+            if not can_buy:
                 logger.info("rotation_skip_cant_trade", symbol=symbol, reason=reason)
                 continue
 
@@ -915,6 +933,8 @@ class TradingEngine:
 
             self._last_trade_time[symbol] = datetime.now(timezone.utc)
             self._daily_trade_count += 1
+            self._daily_buy_count += 1
+            self._daily_coin_buy_count[symbol] = self._daily_coin_buy_count.get(symbol, 0) + 1
 
             logger.info(
                 "rotation_buy",
@@ -1098,6 +1118,9 @@ class TradingEngine:
         # 매매 추적
         self._last_trade_time[symbol] = datetime.now(timezone.utc)
         self._daily_trade_count += 1
+        if decision.action == SignalType.BUY:
+            self._daily_buy_count += 1
+            self._daily_coin_buy_count[symbol] = self._daily_coin_buy_count.get(symbol, 0) + 1
 
         # 브로드캐스트
         if self._broadcast_callback:
