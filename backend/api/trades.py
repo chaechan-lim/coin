@@ -84,35 +84,59 @@ async def get_trade_summary(
     else:
         start = None
 
-    query = select(Order).where(Order.status == "filled")
-    if start:
-        query = query.where(Order.created_at >= start)
+    # 전체 체결 주문 시간순 (매수 원가 계산용)
+    result = await session.execute(
+        select(Order).where(Order.status == "filled").order_by(Order.created_at)
+    )
+    all_orders = list(result.scalars().all())
 
-    result = await session.execute(query)
-    orders = list(result.scalars().all())
+    from collections import defaultdict
+    positions: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "cost": 0.0})
 
-    total_trades = len(orders)
-    buy_orders = [o for o in orders if o.side == "buy"]
-    sell_orders = [o for o in orders if o.side == "sell"]
-
-    # Simple P&L from sell orders
-    total_pnl = 0.0
+    buy_count = 0
+    sell_count = 0
     winning = 0
     losing = 0
-    for sell in sell_orders:
-        if sell.executed_price and sell.requested_price:
-            pnl = (sell.executed_price - sell.requested_price) * (sell.executed_quantity or 0)
-            total_pnl += pnl
-            if pnl > 0:
-                winning += 1
-            else:
-                losing += 1
+    total_pnl = 0.0
+
+    for order in all_orders:
+        sym = order.symbol
+        qty = order.executed_quantity or order.requested_quantity
+        price = order.executed_price or order.requested_price
+        fee = order.fee or 0
+        in_period = start is None or order.created_at >= start
+
+        if not price or not qty:
+            continue
+
+        if order.side == "buy":
+            positions[sym]["cost"] += price * qty + fee
+            positions[sym]["qty"] += qty
+            if in_period:
+                buy_count += 1
+        elif order.side == "sell":
+            pos = positions[sym]
+            if pos["qty"] > 0:
+                avg_buy = pos["cost"] / pos["qty"]
+                sell_qty = min(qty, pos["qty"])
+                pnl = (price - avg_buy) * sell_qty - fee
+
+                if in_period:
+                    sell_count += 1
+                    total_pnl += pnl
+                    if pnl > 0:
+                        winning += 1
+                    else:
+                        losing += 1
+
+                pos["cost"] -= avg_buy * sell_qty
+                pos["qty"] -= sell_qty
 
     return {
         "period": period,
-        "total_trades": total_trades,
-        "buy_count": len(buy_orders),
-        "sell_count": len(sell_orders),
+        "total_trades": buy_count + sell_count,
+        "buy_count": buy_count,
+        "sell_count": sell_count,
         "winning_trades": winning,
         "losing_trades": losing,
         "win_rate": round(winning / (winning + losing) * 100, 1) if (winning + losing) > 0 else 0,

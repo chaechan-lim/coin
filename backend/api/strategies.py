@@ -61,40 +61,68 @@ async def get_strategy_performance(
     days = period_map.get(period, 30)
     start = now - timedelta(days=days)
 
-    # Get all filled orders for this strategy
+    # 1) 모든 체결 주문을 시간순 조회 (매수 원가 계산을 위해 전체 기간)
     result = await session.execute(
         select(Order)
-        .where(Order.strategy_name == name, Order.status == "filled", Order.created_at >= start)
+        .where(Order.status == "filled")
+        .order_by(Order.created_at)
     )
-    orders = list(result.scalars().all())
+    all_orders = list(result.scalars().all())
 
-    sell_orders = [o for o in orders if o.side == "sell"]
+    # 2) 심볼별 포지션 추적 (FIFO 원가 계산)
+    from collections import defaultdict
+    positions: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "cost": 0.0})
+
     winning = 0
     losing = 0
     total_pnl = 0.0
-    returns = []
+    returns: list[float] = []
+    trade_count = 0
 
-    for sell in sell_orders:
-        if sell.executed_price and sell.requested_quantity:
-            # Approximate P&L
-            cost = (sell.requested_price or sell.executed_price) * sell.requested_quantity
-            revenue = sell.executed_price * (sell.executed_quantity or sell.requested_quantity)
-            pnl = revenue - cost - (sell.fee or 0)
-            total_pnl += pnl
-            ret_pct = pnl / cost * 100 if cost > 0 else 0
-            returns.append(ret_pct)
-            if pnl > 0:
-                winning += 1
-            else:
-                losing += 1
+    for order in all_orders:
+        sym = order.symbol
+        qty = order.executed_quantity or order.requested_quantity
+        price = order.executed_price or order.requested_price
+        fee = order.fee or 0
 
-    total_trades = len(orders)
+        if not price or not qty:
+            continue
+
+        if order.side == "buy":
+            positions[sym]["cost"] += price * qty + fee
+            positions[sym]["qty"] += qty
+            # 기간 내 매수만 카운트
+            if order.strategy_name == name and order.created_at >= start:
+                trade_count += 1
+
+        elif order.side == "sell":
+            pos = positions[sym]
+            if pos["qty"] > 0:
+                avg_buy = pos["cost"] / pos["qty"]
+                sell_qty = min(qty, pos["qty"])
+                pnl = (price - avg_buy) * sell_qty - fee
+
+                # 기간 내 + 해당 전략 매도만 성과에 반영
+                if order.strategy_name == name and order.created_at >= start:
+                    total_pnl += pnl
+                    ret_pct = pnl / (avg_buy * sell_qty) * 100 if avg_buy > 0 else 0
+                    returns.append(ret_pct)
+                    trade_count += 1
+                    if pnl > 0:
+                        winning += 1
+                    else:
+                        losing += 1
+
+                # 포지션 차감 (항상)
+                pos["cost"] -= avg_buy * sell_qty
+                pos["qty"] -= sell_qty
+
     win_rate = winning / (winning + losing) * 100 if (winning + losing) > 0 else 0
     avg_return = sum(returns) / len(returns) if returns else 0
 
     return StrategyPerformanceResponse(
         strategy_name=name,
-        total_trades=total_trades,
+        total_trades=trade_count,
         winning_trades=winning,
         losing_trades=losing,
         win_rate=round(win_rate, 1),
