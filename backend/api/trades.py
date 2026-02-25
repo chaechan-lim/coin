@@ -19,9 +19,18 @@ async def get_trades(
     symbol: Optional[str] = None,
     strategy: Optional[str] = None,
     side: Optional[str] = None,
+    status: Optional[str] = Query(None, pattern="^(filled|open|cancelled|failed|all)$"),
     session: AsyncSession = Depends(get_db),
 ):
     query = select(Order).order_by(desc(Order.created_at))
+
+    # 기본: filled만 표시 (실패/취소 거래 숨김)
+    if status == "all":
+        pass  # 전체 표시
+    elif status:
+        query = query.where(Order.status == status)
+    else:
+        query = query.where(Order.status == "filled")
 
     if symbol:
         query = query.where(Order.symbol == symbol)
@@ -61,7 +70,7 @@ async def get_trades(
 
 @router.get("/summary")
 async def get_trade_summary(
-    period: str = Query("7d", regex="^(today|7d|30d|all)$"),
+    period: str = Query("7d", pattern="^(today|7d|30d|all)$"),
     session: AsyncSession = Depends(get_db),
 ):
     now = utcnow()

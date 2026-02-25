@@ -338,6 +338,14 @@ class TradingEngine:
                 )
                 self._combiner.apply_market_state(new_state)
 
+                # 에이전트 분석 결과도 즉시 동기화 (프론트엔드 불일치 방지)
+                if (self._agent_coordinator
+                        and self._agent_coordinator.last_market_analysis):
+                    try:
+                        self._agent_coordinator.last_market_analysis.state = MarketState(new_state)
+                    except ValueError:
+                        pass
+
                 # 보유 중 포지션 동적 SL 재조정 (백테스트 동일)
                 for symbol, tracker in self._position_trackers.items():
                     try:
@@ -383,7 +391,10 @@ class TradingEngine:
                     max_hold_hours=48,
                 )
                 if position.entered_at:
-                    tracker.entered_at = position.entered_at
+                    ea = position.entered_at
+                    if ea.tzinfo is None:
+                        ea = ea.replace(tzinfo=timezone.utc)
+                    tracker.entered_at = ea
                 logger.info("tracker_restored_surge", symbol=symbol)
             else:
                 # 일반 코인 → 동적 SL 계산
@@ -392,7 +403,10 @@ class TradingEngine:
                     highest_price=position.average_buy_price,
                 )
                 if position.entered_at:
-                    tracker.entered_at = position.entered_at
+                    ea = position.entered_at
+                    if ea.tzinfo is None:
+                        ea = ea.replace(tzinfo=timezone.utc)
+                    tracker.entered_at = ea
                 try:
                     df = await self._market_data.get_candles(symbol, "4h", 200)
                     tracker.stop_loss_pct = self._calc_dynamic_sl(
@@ -491,6 +505,18 @@ class TradingEngine:
         order = await self._order_manager.create_order(
             session, symbol, "sell", position.quantity, price, sell_signal
         )
+
+        # 미체결 주문은 거래소 취소 + 포트폴리오 건드리지 않음
+        if order.status != "filled":
+            logger.warning("sell_order_not_filled", symbol=symbol, status=order.status,
+                           order_id=order.id)
+            if order.exchange_order_id:
+                try:
+                    await self._order_manager.cancel_order_by_id(session, order.id)
+                except Exception:
+                    pass
+            return
+
         await self._portfolio_manager.update_position_on_sell(
             session, symbol, position.quantity, price,
             position.quantity * price, order.fee
@@ -527,6 +553,9 @@ class TradingEngine:
         session_factory = get_session_factory()
         async with session_factory() as session:
             try:
+                # 매 사이클 시작 시 현금 잔고 정합성 확인
+                await self._portfolio_manager.reconcile_cash_from_db(session)
+
                 coins = set(self._config.trading.tracked_coins)
 
                 # 보유 중인 포지션도 평가 대상에 포함 (서지 코인 SL/TP/SELL)
@@ -537,7 +566,11 @@ class TradingEngine:
                 all_coins = list(coins | held)
 
                 for symbol in all_coins:
-                    await self._evaluate_coin(session, symbol)
+                    try:
+                        await self._evaluate_coin(session, symbol)
+                    except Exception as coin_err:
+                        logger.error("evaluate_coin_error", symbol=symbol, error=str(coin_err))
+                        continue
 
                 # 거래량 급등 로테이션 모드
                 if self._config.trading.rotation_enabled:
@@ -607,9 +640,11 @@ class TradingEngine:
                 )
 
         # ── 4. 결합 판단 + 실행 ──
-        if signals and can_trade:
+        if signals:
             decision = self._combiner.combine(signals)
-            await self._process_decision(session, symbol, decision)
+            # can_trade=False → 매수만 차단, 매도는 허용
+            if can_trade or decision.action == SignalType.SELL:
+                await self._process_decision(session, symbol, decision)
 
     # ── 거래량 급등 로테이션 ──────────────────────────────────────
 
@@ -672,7 +707,9 @@ class TradingEngine:
                 continue
 
             # 전략 확인 (combiner) — 서지는 임계값 완화
-            confirmed, confidence = await self._get_surge_confirmation(session, symbol)
+            confirmed, confidence = await self._get_surge_confirmation(
+                session, symbol,
+            )
             if not confirmed:
                 logger.info("rotation_skip_not_confirmed", symbol=symbol, score=round(score, 1))
                 continue
@@ -684,11 +721,15 @@ class TradingEngine:
             self._current_surge_symbol = symbol
             break  # 최고 서지 1개만
 
-    async def _get_surge_confirmation(self, session: AsyncSession, symbol: str) -> tuple[bool, float]:
+    async def _get_surge_confirmation(
+        self, session: AsyncSession, symbol: str,
+        force_on_strong_surge: bool = False,
+    ) -> tuple[bool, float]:
         """서지 코인에 대해 기존 전략 파이프라인으로 BUY 확인.
 
         서지는 그 자체로 강한 시그널이므로 임계값을 일반 매수보다 낮춤 (0.20).
         BUY 시그널이 1개라도 있으면 확인 통과.
+        force_on_strong_surge=True이면 HOLD도 허용 (SELL만 거부).
         """
         signals: list[Signal] = []
         for name, strategy in self._strategies.items():
@@ -718,8 +759,17 @@ class TradingEngine:
             )
             return True, float(decision.combined_confidence)
 
-        # BUY만 허용 (엄격 모드) — 백테스트 C 프로필 결과 적용
-        # HOLD/SELL 모두 거부: 승률 44.8%, PF 1.04, 알파 +33.44%
+        # 강한 서지 (임계값 2배): SELL이 아니면 허용 (HOLD 통과)
+        if force_on_strong_surge and decision.action != SignalType.SELL:
+            logger.info(
+                "surge_confirmed_strong", symbol=symbol,
+                confidence=round(decision.combined_confidence, 3),
+                strategy_action=decision.action.value,
+                method="strong_surge_override",
+            )
+            return True, max(float(decision.combined_confidence), 0.25)
+
+        # 일반 서지: BUY만 허용 (엄격 모드)
         logger.info(
             "surge_rejected_no_buy", symbol=symbol,
             strategy_action=decision.action.value,
@@ -781,6 +831,18 @@ class TradingEngine:
             order = await self._order_manager.create_order(
                 session, symbol, "buy", amount, price, buy_signal,
             )
+
+            # 미체결 주문은 거래소 취소 + 포트폴리오 건드리지 않음
+            if order.status != "filled":
+                logger.warning("rotation_buy_not_filled", symbol=symbol, status=order.status,
+                               order_id=order.id)
+                if order.exchange_order_id:
+                    try:
+                        await self._order_manager.cancel_order_by_id(session, order.id)
+                    except Exception:
+                        pass
+                return
+
             await self._portfolio_manager.update_position_on_buy(
                 session, symbol, amount, price, amount_krw, order.fee,
                 is_surge=True,
@@ -911,6 +973,18 @@ class TradingEngine:
             order = await self._order_manager.create_order(
                 session, symbol, "buy", amount, price, primary_signal, decision
             )
+
+            # 미체결 주문은 거래소 취소 + 포트폴리오 건드리지 않음
+            if order.status != "filled":
+                logger.warning("buy_order_not_filled", symbol=symbol, status=order.status,
+                               order_id=order.id)
+                if order.exchange_order_id:
+                    try:
+                        await self._order_manager.cancel_order_by_id(session, order.id)
+                    except Exception:
+                        pass
+                return
+
             await self._portfolio_manager.update_position_on_buy(
                 session, symbol, amount, price, amount_krw, order.fee
             )
@@ -947,6 +1021,18 @@ class TradingEngine:
             order = await self._order_manager.create_order(
                 session, symbol, "sell", position.quantity, price, primary_signal, decision
             )
+
+            # 미체결 주문은 거래소 취소 + 포트폴리오 건드리지 않음
+            if order.status != "filled":
+                logger.warning("sell_order_not_filled", symbol=symbol, status=order.status,
+                               order_id=order.id)
+                if order.exchange_order_id:
+                    try:
+                        await self._order_manager.cancel_order_by_id(session, order.id)
+                    except Exception:
+                        pass
+                return
+
             await self._portfolio_manager.update_position_on_sell(
                 session, symbol, position.quantity, price,
                 position.quantity * price, order.fee

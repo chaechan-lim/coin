@@ -2,9 +2,9 @@ import structlog
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.enums import RiskLevel
+from core.enums import MarketState, RiskLevel
 from core.models import AgentAnalysisLog
-from agents.market_analysis import MarketAnalysisAgent, MarketAnalysis
+from agents.market_analysis import MarketAnalysisAgent, MarketAnalysis, WEIGHT_PROFILES
 from agents.risk_management import RiskManagementAgent, RiskAlert
 from agents.trade_review import TradeReviewAgent, TradeReview
 from strategies.combiner import SignalCombiner
@@ -43,9 +43,27 @@ class AgentCoordinator:
     async def run_market_analysis(self) -> MarketAnalysis:
         """Run market analysis (정보 제공용 — 가중치는 엔진 _maybe_update_market_state()가 관리)."""
         analysis = await self._market_agent.analyze()
+
+        # 엔진의 공식 시장 상태로 동기화 (엔진 = 4h 기준, 에이전트 = 1h 기준 → 불일치 방지)
+        if self._engine and hasattr(self._engine, '_market_state'):
+            engine_state_str = self._engine._market_state
+            try:
+                engine_state = MarketState(engine_state_str)
+                if engine_state != analysis.state:
+                    logger.info(
+                        "agent_state_synced_to_engine",
+                        agent_state=analysis.state.value,
+                        engine_state=engine_state_str,
+                    )
+                    analysis.state = engine_state
+                    analysis.recommended_weights = WEIGHT_PROFILES.get(
+                        engine_state, analysis.recommended_weights
+                    )
+            except ValueError:
+                pass  # 엔진 상태가 enum에 없으면 에이전트 상태 유지
+
         self._last_market_analysis = analysis
 
-        # 가중치 변경 제거: 엔진이 단일 권한으로 apply_market_state() 호출
         # 에이전트 분석 결과는 DB 저장 + 대시보드 표시용
 
         # Persist analysis
@@ -90,22 +108,32 @@ class AgentCoordinator:
                     coins_to_suppress = []
 
                     for alert in alerts:
+                        # reduce_buying = 경고만 (로그/대시보드 표시), 매수 차단 안 함
+                        if alert.action == "reduce_buying":
+                            logger.info("risk_reduce_buying",
+                                        message=alert.message,
+                                        drawdown=alert.details.get("drawdown_pct"))
+                            continue
+
                         if alert.level == RiskLevel.CRITICAL:
-                            if alert.affected_coins:
+                            if alert.action in ("stop_buying", "emergency_sell"):
+                                if alert.affected_coins:
+                                    coins_to_pause.extend(alert.affected_coins)
+                                else:
+                                    # Critical with no specific coins = pause all
+                                    coins_to_pause.extend(
+                                        self._engine._config.trading.tracked_coins
+                                    )
+                            elif alert.affected_coins:
                                 coins_to_pause.extend(alert.affected_coins)
-                            else:
-                                # Critical with no specific coins = pause all
-                                self._engine.pause_buying(
-                                    list(self._engine._config.trading.tracked_coins)
-                                )
                         elif alert.level == RiskLevel.WARNING:
                             if alert.affected_coins:
                                 coins_to_suppress.extend(alert.affected_coins)
 
                     if coins_to_pause:
-                        self._engine.pause_buying(coins_to_pause)
+                        self._engine.pause_buying(list(set(coins_to_pause)))
                     if coins_to_suppress:
-                        self._engine.suppress_buys(coins_to_suppress)
+                        self._engine.suppress_buys(list(set(coins_to_suppress)))
 
                     # Resume coins with no alerts
                     all_alerted = set(coins_to_pause + coins_to_suppress)

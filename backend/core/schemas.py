@@ -18,6 +18,7 @@ class PortfolioSummaryResponse(BaseModel):
     total_value_krw: float
     cash_balance_krw: float
     invested_value_krw: float
+    initial_balance_krw: float
     realized_pnl: float
     unrealized_pnl: float
     total_pnl: float

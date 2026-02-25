@@ -1612,8 +1612,6 @@ async def main():
             rot_kwargs["trailing_activation"] = args.trailing_activation
         if args.trailing_stop != 3.0:
             rot_kwargs["trailing_stop"] = args.trailing_stop
-        if args.strict_confirm:
-            rot_kwargs["strict_confirm"] = True
 
         rot = RotationBacktester(
             exchange=exchange,

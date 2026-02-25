@@ -13,6 +13,7 @@ export interface PortfolioSummary {
   total_value_krw: number
   cash_balance_krw: number
   invested_value_krw: number
+  initial_balance_krw: number
   realized_pnl: number
   unrealized_pnl: number
   total_pnl: number

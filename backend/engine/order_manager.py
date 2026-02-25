@@ -76,15 +76,20 @@ class OrderManager:
     ) -> Order:
         """Create and execute an order with full strategy attribution."""
 
-        # Execute on exchange
+        # Execute on exchange (어댑터가 _poll_fill 포함 — 체결 확인까지)
         if side == "buy":
             result = await self._exchange.create_limit_buy(symbol, amount, price)
         else:
             result = await self._exchange.create_limit_sell(symbol, amount, price)
 
-        # 지정가 주문이 즉시 체결 안 됐으면 짧게 폴링
+        # 어댑터가 미체결이면 추가 폴링
         if result.status != "closed" and result.order_id:
-            result = await self._poll_fill(result.order_id, symbol, timeout=8)
+            try:
+                final = await self._exchange.fetch_order(result.order_id, symbol)
+                if final.status in ("closed", "canceled"):
+                    result = final
+            except Exception:
+                pass  # fetch 실패 시 원본 결과 유지
 
         # Determine status
         status = OrderStatus.FILLED.value if result.status == "closed" else OrderStatus.OPEN.value
@@ -151,7 +156,7 @@ class OrderManager:
             confidence=_f(signal.confidence),
             reason=signal.reason,
             indicators=_clean_indicators(signal.indicators),
-            was_executed=True,
+            was_executed=(status == OrderStatus.FILLED.value),
             order_id=order.id,
         )
         session.add(strategy_log)
@@ -208,7 +213,10 @@ class OrderManager:
             return False
 
         if order.exchange_order_id:
-            await self._exchange.cancel_order(order.exchange_order_id, order.symbol)
+            try:
+                await self._exchange.cancel_order(order.exchange_order_id, order.symbol)
+            except Exception as e:
+                logger.warning("cancel_exchange_error", oid=order.exchange_order_id, error=str(e))
 
         order.status = OrderStatus.CANCELLED.value
         order.updated_at = utcnow()

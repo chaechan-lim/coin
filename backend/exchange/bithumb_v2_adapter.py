@@ -196,7 +196,7 @@ class BithumbV2Adapter(BithumbAdapter):
         d = await self._v2("POST", "/v2/orders", p)
         oid = d.get("uuid") or d.get("order_id", "")
         logger.info("v2_limit_buy", symbol=symbol, amount=amount, price=price, oid=oid)
-        return self._parse_v2(d, symbol)
+        return await self._poll_fill(oid, symbol)
 
     async def create_limit_sell(
         self, symbol: str, amount: float, price: float,
@@ -209,7 +209,7 @@ class BithumbV2Adapter(BithumbAdapter):
         d = await self._v2("POST", "/v2/orders", p)
         oid = d.get("uuid") or d.get("order_id", "")
         logger.info("v2_limit_sell", symbol=symbol, amount=amount, price=price, oid=oid)
-        return self._parse_v2(d, symbol)
+        return await self._poll_fill(oid, symbol)
 
     async def create_market_buy(self, symbol: str, amount: float) -> OrderResult:
         """Market buy: ord_type=price, price = total KRW to spend."""
@@ -236,10 +236,10 @@ class BithumbV2Adapter(BithumbAdapter):
         return await self._poll_fill(oid, symbol)
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
-        await self._v2("DELETE", "/v2/order", {"uuid": order_id})
+        await self._v2("DELETE", "/v2/order", {"order_id": order_id})
         logger.info("v2_cancelled", oid=order_id, symbol=symbol)
         return True
 
     async def fetch_order(self, order_id: str, symbol: str) -> OrderResult:
-        d = await self._v2("GET", "/v2/order", {"uuid": order_id})
+        d = await self._v2("GET", "/v1/order", {"uuid": order_id})
         return self._parse_v2(d, symbol)

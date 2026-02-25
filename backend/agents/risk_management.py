@@ -105,23 +105,42 @@ class RiskManagementAgent:
     async def _check_drawdown(
         self, session: AsyncSession, current_value: float
     ) -> None:
-        """Check maximum drawdown from portfolio peak."""
+        """Check maximum drawdown from portfolio peak.
+
+        peak = MAX(total_value_krw) from snapshots (실제 포트폴리오 가치의 최대값).
+        기존 MAX(peak_value) 방식은 인메모리 값 의존 → 재시작 시 리셋 문제.
+        """
         result = await session.execute(
-            select(func.max(PortfolioSnapshot.peak_value))
+            select(func.max(PortfolioSnapshot.total_value_krw))
         )
         peak = result.scalar()
         if not peak or peak <= 0:
             return
 
+        # 현재 가치가 peak보다 높으면 drawdown 없음
+        if current_value >= peak:
+            return
+
         drawdown = (peak - current_value) / peak
         if drawdown > self._config.max_drawdown_pct:
-            level = RiskLevel.CRITICAL if drawdown > self._config.max_drawdown_pct * 1.5 else RiskLevel.WARNING
+            # 낙폭 단계별 대응: WARNING=매수 축소(경고만), CRITICAL=매수 중지
+            # emergency_sell은 50% 이상 낙폭에서만 (극단적 상황)
+            if drawdown > 0.50:
+                level = RiskLevel.CRITICAL
+                action = "emergency_sell"
+            elif drawdown > self._config.max_drawdown_pct * 2:
+                level = RiskLevel.CRITICAL
+                action = "stop_buying"
+            else:
+                level = RiskLevel.WARNING
+                action = "reduce_buying"  # 매수 차단 아닌 축소 (경고만)
+
             self._alerts.append(RiskAlert(
                 level=level,
                 message=f"포트폴리오 낙폭 {drawdown*100:.1f}%가 한도 {self._config.max_drawdown_pct*100:.0f}% 초과. "
                 f"고점: {peak:,.0f}원, 현재: {current_value:,.0f}원",
-                action="stop_buying" if level == RiskLevel.WARNING else "emergency_sell",
-                affected_coins=[],  # All coins affected
+                action=action,
+                affected_coins=[],
                 details={"drawdown_pct": round(drawdown * 100, 1), "peak": peak, "current": current_value},
             ))
 

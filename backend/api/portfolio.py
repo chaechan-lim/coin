@@ -24,6 +24,7 @@ async def get_portfolio_summary(session: AsyncSession = Depends(get_db)):
     if not _portfolio_manager:
         return PortfolioSummaryResponse(
             total_value_krw=0, cash_balance_krw=0, invested_value_krw=0,
+            initial_balance_krw=0,
             realized_pnl=0, unrealized_pnl=0, total_pnl=0, total_pnl_pct=0,
             total_fees=0, trade_count=0,
             peak_value=0, drawdown_pct=0, positions=[],
@@ -34,7 +35,7 @@ async def get_portfolio_summary(session: AsyncSession = Depends(get_db)):
 
 @router.get("/history", response_model=list[PortfolioHistoryPoint])
 async def get_portfolio_history(
-    period: str = Query("7d", regex="^(1d|7d|30d|90d|all)$"),
+    period: str = Query("7d", pattern="^(1d|7d|30d|90d|all)$"),
     session: AsyncSession = Depends(get_db),
 ):
     now = utcnow()

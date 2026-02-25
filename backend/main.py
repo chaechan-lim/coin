@@ -84,15 +84,32 @@ async def lifespan(app: FastAPI):
     logger.info("exchange_ready", mode=config.trading.mode, is_paper=is_paper)
 
     # ── 3. 핵심 서비스 ───────────────────────────────────────
-    # 라이브 모드: 실제 잔고 조회 / 페이퍼 모드: 설정값 사용
+    # 라이브 모드: 실제 잔고 + DB 포지션 기반 총자산 계산 / 페이퍼 모드: 설정값 사용
     if is_paper:
         initial_krw = config.trading.initial_balance_krw
     else:
         try:
             balances = await exchange.fetch_balance()
             krw_bal = balances.get("KRW", None)
-            initial_krw = krw_bal.free if krw_bal else config.trading.initial_balance_krw
-            logger.info("live_balance_fetched", krw_balance=initial_krw)
+            actual_krw = krw_bal.free if krw_bal else 0
+
+            # DB에 기존 포지션이 있으면 총 투자금을 더해서 initial_balance 계산
+            # → cash = initial - invested = actual_krw (정확히 일치)
+            from sqlalchemy import select, func
+            from core.models import Position
+            session_factory = get_session_factory()
+            async with session_factory() as session:
+                result = await session.execute(
+                    select(func.coalesce(func.sum(Position.total_invested), 0))
+                    .where(Position.quantity > 0)
+                )
+                total_invested = float(result.scalar())
+
+            initial_krw = actual_krw + total_invested
+            logger.info("live_balance_fetched",
+                        krw_balance=actual_krw,
+                        existing_invested=round(total_invested, 0),
+                        initial_total=round(initial_krw, 0))
         except Exception as e:
             initial_krw = config.trading.initial_balance_krw
             logger.warning("balance_fetch_failed_using_config", error=str(e), fallback=initial_krw)
@@ -106,6 +123,12 @@ async def lifespan(app: FastAPI):
         initial_balance_krw=initial_krw,
         is_paper=is_paper,
     )
+
+    # 라이브 모드: 시작 즉시 현금 잔고 보정 (API 호출 전에 peak_value 오염 방지)
+    if not is_paper:
+        async with session_factory() as sess:
+            await portfolio_mgr.reconcile_cash_from_db(sess)
+            await sess.commit()
 
     # ── 4. AI 에이전트 ───────────────────────────────────────
     from agents.trade_review import TradeReviewAgent

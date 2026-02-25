@@ -44,16 +44,24 @@ export function PortfolioSummary() {
 
   const pnlColor = data.total_pnl >= 0 ? 'text-buy' : 'text-sell'
   const drawdownColor = data.drawdown_pct > 5 ? 'text-sell' : data.drawdown_pct > 2 ? 'text-yellow-400' : 'text-gray-300'
+  const returnFromInitial = data.initial_balance_krw > 0
+    ? ((data.total_value_krw - data.initial_balance_krw) / data.initial_balance_krw) * 100
+    : 0
+  const returnColor = returnFromInitial >= 0 ? 'text-buy' : 'text-sell'
 
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard label="총 자산" value={fmt(data.total_value_krw)} />
         <StatCard
-          label="총 수익"
-          value={fmt(data.total_pnl)}
-          sub={fmtPct(data.total_pnl_pct)}
-          color={pnlColor}
+          label="총 자산"
+          value={fmt(data.total_value_krw)}
+          sub={data.initial_balance_krw > 0 ? `원금 ${fmt(data.initial_balance_krw)}` : undefined}
+        />
+        <StatCard
+          label="원금 대비 수익"
+          value={fmtPct(returnFromInitial)}
+          sub={`${returnFromInitial >= 0 ? '+' : ''}${(data.total_value_krw - data.initial_balance_krw).toLocaleString('ko-KR')} ₩`}
+          color={returnColor}
         />
         <StatCard label="현금 잔액" value={fmt(data.cash_balance_krw)} />
         <StatCard

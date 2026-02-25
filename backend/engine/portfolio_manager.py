@@ -19,6 +19,7 @@ class PortfolioManager:
         is_paper: bool = True,
     ):
         self._market_data = market_data
+        self._initial_balance = initial_balance_krw
         self._cash_balance = initial_balance_krw
         self._is_paper = is_paper
         self._peak_value = initial_balance_krw
@@ -180,12 +181,13 @@ class PortfolioManager:
             "total_value_krw": round(total_value, 0),
             "cash_balance_krw": round(self._cash_balance, 0),
             "invested_value_krw": round(total_current_value, 0),
+            "initial_balance_krw": round(self._initial_balance, 0),
             "realized_pnl": round(self._realized_pnl, 0),
             "unrealized_pnl": round(total_unrealized_pnl, 0),
             "total_pnl": round(self._realized_pnl + total_unrealized_pnl, 0),
             "total_pnl_pct": round(
-                (self._realized_pnl + total_unrealized_pnl) / self._peak_value * 100, 2
-            ) if self._peak_value > 0 else 0,
+                (self._realized_pnl + total_unrealized_pnl) / self._initial_balance * 100, 2
+            ) if self._initial_balance > 0 else 0,
             "total_fees": round(total_fees, 0),
             "trade_count": trade_count,
             "peak_value": round(self._peak_value, 0),
@@ -209,6 +211,39 @@ class PortfolioManager:
         session.add(snapshot)
         await session.flush()
         return snapshot
+
+    async def reconcile_cash_from_db(self, session: AsyncSession) -> None:
+        """DB 포지션 기준으로 현금 잔고를 재계산 (인메모리 누수 방지)."""
+        result = await session.execute(
+            select(Position).where(Position.quantity > 0)
+        )
+        positions = list(result.scalars().all())
+        total_invested = sum(p.total_invested for p in positions)
+
+        # 수수료 합산
+        fee_result = await session.execute(
+            select(func.coalesce(func.sum(Order.fee), 0))
+        )
+        total_fees = float(fee_result.scalar())
+        if total_fees == 0:
+            trade_fee_result = await session.execute(
+                select(func.coalesce(func.sum(Trade.fee), 0))
+            )
+            total_fees = float(trade_fee_result.scalar())
+
+        old_cash = self._cash_balance
+        self._cash_balance = self._initial_balance - total_invested
+        if abs(old_cash - self._cash_balance) > 1.0:
+            # peak_value가 잘못된 값이면 리셋 (재시작 직후 보정)
+            correct_total = self._cash_balance + total_invested
+            if self._peak_value > correct_total * 1.5:
+                self._peak_value = correct_total
+            logger.warning(
+                "cash_balance_reconciled",
+                old=round(old_cash, 0),
+                new=round(self._cash_balance, 0),
+                diff=round(old_cash - self._cash_balance, 0),
+            )
 
     @property
     def cash_balance(self) -> float:
