@@ -36,7 +36,8 @@ function OrderDetail({ order }: { order: Order }) {
         className="w-full text-left px-4 py-3 hover:bg-gray-700/30 transition-colors"
         onClick={() => setExpanded((v) => !v)}
       >
-        <div className="flex items-center justify-between">
+        {/* Desktop layout */}
+        <div className="hidden sm:flex items-center justify-between">
           <div className="flex items-center gap-3">
             <span className={`text-sm font-bold ${side ? 'text-buy' : 'text-sell'}`}>
               {side ? '▲ 매수' : '▼ 매도'}
@@ -53,6 +54,29 @@ function OrderDetail({ order }: { order: Order }) {
               {format(utcToLocal(order.created_at), 'MM/dd HH:mm')}
             </span>
             <span className="text-gray-600">{expanded ? '▲' : '▼'}</span>
+          </div>
+        </div>
+        {/* Mobile layout - stacked */}
+        <div className="sm:hidden space-y-1.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className={`text-sm font-bold ${side ? 'text-buy' : 'text-sell'}`}>
+                {side ? '▲ 매수' : '▼ 매도'}
+              </span>
+              <span className="text-white font-medium text-sm">{order.symbol.replace('/KRW', '')}</span>
+            </div>
+            <span className="text-gray-500 text-xs">
+              {format(utcToLocal(order.created_at), 'MM/dd HH:mm')}
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <StrategyBadge name={order.strategy_name} />
+              {order.is_paper && (
+                <span className="text-xs text-gray-500 border border-gray-600 px-1 rounded">P</span>
+              )}
+            </div>
+            <span className="text-gray-300 text-sm">{price.toLocaleString()} ₩</span>
           </div>
         </div>
       </button>
@@ -136,36 +160,40 @@ export function TradeHistory() {
 
   return (
     <div className="bg-gray-800 rounded-xl overflow-hidden">
-      <div className="px-4 py-3 border-b border-gray-700 flex items-center gap-3 flex-wrap">
-        <h3 className="text-white font-semibold mr-2">거래 이력</h3>
-        <input
-          className="bg-gray-700 text-white text-xs px-2 py-1 rounded border border-gray-600 w-28"
-          placeholder="코인 (BTC/KRW)"
-          value={symbol}
-          onChange={(e) => { setSymbol(e.target.value); setPage(1) }}
-        />
-        <select
-          className="bg-gray-700 text-white text-xs px-2 py-1 rounded border border-gray-600"
-          value={strategy}
-          onChange={(e) => { setStrategy(e.target.value); setPage(1) }}
-        >
-          <option value="">전체 전략</option>
-          <option value="volatility_breakout">변동성 돌파</option>
-          <option value="ma_crossover">MA 크로스</option>
-          <option value="rsi">RSI</option>
-          <option value="macd_crossover">MACD</option>
-          <option value="bollinger_rsi">볼린저+RSI</option>
-          <option value="risk_management">리스크 관리</option>
-        </select>
-        <select
-          className="bg-gray-700 text-white text-xs px-2 py-1 rounded border border-gray-600"
-          value={side}
-          onChange={(e) => { setSide(e.target.value); setPage(1) }}
-        >
-          <option value="">전체</option>
-          <option value="buy">매수</option>
-          <option value="sell">매도</option>
-        </select>
+      <div className="px-4 py-3 border-b border-gray-700">
+        <div className="flex items-center gap-3 flex-wrap">
+          <h3 className="text-white font-semibold mr-2">거래 이력</h3>
+          <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
+            <input
+              className="bg-gray-700 text-white text-xs px-2 py-1.5 rounded border border-gray-600 w-24 sm:w-28"
+              placeholder="코인"
+              value={symbol}
+              onChange={(e) => { setSymbol(e.target.value); setPage(1) }}
+            />
+            <select
+              className="bg-gray-700 text-white text-xs px-2 py-1.5 rounded border border-gray-600"
+              value={strategy}
+              onChange={(e) => { setStrategy(e.target.value); setPage(1) }}
+            >
+              <option value="">전략</option>
+              <option value="volatility_breakout">변동성 돌파</option>
+              <option value="ma_crossover">MA 크로스</option>
+              <option value="rsi">RSI</option>
+              <option value="macd_crossover">MACD</option>
+              <option value="bollinger_rsi">볼린저+RSI</option>
+              <option value="risk_management">리스크 관리</option>
+            </select>
+            <select
+              className="bg-gray-700 text-white text-xs px-2 py-1.5 rounded border border-gray-600"
+              value={side}
+              onChange={(e) => { setSide(e.target.value); setPage(1) }}
+            >
+              <option value="">전체</option>
+              <option value="buy">매수</option>
+              <option value="sell">매도</option>
+            </select>
+          </div>
+        </div>
       </div>
 
       {isLoading ? (
@@ -181,15 +209,15 @@ export function TradeHistory() {
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={page === 1}
-              className="px-3 py-1 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-40"
+              className="px-4 py-2 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-40 active:bg-gray-600"
             >
               이전
             </button>
-            <span className="px-3 py-1 text-gray-400 text-sm">{page}페이지</span>
+            <span className="px-3 py-2 text-gray-400 text-sm">{page}페이지</span>
             <button
               onClick={() => setPage((p) => p + 1)}
               disabled={data.length < 20}
-              className="px-3 py-1 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-40"
+              className="px-4 py-2 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-40 active:bg-gray-600"
             >
               다음
             </button>

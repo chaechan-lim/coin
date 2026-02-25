@@ -86,7 +86,8 @@ export function PortfolioSummary() {
           <div className="px-4 py-3 border-b border-gray-700 text-sm font-semibold text-gray-300">
             보유 포지션
           </div>
-          <table className="w-full text-sm">
+          {/* Desktop table */}
+          <table className="w-full text-sm hidden md:table">
             <thead>
               <tr className="text-gray-500 text-xs border-b border-gray-700">
                 <th className="px-4 py-2 text-left">코인</th>
@@ -113,6 +114,39 @@ export function PortfolioSummary() {
               ))}
             </tbody>
           </table>
+          {/* Mobile card layout */}
+          <div className="md:hidden divide-y divide-gray-700/50">
+            {data.positions.map((pos) => (
+              <div key={pos.symbol} className="px-4 py-3 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-white">{pos.symbol.replace('/KRW', '')}</span>
+                  <span className={`font-semibold ${pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}`}>
+                    {fmtPct(pos.unrealized_pnl_pct)}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-x-4 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">평균가</span>
+                    <span className="text-gray-300">{pos.average_buy_price.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">현재가</span>
+                    <span className="text-gray-300">{pos.current_price.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">평가금액</span>
+                    <span className="text-gray-300">{pos.current_value.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">손익</span>
+                    <span className={pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}>
+                      {pos.unrealized_pnl >= 0 ? '+' : ''}{pos.unrealized_pnl.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

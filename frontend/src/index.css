@@ -16,4 +16,13 @@
   ::-webkit-scrollbar-thumb {
     @apply bg-gray-600 rounded-full;
   }
+
+  /* Hide scrollbar for horizontal tab navigation on mobile */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
 }

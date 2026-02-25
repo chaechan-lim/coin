@@ -19,10 +19,10 @@ export function PortfolioChart() {
   }))
 
   return (
-    <div className="bg-gray-800 rounded-xl p-4">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-white font-semibold">포트폴리오 추이</h3>
-        <div className="flex gap-1">
+    <div className="bg-gray-800 rounded-xl p-3 md:p-4">
+      <div className="flex items-center justify-between mb-3 md:mb-4">
+        <h3 className="text-white font-semibold text-sm md:text-base">포트폴리오 추이</h3>
+        <div className="flex gap-0.5 md:gap-1">
           {PERIODS.map((p) => (
             <button
               key={p}

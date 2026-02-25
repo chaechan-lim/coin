@@ -76,25 +76,25 @@ export function Dashboard() {
   return (
     <div className="min-h-screen bg-gray-900 text-white">
       {/* Header */}
-      <header className="border-b border-gray-700 px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <span className="text-xl font-bold">🪙 코인 자동 매매</span>
+      <header className="border-b border-gray-700 px-4 md:px-6 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-2 md:gap-3 min-w-0">
+          <span className="text-lg md:text-xl font-bold whitespace-nowrap">🪙 코인 자동 매매</span>
           <span className="text-xs text-gray-500 hidden md:block">빗썸 기반 24시간 트레이딩</span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
-          <span className="text-xs text-gray-400">{connected ? '연결됨' : '연결 중...'}</span>
+          <span className="text-xs text-gray-400 hidden sm:inline">{connected ? '연결됨' : '연결 중...'}</span>
         </div>
       </header>
 
-      {/* Tabs */}
-      <nav className="border-b border-gray-700 px-6">
-        <div className="flex gap-1">
+      {/* Tabs - horizontal scroll on mobile */}
+      <nav className="border-b border-gray-700 px-2 md:px-6">
+        <div className="flex gap-0.5 md:gap-1 overflow-x-auto scrollbar-hide">
           {TABS.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
-              className={`px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
+              className={`px-3 md:px-4 py-3 text-xs md:text-sm font-medium transition-colors border-b-2 -mb-px whitespace-nowrap ${
                 tab === t.id
                   ? 'border-blue-500 text-blue-400'
                   : 'border-transparent text-gray-400 hover:text-white'
@@ -107,7 +107,7 @@ export function Dashboard() {
       </nav>
 
       {/* Content */}
-      <main className="p-4 md:p-6 space-y-4 max-w-7xl mx-auto">
+      <main className="p-3 md:p-6 space-y-3 md:space-y-4 max-w-7xl mx-auto">
         {tab === 'overview' && (
           <>
             <EngineControl liveEvents={liveEvents} />

@@ -72,8 +72,8 @@ export function StrategyPerformance() {
             </BarChart>
           </ResponsiveContainer>
 
-          {/* Table */}
-          <table className="w-full text-xs mt-2">
+          {/* Desktop Table */}
+          <table className="w-full text-xs mt-2 hidden sm:table">
             <thead>
               <tr className="text-gray-500 border-b border-gray-700">
                 <th className="py-1 text-left">전략</th>
@@ -101,6 +101,28 @@ export function StrategyPerformance() {
               ))}
             </tbody>
           </table>
+          {/* Mobile Cards */}
+          <div className="sm:hidden mt-2 space-y-2">
+            {chartData.map((s) => (
+              <div key={s.name} className="bg-gray-900 rounded-lg p-2.5">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-gray-200 text-xs font-medium">{s.name}</span>
+                  <span className={`text-xs font-bold ${s.winRate >= 50 ? 'text-buy' : 'text-sell'}`}>
+                    {s.winRate.toFixed(1)}%
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-500">{s.trades}건</span>
+                  <span className={s.pnl >= 0 ? 'text-buy' : 'text-sell'}>
+                    {s.pnl >= 0 ? '+' : ''}{s.pnl}k ₩
+                  </span>
+                  <span className={s.avgReturn >= 0 ? 'text-buy' : 'text-sell'}>
+                    평균 {s.avgReturn >= 0 ? '+' : ''}{s.avgReturn.toFixed(2)}%
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
         </>
       )}
     </div>

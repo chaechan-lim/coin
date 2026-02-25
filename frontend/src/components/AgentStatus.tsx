@@ -126,7 +126,7 @@ export function AgentStatus() {
                     .sort(([, a], [, b]) => b - a)
                     .map(([name, weight]) => (
                       <div key={name} className="flex items-center gap-2">
-                        <span className="text-gray-400 text-xs w-24 truncate">{name.replace(/_/g, ' ')}</span>
+                        <span className="text-gray-400 text-xs w-16 sm:w-24 truncate">{name.replace(/_/g, ' ')}</span>
                         <div className="flex-1 bg-gray-700 rounded-full h-1">
                           <div
                             className="bg-blue-500 h-1 rounded-full transition-all"
@@ -179,14 +179,14 @@ export function AgentStatus() {
 
       {/* Trade Review Agent */}
       <div className="bg-gray-800 rounded-xl p-4">
-        <div className="flex items-center gap-2 mb-3">
-          <div className={`w-2 h-2 rounded-full ${review?.total_trades > 0 ? 'bg-blue-500' : 'bg-gray-500'}`} />
-          <h3 className="text-white font-semibold text-sm">매매 회고 에이전트</h3>
-          <span className="text-gray-500 text-xs">24시간 분석</span>
+        <div className="flex items-center gap-2 mb-3 flex-wrap">
+          <div className={`w-2 h-2 rounded-full shrink-0 ${review?.total_trades > 0 ? 'bg-blue-500' : 'bg-gray-500'}`} />
+          <h3 className="text-white font-semibold text-sm">매매 회고</h3>
+          <span className="text-gray-500 text-xs hidden sm:inline">24시간 분석</span>
           <button
             onClick={() => reviewMut.mutate()}
             disabled={reviewMut.isPending}
-            className="ml-auto text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1 rounded transition-colors disabled:opacity-50"
+            className="ml-auto text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1.5 rounded transition-colors disabled:opacity-50 active:bg-gray-500"
           >
             {reviewMut.isPending ? '분석 중...' : '수동 실행'}
           </button>
@@ -232,14 +232,14 @@ export function AgentStatus() {
                   {Object.entries(review.by_strategy)
                     .sort(([, a]: any, [, b]: any) => b.total_pnl - a.total_pnl)
                     .map(([name, stats]: [string, any]) => (
-                      <div key={name} className="flex items-center gap-2 text-xs">
-                        <span className="text-gray-400 w-28 truncate">{name.replace(/_/g, ' ')}</span>
-                        <span className="text-gray-300 w-16">{stats.trades}건</span>
-                        <span className={`w-16 ${stats.win_rate >= 0.5 ? 'text-green-400' : 'text-red-400'}`}>
-                          {(stats.win_rate * 100).toFixed(0)}% 승률
+                      <div key={name} className="flex items-center gap-2 text-xs flex-wrap">
+                        <span className="text-gray-400 w-20 sm:w-28 truncate">{name.replace(/_/g, ' ')}</span>
+                        <span className="text-gray-300">{stats.trades}건</span>
+                        <span className={`${stats.win_rate >= 0.5 ? 'text-green-400' : 'text-red-400'}`}>
+                          {(stats.win_rate * 100).toFixed(0)}%
                         </span>
-                        <span className={`flex-1 text-right ${stats.total_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                          {stats.total_pnl >= 0 ? '+' : ''}{fmt(stats.total_pnl)} KRW
+                        <span className={`ml-auto ${stats.total_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {stats.total_pnl >= 0 ? '+' : ''}{fmt(stats.total_pnl)}
                         </span>
                       </div>
                     ))}

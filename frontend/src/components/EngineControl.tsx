@@ -24,27 +24,29 @@ export function EngineControl({ liveEvents }: { liveEvents: string[] }) {
   const isPaper = status?.mode === 'paper'
 
   return (
-    <div className="bg-gray-800 rounded-xl p-4">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <div className={`w-2.5 h-2.5 rounded-full ${isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`} />
-          <h3 className="text-white font-semibold">엔진 상태</h3>
+    <div className="bg-gray-800 rounded-xl p-3 md:p-4">
+      <div className="flex items-center justify-between mb-3 md:mb-4 gap-2">
+        <div className="flex items-center gap-2 md:gap-3 min-w-0 flex-wrap">
+          <div className="flex items-center gap-2">
+            <div className={`w-2.5 h-2.5 rounded-full shrink-0 ${isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`} />
+            <h3 className="text-white font-semibold text-sm md:text-base">엔진 상태</h3>
+          </div>
           <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${isPaper ? 'bg-blue-900 text-blue-300' : 'bg-orange-900 text-orange-300'}`}>
-            {isPaper ? '페이퍼 모드' : '실전 모드'}
+            {isPaper ? '페이퍼' : '실전'}
           </span>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 shrink-0">
           <button
             onClick={() => startMut.mutate()}
             disabled={isRunning || startMut.isPending}
-            className="px-3 py-1.5 bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white text-sm rounded-lg font-medium transition-colors"
+            className="px-3 py-1.5 bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white text-sm rounded-lg font-medium transition-colors active:bg-green-500"
           >
             시작
           </button>
           <button
             onClick={() => stopMut.mutate()}
             disabled={!isRunning || stopMut.isPending}
-            className="px-3 py-1.5 bg-red-800 hover:bg-red-700 disabled:opacity-40 text-white text-sm rounded-lg font-medium transition-colors"
+            className="px-3 py-1.5 bg-red-800 hover:bg-red-700 disabled:opacity-40 text-white text-sm rounded-lg font-medium transition-colors active:bg-red-600"
           >
             중지
           </button>

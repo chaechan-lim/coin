@@ -34,27 +34,29 @@ export function OrderLog() {
     <div className="bg-gray-800 rounded-xl overflow-hidden">
       <div className="px-4 py-3 border-b border-gray-700">
         <div className="flex items-center gap-3 flex-wrap">
-          <h3 className="text-white font-semibold mr-2">전략 신호 로그 (회고 분석)</h3>
-          <input
-            className="bg-gray-700 text-white text-xs px-2 py-1 rounded border border-gray-600 w-28"
-            placeholder="코인"
-            value={symbol}
-            onChange={(e) => { setSymbol(e.target.value); setPage(1) }}
-          />
-          <select
-            className="bg-gray-700 text-white text-xs px-2 py-1 rounded border border-gray-600"
-            value={strategy}
-            onChange={(e) => { setStrategy(e.target.value); setPage(1) }}
-          >
-            <option value="">전체 전략</option>
-            <option value="volatility_breakout">변동성 돌파</option>
-            <option value="ma_crossover">MA 크로스</option>
-            <option value="rsi">RSI</option>
-            <option value="macd_crossover">MACD</option>
-            <option value="bollinger_rsi">볼린저+RSI</option>
-            <option value="risk_management">리스크 관리</option>
-          </select>
-          <span className="text-gray-500 text-xs">* 체결 여부와 무관하게 모든 신호 기록</span>
+          <h3 className="text-white font-semibold mr-2 text-sm md:text-base">전략 신호 로그</h3>
+          <div className="flex items-center gap-2 flex-wrap">
+            <input
+              className="bg-gray-700 text-white text-xs px-2 py-1.5 rounded border border-gray-600 w-24 sm:w-28"
+              placeholder="코인"
+              value={symbol}
+              onChange={(e) => { setSymbol(e.target.value); setPage(1) }}
+            />
+            <select
+              className="bg-gray-700 text-white text-xs px-2 py-1.5 rounded border border-gray-600"
+              value={strategy}
+              onChange={(e) => { setStrategy(e.target.value); setPage(1) }}
+            >
+              <option value="">전략</option>
+              <option value="volatility_breakout">변동성 돌파</option>
+              <option value="ma_crossover">MA 크로스</option>
+              <option value="rsi">RSI</option>
+              <option value="macd_crossover">MACD</option>
+              <option value="bollinger_rsi">볼린저+RSI</option>
+              <option value="risk_management">리스크 관리</option>
+            </select>
+          </div>
+          <span className="text-gray-500 text-xs hidden sm:inline">* 체결 여부와 무관하게 모든 신호</span>
         </div>
       </div>
 
@@ -68,18 +70,18 @@ export function OrderLog() {
             {data.map((log: StrategyLog) => {
               const signalStyle = SIGNAL_STYLE[log.signal_type ?? 'HOLD'] ?? SIGNAL_STYLE.HOLD
               return (
-                <div key={log.id} className="px-4 py-3 hover:bg-gray-700/20">
-                  <div className="flex items-center gap-3 mb-1">
+                <div key={log.id} className="px-3 md:px-4 py-3 hover:bg-gray-700/20">
+                  <div className="flex items-center gap-2 md:gap-3 mb-1 flex-wrap">
                     <span className={`text-xs font-bold border px-1.5 py-0.5 rounded ${signalStyle}`}>
                       {log.signal_type ?? '?'}
                     </span>
-                    <span className="text-white text-sm font-medium">{log.symbol}</span>
-                    <span className="text-gray-500 text-xs">{log.strategy_name.replace(/_/g, ' ')}</span>
+                    <span className="text-white text-sm font-medium">{log.symbol.replace('/KRW', '')}</span>
+                    <span className="text-gray-500 text-xs hidden sm:inline">{log.strategy_name.replace(/_/g, ' ')}</span>
                     {log.was_executed && (
-                      <span className="text-green-400 text-xs">✓ 체결</span>
+                      <span className="text-green-400 text-xs">✓</span>
                     )}
                     <span className="ml-auto text-gray-500 text-xs">
-                      {format(utcToLocal(log.logged_at), 'MM/dd HH:mm:ss')}
+                      {format(utcToLocal(log.logged_at), 'MM/dd HH:mm')}
                     </span>
                   </div>
 
@@ -117,15 +119,15 @@ export function OrderLog() {
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={page === 1}
-              className="px-3 py-1 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-40"
+              className="px-4 py-2 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-40 active:bg-gray-600"
             >
               이전
             </button>
-            <span className="px-3 py-1 text-gray-400 text-sm">{page}페이지</span>
+            <span className="px-3 py-2 text-gray-400 text-sm">{page}페이지</span>
             <button
               onClick={() => setPage((p) => p + 1)}
               disabled={!data || data.length < 30}
-              className="px-3 py-1 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-40"
+              className="px-4 py-2 bg-gray-700 text-gray-300 rounded text-sm disabled:opacity-40 active:bg-gray-600"
             >
               다음
             </button>

@@ -84,10 +84,10 @@ export function RotationMonitor() {
       </div>
 
       {/* Rotation Enabled Status */}
-      <div className="bg-gray-800 rounded-lg p-4 flex items-center justify-between">
-        <div>
-          <span className="text-sm text-gray-400">로테이션 모드</span>
-          <span className={`ml-2 text-sm font-bold ${data.rotation_enabled ? 'text-green-400' : 'text-red-400'}`}>
+      <div className="bg-gray-800 rounded-lg p-3 md:p-4 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-400">로테이션</span>
+          <span className={`text-sm font-bold ${data.rotation_enabled ? 'text-green-400' : 'text-red-400'}`}>
             {data.rotation_enabled ? 'ON' : 'OFF'}
           </span>
         </div>
@@ -136,12 +136,12 @@ export function RotationMonitor() {
               )
             })}
             {/* Legend */}
-            <div className="flex items-center gap-4 mt-3 text-xs text-gray-500">
+            <div className="flex items-center gap-3 md:gap-4 mt-3 text-xs text-gray-500 flex-wrap">
               <span className="flex items-center gap-1">
-                <span className="w-3 h-3 bg-red-500 rounded-sm inline-block" /> 임계값 이상
+                <span className="w-3 h-3 bg-red-500 rounded-sm inline-block" /> 초과
               </span>
               <span className="flex items-center gap-1">
-                <span className="w-3 h-3 bg-blue-600 rounded-sm inline-block" /> 임계값 미만
+                <span className="w-3 h-3 bg-blue-600 rounded-sm inline-block" /> 미만
               </span>
               <span className="flex items-center gap-1">
                 <span className="w-px h-3 bg-yellow-500 inline-block" /> 임계값 ({data.surge_threshold.toFixed(1)}x)

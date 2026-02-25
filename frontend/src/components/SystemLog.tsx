@@ -108,7 +108,7 @@ export function SystemLog({ realtimeEvents = [] }: SystemLogProps) {
         <button
           onClick={() => setPage((p) => Math.max(1, p - 1))}
           disabled={page === 1}
-          className="px-3 py-1.5 text-sm bg-gray-700 rounded disabled:opacity-40 hover:bg-gray-600"
+          className="px-4 py-2 text-sm bg-gray-700 rounded disabled:opacity-40 hover:bg-gray-600 active:bg-gray-500"
         >
           이전
         </button>
@@ -116,7 +116,7 @@ export function SystemLog({ realtimeEvents = [] }: SystemLogProps) {
         <button
           onClick={() => setPage((p) => p + 1)}
           disabled={events.length < size}
-          className="px-3 py-1.5 text-sm bg-gray-700 rounded disabled:opacity-40 hover:bg-gray-600"
+          className="px-4 py-2 text-sm bg-gray-700 rounded disabled:opacity-40 hover:bg-gray-600 active:bg-gray-500"
         >
           다음
         </button>
@@ -139,38 +139,50 @@ function EventRow({
   const hasExtra = ev.detail || ev.metadata
 
   return (
-    <div className="px-4 py-3">
+    <div className="px-3 md:px-4 py-3">
       <div
-        className={`flex items-center gap-3 ${hasExtra ? 'cursor-pointer' : ''}`}
+        className={`${hasExtra ? 'cursor-pointer' : ''}`}
         onClick={hasExtra ? onToggle : undefined}
       >
-        {/* Level badge */}
-        <span className={`text-xs font-semibold px-2 py-0.5 rounded ${ls.bg} ${ls.text} uppercase min-w-[60px] text-center`}>
-          {ev.level}
-        </span>
-
-        {/* Category tag */}
-        <span className={`text-xs px-2 py-0.5 rounded ${cs} min-w-[64px] text-center`}>
-          {ev.category}
-        </span>
-
-        {/* Title */}
-        <span className="flex-1 text-sm">{ev.title}</span>
-
-        {/* Time */}
-        <span className="text-xs text-gray-500 whitespace-nowrap">
-          {format(utcToLocal(ev.created_at), 'MM/dd HH:mm:ss')}
-        </span>
-
-        {/* Expand indicator */}
-        {hasExtra && (
-          <span className="text-gray-500 text-xs">{expanded ? '▼' : '▶'}</span>
-        )}
+        {/* Desktop layout */}
+        <div className="hidden sm:flex items-center gap-3">
+          <span className={`text-xs font-semibold px-2 py-0.5 rounded ${ls.bg} ${ls.text} uppercase min-w-[60px] text-center`}>
+            {ev.level}
+          </span>
+          <span className={`text-xs px-2 py-0.5 rounded ${cs} min-w-[64px] text-center`}>
+            {ev.category}
+          </span>
+          <span className="flex-1 text-sm">{ev.title}</span>
+          <span className="text-xs text-gray-500 whitespace-nowrap">
+            {format(utcToLocal(ev.created_at), 'MM/dd HH:mm:ss')}
+          </span>
+          {hasExtra && (
+            <span className="text-gray-500 text-xs">{expanded ? '▼' : '▶'}</span>
+          )}
+        </div>
+        {/* Mobile layout - stacked */}
+        <div className="sm:hidden space-y-1">
+          <div className="flex items-center gap-1.5">
+            <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${ls.bg} ${ls.text} uppercase`}>
+              {ev.level}
+            </span>
+            <span className={`text-xs px-1.5 py-0.5 rounded ${cs}`}>
+              {ev.category}
+            </span>
+            <span className="ml-auto text-xs text-gray-500">
+              {format(utcToLocal(ev.created_at), 'HH:mm:ss')}
+            </span>
+            {hasExtra && (
+              <span className="text-gray-500 text-xs">{expanded ? '▼' : '▶'}</span>
+            )}
+          </div>
+          <div className="text-sm text-gray-200">{ev.title}</div>
+        </div>
       </div>
 
       {/* Expanded detail */}
       {expanded && (
-        <div className="mt-2 ml-[140px] space-y-1">
+        <div className="mt-2 sm:ml-[140px] space-y-1">
           {ev.detail && (
             <p className="text-xs text-gray-400 whitespace-pre-wrap">{ev.detail}</p>
           )}
