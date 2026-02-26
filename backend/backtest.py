@@ -1008,6 +1008,7 @@ class FuturesBacktester:
         funding_rate: float = FUNDING_RATE,
         position_pct: float = 0.30,
         short_all: bool = False,             # 모든 시장에서 숏 허용
+        short_sideways: bool = False,        # sideways+downtrend+crash에서 숏 허용
     ):
         self._exchange = exchange
         self._initial_balance = initial_balance
@@ -1025,6 +1026,7 @@ class FuturesBacktester:
         self._futures_fee = futures_fee
         self._funding_rate = funding_rate
         self._short_all = short_all
+        self._short_sideways = short_sideways
 
         # ── 레버리지 적응형 파라미터 ──────────────────────────
         import math
@@ -1118,7 +1120,7 @@ class FuturesBacktester:
         trail_str = (f"활성 +{self._effective_trail_act:.1f}% / 스탑 -{self._effective_trail_stop:.1f}%"
                      if self._effective_trail_act > 0 else "OFF")
         print(f"  손절: {sl_str} | 익절: {tp_str} | 트레일링: {trail_str}")
-        short_str = "전체" if self._short_all else "downtrend/crash만"
+        short_str = "전체" if self._short_all else ("sideways+downtrend/crash" if self._short_sideways else "downtrend/crash만")
         print(f"  숏 허용: {short_str} | 쿨다운: {self._trade_cooldown}캔들 | 최소 신뢰도: {self._min_confidence}")
         print(f"{'='*60}")
 
@@ -1414,7 +1416,11 @@ class FuturesBacktester:
 
                 elif decision.action == SignalType.SELL:
                     # 숏 진입 — 시장 상태 게이팅
-                    if not self._short_all and current_market_state not in self.SHORT_ALLOWED_STATES:
+                    if self._short_sideways:
+                        _allowed = {"sideways", "downtrend", "crash"}
+                    else:
+                        _allowed = self.SHORT_ALLOWED_STATES
+                    if not self._short_all and current_market_state not in _allowed:
                         continue  # uptrend/sideways에서 숏 차단
 
                     # 숏 신뢰도 상향: 최소 0.55
@@ -2345,6 +2351,8 @@ async def main():
                         help="포지션 크기 (현금 대비 %%, 기본 0.30=30%%)")
     parser.add_argument("--short-all",     action="store_true", default=False,
                         help="모든 시장에서 숏 허용 (기본: downtrend/crash만)")
+    parser.add_argument("--short-sideways", action="store_true", default=False,
+                        help="sideways+downtrend+crash에서 숏 허용")
 
     args = parser.parse_args()
 
@@ -2402,6 +2410,7 @@ async def main():
             funding_rate=args.funding_rate,
             position_pct=args.position_pct,
             short_all=args.short_all,
+            short_sideways=args.short_sideways,
         )
 
         # 선물 심볼 자동 변환: BTC/KRW → BTC/USDT
