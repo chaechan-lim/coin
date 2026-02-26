@@ -97,6 +97,9 @@ class TradingEngine:
         self._dynamic_rotation_coins: list[str] = []
         self._rotation_coins_updated: datetime | None = None
 
+        # 리밸런싱 쿨다운 (코인별 마지막 리밸런싱 시각)
+        self._last_rebalance: dict[str, datetime] = {}
+
         # WebSocket broadcast callback
         self._broadcast_callback = None
 
@@ -569,6 +572,103 @@ class TradingEngine:
                 },
             })
 
+    # ── 포트폴리오 리밸런싱 ─────────────────────────────────────────
+
+    _REBALANCE_COOLDOWN_SEC = 3600  # 동일 코인 1시간 쿨다운
+
+    async def _check_and_rebalance(self, session: AsyncSession) -> None:
+        """비중 초과 코인 자동 일부 매도 (max_single_coin_pct → target_pct)."""
+        risk = self._config.risk
+        if not risk.rebalancing_enabled:
+            return
+
+        summary = await self._portfolio_manager.get_portfolio_summary(session)
+        total_value = summary.get("total_value_krw", 0)
+        if total_value <= 0:
+            return
+
+        now = datetime.now(timezone.utc)
+        positions = summary.get("positions", [])
+
+        for pos_info in positions:
+            symbol = pos_info["symbol"]
+            current_value = pos_info["current_value"]
+            weight = current_value / total_value
+
+            if weight <= risk.max_single_coin_pct:
+                continue
+
+            # 서지 포지션 스킵
+            tracker = self._position_trackers.get(symbol)
+            if tracker and tracker.is_surge:
+                continue
+
+            # 쿨다운 체크
+            last = self._last_rebalance.get(symbol)
+            if last and (now - last).total_seconds() < self._REBALANCE_COOLDOWN_SEC:
+                continue
+
+            # 매도 수량 계산: (weight - target) / weight 비율만큼
+            target = risk.rebalancing_target_pct
+            sell_ratio = (weight - target) / weight
+            qty = pos_info["quantity"] * sell_ratio
+            price = pos_info["current_price"]
+
+            if qty <= 0 or price <= 0:
+                continue
+
+            weight_pct = round(weight * 100, 1)
+            target_pct = round(target * 100, 1)
+            logger.info(
+                "rebalancing_triggered",
+                symbol=symbol, weight_pct=weight_pct,
+                target_pct=target_pct, sell_qty=qty,
+            )
+
+            await self._execute_rebalancing_sell(session, symbol, qty, price)
+            self._last_rebalance[symbol] = now
+
+            await emit_event(
+                "warning", "risk",
+                f"리밸런싱: {symbol} 비중 {weight_pct}%→{target_pct}%",
+                metadata={"symbol": symbol, "weight": weight_pct, "target": target_pct},
+            )
+
+    async def _execute_rebalancing_sell(
+        self, session: AsyncSession, symbol: str, qty: float, price: float
+    ) -> None:
+        """리밸런싱 부분 매도 (현물)."""
+        signal = Signal(
+            strategy_name="rebalancing",
+            signal_type=SignalType.SELL,
+            confidence=1.0,
+            reason=f"포트폴리오 리밸런싱: 비중 초과 부분 매도",
+        )
+
+        order = await self._order_manager.create_order(
+            session, symbol, "sell", qty, price, signal,
+            order_type="market",
+        )
+
+        if order.status != "filled":
+            logger.warning("rebalancing_sell_not_filled", symbol=symbol, status=order.status)
+            if order.exchange_order_id:
+                try:
+                    await self._order_manager.cancel_order_by_id(session, order.id)
+                except Exception:
+                    pass
+            return
+
+        await self._portfolio_manager.update_position_on_sell(
+            session, symbol, qty, price,
+            qty * price, order.fee,
+        )
+
+        logger.info(
+            "rebalancing_sell_executed",
+            symbol=symbol, qty=round(qty, 8), price=price,
+        )
+
     # ── 평가 사이클 ────────────────────────────────────────────────
 
     async def _evaluation_cycle(self) -> None:
@@ -581,6 +681,9 @@ class TradingEngine:
             try:
                 # 매 사이클 시작 시 현금 잔고 정합성 확인
                 await self._portfolio_manager.reconcile_cash_from_db(session)
+
+                # 포트폴리오 리밸런싱 (비중 초과 코인 자동 일부 매도)
+                await self._check_and_rebalance(session)
 
                 coins = set(self._config.trading.tracked_coins)
 

@@ -51,6 +51,8 @@ class RiskConfig(BaseSettings):
     daily_loss_limit_pct: float = 0.03
     max_trade_size_pct: float = 0.20
     max_open_orders: int = 20
+    rebalancing_enabled: bool = True
+    rebalancing_target_pct: float = 0.35  # 리밸런싱 후 목표 비중
 
     model_config = {"env_prefix": "RISK_"}
 

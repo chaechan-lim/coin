@@ -291,6 +291,7 @@ coin/
 | WebSocket 가격 모니터 | ✅ ccxt.pro 실시간 SL/TP/청산가 체크 (~1초), 5분 폴링 fallback |
 | **P1 최적화** | ✅ 4h 타임프레임, 동적 SL, 숏 전면 허용, PF 1.80 |
 | 가격 0원 fallback | ✅ fetch_ticker last=None → bid/ask 중간값 → orderbook fallback |
+| **자동 리밸런싱** | ✅ 비중 40% 초과 → 35%까지 자동 부분 매도 (현물+선물, 1시간 쿨다운) |
 | 바이낸스 현물 연동 | ⬜ BinanceSpotAdapter (ccxt binance), 현물 TradingEngine 추가 (계획) |
 | 시장 상태별 전략 on/off | ⬜ 횡보 시 추세추종 완전 비활성 (향후) |
 | 라즈베리파이 배포 | ⬜ 예정 |
@@ -373,6 +374,21 @@ coin/
 
 - peak 계산: `MAX(PortfolioSnapshot.total_value_krw)` (인메모리 peak_value 대신 DB 기반)
 - 매수 차단 시에도 SELL 신호는 통과 (`_can_trade=False`여도 SELL 실행)
+
+### 자동 포트폴리오 리밸런싱 (v0.15)
+
+매 평가 사이클(5분)마다 비중 체크 → `max_single_coin_pct`(40%) 초과 시 자동 부분 매도:
+
+| 항목 | 값 | 비고 |
+|------|------|------|
+| 트리거 | 비중 > 40% | `RiskConfig.max_single_coin_pct` |
+| 목표 비중 | 35% | `RiskConfig.rebalancing_target_pct` (5% 버퍼) |
+| 주문 유형 | 시장가 | 리스크 제어 우선 |
+| 쿨다운 | 1시간 | 동일 코인 연속 리밸런싱 방지 |
+| 서지 포지션 | 스킵 | 별도 SL/TP/max_hold 관리 |
+| 선물 처리 | direction 반영 | 롱→sell, 숏→buy, `_close_lock` 내 실행 |
+| 일일 제한 | 면제 | 매도는 원래 무제한 |
+| 환경변수 | `RISK_REBALANCING_ENABLED`, `RISK_REBALANCING_TARGET_PCT` | |
 
 ### 과매매 방지 레이어 (다중 장치)
 1. **코인당 최소 간격**: 매수 1시간 이상 (매도는 간격 제한 없음)

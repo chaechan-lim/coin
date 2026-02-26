@@ -405,6 +405,9 @@ class BinanceFuturesEngine(TradingEngine):
                 # 현금 잔고 보정
                 await self._portfolio_manager.reconcile_cash_from_db(session)
 
+                # 포트폴리오 리밸런싱 (비중 초과 포지션 자동 일부 청산)
+                await self._check_and_rebalance(session)
+
                 # 추적 코인 + 보유 중인 포지션 합집합
                 tracked = set(self.tracked_coins)
                 result = await session.execute(
@@ -620,6 +623,58 @@ class BinanceFuturesEngine(TradingEngine):
             await emit_event("info", "trade",
                              f"선물 {direction} 청산: {symbol}",
                              metadata={"price": price, "reason": reason})
+
+    async def _execute_rebalancing_sell(
+        self, session: AsyncSession, symbol: str, qty: float, price: float
+    ) -> None:
+        """선물 리밸런싱 부분 청산 (롱→sell, 숏→buy). close_lock 내에서 실행."""
+        result = await session.execute(
+            select(Position).where(
+                Position.symbol == symbol,
+                Position.quantity > 0,
+                Position.exchange == self._exchange_name,
+            )
+        )
+        position = result.scalar_one_or_none()
+        if not position:
+            return
+
+        direction = position.direction or "long"
+        side = "sell" if direction == "long" else "buy"
+
+        signal = Signal(
+            strategy_name="rebalancing",
+            signal_type=SignalType.SELL if direction == "long" else SignalType.BUY,
+            confidence=1.0,
+            reason=f"선물 포트폴리오 리밸런싱: 비중 초과 부분 청산 ({direction})",
+        )
+
+        lev = position.leverage or self._leverage
+        async with self._close_lock:
+            order = await self._order_manager.create_order(
+                session, symbol, side, qty, price, signal,
+                order_type="market",
+                direction=direction, leverage=lev, margin_used=position.margin_used,
+            )
+
+            if order.status != "filled":
+                logger.warning("futures_rebalancing_not_filled", symbol=symbol, status=order.status)
+                if order.exchange_order_id:
+                    try:
+                        await self._order_manager.cancel_order_by_id(session, order.id)
+                    except Exception:
+                        pass
+                return
+
+            await self._portfolio_manager.update_position_on_sell(
+                session, symbol, qty, price,
+                qty * price, order.fee,
+            )
+
+        logger.info(
+            "futures_rebalancing_executed",
+            symbol=symbol, direction=direction, qty=round(qty, 8), price=price,
+        )
 
     async def _process_futures_decision(
         self, session: AsyncSession, symbol: str,
