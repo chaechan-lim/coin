@@ -289,6 +289,8 @@ coin/
 | 거래소 격리 테스트 | ✅ 5 tests + 선물 엔진 11 tests |
 | 바이낸스 선물 라이브 | ✅ 독립 모드 분리, 시장가 주문, 실제 USDT 잔고 조회 |
 | WebSocket 가격 모니터 | ✅ ccxt.pro 실시간 SL/TP/청산가 체크 (~1초), 5분 폴링 fallback |
+| **P1 최적화** | ✅ 4h 타임프레임, 동적 SL, 숏 전면 허용, PF 1.80 |
+| 가격 0원 fallback | ✅ fetch_ticker last=None → bid/ask 중간값 → orderbook fallback |
 | 바이낸스 현물 연동 | ⬜ BinanceSpotAdapter (ccxt binance), 현물 TradingEngine 추가 (계획) |
 | 시장 상태별 전략 on/off | ⬜ 횡보 시 추세추종 완전 비활성 (향후) |
 | 멀티 타임프레임 확인 | ⬜ 4h+1h 이중 확인 (향후) |
@@ -402,12 +404,16 @@ EngineRegistry (싱글턴)
 **데이터 격리**: 6테이블(Order, Trade, Position, PortfolioSnapshot, StrategyLog, AgentAnalysisLog)에 `exchange` 컬럼 추가 (기본값 "bithumb"). Position은 (symbol, exchange) 복합 유니크.
 
 **BinanceFuturesEngine 주요 기능**:
-- 롱/숏 양방향 매매 (숏은 downtrend/crash에서만)
-- SL/TP/트레일링: `/ sqrt(leverage)` 자동 축소
+- 롱/숏 양방향 매매 (**전체 시장 숏 허용** — P1 백테스트 결과)
+- **4h 타임프레임**: 전략 시그널 4h 캔들 기반 (노이즈 감소, PF 1.80)
+- SL 8%/TP 16%/트레일 5%/3.5%: `/ sqrt(leverage)` 자동 축소 (P1 최적화)
+- **동적 SL**: ATR 기반 + 시장 상태별 프로필 (crash=3~5%, uptrend=4~10%)
+- 포지션 사이징: 35% (P1 최적화)
 - 청산가 2% 이내 긴급 청산
 - 펀딩비 30분 주기 조회
 - 로테이션 비활성 (선물 전용)
 - **WebSocket 실시간 가격 모니터**: ccxt.pro → ~1초 SL/TP/청산가 체크 (5분 폴링 fallback 이중 체크)
+- **듀얼 타임프레임 시장 감지**: 4h(장기) + 1h(단기) 결합, 10분 갱신
 
 ### DB 주문 테이블 핵심 컬럼 (전략 귀속)
 ```sql
@@ -657,6 +663,8 @@ docker compose restart backend
 | v0.13 | 2026-02-26 | **듀얼 엔진**: 바이낸스 USDM 선물 통합 (DB exchange 컬럼, BinanceFuturesEngine, EngineRegistry, API 라우팅, 프론트엔드 거래소 전환), 111 테스트 |
 | v0.13.1 | 2026-02-26 | **바이낸스 선물 라이브**: 독립 모드 분리(BinanceTradingConfig.mode), 시장가 주문, fee_currency, 실제 USDT 잔고 조회 |
 | v0.14 | 2026-02-26 | **WebSocket 실시간 가격 모니터**: 선물 SL/TP/청산가 ~1초 체크 (ccxt.pro), 듀얼 루프 (WS 모니터 + 5분 전략 평가), 동시 청산 방지 Lock |
+| v0.14.1 | 2026-02-27 | **P1 최적화**: 4h 타임프레임, SL8/TP16/트레일5-3.5%, 동적 SL(ATR), 숏 전면 허용, 포지션 35% (PF 1.80, 알파 +62%) |
+| v0.14.2 | 2026-02-27 | 가격 0원 fallback: fetch_ticker last=None → bid/ask 중간값 → orderbook mid-price |
 | v0.15 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
 | v0.15 | 예정 | PostgreSQL 마이그레이션 |
 | v1.0 | 예정 | 라즈베리파이 배포 + 장기 운영 안정화 |
