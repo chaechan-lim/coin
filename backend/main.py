@@ -321,11 +321,12 @@ async def lifespan(app: FastAPI):
 
 
 async def _run_initial_analysis(coordinator, portfolio_mgr, config):
-    """Run initial market analysis and risk check on startup."""
+    """Run initial market analysis, risk check, and trade review on startup."""
     await asyncio.sleep(5)  # Let everything settle
     try:
         await coordinator.run_market_analysis()
         await coordinator.run_risk_evaluation(portfolio_mgr.cash_balance)
+        await coordinator.run_trade_review()
     except Exception as e:
         logger.warning("initial_analysis_failed", error=str(e))
 

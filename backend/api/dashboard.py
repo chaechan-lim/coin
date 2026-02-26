@@ -214,7 +214,10 @@ async def get_market_analysis_history(
 
 
 @router.get("/agents/trade-review/latest")
-async def get_latest_trade_review(exchange: str = Query("bithumb")):
+async def get_latest_trade_review(
+    exchange: str = Query("bithumb"),
+    session: AsyncSession = Depends(get_db),
+):
     coord = _get_coordinator(exchange)
     if coord and coord.last_trade_review:
         r = coord.last_trade_review
@@ -237,6 +240,17 @@ async def get_latest_trade_review(exchange: str = Query("bithumb")):
             "insights": r.insights,
             "recommendations": r.recommendations,
         }
+
+    # Fallback to DB (서버 재시작 후 인메모리 캐시 비어있을 때)
+    result = await session.execute(
+        select(AgentAnalysisLog)
+        .where(AgentAnalysisLog.agent_name == "trade_review", AgentAnalysisLog.exchange == exchange)
+        .order_by(desc(AgentAnalysisLog.analyzed_at))
+        .limit(1)
+    )
+    log = result.scalar_one_or_none()
+    if log:
+        return log.result
     return {"message": "아직 매매 회고 데이터 없음", "insights": [], "recommendations": []}
 
 
