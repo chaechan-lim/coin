@@ -97,7 +97,7 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
             <h3 className="text-white font-semibold text-sm">시장 분석 에이전트</h3>
           </div>
 
-          {analysis ? (
+          {analysis && analysis.confidence != null ? (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-gray-400 text-sm">시장 상태</span>
@@ -111,43 +111,49 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
                   <div className="w-24 bg-gray-700 rounded-full h-1.5">
                     <div
                       className="bg-blue-500 h-1.5 rounded-full"
-                      style={{ width: `${analysis.confidence * 100}%` }}
+                      style={{ width: `${(analysis.confidence ?? 0) * 100}%` }}
                     />
                   </div>
-                  <span className="text-white text-xs">{(analysis.confidence * 100).toFixed(0)}%</span>
+                  <span className="text-white text-xs">{((analysis.confidence ?? 0) * 100).toFixed(0)}%</span>
                 </div>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-gray-400 text-sm">변동성</span>
-                <span className="text-white text-sm">{VOLATILITY_KR[analysis.volatility_level] ?? analysis.volatility_level}</span>
-              </div>
+              {analysis.volatility_level && (
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-400 text-sm">변동성</span>
+                  <span className="text-white text-sm">{VOLATILITY_KR[analysis.volatility_level] ?? analysis.volatility_level}</span>
+                </div>
+              )}
 
               {/* Strategy weights */}
-              <div>
-                <div className="text-gray-400 text-xs mb-2">전략 가중치</div>
-                <div className="space-y-1">
-                  {Object.entries(analysis.recommended_weights)
-                    .sort(([, a], [, b]) => b - a)
-                    .map(([name, weight]) => (
-                      <div key={name} className="flex items-center gap-2">
-                        <span className="text-gray-400 text-xs w-16 sm:w-24 truncate">{name.replace(/_/g, ' ')}</span>
-                        <div className="flex-1 bg-gray-700 rounded-full h-1">
-                          <div
-                            className="bg-blue-500 h-1 rounded-full transition-all"
-                            style={{ width: `${weight * 100}%` }}
-                          />
+              {analysis.recommended_weights && Object.keys(analysis.recommended_weights).length > 0 && (
+                <div>
+                  <div className="text-gray-400 text-xs mb-2">전략 가중치</div>
+                  <div className="space-y-1">
+                    {Object.entries(analysis.recommended_weights)
+                      .sort(([, a], [, b]) => b - a)
+                      .map(([name, weight]) => (
+                        <div key={name} className="flex items-center gap-2">
+                          <span className="text-gray-400 text-xs w-16 sm:w-24 truncate">{name.replace(/_/g, ' ')}</span>
+                          <div className="flex-1 bg-gray-700 rounded-full h-1">
+                            <div
+                              className="bg-blue-500 h-1 rounded-full transition-all"
+                              style={{ width: `${weight * 100}%` }}
+                            />
+                          </div>
+                          <span className="text-gray-400 text-xs w-8 text-right">{(weight * 100).toFixed(0)}%</span>
                         </div>
-                        <span className="text-gray-400 text-xs w-8 text-right">{(weight * 100).toFixed(0)}%</span>
-                      </div>
-                    ))}
+                      ))}
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Reasoning */}
-              <div className="bg-gray-900 rounded-lg p-2">
-                <div className="text-gray-500 text-xs mb-1">분석 근거</div>
-                <div className="text-gray-300 text-xs leading-relaxed">{analysis.reasoning}</div>
-              </div>
+              {analysis.reasoning && (
+                <div className="bg-gray-900 rounded-lg p-2">
+                  <div className="text-gray-500 text-xs mb-1">분석 근거</div>
+                  <div className="text-gray-300 text-xs leading-relaxed">{analysis.reasoning}</div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="text-gray-500 text-sm">분석 데이터 없음</div>
