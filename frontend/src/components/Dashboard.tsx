@@ -20,7 +20,7 @@ const TABS = [
   { id: 'logs', label: '신호 로그' },
   { id: 'strategies', label: '전략 성과' },
   { id: 'agents', label: '에이전트' },
-  { id: 'rotation', label: '로테이션' },
+  { id: 'rotation', label: '종목/로테이션' },
   { id: 'system', label: '시스템 로그' },
 ] as const
 
@@ -129,8 +129,7 @@ export function Dashboard() {
       <nav className="border-b border-gray-700 overflow-x-auto scrollbar-hide">
         <div className="flex min-w-max">
           {TABS.map((t) => {
-            // 로테이션 탭은 빗썸에서만 표시
-            if (t.id === 'rotation' && exchange !== 'bithumb') return null
+            // 종목/로테이션 탭은 모든 거래소에서 표시
             return (
               <button
                 key={t.id}
@@ -161,7 +160,7 @@ export function Dashboard() {
         {tab === 'logs' && <OrderLog exchange={exchange} />}
         {tab === 'strategies' && <StrategyPerformance exchange={exchange} />}
         {tab === 'agents' && <AgentStatus exchange={exchange} />}
-        {tab === 'rotation' && exchange === 'bithumb' && <RotationMonitor />}
+        {tab === 'rotation' && <RotationMonitor exchange={exchange} />}
         {tab === 'system' && <SystemLog realtimeEvents={realtimeServerEvents} />}
       </main>
     </div>

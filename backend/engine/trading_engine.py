@@ -683,6 +683,7 @@ class TradingEngine:
     _STABLECOINS = {"USDT/KRW", "USDC/KRW", "DAI/KRW", "TUSD/KRW"}
     _ROTATION_REFRESH_SEC = 6 * 3600  # 6시간마다 갱신
     _MIN_QUOTE_VOLUME = 1e9  # 최소 24h 거래대금 10억원
+    _MAX_ROTATION_COINS = 40  # 로테이션 코인 상한
 
     async def _refresh_rotation_coins(self) -> None:
         """빗썸 전체 마켓에서 24h 거래대금 상위 코인을 로테이션 대상으로 선정."""
@@ -706,7 +707,7 @@ class TradingEngine:
                     ranked.append((sym, vol))
 
             ranked.sort(key=lambda x: x[1], reverse=True)
-            self._dynamic_rotation_coins = [sym for sym, _ in ranked]
+            self._dynamic_rotation_coins = [sym for sym, _ in ranked[:self._MAX_ROTATION_COINS]]
             self._rotation_coins_updated = now
 
             logger.info(
