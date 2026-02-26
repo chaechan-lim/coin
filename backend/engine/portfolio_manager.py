@@ -97,6 +97,7 @@ class PortfolioManager:
         realized = sell_proceeds - buy_cost
         self._realized_pnl += realized
 
+        old_quantity = position.quantity
         position.quantity -= quantity
         if position.quantity <= 0.0001:  # Effectively zero
             position.quantity = 0
@@ -104,6 +105,9 @@ class PortfolioManager:
             position.total_invested = 0
             position.is_surge = False
             position.entered_at = None
+        else:
+            # 부분 매도: total_invested를 남은 비율만큼 축소
+            position.total_invested *= (position.quantity / old_quantity)
 
         self._cash_balance += sell_proceeds
         await session.flush()

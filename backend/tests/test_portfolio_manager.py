@@ -207,3 +207,61 @@ async def test_average_buy_price_updates_on_additional_buy(session):
     assert pos.quantity == pytest.approx(0.002)
     # Average: (50M*0.001 + 52M*0.001) / 0.002 = 51M
     assert pos.average_buy_price == pytest.approx(51_000_000, rel=0.01)
+
+
+@pytest.mark.asyncio
+async def test_partial_sell_reduces_total_invested(session):
+    """Partial sell must reduce total_invested proportionally."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+    )
+    # Buy 1000 ADA at 400
+    await pm.update_position_on_buy(
+        session, "ADA/KRW",
+        quantity=1000, price=400, cost=400_000, fee=1000,
+    )
+
+    from sqlalchemy import select
+    from core.models import Position
+    result = await session.execute(select(Position).where(Position.symbol == "ADA/KRW"))
+    pos = result.scalar_one()
+    assert pos.total_invested == pytest.approx(401_000)  # cost + fee
+
+    # Partial sell: 500 ADA (50%)
+    await pm.update_position_on_sell(
+        session, "ADA/KRW",
+        quantity=500, price=420, cost=210_000, fee=525,
+    )
+
+    await session.refresh(pos)
+    assert pos.quantity == pytest.approx(500)
+    # total_invested should be halved (50% sold)
+    assert pos.total_invested == pytest.approx(200_500, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_partial_sell_unrealized_pnl_correct(session):
+    """After partial sell, portfolio unrealized PnL reflects only remaining position."""
+    prices = {"ADA/KRW": 420}
+    pm = PortfolioManager(
+        market_data=_make_market_data(prices),
+        initial_balance_krw=500_000,
+    )
+    # Buy 1000 ADA at 400
+    await pm.update_position_on_buy(
+        session, "ADA/KRW",
+        quantity=1000, price=400, cost=400_000, fee=1000,
+    )
+    # Partial sell: 500 ADA at 420
+    await pm.update_position_on_sell(
+        session, "ADA/KRW",
+        quantity=500, price=420, cost=210_000, fee=525,
+    )
+
+    summary = await pm.get_portfolio_summary(session)
+    # Remaining: 500 ADA at avg 400, current 420
+    # unrealized = 500*420 - (total_invested/2 ≈ 200500) = 210000 - 200500 = 9500
+    assert summary["unrealized_pnl"] == pytest.approx(9500, abs=100)
+    assert len(summary["positions"]) == 1
+    assert summary["positions"][0]["quantity"] == pytest.approx(500)
