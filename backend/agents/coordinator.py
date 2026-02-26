@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.enums import MarketState, RiskLevel
 from core.models import AgentAnalysisLog
+from core.event_bus import emit_event
 from agents.market_analysis import MarketAnalysisAgent, MarketAnalysis, WEIGHT_PROFILES
 from agents.risk_management import RiskManagementAgent, RiskAlert
 from agents.trade_review import TradeReviewAgent, TradeReview
@@ -95,6 +96,12 @@ class AgentCoordinator:
             state=analysis.state.value,
             confidence=analysis.confidence,
         )
+        await emit_event(
+            "info", "strategy",
+            f"시장 분석: {analysis.state.value} (신뢰도 {analysis.confidence:.0%})",
+            metadata={"state": analysis.state.value, "confidence": analysis.confidence,
+                      "exchange": self._exchange_name},
+        )
         return analysis
 
     async def run_risk_evaluation(self, cash_balance: float) -> list[RiskAlert]:
@@ -137,6 +144,15 @@ class AgentCoordinator:
                         self._engine.pause_buying(list(set(coins_to_pause)))
                     if coins_to_suppress:
                         self._engine.suppress_buys(list(set(coins_to_suppress)))
+
+                # 리스크 CRITICAL 경고를 시스템 로그에 발행
+                for alert in alerts:
+                    if alert.level == RiskLevel.CRITICAL:
+                        await emit_event(
+                            "warning", "risk",
+                            f"리스크 경고: {alert.message}",
+                            metadata={"action": alert.action, "exchange": self._exchange_name},
+                        )
 
                     # Resume coins with no alerts
                     all_alerted = set(coins_to_pause + coins_to_suppress)
@@ -207,6 +223,13 @@ class AgentCoordinator:
                 )
                 session.add(log)
                 await session.commit()
+
+                await emit_event(
+                    "info", "strategy",
+                    f"매매 회고: {review.total_trades}건, 승률 {review.win_rate:.0%}, PnL {review.total_realized_pnl:+,.0f}",
+                    metadata={"total_trades": review.total_trades, "win_rate": review.win_rate,
+                              "pnl": review.total_realized_pnl, "exchange": self._exchange_name},
+                )
 
                 return review
         except Exception as e:

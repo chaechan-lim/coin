@@ -2,6 +2,18 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getMarketAnalysis, getRiskAlerts, getTradeReview, triggerTradeReview } from '../api/client'
 import type { RiskAlert, ExchangeName } from '../types'
 
+/** **bold** 및 `code` 마크다운을 React 엘리먼트로 변환 */
+function renderMd(text: string) {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/)
+  return parts.map((part, i) => {
+    if (part.startsWith('**') && part.endsWith('**'))
+      return <strong key={i} className="text-white font-semibold">{part.slice(2, -2)}</strong>
+    if (part.startsWith('`') && part.endsWith('`'))
+      return <code key={i} className="text-pink-400 bg-gray-800 px-1 rounded text-[10px]">{part.slice(1, -1)}</code>
+    return <span key={i}>{part}</span>
+  })
+}
+
 const STATE_COLORS: Record<string, string> = {
   strong_uptrend: 'bg-green-500',
   uptrend: 'bg-emerald-400',
@@ -281,7 +293,7 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
                 <div className="text-blue-400 text-xs font-medium mb-1">인사이트</div>
                 <ul className="space-y-1">
                   {review.insights?.map((insight: string, i: number) => (
-                    <li key={i} className="text-gray-300 text-xs">- {insight}</li>
+                    <li key={i} className="text-gray-300 text-xs leading-relaxed">• {renderMd(insight)}</li>
                   ))}
                 </ul>
               </div>
@@ -289,7 +301,7 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
                 <div className="text-yellow-400 text-xs font-medium mb-1">추천</div>
                 <ul className="space-y-1">
                   {review.recommendations?.map((rec: string, i: number) => (
-                    <li key={i} className="text-gray-300 text-xs">- {rec}</li>
+                    <li key={i} className="text-gray-300 text-xs leading-relaxed">• {renderMd(rec)}</li>
                   ))}
                 </ul>
               </div>

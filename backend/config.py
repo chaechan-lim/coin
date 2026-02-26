@@ -108,6 +108,15 @@ class BinanceTradingConfig(BaseSettings):
     model_config = {"env_prefix": "BINANCE_TRADING_"}
 
 
+class LLMConfig(BaseSettings):
+    enabled: bool = False
+    api_key: str = ""
+    model: str = "claude-haiku-4-5-20251001"
+    daily_review_enabled: bool = True
+
+    model_config = {"env_prefix": "LLM_"}
+
+
 class AppConfig(BaseSettings):
     exchange: ExchangeConfig = Field(default_factory=ExchangeConfig)
     binance: BinanceConfig = Field(default_factory=BinanceConfig)
@@ -117,6 +126,7 @@ class AppConfig(BaseSettings):
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
     notification: NotificationConfig = Field(default_factory=NotificationConfig)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
     log_level: str = "INFO"
 
     model_config = {"env_prefix": "APP_"}

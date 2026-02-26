@@ -507,7 +507,7 @@ class TradingEngine:
             )
             await emit_event(
                 "warning", "trade", sell_reason,
-                metadata={"symbol": symbol, "pnl_pct": round(pnl_pct, 2), "price": price},
+                metadata={"symbol": symbol, "pnl_pct": round(pnl_pct, 2), "price": price, "entry_price": entry},
             )
             await self._execute_stop_sell(session, symbol, position, price, sell_reason)
             return True
@@ -1193,7 +1193,13 @@ class TradingEngine:
                 sl_pct=round(sl_pct, 2),
                 market_state=self._market_state,
             )
-            await emit_event("info", "trade", f"매수: {symbol}", metadata={"price": price, "sl_pct": round(sl_pct, 2)})
+            await emit_event("info", "trade", f"매수: {symbol}", metadata={
+                "price": price, "sl_pct": round(sl_pct, 2),
+                "strategy": primary_signal.strategy_name,
+                "confidence": round(decision.combined_confidence, 2),
+                "amount_krw": round(amount_krw, 0),
+                "market_state": self._market_state,
+            })
 
         elif decision.action == SignalType.SELL:
             result = await session.execute(
@@ -1222,7 +1228,16 @@ class TradingEngine:
                 session, symbol, position.quantity, price,
                 position.quantity * price, order.fee
             )
-            await emit_event("info", "trade", f"매도: {symbol}", metadata={"price": price})
+            # P&L 계산
+            entry_price = position.average_buy_price or price
+            pnl_pct = (price - entry_price) / entry_price * 100 if entry_price > 0 else 0
+            await emit_event("info", "trade", f"매도: {symbol}", metadata={
+                "price": price,
+                "strategy": primary_signal.strategy_name,
+                "confidence": round(decision.combined_confidence, 2),
+                "pnl_pct": round(pnl_pct, 2),
+                "entry_price": entry_price,
+            })
 
             # 트래커 제거
             self._position_trackers.pop(symbol, None)

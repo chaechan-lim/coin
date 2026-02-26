@@ -112,6 +112,17 @@ def setup_scheduler(
         seconds=86400,  # 24 hours
     )
 
+    # LLM 기반 일일 매매 회고 (24시간 간격)
+    from config import get_config
+    llm_config = get_config().llm
+    if llm_config.enabled and llm_config.daily_review_enabled and llm_config.api_key:
+        scheduler.add_job(
+            _wrap(coordinator.run_trade_review),
+            name="daily_llm_review",
+            seconds=86400,  # 24 hours
+        )
+        logger.info("daily_llm_review_scheduled")
+
     return scheduler
 
 

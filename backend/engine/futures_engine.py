@@ -619,10 +619,19 @@ class BinanceFuturesEngine(TradingEngine):
                 position.quantity * price, order.fee
             )
             self._position_trackers.pop(symbol, None)
-            logger.info("futures_position_closed", symbol=symbol, direction=direction, reason=reason)
+            entry_price = position.average_buy_price or price
+            pnl_pct = ((price - entry_price) / entry_price * 100) if direction == "long" else ((entry_price - price) / entry_price * 100)
+            lev_val = position.leverage or self._leverage
+            logger.info("futures_position_closed", symbol=symbol, direction=direction, reason=reason, pnl_pct=round(pnl_pct, 2))
             await emit_event("info", "trade",
                              f"선물 {direction} 청산: {symbol}",
-                             metadata={"price": price, "reason": reason})
+                             metadata={
+                                 "price": price, "reason": reason,
+                                 "direction": direction,
+                                 "entry_price": entry_price,
+                                 "pnl_pct": round(pnl_pct, 2),
+                                 "leverage": lev_val,
+                             })
 
     async def _execute_rebalancing_sell(
         self, session: AsyncSession, symbol: str, qty: float, price: float
@@ -831,8 +840,14 @@ class BinanceFuturesEngine(TradingEngine):
             leverage=self._leverage, margin=round(margin, 2),
             sl_pct=round(sl_pct / sqrt_lev, 2),
         )
-        await emit_event("info", "trade", f"선물 롱: {symbol}",
-                         metadata={"price": price, "leverage": self._leverage})
+        await emit_event("info", "trade", f"선물 롱: {symbol}", metadata={
+            "price": price, "leverage": self._leverage,
+            "margin": round(margin, 2),
+            "strategy": signal.strategy_name,
+            "confidence": round(decision.combined_confidence, 2),
+            "sl_pct": round(sl_pct / sqrt_lev, 2),
+            "market_state": self._market_state,
+        })
 
     async def _open_short(
         self, session: AsyncSession, symbol: str, price: float,
@@ -915,8 +930,14 @@ class BinanceFuturesEngine(TradingEngine):
             leverage=self._leverage, margin=round(margin, 2),
             sl_pct=round(sl_pct / sqrt_lev, 2),
         )
-        await emit_event("info", "trade", f"선물 숏: {symbol}",
-                         metadata={"price": price, "leverage": self._leverage})
+        await emit_event("info", "trade", f"선물 숏: {symbol}", metadata={
+            "price": price, "leverage": self._leverage,
+            "margin": round(margin, 2),
+            "strategy": signal.strategy_name,
+            "confidence": round(decision.combined_confidence, 2),
+            "sl_pct": round(sl_pct / sqrt_lev, 2),
+            "market_state": self._market_state,
+        })
 
     def _compute_dynamic_sl(self, symbol: str, default_sl: float) -> float:
         """ATR 기반 동적 손절 계산. 시장 상태별 프로필 적용."""

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from core.models import Trade, Order, Position
+from config import get_config
 
 logger = structlog.get_logger(__name__)
 
@@ -38,12 +39,16 @@ class TradeReviewAgent:
     """
     매매 히스토리를 주기적으로 분석하고 인사이트/추천을 생성.
     기본 1시간마다 실행, 최근 24시간 데이터 분석.
+    LLM 활성화 시 Claude API로 심층 분석.
     """
 
     def __init__(self, review_window_hours: int = 24, exchange_name: str = "bithumb"):
         self._review_window_hours = review_window_hours
         self._exchange_name = exchange_name
         self._last_review: TradeReview | None = None
+        self._llm_client = None
+        self._llm_config = None
+        self._init_llm()
 
     async def review(self, session: AsyncSession) -> TradeReview:
         """최근 거래 분석 실행."""
@@ -192,7 +197,7 @@ class TradeReviewAgent:
         for sym, s in by_symbol.items():
             s["win_rate"] = s["wins"] / s["trades"] if s["trades"] > 0 else 0
 
-        # 인사이트 + 추천
+        # 인사이트 + 추천 (규칙 기반)
         insights = self._generate_insights(
             win_rate, total_pnl, profit_factor, sell_pnls,
             dict(by_strategy), dict(by_symbol), open_positions,
@@ -202,6 +207,18 @@ class TradeReviewAgent:
             win_rate, profit_factor, sell_pnls,
             dict(by_strategy), dict(by_symbol), total_sell, total_fees,
         )
+
+        # LLM 인사이트 (활성화 시 규칙 기반 대체)
+        if self._llm_client:
+            llm_insights, llm_recs = await self._generate_llm_insights(
+                sell_pnls, dict(by_strategy), dict(by_symbol), open_positions,
+                total_pnl, win_rate, profit_factor, total_fees,
+                len(buys), len(sells),
+            )
+            if llm_insights:
+                insights = llm_insights
+            if llm_recs:
+                recommendations = llm_recs
 
         review = TradeReview(
             period_hours=self._review_window_hours,
@@ -505,6 +522,131 @@ class TradeReviewAgent:
             recs.append("현재 성과 양호 — 기존 전략 유지 권장")
 
         return recs
+
+    def _init_llm(self) -> None:
+        """LLM 클라이언트 초기화. API 키 없으면 비활성."""
+        try:
+            config = get_config()
+            self._llm_config = config.llm
+            if self._llm_config.enabled and self._llm_config.api_key:
+                import anthropic
+                self._llm_client = anthropic.AsyncAnthropic(api_key=self._llm_config.api_key)
+                logger.info("llm_trade_review_enabled", model=self._llm_config.model)
+            else:
+                logger.info("llm_trade_review_disabled")
+        except Exception as e:
+            logger.warning("llm_init_failed", error=str(e))
+            self._llm_client = None
+
+    async def _generate_llm_insights(
+        self,
+        sell_pnls: list[dict],
+        by_strategy: dict,
+        by_symbol: dict,
+        open_positions: list[dict],
+        total_pnl: float,
+        win_rate: float,
+        profit_factor: float,
+        total_fees: float,
+        buy_count: int,
+        sell_count: int,
+    ) -> tuple[list[str], list[str]]:
+        """Claude API로 매매 회고 인사이트 생성."""
+        if not self._llm_client or not self._llm_config:
+            return [], []
+
+        # 프롬프트 구성
+        trades_summary = []
+        for t in sell_pnls[-20:]:  # 최근 20건만
+            trades_summary.append(
+                f"  - {t['symbol']}: {t['pnl_pct']:+.1f}% ({t['pnl']:+,.0f}), "
+                f"매도전략={t['strategy']}, 사유={t['reason'][:50]}"
+            )
+        trades_text = "\n".join(trades_summary) if trades_summary else "  매도 없음"
+
+        strategy_text = []
+        for name, stats in by_strategy.items():
+            wr = stats.get("win_rate", 0)
+            strategy_text.append(
+                f"  - {name}: {stats['trades']}건, 승률 {wr:.0%}, PnL {stats['total_pnl']:+,.0f}"
+            )
+        strat_text = "\n".join(strategy_text) if strategy_text else "  전략별 데이터 없음"
+
+        position_text = []
+        for p in open_positions:
+            pnl_pct = p.get("unrealized_pnl_pct", 0) or 0
+            position_text.append(
+                f"  - {p['symbol']}: 평단가 {p['avg_price']:,.0f}, 미실현 {pnl_pct:+.1f}%"
+            )
+        pos_text = "\n".join(position_text) if position_text else "  보유 포지션 없음"
+
+        prompt = f"""당신은 암호화폐 자동매매 시스템의 트레이딩 분석가입니다.
+아래 최근 24시간 매매 데이터를 분석하고, 한국어로 인사이트와 추천을 생성해주세요.
+
+## 거래소: {self._exchange_name}
+
+## 요약
+- 매수: {buy_count}건, 매도: {sell_count}건
+- 승률: {win_rate:.0%}, PF: {profit_factor:.2f}
+- 실현 PnL: {total_pnl:+,.0f}
+- 수수료: {total_fees:,.0f}
+
+## 최근 매도 거래
+{trades_text}
+
+## 전략별 성과
+{strat_text}
+
+## 현재 보유 포지션
+{pos_text}
+
+---
+다음 형식으로 응답하세요:
+
+INSIGHTS:
+- (3~5개 구체적 인사이트, 각각 한 줄)
+
+RECOMMENDATIONS:
+- (3개 실행 가능한 추천, 각각 한 줄)"""
+
+        try:
+            response = await self._llm_client.messages.create(
+                model=self._llm_config.model,
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            text = response.content[0].text
+            insights = []
+            recommendations = []
+            section = None
+
+            for line in text.split("\n"):
+                line = line.strip()
+                if "INSIGHTS:" in line.upper():
+                    section = "insights"
+                    continue
+                elif "RECOMMENDATIONS:" in line.upper():
+                    section = "recommendations"
+                    continue
+
+                if line.startswith("- ") or line.startswith("* "):
+                    item = line[2:].strip()
+                    if item:
+                        if section == "insights":
+                            insights.append(item)
+                        elif section == "recommendations":
+                            recommendations.append(item)
+
+            if insights or recommendations:
+                logger.info("llm_insights_generated",
+                            insights=len(insights), recommendations=len(recommendations))
+                return insights, recommendations
+
+        except Exception as e:
+            logger.warning("llm_insights_failed", error=str(e))
+
+        return [], []
 
     @property
     def last_review(self) -> TradeReview | None:
