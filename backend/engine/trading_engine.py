@@ -635,6 +635,12 @@ class TradingEngine:
             if stopped:
                 return  # 이미 매도했으므로 스킵
 
+            # 서지 포지션은 전용 SL/TP/trailing/max_hold로만 종료
+            # 일반 전략 SELL 시그널은 무시 (서지 모멘텀 패턴이 다름)
+            tracker = self._position_trackers.get(symbol)
+            if tracker and tracker.is_surge:
+                return
+
         # ── 2. 매수 가능 여부 체크 (매도는 항상 허용) ──
         can_buy, buy_block_reason = self._can_trade(symbol, side="buy")
 
@@ -942,7 +948,7 @@ class TradingEngine:
                 price=price,
                 surge_score=round(surge_score, 1),
                 confidence=round(confidence, 3),
-                sl_pct=round(sl_pct, 2),
+                sl_pct=4.0,
             )
             await emit_event("info", "rotation", f"로테이션 매수: {symbol}", metadata={"surge_score": round(surge_score, 1), "price": price})
 
