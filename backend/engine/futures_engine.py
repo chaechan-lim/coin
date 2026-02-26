@@ -864,19 +864,70 @@ class BinanceFuturesEngine(TradingEngine):
         except Exception as e:
             logger.warning("funding_rate_fetch_failed", error=str(e))
 
+    _MARKET_STATE_INTERVAL_SEC = 600  # 10분마다 갱신 (현물 30분 대비 3배 민감)
+
     async def _maybe_update_market_state(self, session: AsyncSession) -> None:
-        """BTC/USDT 기준 시장 상태 감지."""
+        """BTC/USDT 듀얼 타임프레임 시장 상태 감지 (4h 장기 + 1h 단기)."""
         now = datetime.now(timezone.utc)
-        if self._market_state_updated and (now - self._market_state_updated).total_seconds() < 1800:
+        if (self._market_state_updated
+                and (now - self._market_state_updated).total_seconds() < self._MARKET_STATE_INTERVAL_SEC):
             return
         try:
-            # BTC/USDT 기준
-            df = await self._market_data.get_candles("BTC/USDT", "4h", 200)
-            state, conf = self._detect_market_state(df)
-            self._market_state = state
-            self._market_confidence = conf
+            # 장기 추세 (4h)
+            df_4h = await self._market_data.get_candles("BTC/USDT", "4h", 200)
+            state_4h, conf_4h = self._detect_market_state(df_4h)
+
+            # 단기 추세 (1h) — 빠른 전환 감지
+            df_1h = await self._market_data.get_candles("BTC/USDT", "1h", 200)
+            state_1h, conf_1h = self._detect_market_state(df_1h)
+
+            # 듀얼 타임프레임 결합:
+            # - 4h와 1h가 일치하면 그대로 사용 (높은 확신)
+            # - 1h가 더 약세면 한 단계 하향 (빠른 전환 반영)
+            # - 1h가 더 강세면 4h 유지 (노이즈 방지, 보수적)
+            _STATE_RANK = {
+                "crash": 0, "downtrend": 1, "sideways": 2,
+                "uptrend": 3, "strong_uptrend": 4,
+            }
+            _RANK_STATE = {v: k for k, v in _STATE_RANK.items()}
+
+            rank_4h = _STATE_RANK.get(state_4h, 2)
+            rank_1h = _STATE_RANK.get(state_1h, 2)
+
+            if rank_1h < rank_4h:
+                # 1h가 더 약세 → 한 단계 하향 (최대)
+                final_rank = max(rank_4h - 1, rank_1h)
+                final_state = _RANK_STATE.get(final_rank, state_4h)
+                final_conf = (conf_4h + conf_1h) / 2
+            else:
+                # 일치 또는 1h가 더 강세 → 4h 유지
+                final_state = state_4h
+                final_conf = conf_4h
+
+            old_state = self._market_state
+            self._market_state = final_state
+            self._market_confidence = round(final_conf, 2)
             self._market_state_updated = now
-            logger.info("futures_market_state", state=state, confidence=round(conf, 3))
+
+            if old_state != final_state:
+                logger.info(
+                    "futures_market_state_changed",
+                    old=old_state, new=final_state,
+                    state_4h=state_4h, state_1h=state_1h,
+                    confidence=self._market_confidence,
+                )
+                await emit_event(
+                    "info", "strategy",
+                    f"선물 시장 상태: {old_state}→{final_state} (4h={state_4h}, 1h={state_1h}, 신뢰도 {int(final_conf*100)}%)",
+                    metadata={"old": old_state, "new": final_state,
+                              "state_4h": state_4h, "state_1h": state_1h},
+                )
+            else:
+                logger.debug(
+                    "futures_market_state",
+                    state=final_state, state_4h=state_4h, state_1h=state_1h,
+                    confidence=self._market_confidence,
+                )
         except Exception as e:
             logger.warning("futures_market_state_failed", error=str(e))
 
