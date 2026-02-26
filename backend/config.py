@@ -101,6 +101,7 @@ class BinanceTradingConfig(BaseSettings):
     max_trade_size_pct: float = 0.15
     daily_buy_limit: int = 15
     max_daily_coin_buys: int = 3
+    ws_price_monitor: bool = True  # WebSocket 실시간 가격 모니터 활성화
 
     model_config = {"env_prefix": "BINANCE_TRADING_"}
 

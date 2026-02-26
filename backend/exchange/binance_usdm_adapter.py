@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import ccxt.async_support as ccxt
+import ccxt.pro as ccxtpro
 
 from exchange.base import ExchangeAdapter
 from exchange.data_models import (
@@ -41,6 +42,7 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         self._testnet = testnet
         self._rate_limit = rate_limit
         self._exchange: Optional[ccxt.binanceusdm] = None
+        self._ws_exchange: Optional[ccxtpro.binanceusdm] = None
         self._semaphore = asyncio.Semaphore(rate_limit)
 
     async def initialize(self) -> None:
@@ -92,6 +94,10 @@ class BinanceUSDMAdapter(ExchangeAdapter):
                 raise ExchangeError(str(e))
 
     # ── 시세 조회 (공개 API) ──────────────────────────────────────
+
+    async def fetch_tickers(self) -> dict:
+        """Fetch all tickers (for dynamic coin selection)."""
+        return await self._call(self._exchange.fetch_tickers)
 
     async def fetch_ticker(self, symbol: str) -> Ticker:
         data = await self._call(self._exchange.fetch_ticker, symbol)
@@ -251,3 +257,33 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             self._exchange.fetch_funding_rate, symbol
         )
         return float(data.get("fundingRate", 0) or 0)
+
+    # ── WebSocket (ccxt.pro) ──────────────────────────────────────
+
+    async def create_ws_exchange(self) -> None:
+        """WebSocket 전용 ccxt.pro 인스턴스 생성."""
+        config: dict = {
+            "enableRateLimit": True,
+            "options": {"defaultType": "future"},
+        }
+        if self._api_key and self._api_secret:
+            config["apiKey"] = self._api_key
+            config["secret"] = self._api_secret
+
+        self._ws_exchange = ccxtpro.binanceusdm(config)
+        if self._testnet:
+            self._ws_exchange.set_sandbox_mode(True)
+        logger.info("binance_ws_exchange_created", testnet=self._testnet)
+
+    async def watch_tickers(self, symbols: list[str]) -> dict:
+        """실시간 틱커 수신 (blocking — 새 데이터 올 때마다 반환)."""
+        if not self._ws_exchange:
+            raise ExchangeConnectionError("WebSocket exchange not initialized")
+        return await self._ws_exchange.watch_tickers(symbols)
+
+    async def close_ws(self) -> None:
+        """WebSocket 연결 정리."""
+        if self._ws_exchange:
+            await self._ws_exchange.close()
+            self._ws_exchange = None
+            logger.info("binance_ws_closed")

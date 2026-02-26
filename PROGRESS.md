@@ -8,9 +8,11 @@
 
 빗썸(Bithumb) 현물 + 바이낸스(Binance) USDM 선물 **듀얼 엔진** 24시간 자동 암호화폐 트레이딩 시스템.
 6개 전략 가중 투표 (HOLD=기권 방식) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭, 거래소 전환) 포함.
-**현재 라이브 운영 중**: 빗썸 현물 (~548K KRW) + 바이낸스 선물 (~174.92 USDT, 3x 레버리지), SQLite WAL.
+**현재 라이브 운영 중**: 빗썸 현물 (~548K KRW) + 바이낸스 선물 (~174.92 USDT, 3x 레버리지), **PostgreSQL 16** (docker compose).
 **듀얼 엔진 아키텍처**: 빗썸 TradingEngine + 바이낸스 BinanceFuturesEngine 독립 병렬 실행, EngineRegistry 중앙 관리, exchange 컬럼 기반 데이터 격리.
 **바이낸스 선물 라이브**: 독립 모드 분리 (빗썸 paper/live + 바이낸스 paper/live 별도), 시장가 주문, 실제 USDT 잔고 조회.
+**에이전트 심볼 분기**: MarketAnalysisAgent `market_symbol` 파라미터 — 빗썸 BTC/KRW, 바이낸스 BTC/USDT 자동 분기.
+**선물 Graceful Stop**: 포지션 보유 시 경고, `force=true`로 강제 중지.
 
 ---
 
@@ -20,7 +22,7 @@
 |---|---|
 | 백엔드 | Python 3.12, FastAPI, SQLAlchemy (async), APScheduler |
 | 프론트엔드 | React 18, TypeScript, Vite, TailwindCSS, Recharts, lightweight-charts |
-| DB | SQLite + WAL (현재) / PostgreSQL 16 (마이그레이션 예정) |
+| DB | **PostgreSQL 16** (docker compose) / SQLite (테스트 폴백) |
 | Cache / PubSub | Redis 7 (Docker, 선택) |
 | 거래소 연동 | Bithumb V2 (ccxt+JWT), Binance USDM 선물 (ccxt binanceusdm), 듀얼 엔진 EngineRegistry |
 | 기술적 지표 | pandas + pandas-ta |
@@ -286,6 +288,7 @@ coin/
 | 프론트엔드 거래소 전환 | ✅ Dashboard 거래소 탭, 모든 컴포넌트 exchange prop |
 | 거래소 격리 테스트 | ✅ 5 tests + 선물 엔진 11 tests |
 | 바이낸스 선물 라이브 | ✅ 독립 모드 분리, 시장가 주문, 실제 USDT 잔고 조회 |
+| WebSocket 가격 모니터 | ✅ ccxt.pro 실시간 SL/TP/청산가 체크 (~1초), 5분 폴링 fallback |
 | 바이낸스 현물 연동 | ⬜ BinanceSpotAdapter (ccxt binance), 현물 TradingEngine 추가 (계획) |
 | 시장 상태별 전략 on/off | ⬜ 횡보 시 추세추종 완전 비활성 (향후) |
 | 멀티 타임프레임 확인 | ⬜ 4h+1h 이중 확인 (향후) |
@@ -404,6 +407,7 @@ EngineRegistry (싱글턴)
 - 청산가 2% 이내 긴급 청산
 - 펀딩비 30분 주기 조회
 - 로테이션 비활성 (선물 전용)
+- **WebSocket 실시간 가격 모니터**: ccxt.pro → ~1초 SL/TP/청산가 체크 (5분 폴링 fallback 이중 체크)
 
 ### DB 주문 테이블 핵심 컬럼 (전략 귀속)
 ```sql
@@ -652,6 +656,7 @@ docker compose restart backend
 | v0.12.1 | 2026-02-26 | 스마트 매매 제한: 매수만 카운트(매도 무제한), 일일 매수 20회 + 코인당 3회 |
 | v0.13 | 2026-02-26 | **듀얼 엔진**: 바이낸스 USDM 선물 통합 (DB exchange 컬럼, BinanceFuturesEngine, EngineRegistry, API 라우팅, 프론트엔드 거래소 전환), 111 테스트 |
 | v0.13.1 | 2026-02-26 | **바이낸스 선물 라이브**: 독립 모드 분리(BinanceTradingConfig.mode), 시장가 주문, fee_currency, 실제 USDT 잔고 조회 |
-| v0.14 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
+| v0.14 | 2026-02-26 | **WebSocket 실시간 가격 모니터**: 선물 SL/TP/청산가 ~1초 체크 (ccxt.pro), 듀얼 루프 (WS 모니터 + 5분 전략 평가), 동시 청산 방지 Lock |
+| v0.15 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
 | v0.15 | 예정 | PostgreSQL 마이그레이션 |
 | v1.0 | 예정 | 라즈베리파이 배포 + 장기 운영 안정화 |

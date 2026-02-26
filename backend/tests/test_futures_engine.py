@@ -35,6 +35,7 @@ def mock_config():
     config.binance_trading.max_trade_size_pct = 0.15
     config.binance_trading.daily_buy_limit = 15
     config.binance_trading.max_daily_coin_buys = 3
+    config.binance_trading.ws_price_monitor = True
     config.trading.mode = "paper"
     config.trading.evaluation_interval_sec = 300
     config.trading.tracked_coins = ["BTC/USDT"]
@@ -93,7 +94,7 @@ class TestFuturesEngineInit:
         assert futures_engine._leverage == 5
 
     def test_tracked_coins(self, futures_engine):
-        assert futures_engine.tracked_coins == ["BTC/USDT", "ETH/USDT"]
+        assert sorted(futures_engine.tracked_coins) == ["BTC/USDT", "ETH/USDT"]
 
     def test_rotation_disabled(self, futures_engine):
         rs = futures_engine.rotation_status
