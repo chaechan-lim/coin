@@ -28,11 +28,21 @@ from core.event_bus import emit_event
 
 logger = structlog.get_logger(__name__)
 
-# 선물 전용 SL/TP: 레버리지에 따라 자동 축소
-_FUTURES_DEFAULT_SL_PCT = 5.0
-_FUTURES_DEFAULT_TP_PCT = 10.0
-_FUTURES_TRAILING_ACTIVATION = 3.0
-_FUTURES_TRAILING_STOP = 3.0
+# 선물 전용 SL/TP: 레버리지에 따라 자동 축소 (P1 최적화: 4h 기반)
+_FUTURES_DEFAULT_SL_PCT = 8.0
+_FUTURES_DEFAULT_TP_PCT = 16.0
+_FUTURES_TRAILING_ACTIVATION = 5.0
+_FUTURES_TRAILING_STOP = 3.5
+
+# 동적 SL 프로필 (ATR 기반): (atr_multiplier, floor_pct, cap_pct)
+_DYNAMIC_SL_PROFILES = {
+    "strong_uptrend": (2.5, 4.0, 12.0),
+    "uptrend":        (2.0, 4.0, 10.0),
+    "sideways":       (2.0, 4.0,  7.0),
+    "downtrend":      (2.0, 4.0,  7.0),
+    "crash":          (1.5, 3.0,  5.0),
+}
+_FUTURES_TIMEFRAME = "4h"  # 전략 평가 타임프레임
 
 
 class BinanceFuturesEngine(TradingEngine):
@@ -660,9 +670,8 @@ class BinanceFuturesEngine(TradingEngine):
                 await self._close_position(session, symbol, position, price,
                                            f"전략 SELL → 롱 청산 (conf={decision.combined_confidence:.2f})")
             elif not position:
-                # 숏 진입 (downtrend/crash만 허용)
-                if self._market_state in (MarketState.DOWNTREND.value, MarketState.CRASH.value):
-                    await self._open_short(session, symbol, price, primary_signal, decision)
+                # 숏 진입 (전체 시장 허용 — P1 백테스트 결과)
+                await self._open_short(session, symbol, price, primary_signal, decision)
 
     def _adjust_amount(self, symbol: str, amount: float) -> float | None:
         """거래소 최소 수량 정밀도에 맞게 수량 보정. 최소 미만이면 None."""
@@ -747,12 +756,13 @@ class BinanceFuturesEngine(TradingEngine):
             pos.liquidation_price = price * (1 - 1 / self._leverage + self._futures_fee)
             pos.margin_used = margin
 
-        # SL/TP 트래커 — 레버리지 축소
+        # SL/TP 트래커 — 레버리지 축소 + 동적 SL
         sqrt_lev = math.sqrt(self._leverage)
+        sl_pct = self._compute_dynamic_sl(symbol, _FUTURES_DEFAULT_SL_PCT)
         self._position_trackers[symbol] = PositionTracker(
             entry_price=price,
             highest_price=price,
-            stop_loss_pct=_FUTURES_DEFAULT_SL_PCT / sqrt_lev,
+            stop_loss_pct=sl_pct / sqrt_lev,
             take_profit_pct=_FUTURES_DEFAULT_TP_PCT / sqrt_lev,
             trailing_activation_pct=_FUTURES_TRAILING_ACTIVATION / sqrt_lev,
             trailing_stop_pct=_FUTURES_TRAILING_STOP / sqrt_lev,
@@ -764,6 +774,7 @@ class BinanceFuturesEngine(TradingEngine):
         logger.info(
             "futures_long_opened", symbol=symbol, price=price,
             leverage=self._leverage, margin=round(margin, 2),
+            sl_pct=round(sl_pct / sqrt_lev, 2),
         )
         await emit_event("info", "trade", f"선물 롱: {symbol}",
                          metadata={"price": price, "leverage": self._leverage})
@@ -829,12 +840,13 @@ class BinanceFuturesEngine(TradingEngine):
             pos.liquidation_price = price * (1 + 1 / self._leverage - self._futures_fee)
             pos.margin_used = margin
 
-        # 숏 트래커 — highest_price를 lowest로 사용
+        # 숏 트래커 — highest_price를 lowest로 사용 + 동적 SL
         sqrt_lev = math.sqrt(self._leverage)
+        sl_pct = self._compute_dynamic_sl(symbol, _FUTURES_DEFAULT_SL_PCT)
         self._position_trackers[symbol] = PositionTracker(
             entry_price=price,
             highest_price=price,  # Will track lowest
-            stop_loss_pct=_FUTURES_DEFAULT_SL_PCT / sqrt_lev,
+            stop_loss_pct=sl_pct / sqrt_lev,
             take_profit_pct=_FUTURES_DEFAULT_TP_PCT / sqrt_lev,
             trailing_activation_pct=_FUTURES_TRAILING_ACTIVATION / sqrt_lev,
             trailing_stop_pct=_FUTURES_TRAILING_STOP / sqrt_lev,
@@ -846,9 +858,35 @@ class BinanceFuturesEngine(TradingEngine):
         logger.info(
             "futures_short_opened", symbol=symbol, price=price,
             leverage=self._leverage, margin=round(margin, 2),
+            sl_pct=round(sl_pct / sqrt_lev, 2),
         )
         await emit_event("info", "trade", f"선물 숏: {symbol}",
                          metadata={"price": price, "leverage": self._leverage})
+
+    def _compute_dynamic_sl(self, symbol: str, default_sl: float) -> float:
+        """ATR 기반 동적 손절 계산. 시장 상태별 프로필 적용."""
+        try:
+            # 캐시된 4h 캔들에서 ATR 가져오기
+            key = f"{symbol}:{_FUTURES_TIMEFRAME}"
+            if key in self._market_data._ohlcv_cache:
+                _, df = self._market_data._ohlcv_cache[key]
+                if "atr_14" in df.columns and len(df) > 0:
+                    atr = df["atr_14"].iloc[-1]
+                    close = df["close"].iloc[-1]
+                    if atr > 0 and close > 0:
+                        atr_pct = (atr / close) * 100
+                        profile = _DYNAMIC_SL_PROFILES.get(
+                            self._market_state, (2.0, 4.0, 10.0)
+                        )
+                        mult, floor_pct, cap_pct = profile
+                        sl = max(floor_pct, min(atr_pct * mult, cap_pct))
+                        logger.debug("dynamic_sl_computed", symbol=symbol,
+                                     atr_pct=round(atr_pct, 2), sl=round(sl, 2),
+                                     market=self._market_state)
+                        return sl
+        except Exception as e:
+            logger.debug("dynamic_sl_fallback", symbol=symbol, error=str(e))
+        return default_sl
 
     async def _maybe_update_funding_rates(self) -> None:
         """펀딩비 조회 (30분 간격)."""
@@ -932,12 +970,12 @@ class BinanceFuturesEngine(TradingEngine):
             logger.warning("futures_market_state_failed", error=str(e))
 
     async def _collect_signals(self, symbol: str) -> list[Signal]:
-        """전략 시그널 수집."""
+        """전략 시그널 수집 (4h 타임프레임)."""
         signals = []
         ticker = await self._market_data.get_ticker(symbol)
         for name, strategy in self._strategies.items():
             try:
-                timeframe = getattr(strategy, "required_timeframe", "1h")
+                timeframe = _FUTURES_TIMEFRAME  # 4h 고정 (P1 최적화)
                 candles = max(getattr(strategy, "min_candles_required", 50) + 50, 200)
                 df = await self._market_data.get_candles(symbol, timeframe, candles)
                 if df is None or len(df) < 20:

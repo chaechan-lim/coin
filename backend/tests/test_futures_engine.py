@@ -110,8 +110,8 @@ class TestLeverageSizing:
         expected_sl = _FUTURES_DEFAULT_SL_PCT / sqrt_lev
         expected_tp = _FUTURES_DEFAULT_TP_PCT / sqrt_lev
 
-        assert abs(expected_sl - 5.0 / sqrt_lev) < 0.01
-        assert abs(expected_tp - 10.0 / sqrt_lev) < 0.01
+        assert abs(expected_sl - 8.0 / sqrt_lev) < 0.01
+        assert abs(expected_tp - 16.0 / sqrt_lev) < 0.01
 
     def test_liquidation_price_long(self, futures_engine):
         """롱 청산가 = entry * (1 - 1/lev + fee)."""
