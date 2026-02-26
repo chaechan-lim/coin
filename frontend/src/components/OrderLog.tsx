@@ -76,7 +76,7 @@ export function OrderLog({ exchange = 'bithumb' }: { exchange?: ExchangeName }) 
                     <span className={`text-xs font-bold border px-1.5 py-0.5 rounded ${signalStyle}`}>
                       {log.signal_type ?? '?'}
                     </span>
-                    <span className="text-white text-sm font-medium">{log.symbol.replace('/KRW', '')}</span>
+                    <span className="text-white text-sm font-medium">{log.symbol.replace(/\/(KRW|USDT)/, '')}</span>
                     <span className="text-gray-500 text-xs hidden sm:inline">{log.strategy_name.replace(/_/g, ' ')}</span>
                     {log.was_executed && (
                       <span className="text-green-400 text-xs">✓</span>

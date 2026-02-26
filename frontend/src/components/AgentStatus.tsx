@@ -46,11 +46,15 @@ function AlertBadge({ alert }: { alert: RiskAlert }) {
   )
 }
 
-function fmt(n: number): string {
-  return n.toLocaleString('ko-KR', { maximumFractionDigits: 0 })
+function fmtVal(n: number, isUsdt: boolean): string {
+  return isUsdt
+    ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDT'
+    : n.toLocaleString('ko-KR', { maximumFractionDigits: 0 }) + ' ₩'
 }
 
 export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
+  const isUsdt = exchange === 'binance_futures'
+  const fmt = (n: number) => fmtVal(n, isUsdt)
   const qc = useQueryClient()
 
   const { data: analysis } = useQuery({
@@ -254,7 +258,7 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
                 <div className="space-y-1">
                   {review.open_positions.map((pos: any) => (
                     <div key={pos.symbol} className="flex items-center gap-2 text-xs bg-gray-900 rounded p-2">
-                      <span className="text-white font-medium w-20">{pos.symbol.replace('/KRW', '')}</span>
+                      <span className="text-white font-medium w-20">{pos.symbol.replace(/\/(KRW|USDT)/, '')}</span>
                       <span className="text-gray-400">투자 {fmt(pos.invested)}</span>
                       <span className={`ml-auto ${pos.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                         {pos.unrealized_pnl >= 0 ? '+' : ''}{fmt(pos.unrealized_pnl)} ({pos.unrealized_pnl_pct?.toFixed(2) ?? 0}%)

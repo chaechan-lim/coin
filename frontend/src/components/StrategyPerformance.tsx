@@ -17,6 +17,7 @@ const PERIODS = ['7d', '30d', '90d'] as const
 
 export function StrategyPerformance({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
   const [period, setPeriod] = useState<string>('30d')
+  const isUsdt = exchange === 'binance_futures'
   const { data, isLoading } = useQuery({
     queryKey: ['strategies', 'comparison', period, exchange],
     queryFn: () => compareStrategies(period, exchange),
@@ -26,7 +27,8 @@ export function StrategyPerformance({ exchange = 'bithumb' }: { exchange?: Excha
   const chartData = (data ?? []).map((s) => ({
     name: STRATEGY_KR[s.strategy_name] ?? s.strategy_name,
     winRate: s.win_rate,
-    pnl: Math.round(s.total_pnl / 1000),
+    pnl: isUsdt ? parseFloat(s.total_pnl.toFixed(2)) : Math.round(s.total_pnl / 1000),
+    rawPnl: s.total_pnl,
     trades: s.total_trades,
     avgReturn: s.avg_return_pct,
   }))
@@ -93,7 +95,7 @@ export function StrategyPerformance({ exchange = 'bithumb' }: { exchange?: Excha
                     {s.winRate.toFixed(1)}%
                   </td>
                   <td className={`py-1 text-right font-medium ${s.pnl >= 0 ? 'text-buy' : 'text-sell'}`}>
-                    {s.pnl >= 0 ? '+' : ''}{s.pnl}k ₩
+                    {s.pnl >= 0 ? '+' : ''}{isUsdt ? `${s.pnl.toFixed(2)} USDT` : `${s.pnl}k ₩`}
                   </td>
                   <td className={`py-1 text-right ${s.avgReturn >= 0 ? 'text-buy' : 'text-sell'}`}>
                     {s.avgReturn >= 0 ? '+' : ''}{s.avgReturn.toFixed(2)}%
@@ -115,7 +117,7 @@ export function StrategyPerformance({ exchange = 'bithumb' }: { exchange?: Excha
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-gray-500">{s.trades}건</span>
                   <span className={s.pnl >= 0 ? 'text-buy' : 'text-sell'}>
-                    {s.pnl >= 0 ? '+' : ''}{s.pnl}k ₩
+                    {s.pnl >= 0 ? '+' : ''}{isUsdt ? `${s.pnl.toFixed(2)} USDT` : `${s.pnl}k ₩`}
                   </span>
                   <span className={s.avgReturn >= 0 ? 'text-buy' : 'text-sell'}>
                     평균 {s.avgReturn >= 0 ? '+' : ''}{s.avgReturn.toFixed(2)}%

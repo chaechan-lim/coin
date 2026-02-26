@@ -12,11 +12,12 @@ const PERIODS = ['1d', '7d', '30d', '90d', 'all'] as const
 export function PortfolioChart({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
   const [period, setPeriod] = useState<string>('7d')
   const { data, isLoading } = usePortfolioHistory(period, exchange)
+  const isUsdt = exchange === 'binance_futures'
 
   const chartData = (data ?? []).map((p) => ({
     time: format(utcToLocal(p.timestamp), 'MM/dd HH:mm'),
-    value: Math.round(p.total_value),
-    pnl: Math.round(p.unrealized_pnl),
+    value: isUsdt ? parseFloat(p.total_value.toFixed(2)) : Math.round(p.total_value),
+    pnl: isUsdt ? parseFloat(p.unrealized_pnl.toFixed(2)) : Math.round(p.unrealized_pnl),
   }))
 
   return (
@@ -58,12 +59,12 @@ export function PortfolioChart({ exchange = 'bithumb' }: { exchange?: ExchangeNa
             <YAxis
               tick={{ fill: '#9ca3af', fontSize: 10 }}
               tickLine={false}
-              tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`}
+              tickFormatter={(v) => isUsdt ? `${v.toFixed(0)}` : `${(v / 1000).toFixed(0)}k`}
             />
             <Tooltip
               contentStyle={{ backgroundColor: '#1f2937', border: 'none', borderRadius: '8px' }}
               labelStyle={{ color: '#9ca3af' }}
-              formatter={(v: number) => [`${v.toLocaleString()} ₩`, '총 자산']}
+              formatter={(v: number) => [isUsdt ? `${v.toLocaleString('en-US', { minimumFractionDigits: 2 })} USDT` : `${v.toLocaleString()} ₩`, '총 자산']}
             />
             <Area
               type="monotone"

@@ -21,8 +21,12 @@ function StatCard({
   )
 }
 
-function fmt(n: number) {
+function fmtKrw(n: number) {
   return n.toLocaleString('ko-KR') + ' ₩'
+}
+
+function fmtUsdt(n: number) {
+  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDT'
 }
 
 function fmtPct(n: number) {
@@ -31,6 +35,8 @@ function fmtPct(n: number) {
 }
 
 export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
+  const isUsdt = exchange === 'binance_futures'
+  const fmt = isUsdt ? fmtUsdt : fmtKrw
   const { data, isLoading } = usePortfolioSummary(exchange)
 
   if (isLoading || !data) {
@@ -61,7 +67,9 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
         <StatCard
           label="원금 대비 수익"
           value={fmtPct(returnFromInitial)}
-          sub={`${returnFromInitial >= 0 ? '+' : ''}${(data.total_value_krw - data.initial_balance_krw).toLocaleString('ko-KR')} ₩`}
+          sub={`${returnFromInitial >= 0 ? '+' : ''}${isUsdt
+            ? (data.total_value_krw - data.initial_balance_krw).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDT'
+            : (data.total_value_krw - data.initial_balance_krw).toLocaleString('ko-KR') + ' ₩'}`}
           color={returnColor}
         />
         <StatCard label="현금 잔액" value={fmt(data.cash_balance_krw)} />
@@ -104,11 +112,11 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
                 <tr key={pos.symbol} className="border-b border-gray-700/50 hover:bg-gray-700/30">
                   <td className="px-4 py-2 font-medium text-white">{pos.symbol}</td>
                   <td className="px-4 py-2 text-right text-gray-300">{pos.quantity.toFixed(6)}</td>
-                  <td className="px-4 py-2 text-right text-gray-300">{pos.average_buy_price.toLocaleString()}</td>
-                  <td className="px-4 py-2 text-right text-gray-300">{pos.current_price.toLocaleString()}</td>
-                  <td className="px-4 py-2 text-right text-gray-300">{pos.current_value.toLocaleString()}</td>
+                  <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.average_buy_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.average_buy_price.toLocaleString()}</td>
+                  <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.current_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_price.toLocaleString()}</td>
+                  <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.current_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_value.toLocaleString()}</td>
                   <td className={`px-4 py-2 text-right font-semibold ${pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}`}>
-                    {pos.unrealized_pnl >= 0 ? '+' : ''}{pos.unrealized_pnl.toLocaleString()}
+                    {pos.unrealized_pnl >= 0 ? '+' : ''}{isUsdt ? pos.unrealized_pnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.unrealized_pnl.toLocaleString()}
                     <span className="text-xs ml-1">({fmtPct(pos.unrealized_pnl_pct)})</span>
                   </td>
                 </tr>
@@ -120,7 +128,7 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
             {data.positions.map((pos) => (
               <div key={pos.symbol} className="px-4 py-3 space-y-1.5">
                 <div className="flex items-center justify-between">
-                  <span className="font-medium text-white">{pos.symbol.replace('/KRW', '')}</span>
+                  <span className="font-medium text-white">{pos.symbol.replace(/\/(KRW|USDT)/, '')}</span>
                   <span className={`font-semibold ${pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}`}>
                     {fmtPct(pos.unrealized_pnl_pct)}
                   </span>
@@ -128,20 +136,20 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
                 <div className="grid grid-cols-2 gap-x-4 text-xs">
                   <div className="flex justify-between">
                     <span className="text-gray-500">평균가</span>
-                    <span className="text-gray-300">{pos.average_buy_price.toLocaleString()}</span>
+                    <span className="text-gray-300">{isUsdt ? pos.average_buy_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.average_buy_price.toLocaleString()}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-gray-500">현재가</span>
-                    <span className="text-gray-300">{pos.current_price.toLocaleString()}</span>
+                    <span className="text-gray-300">{isUsdt ? pos.current_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_price.toLocaleString()}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-gray-500">평가금액</span>
-                    <span className="text-gray-300">{pos.current_value.toLocaleString()}</span>
+                    <span className="text-gray-300">{isUsdt ? pos.current_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_value.toLocaleString()}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-gray-500">손익</span>
                     <span className={pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}>
-                      {pos.unrealized_pnl >= 0 ? '+' : ''}{pos.unrealized_pnl.toLocaleString()}
+                      {pos.unrealized_pnl >= 0 ? '+' : ''}{isUsdt ? pos.unrealized_pnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.unrealized_pnl.toLocaleString()}
                     </span>
                   </div>
                 </div>

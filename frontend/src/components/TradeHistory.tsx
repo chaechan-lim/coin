@@ -25,7 +25,13 @@ function StrategyBadge({ name }: { name: string }) {
   )
 }
 
-function OrderDetail({ order }: { order: Order }) {
+function fmtPrice(n: number, isUsdt: boolean) {
+  return isUsdt
+    ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDT'
+    : n.toLocaleString() + ' ₩'
+}
+
+function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const side = order.side === 'buy'
   const price = order.executed_price ?? order.requested_price ?? 0
@@ -49,7 +55,7 @@ function OrderDetail({ order }: { order: Order }) {
             )}
           </div>
           <div className="flex items-center gap-4 text-sm">
-            <span className="text-gray-300">{price.toLocaleString()} ₩</span>
+            <span className="text-gray-300">{fmtPrice(price, isUsdt)}</span>
             <span className="text-gray-500 text-xs">
               {format(utcToLocal(order.created_at), 'MM/dd HH:mm')}
             </span>
@@ -63,7 +69,7 @@ function OrderDetail({ order }: { order: Order }) {
               <span className={`text-sm font-bold ${side ? 'text-buy' : 'text-sell'}`}>
                 {side ? '▲ 매수' : '▼ 매도'}
               </span>
-              <span className="text-white font-medium text-sm">{order.symbol.replace('/KRW', '')}</span>
+              <span className="text-white font-medium text-sm">{order.symbol.replace(/\/(KRW|USDT)/, '')}</span>
             </div>
             <span className="text-gray-500 text-xs">
               {format(utcToLocal(order.created_at), 'MM/dd HH:mm')}
@@ -76,7 +82,7 @@ function OrderDetail({ order }: { order: Order }) {
                 <span className="text-xs text-gray-500 border border-gray-600 px-1 rounded">P</span>
               )}
             </div>
-            <span className="text-gray-300 text-sm">{price.toLocaleString()} ₩</span>
+            <span className="text-gray-300 text-sm">{fmtPrice(price, isUsdt)}</span>
           </div>
         </div>
       </button>
@@ -111,7 +117,7 @@ function OrderDetail({ order }: { order: Order }) {
             </div>
             <div>
               <span className="text-gray-500">수수료</span>
-              <div className="text-white font-medium">{order.fee.toLocaleString()} ₩</div>
+              <div className="text-white font-medium">{fmtPrice(order.fee, isUsdt)}</div>
             </div>
           </div>
 
@@ -140,6 +146,7 @@ function OrderDetail({ order }: { order: Order }) {
 }
 
 export function TradeHistory({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
+  const isUsdt = exchange === 'binance_futures'
   const [page, setPage] = useState(1)
   const [symbol, setSymbol] = useState('')
   const [strategy, setStrategy] = useState('')
@@ -204,7 +211,7 @@ export function TradeHistory({ exchange = 'bithumb' }: { exchange?: ExchangeName
       ) : (
         <>
           {data.map((order) => (
-            <OrderDetail key={order.id} order={order} />
+            <OrderDetail key={order.id} order={order} isUsdt={isUsdt} />
           ))}
           <div className="flex justify-center gap-2 p-3">
             <button
