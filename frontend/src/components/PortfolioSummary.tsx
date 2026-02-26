@@ -1,4 +1,5 @@
 import { usePortfolioSummary } from '../hooks/usePortfolio'
+import type { ExchangeName } from '../types'
 
 function StatCard({
   label,
@@ -29,8 +30,8 @@ function fmtPct(n: number) {
   return `${sign}${n.toFixed(2)}%`
 }
 
-export function PortfolioSummary() {
-  const { data, isLoading } = usePortfolioSummary()
+export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
+  const { data, isLoading } = usePortfolioSummary(exchange)
 
   if (isLoading || !data) {
     return (

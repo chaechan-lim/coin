@@ -14,10 +14,11 @@ from core.schemas import (
     StrategyParamsUpdate,
     StrategyWeightUpdate,
 )
+from api.dependencies import engine_registry
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
-# Will be set from main.py
+# Legacy setters for backward compatibility
 _engine = None
 _combiner = None
 
@@ -28,14 +29,30 @@ def set_engine_and_combiner(engine, combiner):
     _combiner = combiner
 
 
+def _get_engine(exchange: str):
+    eng = engine_registry.get_engine(exchange)
+    if eng:
+        return eng
+    return _engine
+
+
+def _get_combiner(exchange: str):
+    comb = engine_registry.get_combiner(exchange)
+    if comb:
+        return comb
+    return _combiner
+
+
 @router.get("", response_model=list[StrategyResponse])
-async def list_strategies():
-    if not _engine:
+async def list_strategies(exchange: str = Query("bithumb")):
+    eng = _get_engine(exchange)
+    comb = _get_combiner(exchange)
+    if not eng:
         return []
 
     strategies = []
-    for name, strategy in _engine.strategies.items():
-        weight = _combiner.weights.get(name, 0.0) if _combiner else 0.0
+    for name, strategy in eng.strategies.items():
+        weight = comb.weights.get(name, 0.0) if comb else 0.0
         strategies.append(
             StrategyResponse(
                 name=strategy.name,
@@ -54,6 +71,7 @@ async def list_strategies():
 async def get_strategy_performance(
     name: str,
     period: str = Query("30d"),
+    exchange: str = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     now = utcnow()
@@ -64,7 +82,7 @@ async def get_strategy_performance(
     # 1) 모든 체결 주문을 시간순 조회 (매수 원가 계산을 위해 전체 기간)
     result = await session.execute(
         select(Order)
-        .where(Order.status == "filled")
+        .where(Order.status == "filled", Order.exchange == exchange)
         .order_by(Order.created_at)
     )
     all_orders = list(result.scalars().all())
@@ -132,34 +150,38 @@ async def get_strategy_performance(
 
 
 @router.put("/{name}/params")
-async def update_strategy_params(name: str, update: StrategyParamsUpdate):
-    if not _engine or name not in _engine.strategies:
+async def update_strategy_params(name: str, update: StrategyParamsUpdate, exchange: str = Query("bithumb")):
+    eng = _get_engine(exchange)
+    if not eng or name not in eng.strategies:
         raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
 
-    _engine.strategies[name].set_params(update.params)
-    return {"status": "ok", "strategy": name, "params": _engine.strategies[name].get_params()}
+    eng.strategies[name].set_params(update.params)
+    return {"status": "ok", "strategy": name, "params": eng.strategies[name].get_params()}
 
 
 @router.put("/{name}/weight")
-async def update_strategy_weight(name: str, update: StrategyWeightUpdate):
-    if not _combiner:
+async def update_strategy_weight(name: str, update: StrategyWeightUpdate, exchange: str = Query("bithumb")):
+    comb = _get_combiner(exchange)
+    if not comb:
         raise HTTPException(status_code=500, detail="Combiner not initialized")
 
-    _combiner.weights[name] = update.weight
+    comb.weights[name] = update.weight
     return {"status": "ok", "strategy": name, "weight": update.weight}
 
 
 @router.get("/comparison")
 async def compare_strategies(
     period: str = Query("30d"),
+    exchange: str = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
-    if not _engine:
+    eng = _get_engine(exchange)
+    if not eng:
         return []
 
     results = []
-    for name in _engine.strategies:
-        perf = await get_strategy_performance(name, period, session)
+    for name in eng.strategies:
+        perf = await get_strategy_performance(name, period, exchange, session)
         results.append(perf)
     return results
 
@@ -171,9 +193,14 @@ async def get_strategy_logs(
     strategy: Optional[str] = None,
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
+    exchange: str = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
-    query = select(StrategyLog).order_by(desc(StrategyLog.logged_at))
+    query = (
+        select(StrategyLog)
+        .where(StrategyLog.exchange == exchange)
+        .order_by(desc(StrategyLog.logged_at))
+    )
 
     if symbol:
         query = query.where(StrategyLog.symbol == symbol)

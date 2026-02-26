@@ -7,10 +7,11 @@ from core.utils import utcnow
 from db.session import get_db
 from core.models import PortfolioSnapshot
 from core.schemas import PortfolioSummaryResponse, PortfolioHistoryPoint
+from api.dependencies import engine_registry
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
-# Will be set from main.py
+# Legacy setter for backward compatibility
 _portfolio_manager = None
 
 
@@ -19,23 +20,36 @@ def set_portfolio_manager(pm):
     _portfolio_manager = pm
 
 
+def _get_pm(exchange: str):
+    pm = engine_registry.get_portfolio_manager(exchange)
+    if pm:
+        return pm
+    return _portfolio_manager
+
+
 @router.get("/summary", response_model=PortfolioSummaryResponse)
-async def get_portfolio_summary(session: AsyncSession = Depends(get_db)):
-    if not _portfolio_manager:
+async def get_portfolio_summary(
+    exchange: str = Query("bithumb"),
+    session: AsyncSession = Depends(get_db),
+):
+    pm = _get_pm(exchange)
+    if not pm:
         return PortfolioSummaryResponse(
+            exchange=exchange,
             total_value_krw=0, cash_balance_krw=0, invested_value_krw=0,
             initial_balance_krw=0,
             realized_pnl=0, unrealized_pnl=0, total_pnl=0, total_pnl_pct=0,
             total_fees=0, trade_count=0,
             peak_value=0, drawdown_pct=0, positions=[],
         )
-    summary = await _portfolio_manager.get_portfolio_summary(session)
+    summary = await pm.get_portfolio_summary(session)
     return PortfolioSummaryResponse(**summary)
 
 
 @router.get("/history", response_model=list[PortfolioHistoryPoint])
 async def get_portfolio_history(
     period: str = Query("7d", pattern="^(1d|7d|30d|90d|all)$"),
+    exchange: str = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     now = utcnow()
@@ -46,7 +60,11 @@ async def get_portfolio_history(
         "90d": timedelta(days=90),
     }
 
-    query = select(PortfolioSnapshot).order_by(desc(PortfolioSnapshot.snapshot_at))
+    query = (
+        select(PortfolioSnapshot)
+        .where(PortfolioSnapshot.exchange == exchange)
+        .order_by(desc(PortfolioSnapshot.snapshot_at))
+    )
 
     if period != "all" and period in period_map:
         start = now - period_map[period]

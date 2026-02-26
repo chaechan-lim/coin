@@ -40,8 +40,9 @@ class TradeReviewAgent:
     기본 1시간마다 실행, 최근 24시간 데이터 분석.
     """
 
-    def __init__(self, review_window_hours: int = 24):
+    def __init__(self, review_window_hours: int = 24, exchange_name: str = "bithumb"):
         self._review_window_hours = review_window_hours
+        self._exchange_name = exchange_name
         self._last_review: TradeReview | None = None
 
     async def review(self, session: AsyncSession) -> TradeReview:
@@ -51,14 +52,14 @@ class TradeReviewAgent:
         # 기간 내 모든 주문 조회 (체결된 것만)
         result = await session.execute(
             select(Order)
-            .where(Order.filled_at >= cutoff, Order.status == "filled")
+            .where(Order.filled_at >= cutoff, Order.status == "filled", Order.exchange == self._exchange_name)
             .order_by(Order.filled_at.asc())
         )
         orders = list(result.scalars().all())
 
         # 현재 포지션
         pos_result = await session.execute(
-            select(Position).where(Position.quantity > 0)
+            select(Position).where(Position.quantity > 0, Position.exchange == self._exchange_name)
         )
         positions = list(pos_result.scalars().all())
 

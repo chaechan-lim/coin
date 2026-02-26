@@ -20,9 +20,14 @@ async def get_trades(
     strategy: Optional[str] = None,
     side: Optional[str] = None,
     status: Optional[str] = Query(None, pattern="^(filled|open|cancelled|failed|all)$"),
+    exchange: str = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
-    query = select(Order).order_by(desc(Order.created_at))
+    query = (
+        select(Order)
+        .where(Order.exchange == exchange)
+        .order_by(desc(Order.created_at))
+    )
 
     # 기본: filled만 표시 (실패/취소 거래 숨김)
     if status == "all":
@@ -46,6 +51,7 @@ async def get_trades(
     return [
         OrderResponse(
             id=o.id,
+            exchange=o.exchange,
             symbol=o.symbol,
             side=o.side,
             order_type=o.order_type,
@@ -71,6 +77,7 @@ async def get_trades(
 @router.get("/summary")
 async def get_trade_summary(
     period: str = Query("7d", pattern="^(today|7d|30d|all)$"),
+    exchange: str = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     now = utcnow()
@@ -86,7 +93,9 @@ async def get_trade_summary(
 
     # 전체 체결 주문 시간순 (매수 원가 계산용)
     result = await session.execute(
-        select(Order).where(Order.status == "filled").order_by(Order.created_at)
+        select(Order)
+        .where(Order.status == "filled", Order.exchange == exchange)
+        .order_by(Order.created_at)
     )
     all_orders = list(result.scalars().all())
 
@@ -154,6 +163,7 @@ async def get_trade_detail(order_id: int, session: AsyncSession = Depends(get_db
 
     return OrderResponse(
         id=order.id,
+        exchange=order.exchange,
         symbol=order.symbol,
         side=order.side,
         order_type=order.order_type,

@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { PortfolioSummary } from './PortfolioSummary'
 import { PortfolioChart } from './PortfolioChart'
 import { TradeHistory } from './TradeHistory'
@@ -10,7 +10,8 @@ import { EngineControl } from './EngineControl'
 import { RotationMonitor } from './RotationMonitor'
 import { SystemLog } from './SystemLog'
 import { useWebSocket } from '../hooks/useWebSocket'
-import type { WsEvent, ServerEvent } from '../types'
+import { getExchanges } from '../api/client'
+import type { WsEvent, ServerEvent, ExchangeName } from '../types'
 import { format } from 'date-fns'
 
 const TABS = [
@@ -25,11 +26,26 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]['id']
 
+const EXCHANGE_LABELS: Record<ExchangeName, string> = {
+  bithumb: '빗썸 현물',
+  binance_futures: '바이낸스 선물',
+}
+
 export function Dashboard() {
   const [tab, setTab] = useState<TabId>('overview')
+  const [exchange, setExchange] = useState<ExchangeName>('bithumb')
   const [liveEvents, setLiveEvents] = useState<string[]>([])
   const [realtimeServerEvents, setRealtimeServerEvents] = useState<ServerEvent[]>([])
   const qc = useQueryClient()
+
+  // 사용 가능한 거래소 목록 조회
+  const { data: exchangeInfo } = useQuery({
+    queryKey: ['exchanges'],
+    queryFn: getExchanges,
+    staleTime: 60_000,
+  })
+
+  const exchanges = exchangeInfo?.exchanges ?? ['bithumb']
 
   const onMessage = useCallback(
     (event: WsEvent) => {
@@ -73,13 +89,16 @@ export function Dashboard() {
 
   const { connected } = useWebSocket(onMessage)
 
+  // 통화 기호
+  const currencySymbol = exchange === 'binance_futures' ? 'USDT' : '₩'
+
   return (
     <div className="min-h-screen bg-gray-900 text-white">
       {/* Header */}
       <header className="border-b border-gray-700 px-3 md:px-6 py-2.5 md:py-3 flex items-center justify-between">
         <div className="flex items-center gap-2 md:gap-3 min-w-0">
           <span className="text-base md:text-xl font-bold whitespace-nowrap">🪙 코인 자동 매매</span>
-          <span className="text-xs text-gray-500 hidden md:block">빗썸 기반 24시간 트레이딩</span>
+          <span className="text-xs text-gray-500 hidden md:block">듀얼 엔진 트레이딩</span>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
           <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
@@ -87,22 +106,45 @@ export function Dashboard() {
         </div>
       </header>
 
+      {/* Exchange selector */}
+      {exchanges.length > 1 && (
+        <div className="border-b border-gray-700 px-3 md:px-6 py-1.5 flex gap-2">
+          {exchanges.map((ex) => (
+            <button
+              key={ex}
+              onClick={() => setExchange(ex)}
+              className={`px-3 py-1 text-xs md:text-sm rounded-full font-medium transition-colors ${
+                exchange === ex
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white'
+              }`}
+            >
+              {EXCHANGE_LABELS[ex] ?? ex}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Tabs - horizontal scroll on mobile */}
       <nav className="border-b border-gray-700 overflow-x-auto scrollbar-hide">
         <div className="flex min-w-max">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={`shrink-0 px-3 md:px-4 py-2.5 md:py-3 text-xs md:text-sm font-medium transition-colors border-b-2 -mb-px whitespace-nowrap ${
-                tab === t.id
-                  ? 'border-blue-500 text-blue-400'
-                  : 'border-transparent text-gray-400 hover:text-white active:text-white'
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
+          {TABS.map((t) => {
+            // 로테이션 탭은 빗썸에서만 표시
+            if (t.id === 'rotation' && exchange !== 'bithumb') return null
+            return (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                className={`shrink-0 px-3 md:px-4 py-2.5 md:py-3 text-xs md:text-sm font-medium transition-colors border-b-2 -mb-px whitespace-nowrap ${
+                  tab === t.id
+                    ? 'border-blue-500 text-blue-400'
+                    : 'border-transparent text-gray-400 hover:text-white active:text-white'
+                }`}
+              >
+                {t.label}
+              </button>
+            )
+          })}
         </div>
       </nav>
 
@@ -110,16 +152,16 @@ export function Dashboard() {
       <main className="p-3 md:p-6 space-y-3 md:space-y-4 max-w-7xl mx-auto">
         {tab === 'overview' && (
           <>
-            <EngineControl liveEvents={liveEvents} />
-            <PortfolioSummary />
-            <PortfolioChart />
+            <EngineControl liveEvents={liveEvents} exchange={exchange} />
+            <PortfolioSummary exchange={exchange} />
+            <PortfolioChart exchange={exchange} />
           </>
         )}
-        {tab === 'trades' && <TradeHistory />}
-        {tab === 'logs' && <OrderLog />}
-        {tab === 'strategies' && <StrategyPerformance />}
-        {tab === 'agents' && <AgentStatus />}
-        {tab === 'rotation' && <RotationMonitor />}
+        {tab === 'trades' && <TradeHistory exchange={exchange} />}
+        {tab === 'logs' && <OrderLog exchange={exchange} />}
+        {tab === 'strategies' && <StrategyPerformance exchange={exchange} />}
+        {tab === 'agents' && <AgentStatus exchange={exchange} />}
+        {tab === 'rotation' && exchange === 'bithumb' && <RotationMonitor />}
         {tab === 'system' && <SystemLog realtimeEvents={realtimeServerEvents} />}
       </main>
     </div>

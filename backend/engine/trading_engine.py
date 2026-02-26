@@ -60,6 +60,7 @@ class TradingEngine:
         portfolio_manager: PortfolioManager,
         combiner: SignalCombiner,
         agent_coordinator=None,
+        exchange_name: str = "bithumb",
     ):
         self._config = config
         self._exchange = exchange
@@ -68,6 +69,7 @@ class TradingEngine:
         self._portfolio_manager = portfolio_manager
         self._combiner = combiner
         self._agent_coordinator = agent_coordinator
+        self._exchange_name = exchange_name
 
         self._strategies: dict[str, BaseStrategy] = {}
         self._is_running = False
@@ -584,7 +586,7 @@ class TradingEngine:
 
                 # 보유 중인 포지션도 평가 대상에 포함 (서지 코인 SL/TP/SELL)
                 result = await session.execute(
-                    select(Position.symbol).where(Position.quantity > 0)
+                    select(Position.symbol).where(Position.quantity > 0, Position.exchange == self._exchange_name)
                 )
                 held = {r[0] for r in result.all()}
                 all_coins = list(coins | held)
@@ -626,7 +628,7 @@ class TradingEngine:
         """Evaluate a single coin: SL/TP first, then strategy signals."""
         # ── 1. 기존 포지션 SL/TP/trailing 체크 ──
         result = await session.execute(
-            select(Position).where(Position.symbol == symbol, Position.quantity > 0)
+            select(Position).where(Position.symbol == symbol, Position.quantity > 0, Position.exchange == self._exchange_name)
         )
         position = result.scalar_one_or_none()
 
@@ -767,7 +769,7 @@ class TradingEngine:
 
         # 이미 보유 중인 심볼 조회
         result = await session.execute(
-            select(Position.symbol).where(Position.quantity > 0)
+            select(Position.symbol).where(Position.quantity > 0, Position.exchange == self._exchange_name)
         )
         held_symbols = {r[0] for r in result.all()}
 
@@ -857,7 +859,7 @@ class TradingEngine:
     async def _execute_rotation_sell(self, session: AsyncSession) -> None:
         """로테이션을 위한 기존 포지션 전량 매도."""
         result = await session.execute(
-            select(Position).where(Position.quantity > 0)
+            select(Position).where(Position.quantity > 0, Position.exchange == self._exchange_name)
         )
         positions = result.scalars().all()
 
@@ -1019,7 +1021,7 @@ class TradingEngine:
 
             # 이미 포지션 있으면 추가 매수 안 함
             result = await session.execute(
-                select(Position).where(Position.symbol == symbol, Position.quantity > 0)
+                select(Position).where(Position.symbol == symbol, Position.quantity > 0, Position.exchange == self._exchange_name)
             )
             if result.scalar_one_or_none():
                 return
@@ -1091,7 +1093,7 @@ class TradingEngine:
 
         elif decision.action == SignalType.SELL:
             result = await session.execute(
-                select(Position).where(Position.symbol == symbol, Position.quantity > 0)
+                select(Position).where(Position.symbol == symbol, Position.quantity > 0, Position.exchange == self._exchange_name)
             )
             position = result.scalar_one_or_none()
             if not position or position.quantity <= 0:

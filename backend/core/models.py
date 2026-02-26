@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Text,
     Index,
+    UniqueConstraint,
 )
 from sqlalchemy import JSON
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -40,6 +41,7 @@ class Order(Base):
     )
 
     id = Column(Integer, primary_key=True)
+    exchange = Column(String(20), nullable=False, default="bithumb", server_default="bithumb")
     exchange_order_id = Column(String(100), nullable=True)
     symbol = Column(String(20), nullable=False)
     side = Column(String(4), nullable=False)  # "buy" / "sell"
@@ -74,6 +76,7 @@ class Trade(Base):
     )
 
     id = Column(Integer, primary_key=True)
+    exchange = Column(String(20), nullable=False, default="bithumb", server_default="bithumb")
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
     symbol = Column(String(20), nullable=False)
     side = Column(String(4), nullable=False)
@@ -89,9 +92,13 @@ class Trade(Base):
 
 class Position(Base):
     __tablename__ = "positions"
+    __table_args__ = (
+        UniqueConstraint("symbol", "exchange", name="uq_position_symbol_exchange"),
+    )
 
     id = Column(Integer, primary_key=True)
-    symbol = Column(String(20), unique=True, nullable=False)
+    exchange = Column(String(20), nullable=False, default="bithumb", server_default="bithumb")
+    symbol = Column(String(20), nullable=False)
     quantity = Column(Float, default=0.0)
     average_buy_price = Column(Float, default=0.0)
     total_invested = Column(Float, default=0.0)
@@ -100,6 +107,11 @@ class Position(Base):
     unrealized_pnl_pct = Column(Float, default=0.0)
     is_paper = Column(Boolean, default=True)
     is_surge = Column(Boolean, default=False)
+    # Futures-specific fields
+    direction = Column(String(5), default="long")
+    leverage = Column(Integer, default=1)
+    liquidation_price = Column(Float, nullable=True)
+    margin_used = Column(Float, default=0.0)
     entered_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -111,6 +123,7 @@ class PortfolioSnapshot(Base):
     )
 
     id = Column(Integer, primary_key=True)
+    exchange = Column(String(20), nullable=False, default="bithumb", server_default="bithumb")
     total_value_krw = Column(Float, nullable=False)
     cash_balance_krw = Column(Float, nullable=False)
     invested_value_krw = Column(Float, nullable=False)
@@ -128,6 +141,7 @@ class StrategyLog(Base):
     )
 
     id = Column(Integer, primary_key=True)
+    exchange = Column(String(20), nullable=False, default="bithumb", server_default="bithumb")
     strategy_name = Column(String(50), nullable=False)
     symbol = Column(String(20), nullable=False)
     signal_type = Column(String(4))  # BUY/SELL/HOLD
@@ -146,6 +160,7 @@ class AgentAnalysisLog(Base):
     )
 
     id = Column(Integer, primary_key=True)
+    exchange = Column(String(20), nullable=False, default="bithumb", server_default="bithumb")
     agent_name = Column(String(50), nullable=False)
     analysis_type = Column(String(30))
     result = Column(JSON, nullable=False)

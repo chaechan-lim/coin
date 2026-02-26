@@ -1,3 +1,11 @@
+// ── Exchange ─────────────────────────────────────────────────
+export type ExchangeName = 'bithumb' | 'binance_futures'
+
+export interface ExchangeInfo {
+  exchanges: ExchangeName[]
+  default: ExchangeName
+}
+
 // ── Portfolio ────────────────────────────────────────────────
 export interface Position {
   symbol: string
@@ -7,9 +15,14 @@ export interface Position {
   current_value: number
   unrealized_pnl: number
   unrealized_pnl_pct: number
+  // Futures-specific
+  direction?: string | null
+  leverage?: number | null
+  liquidation_price?: number | null
 }
 
 export interface PortfolioSummary {
+  exchange?: ExchangeName
   total_value_krw: number
   cash_balance_krw: number
   invested_value_krw: number
@@ -43,6 +56,7 @@ export interface ContributingStrategy {
 
 export interface Order {
   id: number
+  exchange?: ExchangeName
   symbol: string
   side: 'buy' | 'sell'
   order_type: string
@@ -136,6 +150,7 @@ export interface AgentLog {
 
 // ── Engine ───────────────────────────────────────────────────
 export interface EngineStatus {
+  exchange?: ExchangeName
   is_running: boolean
   mode: 'paper' | 'live'
   evaluation_interval_sec: number
@@ -152,6 +167,7 @@ export interface SurgeScore {
 }
 
 export interface RotationStatus {
+  exchange?: ExchangeName
   rotation_enabled: boolean
   surge_threshold: number
   market_state: string

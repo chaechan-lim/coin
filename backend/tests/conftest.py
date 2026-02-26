@@ -65,8 +65,10 @@ def make_order(
     fee=150.0,
     status="filled",
     created_at=None,
+    exchange="bithumb",
 ) -> Order:
     return Order(
+        exchange=exchange,
         symbol=symbol,
         side=side,
         order_type="limit",
@@ -91,8 +93,10 @@ def make_position(
     quantity=0.001,
     average_buy_price=50_000_000,
     total_invested=50_000,
+    exchange="bithumb",
 ) -> Position:
     return Position(
+        exchange=exchange,
         symbol=symbol,
         quantity=quantity,
         average_buy_price=average_buy_price,

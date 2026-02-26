@@ -35,9 +35,12 @@ def _clean_indicators(d: dict | None) -> dict | None:
 class OrderManager:
     """Manages order lifecycle: create, track, fill, cancel."""
 
-    def __init__(self, exchange: ExchangeAdapter, is_paper: bool = True):
+    def __init__(self, exchange: ExchangeAdapter, is_paper: bool = True,
+                 exchange_name: str = "bithumb", fee_currency: str = "KRW"):
         self._exchange = exchange
         self._is_paper = is_paper
+        self._exchange_name = exchange_name
+        self._fee_currency = fee_currency
 
     async def _poll_fill(self, order_id: str, symbol: str, timeout: float = 8) -> OrderResult:
         """Poll exchange until order is filled or timeout."""
@@ -61,7 +64,7 @@ class OrderManager:
             return OrderResult(
                 order_id=order_id, symbol=symbol, side="", order_type="limit",
                 status="open", price=0, amount=0, filled=0, remaining=0,
-                cost=0, fee=0, fee_currency="KRW", timestamp=None, info={},
+                cost=0, fee=0, fee_currency=self._fee_currency, timestamp=None, info={},
             )
 
     async def create_order(
@@ -73,17 +76,24 @@ class OrderManager:
         price: float,
         signal: Signal,
         decision: CombinedDecision | None = None,
+        order_type: str = "limit",
     ) -> Order:
         """Create and execute an order with full strategy attribution."""
 
-        # Execute on exchange (어댑터가 _poll_fill 포함 — 체결 확인까지)
-        if side == "buy":
-            result = await self._exchange.create_limit_buy(symbol, amount, price)
+        # Execute on exchange
+        if order_type == "market":
+            if side == "buy":
+                result = await self._exchange.create_market_buy(symbol, amount)
+            else:
+                result = await self._exchange.create_market_sell(symbol, amount)
         else:
-            result = await self._exchange.create_limit_sell(symbol, amount, price)
+            if side == "buy":
+                result = await self._exchange.create_limit_buy(symbol, amount, price)
+            else:
+                result = await self._exchange.create_limit_sell(symbol, amount, price)
 
-        # 어댑터가 미체결이면 추가 폴링
-        if result.status != "closed" and result.order_id:
+        # 지정가 미체결이면 추가 폴링 (시장가는 즉시 체결)
+        if order_type == "limit" and result.status != "closed" and result.order_id:
             try:
                 final = await self._exchange.fetch_order(result.order_id, symbol)
                 if final.status in ("closed", "canceled"):
@@ -111,10 +121,11 @@ class OrderManager:
 
         # Create DB record
         order = Order(
+            exchange=self._exchange_name,
             exchange_order_id=result.order_id,
             symbol=symbol,
             side=side,
-            order_type="limit",
+            order_type=order_type,
             status=status,
             requested_price=_f(price),
             executed_price=_f(result.price) if result.filled > 0 else None,
@@ -136,6 +147,7 @@ class OrderManager:
         # Create trade record if filled
         if result.filled > 0:
             trade = Trade(
+                exchange=self._exchange_name,
                 order_id=order.id,
                 symbol=symbol,
                 side=side,
@@ -150,6 +162,7 @@ class OrderManager:
 
         # Log the strategy signal
         strategy_log = StrategyLog(
+            exchange=self._exchange_name,
             strategy_name=signal.strategy_name,
             symbol=symbol,
             signal_type=signal.signal_type.value,
@@ -182,6 +195,7 @@ class OrderManager:
     ) -> None:
         """Log a strategy signal that didn't result in a trade."""
         strategy_log = StrategyLog(
+            exchange=self._exchange_name,
             strategy_name=signal.strategy_name,
             symbol=symbol,
             signal_type=signal.signal_type.value,

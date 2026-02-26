@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
 import { compareStrategies } from '../api/client'
+import type { ExchangeName } from '../types'
 
 const STRATEGY_KR: Record<string, string> = {
   volatility_breakout: '변동성 돌파',
@@ -14,11 +15,11 @@ const STRATEGY_KR: Record<string, string> = {
 
 const PERIODS = ['7d', '30d', '90d'] as const
 
-export function StrategyPerformance() {
+export function StrategyPerformance({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
   const [period, setPeriod] = useState<string>('30d')
   const { data, isLoading } = useQuery({
-    queryKey: ['strategies', 'comparison', period],
-    queryFn: () => compareStrategies(period),
+    queryKey: ['strategies', 'comparison', period, exchange],
+    queryFn: () => compareStrategies(period, exchange),
     staleTime: 60_000,
   })
 

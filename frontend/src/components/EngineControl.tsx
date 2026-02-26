@@ -1,22 +1,23 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getEngineStatus, startEngine, stopEngine } from '../api/client'
+import type { ExchangeName } from '../types'
 
-export function EngineControl({ liveEvents }: { liveEvents: string[] }) {
+export function EngineControl({ liveEvents, exchange = 'bithumb' }: { liveEvents: string[]; exchange?: ExchangeName }) {
   const qc = useQueryClient()
 
   const { data: status } = useQuery({
-    queryKey: ['engine', 'status'],
-    queryFn: getEngineStatus,
+    queryKey: ['engine', 'status', exchange],
+    queryFn: () => getEngineStatus(exchange),
     refetchInterval: 10_000,
   })
 
   const startMut = useMutation({
-    mutationFn: startEngine,
+    mutationFn: () => startEngine(exchange),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['engine'] }),
   })
 
   const stopMut = useMutation({
-    mutationFn: stopEngine,
+    mutationFn: () => stopEngine(exchange),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['engine'] }),
   })
 

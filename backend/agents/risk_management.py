@@ -32,9 +32,11 @@ class RiskManagementAgent:
         self,
         config: RiskConfig,
         market_data: MarketDataService,
+        exchange_name: str = "bithumb",
     ):
         self._config = config
         self._market_data = market_data
+        self._exchange_name = exchange_name
         self._alerts: list[RiskAlert] = []
 
     async def evaluate(
@@ -47,7 +49,7 @@ class RiskManagementAgent:
 
         # Get current positions
         result = await session.execute(
-            select(Position).where(Position.quantity > 0)
+            select(Position).where(Position.quantity > 0, Position.exchange == self._exchange_name)
         )
         positions = list(result.scalars().all())
 
@@ -112,6 +114,7 @@ class RiskManagementAgent:
         """
         result = await session.execute(
             select(func.max(PortfolioSnapshot.total_value_krw))
+            .where(PortfolioSnapshot.exchange == self._exchange_name)
         )
         peak = result.scalar()
         if not peak or peak <= 0:
@@ -153,7 +156,7 @@ class RiskManagementAgent:
         # Get today's starting portfolio value
         result = await session.execute(
             select(PortfolioSnapshot)
-            .where(PortfolioSnapshot.snapshot_at >= today_start)
+            .where(PortfolioSnapshot.snapshot_at >= today_start, PortfolioSnapshot.exchange == self._exchange_name)
             .order_by(PortfolioSnapshot.snapshot_at.asc())
             .limit(1)
         )

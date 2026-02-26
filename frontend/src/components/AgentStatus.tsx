@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getMarketAnalysis, getRiskAlerts, getTradeReview, triggerTradeReview } from '../api/client'
-import type { RiskAlert } from '../types'
+import type { RiskAlert, ExchangeName } from '../types'
 
 const STATE_COLORS: Record<string, string> = {
   strong_uptrend: 'bg-green-500',
@@ -50,32 +50,32 @@ function fmt(n: number): string {
   return n.toLocaleString('ko-KR', { maximumFractionDigits: 0 })
 }
 
-export function AgentStatus() {
+export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
   const qc = useQueryClient()
 
   const { data: analysis } = useQuery({
-    queryKey: ['agents', 'market-analysis'],
-    queryFn: getMarketAnalysis,
+    queryKey: ['agents', 'market-analysis', exchange],
+    queryFn: () => getMarketAnalysis(exchange),
     refetchInterval: 60_000,
     staleTime: 30_000,
   })
 
   const { data: alerts } = useQuery({
-    queryKey: ['agents', 'risk-alerts'],
-    queryFn: getRiskAlerts,
+    queryKey: ['agents', 'risk-alerts', exchange],
+    queryFn: () => getRiskAlerts(exchange),
     refetchInterval: 30_000,
     staleTime: 15_000,
   })
 
   const { data: review } = useQuery({
-    queryKey: ['agents', 'trade-review'],
-    queryFn: getTradeReview,
+    queryKey: ['agents', 'trade-review', exchange],
+    queryFn: () => getTradeReview(exchange),
     refetchInterval: 300_000,
     staleTime: 60_000,
   })
 
   const reviewMut = useMutation({
-    mutationFn: triggerTradeReview,
+    mutationFn: () => triggerTradeReview(exchange),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['agents', 'trade-review'] }),
   })
 

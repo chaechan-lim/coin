@@ -92,9 +92,23 @@ class BinanceConfig(BaseSettings):
     model_config = {"env_prefix": "BINANCE_"}
 
 
+class BinanceTradingConfig(BaseSettings):
+    """바이낸스 선물 전용 트레이딩 설정."""
+    mode: str = "paper"  # "paper" or "live" (빗썸과 독립)
+    evaluation_interval_sec: int = 300
+    initial_balance_usdt: float = 1000.0
+    min_combined_confidence: float = 0.50
+    max_trade_size_pct: float = 0.15
+    daily_buy_limit: int = 15
+    max_daily_coin_buys: int = 3
+
+    model_config = {"env_prefix": "BINANCE_TRADING_"}
+
+
 class AppConfig(BaseSettings):
     exchange: ExchangeConfig = Field(default_factory=ExchangeConfig)
     binance: BinanceConfig = Field(default_factory=BinanceConfig)
+    binance_trading: BinanceTradingConfig = Field(default_factory=BinanceTradingConfig)
     trading: TradingConfig = Field(default_factory=TradingConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)

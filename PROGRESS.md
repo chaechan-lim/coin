@@ -6,10 +6,11 @@
 
 ## 개요
 
-빗썸(Bithumb) 거래소 기반의 24시간 자동 암호화폐 트레이딩 시스템.
-6개 전략 가중 투표 (HOLD=기권 방식) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭) 포함.
-**현재 라이브 운영 중** (5종 추적 + 동적 로테이션(거래대금 10B+ 자동 선정), 500K KRW, SQLite WAL).
-**바이낸스 USDM 선물** 어댑터 + 선물 백테스트 (롱/숏/레버리지/청산/펀딩비) 추가.
+빗썸(Bithumb) 현물 + 바이낸스(Binance) USDM 선물 **듀얼 엔진** 24시간 자동 암호화폐 트레이딩 시스템.
+6개 전략 가중 투표 (HOLD=기권 방식) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭, 거래소 전환) 포함.
+**현재 라이브 운영 중**: 빗썸 현물 (~548K KRW) + 바이낸스 선물 (~174.92 USDT, 3x 레버리지), SQLite WAL.
+**듀얼 엔진 아키텍처**: 빗썸 TradingEngine + 바이낸스 BinanceFuturesEngine 독립 병렬 실행, EngineRegistry 중앙 관리, exchange 컬럼 기반 데이터 격리.
+**바이낸스 선물 라이브**: 독립 모드 분리 (빗썸 paper/live + 바이낸스 paper/live 별도), 시장가 주문, 실제 USDT 잔고 조회.
 
 ---
 
@@ -21,7 +22,7 @@
 | 프론트엔드 | React 18, TypeScript, Vite, TailwindCSS, Recharts, lightweight-charts |
 | DB | SQLite + WAL (현재) / PostgreSQL 16 (마이그레이션 예정) |
 | Cache / PubSub | Redis 7 (Docker, 선택) |
-| 거래소 연동 | Bithumb V2 (ccxt+JWT), Binance USDM 선물 (ccxt binanceusdm) |
+| 거래소 연동 | Bithumb V2 (ccxt+JWT), Binance USDM 선물 (ccxt binanceusdm), 듀얼 엔진 EngineRegistry |
 | 기술적 지표 | pandas + pandas-ta |
 | 배포 | Docker Compose (restart: always → 24/7) |
 
@@ -52,12 +53,14 @@ coin/
 │   │   └── schemas.py           ✅ 완료
 │   ├── db/
 │   │   ├── __init__.py          ✅
-│   │   └── session.py           ✅ 완료
+│   │   ├── session.py           ✅ 완료
+│   │   └── migrate.py           ✅ 완료 (exchange 컬럼 마이그레이션)
 │   ├── exchange/
 │   │   ├── __init__.py          ✅
 │   │   ├── base.py              ✅ 완료
 │   │   ├── bithumb_adapter.py   ✅ 완료 (V1, 미사용)
 │   │   ├── bithumb_v2_adapter.py ✅ 완료 (V2, 현재 라이브)
+│   │   ├── binance_usdm_adapter.py ✅ 완료 (USDM 선물)
 │   │   ├── paper_adapter.py     ✅ 완료
 │   │   └── data_models.py       ✅ 완료
 │   ├── services/
@@ -88,12 +91,14 @@ coin/
 │   ├── engine/
 │   │   ├── __init__.py          ✅
 │   │   ├── trading_engine.py    ✅ 완료
+│   │   ├── futures_engine.py    ✅ 완료 (BinanceFuturesEngine 서브클래스)
 │   │   ├── order_manager.py     ✅ 완료
 │   │   ├── portfolio_manager.py ✅ 완료
 │   │   └── scheduler.py         ✅ 완료
 │   ├── api/
 │   │   ├── __init__.py          ✅
 │   │   ├── router.py            ✅ 완료
+│   │   ├── dependencies.py      ✅ 완료 (EngineRegistry 싱글턴)
 │   │   ├── dashboard.py         ✅ 완료
 │   │   ├── events.py            ✅ 완료 (서버 이벤트 조회 + 건수)
 │   │   ├── portfolio.py         ✅ 완료
@@ -107,7 +112,9 @@ coin/
 │   │   ├── test_api_trades.py   ✅ 완료 (5 tests)
 │   │   ├── test_api_portfolio.py ✅ 완료 (4 tests)
 │   │   ├── test_portfolio_manager.py ✅ 완료 (9 tests)
-│   │   └── test_risk_management.py ✅ 완료 (5 tests)
+│   │   ├── test_risk_management.py ✅ 완료 (5 tests)
+│   │   ├── test_exchange_filter.py ✅ 완료 (5 tests, 거래소 격리)
+│   │   └── test_futures_engine.py ✅ 완료 (11 tests, 선물 엔진)
 │   └── pytest.ini               ✅ 완료
 └── frontend/
     ├── package.json             ✅ 완료
@@ -265,13 +272,21 @@ coin/
 | 원금 대비 수익 표시 | ✅ initial_balance_krw + total_pnl_pct 원금 기준 |
 | 전략 성과 P&L 수정 | ✅ FIFO 원가 매칭 (기존: sell.requested_price 비교 → 오계산) |
 | 모바일 반응형 UI | ✅ 탭 스크롤, 테이블→카드, 터치 타겟, 전 컴포넌트 |
-| 단위 테스트 | ✅ 30개 (pytest + 인메모리 SQLite) |
+| 단위 테스트 | ✅ 111개 (pytest + 인메모리 SQLite) |
 | 거래 기본 필터 | ✅ 체결(filled)만 기본 표시, status 파라미터 |
 | 시작 시 현금 보정 | ✅ reconcile_cash_from_db at startup (peak 오염 방지) |
 | 0% 승률 전략 제거 | ✅ volatility_breakout/supertrend 비활성 → 6전략 체제 |
 | 진입 기준 상향 | ✅ min_confidence 0.25→0.50, 쿨다운 3→12캔들 |
 | 동적 로테이션 코인 | ✅ 빗썸 전체 마켓 스캔 → 거래대금 10B+ 자동 선정 (6시간 갱신) |
 | 스마트 매매 제한 | ✅ 매수만 카운트 (매도 무제한), 일일 매수 20회 + 코인당 3회 |
+| **듀얼 엔진 아키텍처** | ✅ 빗썸 + 바이낸스 병렬 실행, EngineRegistry |
+| DB exchange 컬럼 | ✅ 6테이블 exchange 컬럼 + 마이그레이션 |
+| BinanceFuturesEngine | ✅ 롱/숏 양방향, 레버리지, 청산가 감시, 펀딩비 |
+| API 거래소 라우팅 | ✅ 모든 엔드포인트 exchange 파라미터 |
+| 프론트엔드 거래소 전환 | ✅ Dashboard 거래소 탭, 모든 컴포넌트 exchange prop |
+| 거래소 격리 테스트 | ✅ 5 tests + 선물 엔진 11 tests |
+| 바이낸스 선물 라이브 | ✅ 독립 모드 분리, 시장가 주문, 실제 USDT 잔고 조회 |
+| 바이낸스 현물 연동 | ⬜ BinanceSpotAdapter (ccxt binance), 현물 TradingEngine 추가 (계획) |
 | 시장 상태별 전략 on/off | ⬜ 횡보 시 추세추종 완전 비활성 (향후) |
 | 멀티 타임프레임 확인 | ⬜ 4h+1h 이중 확인 (향후) |
 | PostgreSQL 마이그레이션 | ⬜ 향후 스케일업 시 |
@@ -365,6 +380,31 @@ coin/
 6. **시장 신뢰도 게이팅**: confidence < 0.35 → 임계값 +0.10
 7. **시장 상태 사이징**: crash 25%, downtrend 50%
 
+### 듀얼 엔진 아키텍처 (v0.13)
+
+```
+EngineRegistry (싱글턴)
+├── "bithumb"
+│   ├── TradingEngine (현물, exchange_name="bithumb")
+│   ├── PortfolioManager (KRW)
+│   ├── SignalCombiner + AgentCoordinator
+│   └── 서지 로테이션 활성
+└── "binance_futures"
+    ├── BinanceFuturesEngine(TradingEngine) (선물, exchange_name="binance_futures")
+    ├── PortfolioManager (USDT)
+    ├── SignalCombiner + AgentCoordinator
+    └── 롱/숏 양방향, 레버리지, 청산가 감시
+```
+
+**데이터 격리**: 6테이블(Order, Trade, Position, PortfolioSnapshot, StrategyLog, AgentAnalysisLog)에 `exchange` 컬럼 추가 (기본값 "bithumb"). Position은 (symbol, exchange) 복합 유니크.
+
+**BinanceFuturesEngine 주요 기능**:
+- 롱/숏 양방향 매매 (숏은 downtrend/crash에서만)
+- SL/TP/트레일링: `/ sqrt(leverage)` 자동 축소
+- 청산가 2% 이내 긴급 청산
+- 펀딩비 30분 주기 조회
+- 로테이션 비활성 (선물 전용)
+
 ### DB 주문 테이블 핵심 컬럼 (전략 귀속)
 ```sql
 orders
@@ -406,8 +446,11 @@ orders
 | GET | /agents/trade-review/latest | 최근 거래 리뷰 |
 | POST | /agents/trade-review/run | 수동 거래 리뷰 실행 |
 | GET | /agents/trade-review/history | 거래 리뷰 이력 |
+| GET | /exchanges | 사용 가능 거래소 목록 |
 | GET | /events | 서버 이벤트 로그 (페이징+필터) |
 | GET | /events/counts | 레벨별 이벤트 건수 |
+
+> **거래소 파라미터**: 모든 엔드포인트에 `?exchange=bithumb|binance_futures` 쿼리 파라미터 지원 (기본값: bithumb)
 
 ### WebSocket
 
@@ -607,5 +650,8 @@ docker compose restart backend
 | v0.11 | 2026-02-26 | 모바일 반응형 UI (전 컴포넌트), 전략 성과 P&L FIFO 원가 매칭 수정, 유닛 테스트 30개 |
 | v0.12 | 2026-02-26 | 전략 개선: 0%승률 전략 제거(8→6전략), min_confidence 0.50, 쿨다운 12캔들, 동적 로테이션 코인 |
 | v0.12.1 | 2026-02-26 | 스마트 매매 제한: 매수만 카운트(매도 무제한), 일일 매수 20회 + 코인당 3회 |
-| v0.13 | 예정 | PostgreSQL 마이그레이션 |
+| v0.13 | 2026-02-26 | **듀얼 엔진**: 바이낸스 USDM 선물 통합 (DB exchange 컬럼, BinanceFuturesEngine, EngineRegistry, API 라우팅, 프론트엔드 거래소 전환), 111 테스트 |
+| v0.13.1 | 2026-02-26 | **바이낸스 선물 라이브**: 독립 모드 분리(BinanceTradingConfig.mode), 시장가 주문, fee_currency, 실제 USDT 잔고 조회 |
+| v0.14 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
+| v0.15 | 예정 | PostgreSQL 마이그레이션 |
 | v1.0 | 예정 | 라즈베리파이 배포 + 장기 운영 안정화 |

@@ -5,7 +5,7 @@ import { getTrades } from '../api/client'
 
 /** API 타임스탬프(UTC, timezone 미표기)를 로컬 Date로 변환 */
 const utcToLocal = (ts: string) => new Date(ts.endsWith('Z') ? ts : ts + 'Z')
-import type { Order } from '../types'
+import type { Order, ExchangeName } from '../types'
 
 const STRATEGY_COLORS: Record<string, string> = {
   volatility_breakout: 'bg-orange-800 text-orange-200',
@@ -139,14 +139,14 @@ function OrderDetail({ order }: { order: Order }) {
   )
 }
 
-export function TradeHistory() {
+export function TradeHistory({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
   const [page, setPage] = useState(1)
   const [symbol, setSymbol] = useState('')
   const [strategy, setStrategy] = useState('')
   const [side, setSide] = useState('')
 
   const { data, isLoading } = useQuery({
-    queryKey: ['trades', page, symbol, strategy, side],
+    queryKey: ['trades', page, symbol, strategy, side, exchange],
     queryFn: () =>
       getTrades({
         page,
@@ -154,6 +154,7 @@ export function TradeHistory() {
         symbol: symbol || undefined,
         strategy: strategy || undefined,
         side: side || undefined,
+        exchange,
       }),
     staleTime: 15_000,
   })

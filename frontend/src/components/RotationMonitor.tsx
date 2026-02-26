@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRotationStatus } from '../api/client'
 import { format } from 'date-fns'
+import type { RotationStatus } from '../types'
 
 const utcToLocal = (ts: string) => new Date(ts.endsWith('Z') ? ts : ts + 'Z')
 
@@ -13,9 +14,9 @@ const MARKET_STATE_LABELS: Record<string, { label: string; color: string }> = {
 }
 
 export function RotationMonitor() {
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error } = useQuery<RotationStatus>({
     queryKey: ['rotation-status'],
-    queryFn: getRotationStatus,
+    queryFn: () => getRotationStatus(),
     refetchInterval: 30_000,
   })
 

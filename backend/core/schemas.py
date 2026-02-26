@@ -12,9 +12,14 @@ class PositionResponse(BaseModel):
     current_value: float
     unrealized_pnl: float
     unrealized_pnl_pct: float
+    # Futures-specific (optional)
+    direction: Optional[str] = None
+    leverage: Optional[int] = None
+    liquidation_price: Optional[float] = None
 
 
 class PortfolioSummaryResponse(BaseModel):
+    exchange: str = "bithumb"
     total_value_krw: float
     cash_balance_krw: float
     invested_value_krw: float
@@ -54,6 +59,7 @@ class TradeResponse(BaseModel):
 
 class OrderResponse(BaseModel):
     id: int
+    exchange: str = "bithumb"
     symbol: str
     side: str
     order_type: str
@@ -145,6 +151,7 @@ class AgentLogResponse(BaseModel):
 
 # -- Settings --
 class EngineStatusResponse(BaseModel):
+    exchange: str = "bithumb"
     is_running: bool
     mode: str
     evaluation_interval_sec: int
@@ -176,6 +183,7 @@ class SurgeScoreItem(BaseModel):
 
 
 class RotationStatusResponse(BaseModel):
+    exchange: str = "bithumb"
     rotation_enabled: bool
     surge_threshold: float
     market_state: str

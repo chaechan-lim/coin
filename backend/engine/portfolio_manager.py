@@ -17,11 +17,13 @@ class PortfolioManager:
         market_data: MarketDataService,
         initial_balance_krw: float = 500_000,
         is_paper: bool = True,
+        exchange_name: str = "bithumb",
     ):
         self._market_data = market_data
         self._initial_balance = initial_balance_krw
         self._cash_balance = initial_balance_krw
         self._is_paper = is_paper
+        self._exchange_name = exchange_name
         self._peak_value = initial_balance_krw
         self._realized_pnl = 0.0
 
@@ -32,7 +34,10 @@ class PortfolioManager:
         """Update position after a buy trade."""
         from datetime import datetime, timezone
         result = await session.execute(
-            select(Position).where(Position.symbol == symbol)
+            select(Position).where(
+                Position.symbol == symbol,
+                Position.exchange == self._exchange_name,
+            )
         )
         position = result.scalar_one_or_none()
 
@@ -48,6 +53,7 @@ class PortfolioManager:
                 position.entered_at = datetime.now(timezone.utc)
         else:
             position = Position(
+                exchange=self._exchange_name,
                 symbol=symbol,
                 quantity=quantity,
                 average_buy_price=price,
@@ -74,7 +80,10 @@ class PortfolioManager:
     ) -> None:
         """Update position after a sell trade."""
         result = await session.execute(
-            select(Position).where(Position.symbol == symbol)
+            select(Position).where(
+                Position.symbol == symbol,
+                Position.exchange == self._exchange_name,
+            )
         )
         position = result.scalar_one_or_none()
 
@@ -110,7 +119,10 @@ class PortfolioManager:
     async def get_portfolio_summary(self, session: AsyncSession) -> dict:
         """Get current portfolio summary."""
         result = await session.execute(
-            select(Position).where(Position.quantity > 0)
+            select(Position).where(
+                Position.quantity > 0,
+                Position.exchange == self._exchange_name,
+            )
         )
         positions = list(result.scalars().all())
 
@@ -154,7 +166,7 @@ class PortfolioManager:
             select(
                 func.coalesce(func.sum(Order.fee), 0),
                 func.count(Order.id),
-            )
+            ).where(Order.exchange == self._exchange_name)
         )
         fee_row = fee_result.one()
         total_fees = float(fee_row[0])
@@ -163,6 +175,7 @@ class PortfolioManager:
         if total_fees == 0 and trade_count > 0:
             trade_fee_result = await session.execute(
                 select(func.coalesce(func.sum(Trade.fee), 0))
+                .where(Trade.exchange == self._exchange_name)
             )
             total_fees = float(trade_fee_result.scalar())
 
@@ -178,6 +191,7 @@ class PortfolioManager:
         )
 
         return {
+            "exchange": self._exchange_name,
             "total_value_krw": round(total_value, 0),
             "cash_balance_krw": round(self._cash_balance, 0),
             "invested_value_krw": round(total_current_value, 0),
@@ -200,6 +214,7 @@ class PortfolioManager:
         summary = await self.get_portfolio_summary(session)
 
         snapshot = PortfolioSnapshot(
+            exchange=self._exchange_name,
             total_value_krw=summary["total_value_krw"],
             cash_balance_krw=summary["cash_balance_krw"],
             invested_value_krw=summary["invested_value_krw"],
@@ -215,7 +230,10 @@ class PortfolioManager:
     async def reconcile_cash_from_db(self, session: AsyncSession) -> None:
         """DB 포지션 기준으로 현금 잔고를 재계산 (인메모리 누수 방지)."""
         result = await session.execute(
-            select(Position).where(Position.quantity > 0)
+            select(Position).where(
+                Position.quantity > 0,
+                Position.exchange == self._exchange_name,
+            )
         )
         positions = list(result.scalars().all())
         total_invested = sum(p.total_invested for p in positions)
@@ -223,11 +241,13 @@ class PortfolioManager:
         # 수수료 합산
         fee_result = await session.execute(
             select(func.coalesce(func.sum(Order.fee), 0))
+            .where(Order.exchange == self._exchange_name)
         )
         total_fees = float(fee_result.scalar())
         if total_fees == 0:
             trade_fee_result = await session.execute(
                 select(func.coalesce(func.sum(Trade.fee), 0))
+                .where(Trade.exchange == self._exchange_name)
             )
             total_fees = float(trade_fee_result.scalar())
 

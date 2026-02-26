@@ -2,15 +2,16 @@ import { useState } from 'react'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import { format } from 'date-fns'
 import { usePortfolioHistory } from '../hooks/usePortfolio'
+import type { ExchangeName } from '../types'
 
 /** API 타임스탬프(UTC, timezone 미표기)를 로컬 Date로 변환 */
 const utcToLocal = (ts: string) => new Date(ts.endsWith('Z') ? ts : ts + 'Z')
 
 const PERIODS = ['1d', '7d', '30d', '90d', 'all'] as const
 
-export function PortfolioChart() {
+export function PortfolioChart({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
   const [period, setPeriod] = useState<string>('7d')
-  const { data, isLoading } = usePortfolioHistory(period)
+  const { data, isLoading } = usePortfolioHistory(period, exchange)
 
   const chartData = (data ?? []).map((p) => ({
     time: format(utcToLocal(p.timestamp), 'MM/dd HH:mm'),

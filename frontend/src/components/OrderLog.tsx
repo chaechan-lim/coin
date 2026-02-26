@@ -5,7 +5,7 @@ import { getStrategyLogs } from '../api/client'
 
 /** API 타임스탬프(UTC, timezone 미표기)를 로컬 Date로 변환 */
 const utcToLocal = (ts: string) => new Date(ts.endsWith('Z') ? ts : ts + 'Z')
-import type { StrategyLog } from '../types'
+import type { StrategyLog, ExchangeName } from '../types'
 
 const SIGNAL_STYLE: Record<string, string> = {
   BUY: 'text-buy bg-green-900/40 border-green-800',
@@ -13,19 +13,20 @@ const SIGNAL_STYLE: Record<string, string> = {
   HOLD: 'text-gray-400 bg-gray-800 border-gray-700',
 }
 
-export function OrderLog() {
+export function OrderLog({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
   const [symbol, setSymbol] = useState('')
   const [strategy, setStrategy] = useState('')
   const [page, setPage] = useState(1)
 
   const { data, isLoading } = useQuery({
-    queryKey: ['strategy-logs', symbol, strategy, page],
+    queryKey: ['strategy-logs', symbol, strategy, page, exchange],
     queryFn: () =>
       getStrategyLogs({
         symbol: symbol || undefined,
         strategy: strategy || undefined,
         page,
         size: 30,
+        exchange,
       }),
     staleTime: 20_000,
   })

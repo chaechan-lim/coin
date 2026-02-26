@@ -26,11 +26,13 @@ class AgentCoordinator:
         risk_agent: RiskManagementAgent,
         combiner: SignalCombiner,
         trade_review_agent: TradeReviewAgent | None = None,
+        exchange_name: str = "bithumb",
     ):
         self._market_agent = market_agent
         self._risk_agent = risk_agent
         self._combiner = combiner
         self._trade_review_agent = trade_review_agent
+        self._exchange_name = exchange_name
         self._engine = None  # Set after engine creation
         self._last_market_analysis: MarketAnalysis | None = None
         self._last_risk_alerts: list[RiskAlert] = []
@@ -71,6 +73,7 @@ class AgentCoordinator:
             session_factory = get_session_factory()
             async with session_factory() as session:
                 log = AgentAnalysisLog(
+                    exchange=self._exchange_name,
                     agent_name="market_analysis",
                     analysis_type="market_state",
                     result={
@@ -145,6 +148,7 @@ class AgentCoordinator:
                 # Persist alerts
                 for alert in alerts:
                     log = AgentAnalysisLog(
+                        exchange=self._exchange_name,
                         agent_name="risk_management",
                         analysis_type="risk_alert",
                         result={
@@ -178,6 +182,7 @@ class AgentCoordinator:
 
                 # DB 저장
                 log = AgentAnalysisLog(
+                    exchange=self._exchange_name,
                     agent_name="trade_review",
                     analysis_type="trade_performance",
                     result={
