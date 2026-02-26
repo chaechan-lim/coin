@@ -1,4 +1,4 @@
-"""주기적 매매 회고 에이전트 — 거래 히스토리 분석 + 인사이트 생성."""
+"""주기적 매매 회고 에이전트 — 거래 히스토리 분석 + 구체적 인사이트 생성."""
 import structlog
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -70,6 +70,7 @@ class TradeReviewAgent:
                 "invested": p.total_invested,
                 "unrealized_pnl": p.unrealized_pnl,
                 "unrealized_pnl_pct": p.unrealized_pnl_pct,
+                "is_surge": getattr(p, "is_surge", False),
             }
             for p in positions
         ]
@@ -93,30 +94,55 @@ class TradeReviewAgent:
         buys = [o for o in orders if o.side == "buy"]
         sells = [o for o in orders if o.side == "sell"]
 
-        # 매도 건별 손익 계산 — 매도가 vs 해당 코인 최근 매수 평균가
+        # 매수/매도 매칭: 코인별 매수 기록 추적
         sell_pnls = []
-        buy_prices: dict[str, list[float]] = defaultdict(list)
+        buy_records: dict[str, list[dict]] = defaultdict(list)
+        total_fees = 0.0
 
         for o in orders:
+            fee = o.fee or 0
+            total_fees += fee
             if o.side == "buy":
-                buy_prices[o.symbol].append(o.executed_price or o.requested_price)
+                buy_records[o.symbol].append({
+                    "price": o.executed_price or o.requested_price,
+                    "qty": o.executed_quantity or o.requested_quantity,
+                    "strategy": o.strategy_name,
+                    "time": o.filled_at,
+                    "fee": fee,
+                })
             elif o.side == "sell":
                 sell_price = o.executed_price or o.requested_price
+                sell_qty = o.executed_quantity or o.requested_quantity
+                coin_buys = buy_records.get(o.symbol, [])
                 avg_buy = (
-                    sum(buy_prices[o.symbol]) / len(buy_prices[o.symbol])
-                    if buy_prices[o.symbol]
-                    else sell_price  # 기간 이전 매수
+                    sum(b["price"] for b in coin_buys) / len(coin_buys)
+                    if coin_buys
+                    else sell_price
                 )
-                qty = o.executed_quantity or o.requested_quantity
-                fee = o.fee or 0
-                pnl = (sell_price - avg_buy) * qty - fee
+                # 보유 시간 계산 (마지막 매수 ~ 매도)
+                hold_minutes = None
+                buy_strategy = None
+                if coin_buys:
+                    last_buy = coin_buys[-1]
+                    buy_strategy = last_buy["strategy"]
+                    if last_buy["time"] and o.filled_at:
+                        hold_minutes = (o.filled_at - last_buy["time"]).total_seconds() / 60
+
+                pnl = (sell_price - avg_buy) * sell_qty - fee
+                pnl_pct = (sell_price - avg_buy) / avg_buy * 100 if avg_buy > 0 else 0
                 sell_pnls.append({
                     "symbol": o.symbol,
-                    "strategy": o.strategy_name,
+                    "strategy": o.strategy_name,      # 매도 전략
+                    "buy_strategy": buy_strategy,      # 매수 전략
                     "pnl": pnl,
-                    "pnl_pct": (sell_price - avg_buy) / avg_buy * 100 if avg_buy > 0 else 0,
+                    "pnl_pct": pnl_pct,
                     "sell_price": sell_price,
                     "avg_buy": avg_buy,
+                    "sell_time": o.filled_at,
+                    "hold_minutes": hold_minutes,
+                    "fee": fee,
+                    "reason": o.signal_reason or "",
+                    "is_surge": buy_strategy == "rotation_surge",
                 })
 
         # 승/패
@@ -169,10 +195,11 @@ class TradeReviewAgent:
         insights = self._generate_insights(
             win_rate, total_pnl, profit_factor, sell_pnls,
             dict(by_strategy), dict(by_symbol), open_positions,
+            total_fees, buys, sells,
         )
         recommendations = self._generate_recommendations(
             win_rate, profit_factor, sell_pnls,
-            dict(by_strategy), total_sell,
+            dict(by_strategy), dict(by_symbol), total_sell, total_fees,
         )
 
         review = TradeReview(
@@ -207,15 +234,16 @@ class TradeReviewAgent:
         return review
 
     def _generate_insights(
-        self, win_rate, total_pnl, pf, sell_pnls, by_strategy, by_symbol, positions
+        self, win_rate, total_pnl, pf, sell_pnls, by_strategy, by_symbol,
+        positions, total_fees, buys, sells,
     ) -> list[str]:
         insights = []
 
-        # 전체 성과
+        # ── 1. 전체 성과 요약 ──
         if win_rate >= 0.6:
-            insights.append(f"높은 승률 {win_rate:.0%} — 전략 효과적")
+            insights.append(f"승률 {win_rate:.0%} — 양호")
         elif win_rate > 0 and win_rate < 0.4:
-            insights.append(f"낮은 승률 {win_rate:.0%} — 진입 조건 재검토 필요")
+            insights.append(f"승률 {win_rate:.0%} — 저조")
 
         if total_pnl > 0:
             insights.append(f"실현 수익 +{total_pnl:,.0f} KRW")
@@ -223,31 +251,130 @@ class TradeReviewAgent:
             insights.append(f"실현 손실 {total_pnl:,.0f} KRW")
 
         if pf > 2.0:
-            insights.append(f"우수한 Profit Factor {pf:.2f}x")
+            insights.append(f"Profit Factor {pf:.2f}x — 우수")
         elif 0 < pf < 1.0:
-            insights.append(f"Profit Factor {pf:.2f}x — 손실이 수익 초과")
+            insights.append(f"Profit Factor {pf:.2f}x — 손실>수익")
 
-        # 전략별
+        # ── 2. 수수료 영향 분석 ──
+        if total_fees > 0:
+            if total_pnl != 0:
+                fee_ratio = total_fees / abs(total_pnl) * 100 if abs(total_pnl) > 0 else 0
+                if fee_ratio > 50:
+                    insights.append(
+                        f"수수료 {total_fees:,.0f} KRW (수익의 {fee_ratio:.0f}%) — 수수료 비중 과다"
+                    )
+                else:
+                    insights.append(f"수수료 총 {total_fees:,.0f} KRW")
+            else:
+                insights.append(f"수수료 총 {total_fees:,.0f} KRW")
+
+        # ── 3. 서지 vs 일반 거래 분리 분석 ──
+        surge_trades = [t for t in sell_pnls if t["is_surge"]]
+        normal_trades = [t for t in sell_pnls if not t["is_surge"]]
+
+        if surge_trades and normal_trades:
+            surge_pnl = sum(t["pnl"] for t in surge_trades)
+            surge_wins = sum(1 for t in surge_trades if t["pnl"] > 0)
+            surge_wr = surge_wins / len(surge_trades)
+            normal_pnl = sum(t["pnl"] for t in normal_trades)
+            normal_wins = sum(1 for t in normal_trades if t["pnl"] > 0)
+            normal_wr = normal_wins / len(normal_trades)
+            insights.append(
+                f"서지 매매 {len(surge_trades)}건: 승률 {surge_wr:.0%}, {surge_pnl:+,.0f} KRW | "
+                f"일반 매매 {len(normal_trades)}건: 승률 {normal_wr:.0%}, {normal_pnl:+,.0f} KRW"
+            )
+        elif surge_trades:
+            surge_pnl = sum(t["pnl"] for t in surge_trades)
+            surge_wins = sum(1 for t in surge_trades if t["pnl"] > 0)
+            insights.append(
+                f"서지 매매만 {len(surge_trades)}건: 승률 {surge_wins}/{len(surge_trades)}, "
+                f"{surge_pnl:+,.0f} KRW"
+            )
+
+        # ── 4. 매도 유형별 분석 (SL/TP/trailing/전략/서지) ──
+        sell_types: dict[str, list] = defaultdict(list)
+        for t in sell_pnls:
+            reason = t["reason"]
+            if "SL" in reason or "손절" in reason:
+                sell_types["SL"].append(t)
+            elif "TP" in reason or "익절" in reason:
+                sell_types["TP"].append(t)
+            elif "Trailing" in reason or "trailing" in reason:
+                sell_types["trailing"].append(t)
+            elif "시간 초과" in reason or "보유 시간" in reason:
+                sell_types["시간초과"].append(t)
+            else:
+                sell_types["전략"].append(t)
+
+        if len(sell_types) > 1:
+            type_parts = []
+            for stype, trades in sorted(sell_types.items(), key=lambda x: len(x[1]), reverse=True):
+                avg = sum(t["pnl"] for t in trades) / len(trades) if trades else 0
+                type_parts.append(f"{stype} {len(trades)}건({avg:+,.0f}원)")
+            insights.append(f"매도 유형: {', '.join(type_parts)}")
+
+        # ── 5. 보유 시간 분석 ──
+        hold_times = [t["hold_minutes"] for t in sell_pnls if t["hold_minutes"] is not None]
+        if hold_times:
+            avg_hold = sum(hold_times) / len(hold_times)
+            min_hold = min(hold_times)
+            max_hold = max(hold_times)
+            # 초단기 매도 경고 (30분 미만)
+            quick_sells = [t for t in sell_pnls
+                           if t["hold_minutes"] is not None and t["hold_minutes"] < 30]
+            if quick_sells:
+                quick_pnl = sum(t["pnl"] for t in quick_sells)
+                insights.append(
+                    f"초단기 매도(<30분) {len(quick_sells)}건, "
+                    f"합계 {quick_pnl:+,.0f} KRW — 진입 타이밍 점검 필요"
+                )
+            if avg_hold < 60:
+                insights.append(f"평균 보유 {avg_hold:.0f}분 (최단 {min_hold:.0f}분, 최장 {max_hold:.0f}분)")
+            else:
+                insights.append(
+                    f"평균 보유 {avg_hold/60:.1f}시간 "
+                    f"(최단 {min_hold:.0f}분, 최장 {max_hold/60:.1f}시간)"
+                )
+
+        # ── 6. 전략별 구체적 성과 ──
         if by_strategy:
             best = max(by_strategy.items(), key=lambda x: x[1].get("total_pnl", 0))
             if best[1]["total_pnl"] > 0:
                 insights.append(
                     f"최고 전략: {best[0]} (+{best[1]['total_pnl']:,.0f} KRW, "
-                    f"승률 {best[1].get('win_rate', 0):.0%})"
+                    f"승률 {best[1].get('win_rate', 0):.0%}, {best[1]['trades']}건)"
                 )
             worst = min(by_strategy.items(), key=lambda x: x[1].get("total_pnl", 0))
             if worst[1]["total_pnl"] < 0 and worst[0] != best[0]:
                 insights.append(
-                    f"부진 전략: {worst[0]} ({worst[1]['total_pnl']:,.0f} KRW)"
+                    f"부진 전략: {worst[0]} ({worst[1]['total_pnl']:,.0f} KRW, "
+                    f"승률 {worst[1].get('win_rate', 0):.0%}, {worst[1]['trades']}건)"
                 )
 
-        # 보유 포지션
+        # ── 7. 코인별 구체적 성과 ──
+        if by_symbol:
+            for sym, stats in sorted(by_symbol.items(), key=lambda x: x[1]["total_pnl"]):
+                if stats["trades"] >= 2 and stats["total_pnl"] < 0:
+                    insights.append(
+                        f"{sym}: {stats['trades']}건 매도 중 승률 {stats.get('win_rate',0):.0%}, "
+                        f"합계 {stats['total_pnl']:+,.0f} KRW"
+                    )
+
+        # ── 8. 보유 포지션 개별 상태 ──
         if positions:
             total_unrealized = sum(p.get("unrealized_pnl", 0) for p in positions)
             insights.append(
-                f"보유 중 {len(positions)}개 포지션, "
-                f"미실현 손익 {total_unrealized:+,.0f} KRW"
+                f"보유 {len(positions)}개: 미실현 {total_unrealized:+,.0f} KRW"
             )
+            # 큰 손실 포지션 경고
+            for p in positions:
+                pct = p.get("unrealized_pnl_pct", 0)
+                if pct is not None and pct < -3:
+                    tag = " [서지]" if p.get("is_surge") else ""
+                    insights.append(
+                        f"  {p['symbol']}{tag}: {pct:+.1f}% "
+                        f"(매수가 {p['avg_price']:,.0f}원)"
+                    )
 
         if not insights:
             insights.append("분석 가능한 데이터 부족")
@@ -255,7 +382,7 @@ class TradeReviewAgent:
         return insights
 
     def _generate_recommendations(
-        self, win_rate, pf, sell_pnls, by_strategy, total_sells
+        self, win_rate, pf, sell_pnls, by_strategy, by_symbol, total_sells, total_fees,
     ) -> list[str]:
         recs = []
 
@@ -263,30 +390,115 @@ class TradeReviewAgent:
             recs.append("거래 데이터 부족 — 충분한 샘플 축적 후 재평가 권장")
             return recs
 
-        if win_rate < 0.4:
-            recs.append("승률 개선: 진입 조건 강화 또는 min_confidence 상향 검토")
+        # ── 1. 코인별 연속 손실 체크 (구체적 코인 지목) ──
+        coin_streaks: dict[str, int] = defaultdict(int)
+        coin_current: dict[str, int] = defaultdict(int)
+        for t in sell_pnls:
+            sym = t["symbol"]
+            if t["pnl"] <= 0:
+                coin_current[sym] += 1
+                coin_streaks[sym] = max(coin_streaks[sym], coin_current[sym])
+            else:
+                coin_current[sym] = 0
 
-        if pf < 1.5 and pf > 0:
-            recs.append("수익/손실 비율 개선: 손절폭 축소 또는 익절폭 확대 검토")
+        for sym, streak in sorted(coin_streaks.items(), key=lambda x: x[1], reverse=True):
+            if streak >= 2:
+                coin_pnl = by_symbol.get(sym, {}).get("total_pnl", 0)
+                recs.append(
+                    f"{sym} {streak}연패 (합계 {coin_pnl:+,.0f} KRW) — 해당 코인 진입 재검토"
+                )
 
-        # 특정 전략이 전체 손실의 주범인지
-        if by_strategy:
-            for name, stats in by_strategy.items():
-                if stats["trades"] >= 2 and stats.get("win_rate", 0) == 0:
-                    recs.append(f"전략 '{name}' 연패 중 — 가중치 하향 또는 비활성화 검토")
+        # ── 2. 전략-코인 교차 분석 ──
+        strategy_coin: dict[str, dict[str, dict]] = defaultdict(
+            lambda: defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0})
+        )
+        for t in sell_pnls:
+            sc = strategy_coin[t["strategy"]][t["symbol"]]
+            if t["pnl"] > 0:
+                sc["wins"] += 1
+            else:
+                sc["losses"] += 1
+            sc["pnl"] += t["pnl"]
 
-        # 연속 손실 체크
+        for strat, coins in strategy_coin.items():
+            for coin, stats in coins.items():
+                total = stats["wins"] + stats["losses"]
+                if total >= 2 and stats["wins"] == 0:
+                    recs.append(
+                        f"'{strat}' → {coin}: {total}연패 ({stats['pnl']:+,.0f} KRW) — "
+                        f"이 조합 비활성화 검토"
+                    )
+
+        # ── 3. SL 발동 빈도 분석 ──
+        sl_trades = [t for t in sell_pnls if "SL" in t.get("reason", "") or "손절" in t.get("reason", "")]
+        if sl_trades and total_sells > 0:
+            sl_ratio = len(sl_trades) / total_sells
+            if sl_ratio > 0.5:
+                avg_sl_loss = sum(t["pnl_pct"] for t in sl_trades) / len(sl_trades)
+                recs.append(
+                    f"SL 발동 {len(sl_trades)}/{total_sells}건 ({sl_ratio:.0%}) — "
+                    f"평균 {avg_sl_loss:+.1f}% 손실. 진입 타이밍 또는 SL 폭 조정 검토"
+                )
+
+        # ── 4. 서지 매매 별도 평가 ──
+        surge_trades = [t for t in sell_pnls if t.get("is_surge")]
+        if surge_trades:
+            surge_wins = sum(1 for t in surge_trades if t["pnl"] > 0)
+            surge_pnl = sum(t["pnl"] for t in surge_trades)
+            if len(surge_trades) >= 2 and surge_wins == 0:
+                recs.append(
+                    f"서지 매매 {len(surge_trades)}건 전패 ({surge_pnl:+,.0f} KRW) — "
+                    f"서지 진입 조건 강화 또는 surge_threshold 상향 검토"
+                )
+            # 초단기 서지 매도
+            quick_surge = [t for t in surge_trades
+                           if t.get("hold_minutes") is not None and t["hold_minutes"] < 60]
+            if quick_surge:
+                quick_pnl = sum(t["pnl"] for t in quick_surge)
+                if quick_pnl < 0:
+                    recs.append(
+                        f"서지 매수 후 1시간 내 매도 {len(quick_surge)}건 ({quick_pnl:+,.0f} KRW) — "
+                        f"서지 포지션 보호 시간 확인"
+                    )
+
+        # ── 5. 전체 성과 기반 일반 권고 ──
+        if win_rate < 0.4 and not any("연패" in r for r in recs):
+            recs.append(f"승률 {win_rate:.0%} — min_confidence 상향 검토")
+
+        if pf < 1.0 and pf > 0 and not any("SL" in r for r in recs):
+            recs.append(f"PF {pf:.2f}x — 손절폭 축소 또는 익절폭 확대 검토")
+
+        # ── 6. 수수료 비율 경고 ──
+        if total_fees > 0 and total_sells > 0:
+            avg_fee = total_fees / total_sells
+            gross = abs(sum(t["pnl"] for t in sell_pnls)) if sell_pnls else 0
+            if gross > 0 and total_fees / gross > 0.5:
+                recs.append(
+                    f"수수료 {total_fees:,.0f} KRW가 거래 P&L의 {total_fees/gross*100:.0f}% — "
+                    f"거래 빈도 축소 또는 포지션 크기 확대 검토"
+                )
+
+        # ── 7. 전체 연속 손실 체크 ──
         consecutive_losses = 0
         max_consecutive = 0
+        max_streak_coins = []
+        current_streak_coins = []
         for t in sell_pnls:
             if t["pnl"] <= 0:
                 consecutive_losses += 1
-                max_consecutive = max(max_consecutive, consecutive_losses)
+                current_streak_coins.append(t["symbol"])
+                if consecutive_losses > max_consecutive:
+                    max_consecutive = consecutive_losses
+                    max_streak_coins = list(current_streak_coins)
             else:
                 consecutive_losses = 0
+                current_streak_coins = []
 
         if max_consecutive >= 3:
-            recs.append(f"최대 {max_consecutive}연패 발생 — 시장 상태 재점검 필요")
+            coins_str = ", ".join(dict.fromkeys(max_streak_coins))
+            recs.append(
+                f"최대 {max_consecutive}연패 ({coins_str}) — 시장 상태 재점검"
+            )
 
         if not recs:
             recs.append("현재 성과 양호 — 기존 전략 유지 권장")
