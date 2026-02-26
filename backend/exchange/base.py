@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from exchange.data_models import Candle, Ticker, OrderResult, Balance, OrderBook
+from exchange.data_models import Candle, Ticker, OrderResult, Balance, OrderBook, FuturesPosition
 
 
 class ExchangeAdapter(ABC):
@@ -80,3 +80,17 @@ class ExchangeAdapter(ABC):
     async def fetch_order(self, order_id: str, symbol: str) -> OrderResult:
         """Fetch order status."""
         ...
+
+    # ── 선물 전용 (Optional — 현물 어댑터는 NotImplementedError) ──
+
+    async def set_leverage(self, symbol: str, leverage: int) -> dict:
+        """Set leverage for a futures symbol."""
+        raise NotImplementedError("Futures not supported")
+
+    async def fetch_futures_position(self, symbol: str) -> FuturesPosition | None:
+        """Fetch current futures position for a symbol."""
+        raise NotImplementedError("Futures not supported")
+
+    async def fetch_funding_rate(self, symbol: str) -> float:
+        """Fetch current funding rate for a symbol."""
+        raise NotImplementedError("Futures not supported")

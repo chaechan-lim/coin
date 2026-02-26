@@ -57,3 +57,15 @@ class OrderBook:
     bids: list[tuple[float, float]]  # [(price, amount), ...]
     asks: list[tuple[float, float]]
     timestamp: datetime
+
+
+@dataclass
+class FuturesPosition:
+    symbol: str
+    side: str           # "long" / "short"
+    amount: float       # 포지션 수량
+    entry_price: float
+    leverage: int
+    liquidation_price: float
+    unrealized_pnl: float
+    margin: float

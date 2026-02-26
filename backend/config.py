@@ -76,8 +76,25 @@ class NotificationConfig(BaseSettings):
     model_config = {"env_prefix": "NOTIFY_"}
 
 
+class BinanceConfig(BaseSettings):
+    enabled: bool = False
+    api_key: str = ""
+    api_secret: str = ""
+    testnet: bool = True
+    default_leverage: int = 3
+    max_leverage: int = 10
+    tracked_coins: list[str] = [
+        "BTC/USDT",
+        "ETH/USDT",
+    ]
+    futures_fee: float = 0.0004  # 0.04% maker/taker
+
+    model_config = {"env_prefix": "BINANCE_"}
+
+
 class AppConfig(BaseSettings):
     exchange: ExchangeConfig = Field(default_factory=ExchangeConfig)
+    binance: BinanceConfig = Field(default_factory=BinanceConfig)
     trading: TradingConfig = Field(default_factory=TradingConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
