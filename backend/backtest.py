@@ -15,6 +15,11 @@
   python backtest.py --rotation --days 180 --timeframe 4h
   python backtest.py --rotation --days 180 --surge-threshold 2.0
   python backtest.py --rotation --days 180 --no-strategy-confirm
+
+선물 백테스트 (바이낸스 USDM):
+  python backtest.py --futures --symbol BTC/USDT --days 180 --timeframe 4h --leverage 3
+  python backtest.py --futures --symbol ETH/USDT --days 180 --leverage 5
+  python backtest.py --futures --symbol BTC/USDT --days 180 --leverage 10 --dynamic-sl
 """
 
 import asyncio
@@ -923,6 +928,733 @@ def _calc_dynamic_sl(row, price: float, market_state: str) -> float:
     return max(floor_pct, min(raw_sl, cap_pct))
 
 
+# ── 선물 백테스트 (FuturesBacktester) ──────────────────────────────
+
+FUTURES_FEE = 0.0004   # 0.04% 바이낸스 선물 수수료
+FUNDING_RATE = 0.0001  # 0.01% 8시간 펀딩비 (기본값)
+
+
+@dataclass
+class FuturesPositionState:
+    side: str            # "long" / "short"
+    entry_price: float
+    quantity: float      # 레버리지 반영 수량
+    leverage: int
+    margin: float        # 격리 마진 (실제 투입 현금)
+    peak_price: float    # 트레일링용 (롱=최고, 숏=최저)
+    trailing_active: bool = False
+
+
+@dataclass
+class FuturesBacktestResult:
+    symbol: str
+    days: int
+    leverage: int
+    initial_balance: float
+    final_balance: float
+    total_pnl: float
+    total_pnl_pct: float
+    max_drawdown_pct: float
+    total_trades: int
+    long_trades: int
+    short_trades: int
+    long_wins: int
+    long_losses: int
+    short_wins: int
+    short_losses: int
+    win_rate: float
+    avg_win_pct: float = 0.0
+    avg_loss_pct: float = 0.0
+    profit_factor: float = 0.0
+    buy_hold_pnl_pct: float = 0.0
+    liquidations: int = 0
+    total_funding: float = 0.0
+    total_fees: float = 0.0
+    trades: list[BacktestTrade] = field(default_factory=list)
+    equity_curve: list[tuple] = field(default_factory=list)
+    strategy_stats: dict = field(default_factory=dict)
+
+
+class FuturesBacktester:
+    """선물 백테스터 — 롱/숏 양방향 + 레버리지 + 청산 시뮬레이션.
+
+    선물 전용 튜닝:
+    - 숏 진입: downtrend/crash 시장에서만 허용 (--short-all로 해제)
+    - 레버리지 적응형 SL: base_sl / sqrt(leverage)
+    - 레버리지별 포지션 축소: position_pct / sqrt(leverage)
+    - 쿨다운 기본 6캔들 (현물 12 대비 축소)
+    """
+
+    # 숏 진입 허용 시장 상태
+    SHORT_ALLOWED_STATES = {"downtrend", "crash"}
+
+    def __init__(
+        self,
+        exchange,
+        strategy_names: list[str],
+        initial_balance: float = 10_000,     # USDT
+        min_confidence: float = 0.50,
+        stop_loss_pct: float = 5.0,
+        take_profit_pct: float = 10.0,
+        trend_filter: bool = True,
+        trailing_activation: float = 3.0,
+        trailing_stop: float = 3.0,
+        adaptive_weights: bool = True,
+        dynamic_sl: bool = False,
+        agent_market: bool = True,
+        trade_cooldown: int = 6,
+        leverage: int = 3,
+        futures_fee: float = FUTURES_FEE,
+        funding_rate: float = FUNDING_RATE,
+        position_pct: float = 0.30,
+        short_all: bool = False,             # 모든 시장에서 숏 허용
+    ):
+        self._exchange = exchange
+        self._initial_balance = initial_balance
+        self._min_confidence = min_confidence
+        self._stop_loss_pct = stop_loss_pct
+        self._take_profit_pct = take_profit_pct
+        self._trend_filter = trend_filter
+        self._trailing_activation = trailing_activation
+        self._trailing_stop = trailing_stop
+        self._adaptive_weights = adaptive_weights
+        self._dynamic_sl = dynamic_sl
+        self._agent_market = agent_market
+        self._trade_cooldown = trade_cooldown
+        self._leverage = leverage
+        self._futures_fee = futures_fee
+        self._funding_rate = funding_rate
+        self._short_all = short_all
+
+        # ── 레버리지 적응형 파라미터 ──────────────────────────
+        import math
+        lev_sqrt = math.sqrt(leverage)
+        # 포지션 사이즈: 고배율 → 자동 축소
+        self._position_pct = position_pct / lev_sqrt
+        # SL/TP: 마진 대비 %이므로 레버리지 반영 불필요 — 가격 변동폭만 축소
+        self._effective_sl = stop_loss_pct / lev_sqrt
+        self._effective_tp = take_profit_pct / lev_sqrt
+        # 트레일링도 레버리지 반영
+        self._effective_trail_act = trailing_activation / lev_sqrt if trailing_activation > 0 else 0
+        self._effective_trail_stop = trailing_stop / lev_sqrt if trailing_stop > 0 else 0
+
+        all_strats = StrategyRegistry.create_all()
+        self._strategies = {
+            name: strat for name, strat in all_strats.items()
+            if name in strategy_names
+        }
+        if set(strategy_names) <= set(WEIGHTS_5.keys()):
+            base_weights = WEIGHTS_5
+        elif set(strategy_names) <= set(WEIGHTS_6.keys()):
+            base_weights = WEIGHTS_6
+        else:
+            base_weights = WEIGHTS_8
+        weights = {k: v for k, v in base_weights.items() if k in strategy_names}
+        total_w = sum(weights.values())
+        if total_w > 0:
+            weights = {k: v / total_w for k, v in weights.items()}
+        self._combiner = SignalCombiner(
+            strategy_weights=weights,
+            min_confidence=min_confidence,
+        )
+
+    async def fetch_history(
+        self, symbol: str, timeframe: str, days: int
+    ) -> pd.DataFrame:
+        return await fetch_history(self._exchange, symbol, timeframe, days)
+
+    def _calc_liquidation_price(self, side: str, entry: float) -> float:
+        """격리 마진 청산가격 계산."""
+        lev = self._leverage
+        fee = self._futures_fee
+        if side == "long":
+            return entry * (1 - 1 / lev + fee)
+        else:  # short
+            return entry * (1 + 1 / lev - fee)
+
+    def _calc_unrealized_pnl(self, side: str, entry: float, current: float, qty: float) -> float:
+        """미실현 PnL 계산."""
+        if side == "long":
+            return (current - entry) * qty
+        else:
+            return (entry - current) * qty
+
+    def _execute_futures_close(
+        self, ts, pos: FuturesPositionState, current_price: float,
+        side_label: str, strategy_name: str, confidence: float, reason: str,
+    ) -> tuple[float, float, float, BacktestTrade]:
+        """포지션 청산 → (pnl, fee, pnl_pct, trade)"""
+        exec_price = current_price  # 선물은 슬리피지 미적용 (유동성 풍부)
+        pnl = self._calc_unrealized_pnl(pos.side, pos.entry_price, exec_price, pos.quantity)
+        fee = abs(pos.quantity * exec_price) * self._futures_fee
+        net_pnl = pnl - fee
+
+        pnl_pct = net_pnl / pos.margin * 100 if pos.margin > 0 else 0
+
+        t = BacktestTrade(
+            timestamp=ts, side=side_label, symbol="",
+            price=exec_price, quantity=pos.quantity,
+            cost=pos.quantity * exec_price, fee=fee,
+            strategy=strategy_name,
+            confidence=confidence,
+            reason=reason,
+            pnl=net_pnl, pnl_pct=round(pnl_pct, 2),
+        )
+        return net_pnl, fee, pnl_pct, t
+
+    async def run(self, symbol: str, timeframe: str = "4h", days: int = 180) -> FuturesBacktestResult:
+        """선물 백테스트 실행."""
+        tf_hours = _tf_hours(timeframe)
+        candles_per_8h = max(1, int(8 / tf_hours))
+
+        print(f"\n{'='*60}")
+        print(f"  선물 백테스트: {symbol} | {timeframe} | {days}일")
+        print(f"  전략: {', '.join(self._strategies.keys())}")
+        print(f"  레버리지: {self._leverage}x | 수수료: {self._futures_fee*100:.2f}%")
+        print(f"  펀딩비: {self._funding_rate*100:.3f}%/8h | 포지션: 현금 {self._position_pct*100:.1f}%")
+        sl_str = "동적(ATR+시장)" if self._dynamic_sl else (
+            f"고정 {self._effective_sl:.1f}%" if self._effective_sl > 0 else "OFF")
+        tp_str = f"{self._effective_tp:.1f}%" if self._effective_tp > 0 else "OFF"
+        trail_str = (f"활성 +{self._effective_trail_act:.1f}% / 스탑 -{self._effective_trail_stop:.1f}%"
+                     if self._effective_trail_act > 0 else "OFF")
+        print(f"  손절: {sl_str} | 익절: {tp_str} | 트레일링: {trail_str}")
+        short_str = "전체" if self._short_all else "downtrend/crash만"
+        print(f"  숏 허용: {short_str} | 쿨다운: {self._trade_cooldown}캔들 | 최소 신뢰도: {self._min_confidence}")
+        print(f"{'='*60}")
+
+        df = await self.fetch_history(symbol, timeframe, days)
+        print(f"  데이터: {len(df)}개 캔들 ({df.index[0].date()} ~ {df.index[-1].date()})")
+
+        first_close = float(df.iloc[0]["close"])
+        last_close = float(df.iloc[-1]["close"])
+        buy_hold_pnl_pct = (last_close - first_close) / first_close * 100
+
+        # ── 시뮬레이션 상태 ─────────────────────────────────────
+        cash = self._initial_balance
+        position: FuturesPositionState | None = None
+        dynamic_sl_pct = self._effective_sl
+        current_market_state = "sideways"
+        market_confidence = 0.5
+
+        trades: list[BacktestTrade] = []
+        equity_curve: list[tuple] = []
+        peak_equity = self._initial_balance
+        max_drawdown = 0.0
+        last_trade_idx = -9999
+        last_weight_eval_idx = -9999
+
+        strategy_wins = {name: 0 for name in self._strategies}
+        strategy_losses = {name: 0 for name in self._strategies}
+        strategy_trades = {name: 0 for name in self._strategies}
+
+        long_wins = 0
+        long_losses = 0
+        short_wins = 0
+        short_losses = 0
+        total_win_pct = 0.0
+        total_loss_pct = 0.0
+        liquidations = 0
+        total_funding = 0.0
+        total_fees = 0.0
+
+        # ── 캔들 루프 ───────────────────────────────────────────
+        rows = list(df.iterrows())
+        for i, (ts, row) in enumerate(rows):
+            current_price = float(row["close"])
+            high_price = float(row["high"])
+            low_price = float(row["low"])
+
+            # 에쿼티 계산
+            if position:
+                unrealized = self._calc_unrealized_pnl(
+                    position.side, position.entry_price, current_price, position.quantity
+                )
+                current_equity = cash + position.margin + unrealized
+            else:
+                current_equity = cash
+
+            equity_curve.append((ts, current_equity))
+            if current_equity > peak_equity:
+                peak_equity = current_equity
+            drawdown = (peak_equity - current_equity) / peak_equity * 100
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+
+            if i < 60:
+                continue
+
+            # ── 펀딩비 (8시간마다) ──────────────────────────────
+            if position and i % candles_per_8h == 0:
+                notional = position.quantity * current_price
+                if position.side == "long":
+                    funding_cost = notional * self._funding_rate
+                else:
+                    funding_cost = -notional * self._funding_rate  # 숏은 펀딩비 수취
+                cash -= funding_cost
+                total_funding += funding_cost
+
+            # ── 24캔들마다 시장 상태 재평가 ─────────────────────
+            if i - last_weight_eval_idx >= 24:
+                prev_state = current_market_state
+                current_market_state, market_confidence = _detect_market_state(
+                    row, df, i, use_agent_scoring=self._agent_market,
+                )
+                if current_market_state != prev_state:
+                    print(f"  [{ts.strftime('%m/%d %H:%M')}] 시장: {current_market_state} (신뢰도 {market_confidence:.0%})")
+                if self._adaptive_weights:
+                    new_weights = _get_adaptive_weights(current_market_state, list(self._strategies.keys()))
+                    self._combiner.update_weights(new_weights, source="backtest")
+                if self._dynamic_sl and position:
+                    import math
+                    raw_sl = _calc_dynamic_sl(row, current_price, current_market_state)
+                    dynamic_sl_pct = raw_sl / math.sqrt(self._leverage)
+                last_weight_eval_idx = i
+
+            # ── 포지션 보유 중: 청산/SL/TP/트레일링 체크 ────────
+            if position:
+                liq_price = self._calc_liquidation_price(position.side, position.entry_price)
+
+                # 강제 청산 체크 (캔들 내 고/저가 기준)
+                liquidated = False
+                if position.side == "long" and low_price <= liq_price:
+                    liquidated = True
+                    close_price = liq_price
+                elif position.side == "short" and high_price >= liq_price:
+                    liquidated = True
+                    close_price = liq_price
+
+                if liquidated:
+                    # 마진 전액 손실
+                    lost_margin = position.margin
+                    fee = 0  # 청산 수수료는 마진에서 이미 차감
+                    t = BacktestTrade(
+                        timestamp=ts, side=f"sell(liq-{position.side})", symbol=symbol,
+                        price=close_price, quantity=position.quantity,
+                        cost=position.quantity * close_price, fee=fee,
+                        strategy="liquidation", confidence=0,
+                        reason=f"강제청산 ({position.side}) liq={liq_price:,.2f}",
+                        pnl=-lost_margin, pnl_pct=-100.0,
+                    )
+                    trades.append(t)
+                    total_fees += fee
+                    liquidations += 1
+                    if position.side == "long":
+                        long_losses += 1
+                    else:
+                        short_losses += 1
+                    total_loss_pct += 100.0
+                    # 마진은 이미 cash에서 빠졌으므로 반환 없음
+                    position = None
+                    last_trade_idx = i
+                    continue
+
+                # 미실현 손익 (마진 대비 %)
+                unrealized_pnl = self._calc_unrealized_pnl(
+                    position.side, position.entry_price, current_price, position.quantity
+                )
+                unrealized_pct = unrealized_pnl / position.margin * 100 if position.margin > 0 else 0
+
+                # 트레일링: 고점/저점 추적
+                if position.side == "long":
+                    if current_price > position.peak_price:
+                        position.peak_price = current_price
+                else:  # short
+                    if current_price < position.peak_price:
+                        position.peak_price = current_price
+
+                # 트레일링 활성화
+                if (self._effective_trail_act > 0
+                        and not position.trailing_active
+                        and unrealized_pct >= self._effective_trail_act):
+                    position.trailing_active = True
+
+                # 트레일링 스탑 발동
+                if position.trailing_active and self._effective_trail_stop > 0:
+                    if position.side == "long":
+                        drop = (position.peak_price - current_price) / position.peak_price * 100
+                    else:
+                        drop = (current_price - position.peak_price) / position.peak_price * 100
+                    if drop >= self._effective_trail_stop:
+                        net_pnl, fee, pnl_pct, t = self._execute_futures_close(
+                            ts, position, current_price,
+                            f"sell(trail-{position.side})", "trailing_stop", 0,
+                            f"트레일링 ({position.side}) 피크 대비 -{drop:.1f}% (수익 {unrealized_pct:+.1f}%)",
+                        )
+                        t.symbol = symbol
+                        cash += position.margin + net_pnl
+                        total_fees += fee
+                        trades.append(t)
+                        if net_pnl > 0:
+                            if position.side == "long": long_wins += 1
+                            else: short_wins += 1
+                            total_win_pct += abs(pnl_pct)
+                        else:
+                            if position.side == "long": long_losses += 1
+                            else: short_losses += 1
+                            total_loss_pct += abs(pnl_pct)
+                        position = None
+                        last_trade_idx = i
+                        continue
+
+                # 손절
+                if dynamic_sl_pct > 0 and unrealized_pct <= -dynamic_sl_pct:
+                    net_pnl, fee, pnl_pct, t = self._execute_futures_close(
+                        ts, position, current_price,
+                        f"sell(sl-{position.side})", "stop_loss", 0,
+                        f"손절 ({position.side}) {unrealized_pct:.1f}% (한도 -{dynamic_sl_pct:.1f}%)",
+                    )
+                    t.symbol = symbol
+                    cash += position.margin + net_pnl
+                    total_fees += fee
+                    trades.append(t)
+                    if position.side == "long": long_losses += 1
+                    else: short_losses += 1
+                    total_loss_pct += abs(pnl_pct)
+                    position = None
+                    last_trade_idx = i
+                    continue
+
+                # 익절 (트레일링 미활성 시)
+                if (not position.trailing_active
+                        and self._effective_tp > 0
+                        and unrealized_pct >= self._effective_tp):
+                    net_pnl, fee, pnl_pct, t = self._execute_futures_close(
+                        ts, position, current_price,
+                        f"sell(tp-{position.side})", "take_profit", 0,
+                        f"익절 ({position.side}) +{unrealized_pct:.1f}% (목표 +{self._effective_tp:.1f}%)",
+                    )
+                    t.symbol = symbol
+                    cash += position.margin + net_pnl
+                    total_fees += fee
+                    trades.append(t)
+                    if position.side == "long": long_wins += 1
+                    else: short_wins += 1
+                    total_win_pct += abs(pnl_pct)
+                    position = None
+                    last_trade_idx = i
+                    continue
+
+            # 쿨다운
+            if i - last_trade_idx < self._trade_cooldown:
+                continue
+
+            # ── 전략 신호 수집 ─────────────────────────────────
+            slice_df = df.iloc[max(0, i-200):i+1]
+            ticker = Ticker(
+                symbol=symbol,
+                last=current_price,
+                bid=current_price * 0.9999,
+                ask=current_price * 1.0001,
+                high=float(row["high"]),
+                low=float(row["low"]),
+                volume=float(row.get("volume", 0)),
+                timestamp=ts,
+            )
+
+            signals: list[Signal] = []
+            for name, strategy in self._strategies.items():
+                try:
+                    sig = await strategy.analyze(slice_df.copy(), ticker)
+                    signals.append(sig)
+                except Exception:
+                    pass
+
+            if not signals:
+                continue
+
+            decision = self._combiner.combine(signals)
+
+            # ── 포지션 없음: 롱/숏 진입 ────────────────────────
+            if position is None:
+                if decision.action == SignalType.BUY:
+                    buy_threshold = self._min_confidence
+                    if market_confidence < 0.35:
+                        buy_threshold = self._min_confidence + 0.10
+                    if decision.combined_confidence < buy_threshold:
+                        continue
+
+                    margin = cash * self._position_pct
+                    if margin < 1.0:  # 최소 1 USDT
+                        continue
+
+                    entry_fee = margin * self._leverage * self._futures_fee
+                    effective_margin = margin - entry_fee
+                    qty = effective_margin * self._leverage / current_price
+
+                    cash -= margin
+                    total_fees += entry_fee
+                    position = FuturesPositionState(
+                        side="long",
+                        entry_price=current_price,
+                        quantity=qty,
+                        leverage=self._leverage,
+                        margin=margin,
+                        peak_price=current_price,
+                    )
+
+                    if self._dynamic_sl:
+                        import math
+                        dynamic_sl_pct = _calc_dynamic_sl(row, current_price, current_market_state) / math.sqrt(self._leverage)
+                    else:
+                        dynamic_sl_pct = self._effective_sl
+
+                    buy_signals = [s for s in signals if s.signal_type == SignalType.BUY]
+                    best_signal = max(buy_signals, key=lambda s: s.confidence) if buy_signals else signals[0]
+
+                    t = BacktestTrade(
+                        timestamp=ts, side="buy(long)", symbol=symbol,
+                        price=current_price, quantity=qty, cost=margin, fee=entry_fee,
+                        strategy=best_signal.strategy_name,
+                        confidence=float(decision.combined_confidence),
+                        reason=f"롱 진입 {self._leverage}x | {best_signal.reason}",
+                    )
+                    trades.append(t)
+                    strategy_trades[best_signal.strategy_name] = strategy_trades.get(best_signal.strategy_name, 0) + 1
+                    last_trade_idx = i
+
+                elif decision.action == SignalType.SELL:
+                    # 숏 진입 — 시장 상태 게이팅
+                    if not self._short_all and current_market_state not in self.SHORT_ALLOWED_STATES:
+                        continue  # uptrend/sideways에서 숏 차단
+
+                    # 숏 신뢰도 상향: 최소 0.55
+                    short_threshold = max(self._min_confidence, 0.55)
+                    if decision.combined_confidence < short_threshold:
+                        continue
+
+                    margin = cash * self._position_pct
+                    if margin < 1.0:
+                        continue
+
+                    entry_fee = margin * self._leverage * self._futures_fee
+                    effective_margin = margin - entry_fee
+                    qty = effective_margin * self._leverage / current_price
+
+                    cash -= margin
+                    total_fees += entry_fee
+                    position = FuturesPositionState(
+                        side="short",
+                        entry_price=current_price,
+                        quantity=qty,
+                        leverage=self._leverage,
+                        margin=margin,
+                        peak_price=current_price,  # 숏은 최저가 추적
+                    )
+
+                    if self._dynamic_sl:
+                        import math
+                        dynamic_sl_pct = _calc_dynamic_sl(row, current_price, current_market_state) / math.sqrt(self._leverage)
+                    else:
+                        dynamic_sl_pct = self._effective_sl
+
+                    sell_signals = [s for s in signals if s.signal_type == SignalType.SELL]
+                    best_signal = max(sell_signals, key=lambda s: s.confidence) if sell_signals else signals[0]
+
+                    t = BacktestTrade(
+                        timestamp=ts, side="buy(short)", symbol=symbol,
+                        price=current_price, quantity=qty, cost=margin, fee=entry_fee,
+                        strategy=best_signal.strategy_name,
+                        confidence=float(decision.combined_confidence),
+                        reason=f"숏 진입 {self._leverage}x | {best_signal.reason}",
+                    )
+                    trades.append(t)
+                    strategy_trades[best_signal.strategy_name] = strategy_trades.get(best_signal.strategy_name, 0) + 1
+                    last_trade_idx = i
+
+            # ── 포지션 보유 중: 반대 신호로 청산 ───────────────
+            elif position.side == "long" and decision.action == SignalType.SELL:
+                net_pnl, fee, pnl_pct, t = self._execute_futures_close(
+                    ts, position, current_price,
+                    "sell(close-long)", "", float(decision.combined_confidence), "",
+                )
+                t.symbol = symbol
+
+                sell_signals = [s for s in signals if s.signal_type == SignalType.SELL]
+                best_signal = max(sell_signals, key=lambda s: s.confidence) if sell_signals else signals[0]
+                t.strategy = best_signal.strategy_name
+                t.reason = f"롱 청산 | {best_signal.reason}"
+
+                cash += position.margin + net_pnl
+                total_fees += fee
+                trades.append(t)
+                strategy_trades[best_signal.strategy_name] = strategy_trades.get(best_signal.strategy_name, 0) + 1
+                last_trade_idx = i
+
+                if net_pnl > 0:
+                    long_wins += 1
+                    total_win_pct += abs(pnl_pct)
+                    strategy_wins[best_signal.strategy_name] = strategy_wins.get(best_signal.strategy_name, 0) + 1
+                else:
+                    long_losses += 1
+                    total_loss_pct += abs(pnl_pct)
+                    strategy_losses[best_signal.strategy_name] = strategy_losses.get(best_signal.strategy_name, 0) + 1
+                position = None
+
+            elif position.side == "short" and decision.action == SignalType.BUY:
+                net_pnl, fee, pnl_pct, t = self._execute_futures_close(
+                    ts, position, current_price,
+                    "sell(close-short)", "", float(decision.combined_confidence), "",
+                )
+                t.symbol = symbol
+
+                buy_signals = [s for s in signals if s.signal_type == SignalType.BUY]
+                best_signal = max(buy_signals, key=lambda s: s.confidence) if buy_signals else signals[0]
+                t.strategy = best_signal.strategy_name
+                t.reason = f"숏 청산 | {best_signal.reason}"
+
+                cash += position.margin + net_pnl
+                total_fees += fee
+                trades.append(t)
+                strategy_trades[best_signal.strategy_name] = strategy_trades.get(best_signal.strategy_name, 0) + 1
+                last_trade_idx = i
+
+                if net_pnl > 0:
+                    short_wins += 1
+                    total_win_pct += abs(pnl_pct)
+                    strategy_wins[best_signal.strategy_name] = strategy_wins.get(best_signal.strategy_name, 0) + 1
+                else:
+                    short_losses += 1
+                    total_loss_pct += abs(pnl_pct)
+                    strategy_losses[best_signal.strategy_name] = strategy_losses.get(best_signal.strategy_name, 0) + 1
+                position = None
+
+        # ── 미청산 포지션 강제 청산 ─────────────────────────────
+        if position:
+            net_pnl, fee, pnl_pct, t = self._execute_futures_close(
+                df.index[-1], position, last_close,
+                f"sell(close-{position.side})", "forced_close", 0,
+                f"백테스트 종료 강제 청산 ({position.side})",
+            )
+            t.symbol = symbol
+            cash += position.margin + net_pnl
+            total_fees += fee
+            trades.append(t)
+            if net_pnl > 0:
+                if position.side == "long": long_wins += 1
+                else: short_wins += 1
+                total_win_pct += abs(pnl_pct)
+            else:
+                if position.side == "long": long_losses += 1
+                else: short_losses += 1
+                total_loss_pct += abs(pnl_pct)
+
+        # ── 결과 집계 ──────────────────────────────────────────
+        final_balance = cash
+        total_pnl = final_balance - self._initial_balance
+        total_pnl_pct = total_pnl / self._initial_balance * 100
+
+        win_count = long_wins + short_wins
+        loss_count = long_losses + short_losses
+        total_closes = win_count + loss_count
+        win_rate = win_count / total_closes * 100 if total_closes > 0 else 0
+
+        avg_win = total_win_pct / win_count if win_count > 0 else 0
+        avg_loss = total_loss_pct / loss_count if loss_count > 0 else 0
+        profit_factor = (total_win_pct / total_loss_pct) if total_loss_pct > 0 else float("inf") if total_win_pct > 0 else 0
+
+        long_total = long_wins + long_losses
+        short_total = short_wins + short_losses
+
+        strategy_stats = {}
+        for name in self._strategies:
+            n = strategy_trades.get(name, 0)
+            w = strategy_wins.get(name, 0)
+            l = strategy_losses.get(name, 0)
+            strategy_stats[name] = {
+                "trades": n,
+                "wins": w,
+                "losses": l,
+                "win_rate": round(w / (w + l) * 100, 1) if (w + l) > 0 else 0,
+            }
+
+        return FuturesBacktestResult(
+            symbol=symbol,
+            days=days,
+            leverage=self._leverage,
+            initial_balance=self._initial_balance,
+            final_balance=round(final_balance, 2),
+            total_pnl=round(total_pnl, 2),
+            total_pnl_pct=round(total_pnl_pct, 2),
+            max_drawdown_pct=round(max_drawdown, 2),
+            total_trades=total_closes,
+            long_trades=long_total,
+            short_trades=short_total,
+            long_wins=long_wins,
+            long_losses=long_losses,
+            short_wins=short_wins,
+            short_losses=short_losses,
+            win_rate=round(win_rate, 1),
+            avg_win_pct=round(avg_win, 2),
+            avg_loss_pct=round(avg_loss, 2),
+            profit_factor=round(profit_factor, 2),
+            buy_hold_pnl_pct=round(buy_hold_pnl_pct, 2),
+            liquidations=liquidations,
+            total_funding=round(total_funding, 2),
+            total_fees=round(total_fees, 2),
+            trades=trades,
+            equity_curve=equity_curve,
+            strategy_stats=strategy_stats,
+        )
+
+
+def print_futures_result(r: FuturesBacktestResult):
+    """선물 백테스트 결과 출력."""
+    pnl_sign = "+" if r.total_pnl >= 0 else ""
+    dd_warn = " !!!" if r.max_drawdown_pct > 15 else ""
+    bh_sign = "+" if r.buy_hold_pnl_pct >= 0 else ""
+    alpha = r.total_pnl_pct - r.buy_hold_pnl_pct
+    alpha_sign = "+" if alpha >= 0 else ""
+
+    print(f"\n{'='*60}")
+    print(f"  {r.symbol} 선물 백테스트 결과 ({r.days}일, {r.leverage}x)")
+    print(f"{'='*60}")
+    print(f"  초기 자산    : {r.initial_balance:>12,.2f} USDT")
+    print(f"  최종 자산    : {r.final_balance:>12,.2f} USDT")
+    print(f"  총 수익      : {pnl_sign}{r.total_pnl:>10,.2f} USDT  ({pnl_sign}{r.total_pnl_pct:.2f}%)")
+    print(f"  최대 낙폭    : {r.max_drawdown_pct:.2f}%{dd_warn}")
+    print(f"{'─'*60}")
+    print(f"  현물 B&H     : {bh_sign}{r.buy_hold_pnl_pct:.2f}%")
+    print(f"  초과 수익(α) : {alpha_sign}{alpha:.2f}%")
+    print(f"{'─'*60}")
+    print(f"  총 청산 횟수 : {r.total_trades}회")
+
+    long_wr = r.long_wins / r.long_trades * 100 if r.long_trades > 0 else 0
+    short_wr = r.short_wins / r.short_trades * 100 if r.short_trades > 0 else 0
+    print(f"  롱  거래     : {r.long_trades}회  ({r.long_wins}승/{r.long_losses}패, 승률 {long_wr:.1f}%)")
+    print(f"  숏  거래     : {r.short_trades}회  ({r.short_wins}승/{r.short_losses}패, 승률 {short_wr:.1f}%)")
+    print(f"  전체 승률    : {r.win_rate:.1f}%")
+    print(f"  평균 수익    : +{r.avg_win_pct:.2f}% | 평균 손실: -{r.avg_loss_pct:.2f}%")
+    print(f"  Profit Factor: {r.profit_factor:.2f}")
+    print(f"{'─'*60}")
+    print(f"  강제청산     : {r.liquidations}회")
+    print(f"  총 펀딩비    : {r.total_funding:>+10,.2f} USDT")
+    print(f"  총 수수료    : {r.total_fees:>10,.2f} USDT")
+    print(f"{'─'*60}")
+    print(f"  전략별 기여:")
+    for name, stat in r.strategy_stats.items():
+        if stat["trades"] > 0:
+            print(f"    {name:<22}: {stat['trades']:>3}회  승률 {stat['win_rate']:>5.1f}%")
+    print(f"{'─'*60}")
+
+    sell_trades = [t for t in r.trades if "sell" in t.side]
+    if sell_trades:
+        print(f"  매매 내역 (최근 10건):")
+        for t in sell_trades[-10:]:
+            arrow = "+" if t.pnl >= 0 else ""
+            side_info = t.side.replace("sell(", "").replace(")", "")
+            tag_map = {
+                "sl-long": "롱손절", "sl-short": "숏손절",
+                "tp-long": "롱익절", "tp-short": "숏익절",
+                "trail-long": "롱트레일", "trail-short": "숏트레일",
+                "close-long": "롱청산", "close-short": "숏청산",
+                "liq-long": "롱강청", "liq-short": "숏강청",
+            }
+            tag = tag_map.get(side_info, side_info)
+            print(f"    {t.timestamp.strftime('%m/%d %H:%M')}  {arrow}{t.pnl_pct:>+6.1f}%  "
+                  f"[{tag}] {t.reason[:50]}")
+    print(f"{'='*60}\n")
+
+
 def print_result(r: BacktestResult):
     """백테스트 결과를 보기 좋게 출력."""
     pnl_sign = "+" if r.total_pnl >= 0 else ""
@@ -1600,6 +2332,19 @@ async def main():
                         help="빗썸 거래대금 상위 코인 자동 선정 (기본 OFF=하드코딩 20개)")
     parser.add_argument("--min-volume-krw", type=float, default=1e9,
                         help="동적 로테이션 최소 24h 거래대금 (기본 10억원)")
+    # 선물 모드
+    parser.add_argument("--futures",       action="store_true",
+                        help="선물 백테스트 모드 (롱+숏+레버리지)")
+    parser.add_argument("--leverage",      type=int, default=3,
+                        help="선물 레버리지 (기본 3)")
+    parser.add_argument("--futures-fee",   type=float, default=0.0004,
+                        help="선물 수수료 (기본 0.0004=0.04%%)")
+    parser.add_argument("--funding-rate",  type=float, default=0.0001,
+                        help="8시간 펀딩비 (기본 0.0001=0.01%%)")
+    parser.add_argument("--position-pct",  type=float, default=0.30,
+                        help="포지션 크기 (현금 대비 %%, 기본 0.30=30%%)")
+    parser.add_argument("--short-all",     action="store_true", default=False,
+                        help="모든 시장에서 숏 허용 (기본: downtrend/crash만)")
 
     args = parser.parse_args()
 
@@ -1617,6 +2362,58 @@ async def main():
         print(f"알 수 없는 전략: {invalid}")
         print(f"사용 가능: {ALL_STRATEGIES}")
         sys.exit(1)
+
+    # ── 선물 모드 ──────────────────────────────────────────────
+    if args.futures:
+        # 선물 데이터는 바이낸스 public API에서 가져옴
+        from exchange.binance_usdm_adapter import BinanceUSDMAdapter
+        print("바이낸스 USDM 선물 연결 중...")
+        exchange = BinanceUSDMAdapter(api_key="", api_secret="", testnet=False)
+        await exchange.initialize()
+
+        # 선물은 USDT 기본 잔액 (--balance를 USDT로 해석)
+        fut_balance = args.balance
+        if fut_balance >= 100_000:
+            # KRW 기본값(500,000)이면 USDT 환산 (대략적 편의)
+            fut_balance = 10_000
+            print(f"  (--balance 미지정 — 기본 {fut_balance:,.0f} USDT 사용)")
+
+        # 선물 기본 쿨다운: 6캔들 (사용자가 명시 안 했으면)
+        fut_cooldown = args.trade_cooldown
+        if fut_cooldown == 12:  # CLI 기본값 = 현물용
+            fut_cooldown = 6
+
+        bt = FuturesBacktester(
+            exchange=exchange,
+            strategy_names=args.strategies,
+            initial_balance=fut_balance,
+            min_confidence=args.min_confidence,
+            stop_loss_pct=args.stop_loss,
+            take_profit_pct=args.take_profit,
+            trend_filter=args.trend_filter,
+            trailing_activation=args.trailing_activation,
+            trailing_stop=args.trailing_stop,
+            adaptive_weights=args.adaptive_weights,
+            dynamic_sl=args.dynamic_sl,
+            agent_market=args.agent_market,
+            trade_cooldown=fut_cooldown,
+            leverage=args.leverage,
+            futures_fee=args.futures_fee,
+            funding_rate=args.funding_rate,
+            position_pct=args.position_pct,
+            short_all=args.short_all,
+        )
+
+        # 선물 심볼 자동 변환: BTC/KRW → BTC/USDT
+        symbol = args.symbol
+        if symbol.endswith("/KRW"):
+            symbol = symbol.replace("/KRW", "/USDT")
+            print(f"  심볼 자동 변환: {args.symbol} → {symbol}")
+
+        result = await bt.run(symbol, args.timeframe, args.days)
+        print_futures_result(result)
+        await exchange.close()
+        return
 
     print("빗썸 연결 중...")
     exchange = BithumbAdapter(api_key="", api_secret="")
