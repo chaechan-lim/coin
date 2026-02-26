@@ -293,8 +293,6 @@ coin/
 | 가격 0원 fallback | ✅ fetch_ticker last=None → bid/ask 중간값 → orderbook fallback |
 | 바이낸스 현물 연동 | ⬜ BinanceSpotAdapter (ccxt binance), 현물 TradingEngine 추가 (계획) |
 | 시장 상태별 전략 on/off | ⬜ 횡보 시 추세추종 완전 비활성 (향후) |
-| 멀티 타임프레임 확인 | ⬜ 4h+1h 이중 확인 (향후) |
-| PostgreSQL 마이그레이션 | ⬜ 향후 스케일업 시 |
 | 라즈베리파이 배포 | ⬜ 예정 |
 
 ---
@@ -666,5 +664,4 @@ docker compose restart backend
 | v0.14.1 | 2026-02-27 | **P1 최적화**: 4h 타임프레임, SL8/TP16/트레일5-3.5%, 동적 SL(ATR), 숏 전면 허용, 포지션 35% (PF 1.80, 알파 +62%) |
 | v0.14.2 | 2026-02-27 | 가격 0원 fallback: fetch_ticker last=None → bid/ask 중간값 → orderbook mid-price |
 | v0.15 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
-| v0.15 | 예정 | PostgreSQL 마이그레이션 |
 | v1.0 | 예정 | 라즈베리파이 배포 + 장기 운영 안정화 |
