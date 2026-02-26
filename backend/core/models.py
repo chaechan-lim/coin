@@ -4,15 +4,21 @@ from sqlalchemy import (
     Integer,
     String,
     Float,
-    DateTime,
     Boolean,
     ForeignKey,
     Text,
     Index,
     UniqueConstraint,
 )
-from sqlalchemy import JSON
+from sqlalchemy import JSON, DateTime as _DateTime
 from sqlalchemy.orm import DeclarativeBase, relationship
+
+# PostgreSQL: TIMESTAMP WITH TIME ZONE 사용
+DateTime = _DateTime(timezone=True)
+
+
+def _utcnow():
+    return datetime.now(timezone.utc)
 
 
 class Base(DeclarativeBase):
@@ -29,7 +35,7 @@ class CoinConfig(Base):
     strategies = Column(JSON, default=list)  # ["volatility_breakout", "rsi"]
     min_order_krw = Column(Float, default=5000)
     max_position_pct = Column(Float, default=0.30)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class Order(Base):
@@ -55,6 +61,11 @@ class Order(Base):
     fee_currency = Column(String(10), default="KRW")
     is_paper = Column(Boolean, default=True)
 
+    # Futures-specific fields
+    direction = Column(String(5), nullable=True)  # "long" / "short"
+    leverage = Column(Integer, nullable=True)
+    margin_used = Column(Float, nullable=True)
+
     # Strategy attribution
     strategy_name = Column(String(50), nullable=False)
     signal_confidence = Column(Float)
@@ -62,8 +73,8 @@ class Order(Base):
     combined_score = Column(Float, nullable=True)
     contributing_strategies = Column(JSON, nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     filled_at = Column(DateTime, nullable=True)
 
     trades = relationship("Trade", back_populates="order")
@@ -85,7 +96,7 @@ class Trade(Base):
     cost = Column(Float, nullable=False)
     fee = Column(Float, default=0.0)
     is_paper = Column(Boolean, default=True)
-    executed_at = Column(DateTime, default=datetime.utcnow)
+    executed_at = Column(DateTime, default=_utcnow)
 
     order = relationship("Order", back_populates="trades")
 
@@ -113,7 +124,7 @@ class Position(Base):
     liquidation_price = Column(Float, nullable=True)
     margin_used = Column(Float, default=0.0)
     entered_at = Column(DateTime, nullable=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class PortfolioSnapshot(Base):
@@ -131,7 +142,7 @@ class PortfolioSnapshot(Base):
     unrealized_pnl = Column(Float, default=0.0)
     peak_value = Column(Float, default=0.0)
     drawdown_pct = Column(Float, default=0.0)
-    snapshot_at = Column(DateTime, default=datetime.utcnow)
+    snapshot_at = Column(DateTime, default=_utcnow)
 
 
 class StrategyLog(Base):
@@ -150,7 +161,7 @@ class StrategyLog(Base):
     indicators = Column(JSON)  # {"rsi": 28.5, "ma_short": 45000000}
     was_executed = Column(Boolean, default=False)
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=True)
-    logged_at = Column(DateTime, default=datetime.utcnow)
+    logged_at = Column(DateTime, default=_utcnow)
 
 
 class AgentAnalysisLog(Base):
@@ -166,7 +177,7 @@ class AgentAnalysisLog(Base):
     result = Column(JSON, nullable=False)
     recommended_weights = Column(JSON, nullable=True)
     risk_level = Column(String(20), nullable=True)
-    analyzed_at = Column(DateTime, default=datetime.utcnow)
+    analyzed_at = Column(DateTime, default=_utcnow)
 
 
 class ServerEvent(Base):
@@ -182,4 +193,4 @@ class ServerEvent(Base):
     title = Column(String(200), nullable=False)
     detail = Column(Text, nullable=True)
     metadata_ = Column("metadata", JSON, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=_utcnow)

@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
 from typing import Optional
 from datetime import timedelta
-from core.utils import utcnow
+from core.utils import utcnow, ensure_aware
 
 from db.session import get_db
 from core.models import Order, Trade
@@ -62,6 +62,9 @@ async def get_trades(
             executed_quantity=o.executed_quantity,
             fee=o.fee,
             is_paper=o.is_paper,
+            direction=o.direction,
+            leverage=o.leverage,
+            margin_used=o.margin_used,
             strategy_name=o.strategy_name,
             signal_confidence=o.signal_confidence,
             signal_reason=o.signal_reason,
@@ -113,7 +116,7 @@ async def get_trade_summary(
         qty = order.executed_quantity or order.requested_quantity
         price = order.executed_price or order.requested_price
         fee = order.fee or 0
-        in_period = start is None or order.created_at >= start
+        in_period = start is None or ensure_aware(order.created_at) >= start
 
         if not price or not qty:
             continue
@@ -174,6 +177,9 @@ async def get_trade_detail(order_id: int, session: AsyncSession = Depends(get_db
         executed_quantity=order.executed_quantity,
         fee=order.fee,
         is_paper=order.is_paper,
+        direction=order.direction,
+        leverage=order.leverage,
+        margin_used=order.margin_used,
         strategy_name=order.strategy_name,
         signal_confidence=order.signal_confidence,
         signal_reason=order.signal_reason,

@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
 from typing import Optional
 from datetime import timedelta
-from core.utils import utcnow
+from core.utils import utcnow, ensure_aware
 
 from db.session import get_db
 from core.models import StrategyLog, Order
@@ -110,7 +110,7 @@ async def get_strategy_performance(
             positions[sym]["cost"] += price * qty + fee
             positions[sym]["qty"] += qty
             # 기간 내 매수만 카운트
-            if order.strategy_name == name and order.created_at >= start:
+            if order.strategy_name == name and ensure_aware(order.created_at) >= start:
                 trade_count += 1
 
         elif order.side == "sell":
@@ -121,7 +121,7 @@ async def get_strategy_performance(
                 pnl = (price - avg_buy) * sell_qty - fee
 
                 # 기간 내 + 해당 전략 매도만 성과에 반영
-                if order.strategy_name == name and order.created_at >= start:
+                if order.strategy_name == name and ensure_aware(order.created_at) >= start:
                     total_pnl += pnl
                     ret_pct = pnl / (avg_buy * sell_qty) * 100 if avg_buy > 0 else 0
                     returns.append(ret_pct)

@@ -70,6 +70,11 @@ class OrderResponse(BaseModel):
     executed_quantity: Optional[float]
     fee: float
     is_paper: bool
+    # Futures-specific
+    direction: Optional[str] = None
+    leverage: Optional[int] = None
+    margin_used: Optional[float] = None
+    # Strategy attribution
     strategy_name: str
     signal_confidence: Optional[float]
     signal_reason: Optional[str]

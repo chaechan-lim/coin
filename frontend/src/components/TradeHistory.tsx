@@ -35,6 +35,9 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
   const [expanded, setExpanded] = useState(false)
   const side = order.side === 'buy'
   const price = order.executed_price ?? order.requested_price ?? 0
+  const isFutures = !!order.direction
+  const dirLabel = order.direction === 'short' ? 'SHORT' : 'LONG'
+  const dirColor = order.direction === 'short' ? 'text-sell' : 'text-buy'
 
   return (
     <div className="border-b border-gray-700/50">
@@ -45,16 +48,28 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
         {/* Desktop layout */}
         <div className="hidden sm:flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <span className={`text-sm font-bold ${side ? 'text-buy' : 'text-sell'}`}>
-              {side ? '▲ 매수' : '▼ 매도'}
-            </span>
+            {isFutures ? (
+              <span className={`text-sm font-bold ${dirColor}`}>
+                {order.direction === 'short' ? '▼ SHORT' : '▲ LONG'}
+              </span>
+            ) : (
+              <span className={`text-sm font-bold ${side ? 'text-buy' : 'text-sell'}`}>
+                {side ? '▲ 매수' : '▼ 매도'}
+              </span>
+            )}
             <span className="text-white font-medium">{order.symbol}</span>
+            {isFutures && order.leverage && order.leverage > 1 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400 font-semibold">{order.leverage}x</span>
+            )}
             <StrategyBadge name={order.strategy_name} />
             {order.is_paper && (
               <span className="text-xs text-gray-500 border border-gray-600 px-1 rounded">페이퍼</span>
             )}
           </div>
           <div className="flex items-center gap-4 text-sm">
+            {isFutures && order.margin_used != null && (
+              <span className="text-gray-400 text-xs">{order.margin_used.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT</span>
+            )}
             <span className="text-gray-300">{fmtPrice(price, isUsdt)}</span>
             <span className="text-gray-500 text-xs">
               {format(utcToLocal(order.created_at), 'MM/dd HH:mm')}
@@ -66,10 +81,19 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
         <div className="sm:hidden space-y-1.5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <span className={`text-sm font-bold ${side ? 'text-buy' : 'text-sell'}`}>
-                {side ? '▲ 매수' : '▼ 매도'}
-              </span>
+              {isFutures ? (
+                <span className={`text-sm font-bold ${dirColor}`}>
+                  {order.direction === 'short' ? '▼ SHORT' : '▲ LONG'}
+                </span>
+              ) : (
+                <span className={`text-sm font-bold ${side ? 'text-buy' : 'text-sell'}`}>
+                  {side ? '▲ 매수' : '▼ 매도'}
+                </span>
+              )}
               <span className="text-white font-medium text-sm">{order.symbol.replace(/\/(KRW|USDT)/, '')}</span>
+              {isFutures && order.leverage && order.leverage > 1 && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400 font-semibold">{order.leverage}x</span>
+              )}
             </div>
             <span className="text-gray-500 text-xs">
               {format(utcToLocal(order.created_at), 'MM/dd HH:mm')}
@@ -99,6 +123,20 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
 
           {/* 메타 정보 */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+            {isFutures && (
+              <>
+                <div>
+                  <span className="text-gray-500">방향</span>
+                  <div className={`font-medium ${dirColor}`}>{dirLabel} {order.leverage}x</div>
+                </div>
+                <div>
+                  <span className="text-gray-500">사용 마진</span>
+                  <div className="text-white font-medium">
+                    {order.margin_used != null ? `${order.margin_used.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT` : '-'}
+                  </div>
+                </div>
+              </>
+            )}
             <div>
               <span className="text-gray-500">신뢰도</span>
               <div className="text-white font-medium">

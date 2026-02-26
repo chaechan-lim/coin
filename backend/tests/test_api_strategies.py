@@ -46,10 +46,11 @@ async def _calc_performance(session: AsyncSession, strategy_name: str, days: int
         if not price or not qty:
             continue
 
+        from core.utils import ensure_aware
         if order.side == "buy":
             positions[sym]["cost"] += price * qty + fee
             positions[sym]["qty"] += qty
-            if order.strategy_name == strategy_name and order.created_at >= start:
+            if order.strategy_name == strategy_name and ensure_aware(order.created_at) >= start:
                 trade_count += 1
         elif order.side == "sell":
             pos = positions[sym]
@@ -58,7 +59,7 @@ async def _calc_performance(session: AsyncSession, strategy_name: str, days: int
                 sell_qty = min(qty, pos["qty"])
                 pnl = (price - avg_buy) * sell_qty - fee
 
-                if order.strategy_name == strategy_name and order.created_at >= start:
+                if order.strategy_name == strategy_name and ensure_aware(order.created_at) >= start:
                     total_pnl += pnl
                     ret_pct = pnl / (avg_buy * sell_qty) * 100 if avg_buy > 0 else 0
                     returns.append(ret_pct)

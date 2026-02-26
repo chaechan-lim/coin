@@ -81,7 +81,7 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
         />
         <StatCard label="실현 손익" value={fmt(data.realized_pnl)} color={data.realized_pnl >= 0 ? 'text-buy' : 'text-sell'} />
         <StatCard label="미실현 손익" value={fmt(data.unrealized_pnl)} color={data.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'} />
-        <StatCard label="투자 금액" value={fmt(data.invested_value_krw)} />
+        <StatCard label={isUsdt ? '사용 마진' : '투자 금액'} value={fmt(data.invested_value_krw)} />
         <StatCard
           label="수수료 지출"
           value={fmt(data.total_fees)}
@@ -100,61 +100,100 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
             <thead>
               <tr className="text-gray-500 text-xs border-b border-gray-700">
                 <th className="px-4 py-2 text-left">코인</th>
+                {isUsdt && <th className="px-4 py-2 text-center">방향</th>}
                 <th className="px-4 py-2 text-right">수량</th>
-                <th className="px-4 py-2 text-right">평균 매수가</th>
+                <th className="px-4 py-2 text-right">진입가</th>
                 <th className="px-4 py-2 text-right">현재가</th>
-                <th className="px-4 py-2 text-right">평가금액</th>
+                <th className="px-4 py-2 text-right">{isUsdt ? '마진' : '평가금액'}</th>
+                {isUsdt && <th className="px-4 py-2 text-right">청산가</th>}
                 <th className="px-4 py-2 text-right">미실현 손익</th>
               </tr>
             </thead>
             <tbody>
-              {data.positions.map((pos) => (
-                <tr key={pos.symbol} className="border-b border-gray-700/50 hover:bg-gray-700/30">
-                  <td className="px-4 py-2 font-medium text-white">{pos.symbol}</td>
-                  <td className="px-4 py-2 text-right text-gray-300">{pos.quantity.toFixed(6)}</td>
-                  <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.average_buy_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.average_buy_price.toLocaleString()}</td>
-                  <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.current_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_price.toLocaleString()}</td>
-                  <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.current_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_value.toLocaleString()}</td>
-                  <td className={`px-4 py-2 text-right font-semibold ${pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}`}>
-                    {pos.unrealized_pnl >= 0 ? '+' : ''}{isUsdt ? pos.unrealized_pnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.unrealized_pnl.toLocaleString()}
-                    <span className="text-xs ml-1">({fmtPct(pos.unrealized_pnl_pct)})</span>
-                  </td>
-                </tr>
-              ))}
+              {data.positions.map((pos) => {
+                const dirLabel = pos.direction === 'short' ? 'SHORT' : 'LONG'
+                const dirColor = pos.direction === 'short' ? 'text-sell' : 'text-buy'
+                return (
+                  <tr key={pos.symbol} className="border-b border-gray-700/50 hover:bg-gray-700/30">
+                    <td className="px-4 py-2 font-medium text-white">
+                      {pos.symbol}
+                      {pos.leverage && pos.leverage > 1 && (
+                        <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400 font-semibold">{pos.leverage}x</span>
+                      )}
+                    </td>
+                    {isUsdt && (
+                      <td className={`px-4 py-2 text-center font-semibold text-xs ${dirColor}`}>{dirLabel}</td>
+                    )}
+                    <td className="px-4 py-2 text-right text-gray-300">{pos.quantity.toFixed(6)}</td>
+                    <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.average_buy_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.average_buy_price.toLocaleString()}</td>
+                    <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.current_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_price.toLocaleString()}</td>
+                    <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.current_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_value.toLocaleString()}</td>
+                    {isUsdt && (
+                      <td className="px-4 py-2 text-right text-red-400/80 text-xs">
+                        {pos.liquidation_price ? pos.liquidation_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-'}
+                      </td>
+                    )}
+                    <td className={`px-4 py-2 text-right font-semibold ${pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}`}>
+                      {pos.unrealized_pnl >= 0 ? '+' : ''}{isUsdt ? pos.unrealized_pnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.unrealized_pnl.toLocaleString()}
+                      <span className="text-xs ml-1">({fmtPct(pos.unrealized_pnl_pct)})</span>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
           {/* Mobile card layout */}
           <div className="md:hidden divide-y divide-gray-700/50">
-            {data.positions.map((pos) => (
-              <div key={pos.symbol} className="px-4 py-3 space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="font-medium text-white">{pos.symbol.replace(/\/(KRW|USDT)/, '')}</span>
-                  <span className={`font-semibold ${pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}`}>
-                    {fmtPct(pos.unrealized_pnl_pct)}
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 gap-x-4 text-xs">
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">평균가</span>
-                    <span className="text-gray-300">{isUsdt ? pos.average_buy_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.average_buy_price.toLocaleString()}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">현재가</span>
-                    <span className="text-gray-300">{isUsdt ? pos.current_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_price.toLocaleString()}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">평가금액</span>
-                    <span className="text-gray-300">{isUsdt ? pos.current_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_value.toLocaleString()}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">손익</span>
-                    <span className={pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}>
-                      {pos.unrealized_pnl >= 0 ? '+' : ''}{isUsdt ? pos.unrealized_pnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.unrealized_pnl.toLocaleString()}
+            {data.positions.map((pos) => {
+              const dirLabel = pos.direction === 'short' ? 'SHORT' : 'LONG'
+              const dirColor = pos.direction === 'short' ? 'text-sell' : 'text-buy'
+              return (
+                <div key={pos.symbol} className="px-4 py-3 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-white">{pos.symbol.replace(/\/(KRW|USDT)/, '')}</span>
+                      {isUsdt && (
+                        <>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${dirColor} ${pos.direction === 'short' ? 'bg-sell/20' : 'bg-buy/20'}`}>{dirLabel}</span>
+                          {pos.leverage && pos.leverage > 1 && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400 font-semibold">{pos.leverage}x</span>
+                          )}
+                        </>
+                      )}
+                    </div>
+                    <span className={`font-semibold ${pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}`}>
+                      {fmtPct(pos.unrealized_pnl_pct)}
                     </span>
                   </div>
+                  <div className="grid grid-cols-2 gap-x-4 text-xs">
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">진입가</span>
+                      <span className="text-gray-300">{isUsdt ? pos.average_buy_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.average_buy_price.toLocaleString()}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">현재가</span>
+                      <span className="text-gray-300">{isUsdt ? pos.current_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_price.toLocaleString()}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">{isUsdt ? '마진' : '평가금액'}</span>
+                      <span className="text-gray-300">{isUsdt ? pos.current_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_value.toLocaleString()}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">손익</span>
+                      <span className={pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}>
+                        {pos.unrealized_pnl >= 0 ? '+' : ''}{isUsdt ? pos.unrealized_pnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.unrealized_pnl.toLocaleString()}
+                      </span>
+                    </div>
+                    {isUsdt && pos.liquidation_price && (
+                      <div className="flex justify-between col-span-2 mt-0.5 pt-1 border-t border-gray-700/30">
+                        <span className="text-gray-500">청산가</span>
+                        <span className="text-red-400/80">{pos.liquidation_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}

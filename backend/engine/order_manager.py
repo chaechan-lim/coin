@@ -77,6 +77,9 @@ class OrderManager:
         signal: Signal,
         decision: CombinedDecision | None = None,
         order_type: str = "limit",
+        direction: str | None = None,
+        leverage: int | None = None,
+        margin_used: float | None = None,
     ) -> Order:
         """Create and execute an order with full strategy attribution."""
 
@@ -134,6 +137,9 @@ class OrderManager:
             fee=_f(result.fee),
             fee_currency=result.fee_currency,
             is_paper=self._is_paper,
+            direction=direction,
+            leverage=leverage,
+            margin_used=_f(margin_used),
             strategy_name=signal.strategy_name,
             signal_confidence=_f(signal.confidence),
             signal_reason=signal.reason,

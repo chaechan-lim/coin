@@ -45,17 +45,18 @@ class MarketAnalysisAgent:
     Runs every 15 minutes.
     """
 
-    def __init__(self, market_data: MarketDataService):
+    def __init__(self, market_data: MarketDataService, market_symbol: str = "BTC/KRW"):
         self._market_data = market_data
+        self._market_symbol = market_symbol
         self._last_analysis: MarketAnalysis | None = None
 
     async def analyze(self) -> MarketAnalysis:
         """Analyze BTC as market proxy to determine overall state."""
         try:
             # Multi-timeframe analysis on BTC
-            df_1h = await self._market_data.get_candles("BTC/KRW", "1h", 200)
-            df_1d = await self._market_data.get_candles("BTC/KRW", "1d", 100)
-            ticker = await self._market_data.get_ticker("BTC/KRW")
+            df_1h = await self._market_data.get_candles(self._market_symbol, "1h", 200)
+            df_1d = await self._market_data.get_candles(self._market_symbol, "1d", 100)
+            ticker = await self._market_data.get_ticker(self._market_symbol)
 
             state, confidence, reasoning, indicators = self._classify_market(
                 df_1h, df_1d, ticker.last

@@ -1,7 +1,7 @@
 # Coin Auto-Trading System
 
-Bithumb 거래소 기반 24시간 자동 암호화폐 트레이딩 시스템.
-5개 전략 가중 투표, 동적 손절/익절, 거래량 서지 로테이션, AI 에이전트, React 대시보드 포함.
+Bithumb (spot) + Binance USDM (futures) dual-engine auto-trading bot.
+6 active strategies, weighted voting, dynamic SL/TP, volume surge rotation, AI agents, React dashboard.
 
 ---
 
@@ -21,157 +21,125 @@ Bithumb 거래소 기반 24시간 자동 암호화폐 트레이딩 시스템.
           ┌────────────────┼────────────────┐
           │                │                │
    ┌──────┴──────┐ ┌──────┴──────┐ ┌───────┴──────┐
-   │  Strategies  │ │   Engine    │ │  AI Agents   │
-   │  (5 active)  │ │  SL/TP/TS   │ │  Market/Risk │
-   └──────┬──────┘ │  Rotation   │ └──────────────┘
-          │        └──────┬──────┘
+   │  Strategies  │ │   Engines   │ │  AI Agents   │
+   │  (6 active)  │ │ Bithumb     │ │  Market/Risk │
+   └──────┬──────┘ │ + Binance   │ │  TradeReview │
+          │        └──────┬──────┘ └──────────────┘
    ┌──────┴──────┐        │
    │  Combiner   │ ┌──────┴──────┐
-   │  (weighted) │ │   Bithumb   │
-   └─────────────┘ │   V2 API    │
-                   └─────────────┘
+   │  (weighted) │ │  PostgreSQL │
+   └─────────────┘ └─────────────┘
 ```
 
-### Core Components
+### Dual Engine
 
-| Component | Description |
-|---|---|
-| **Signal Combiner** | 5개 전략 가중 투표 → BUY/SELL/HOLD 결정 |
-| **Trading Engine** | SL/TP/trailing stop + 동적 손절 + 추세 필터 |
-| **Volume Rotation** | 20코인 실시간 서지 스캔 → 자동 로테이션 |
-| **Market State** | SMA20/SMA60 + ADX + RSI 기반 5단계 감지 |
-| **AI Agents** | 시장 분석 + 리스크 관리 + 거래 리뷰 |
+| Engine | Exchange | Market | Features |
+|--------|----------|--------|----------|
+| TradingEngine | Bithumb V2 | Spot (KRW) | SL/TP/trailing, rotation, dynamic SL |
+| BinanceFuturesEngine | Binance USDM | Futures (USDT) | Long/short, leverage, liquidation guard |
 
-### Strategies
+### Strategies (6 active)
 
 | Strategy | Weight | Description |
 |---|---|---|
-| RSI | 0.30 | RSI 과매도/과매수 역추세 |
-| Bollinger + RSI | 0.35 | 볼린저 밴드 + RSI 복합 |
-| MACD Crossover | 0.15 | MACD/Signal 크로스 |
-| Volatility Breakout | 0.10 | ATR 기반 변동성 돌파 |
-| MA Crossover | 0.10 | 이동평균 크로스오버 |
+| Bollinger + RSI | 0.27 | Bollinger band + RSI composite |
+| RSI | 0.25 | RSI oversold/overbought reversal |
+| Stochastic RSI | 0.15 | Stochastic RSI momentum |
+| OBV Divergence | 0.13 | On-balance volume divergence |
+| MACD Crossover | 0.12 | MACD/Signal crossover |
+| MA Crossover | 0.08 | Moving average crossover |
 
 ---
 
-## Tech Stack
+## Prerequisites
 
-| Area | Tech |
-|---|---|
-| Backend | Python 3.12, FastAPI, SQLAlchemy (async), APScheduler |
-| Frontend | React 18, TypeScript, Vite, TailwindCSS, Recharts |
-| DB | SQLite (dev) / PostgreSQL (prod) |
-| Exchange | Bithumb V2 API (ccxt + aiohttp JWT) |
-| Indicators | pandas + pandas-ta |
+- Python 3.12+
+- Node.js 18+ (via NVM)
+- Docker Engine (for PostgreSQL)
 
 ---
 
 ## Quick Start
 
-### 1. Clone & Setup
+### 1. PostgreSQL Setup
 
 ```bash
-git clone https://github.com/chaechan-lim/coin.git
-cd coin
+# Docker Engine 설치 (WSL2 — sudo 필요)
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+# 쉘 재시작 후:
 
-# Backend
+# PostgreSQL만 기동 (backend는 직접 실행)
+docker compose up -d postgres
+
+# 연결 확인
+docker compose exec postgres pg_isready -U coin -d coin_trading
+```
+
+### 2. Backend Setup
+
+```bash
 cd backend
+
+# venv 생성 (최초 1회)
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+.venv/bin/pip install -r requirements.txt
 
-# Frontend
-cd ../frontend
+# .env 확인 (기본값: PostgreSQL)
+# DB_URL=postgresql+asyncpg://coin:coin@localhost:5432/coin_trading
+
+# 서버 실행
+.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+### 3. Frontend Setup
+
+```bash
+cd frontend
 npm install
+npm run dev   # http://localhost:3000 (vite --host 0.0.0.0)
 ```
 
-### 2. Configuration
+### 4. Engine Start
 
 ```bash
-# Copy example env and fill in your API keys
-cp .env.example .env
-nano .env
-```
+# 빗썸 현물 엔진 시작
+curl -X POST http://localhost:8000/api/v1/engine/start
 
-**Required `.env` settings:**
-```env
-# Exchange
-EXCHANGE_API_KEY=your_bithumb_api_key
-EXCHANGE_API_SECRET=your_bithumb_api_secret
+# 바이낸스 선물 엔진 시작
+curl -X POST "http://localhost:8000/api/v1/engine/start?exchange=binance_futures"
 
-# Trading Mode
-TRADING_MODE=paper          # "paper" or "live"
-TRADING_INITIAL_BALANCE_KRW=500000
-
-# Database
-DB_URL=sqlite+aiosqlite:///./coin_trading.db
-```
-
-### 3. Run
-
-```bash
-# Backend (from backend/)
-source .venv/bin/activate
-uvicorn main:app --host 0.0.0.0 --port 8000
-
-# Frontend (from frontend/)
-npm run dev
+# 선물 엔진 중지 (포지션 있으면 경고)
+curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures"
+# 강제 중지
+curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures&force=true"
 ```
 
 - Dashboard: http://localhost:3000
 - API Docs: http://localhost:8000/docs
-- Health Check: http://localhost:8000/health
-
-### 4. Start Trading Engine
-
-```bash
-curl -X POST http://localhost:8000/api/v1/engine/start
-```
+- Health: http://localhost:8000/health
 
 ---
 
-## Docker (Production)
+## Key Configuration (.env)
 
-```bash
-# Full stack
-docker compose up -d --build
-
-# Logs
-docker compose logs -f backend
-```
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TRADING_MODE` | `paper` / `live` (Bithumb) | `paper` |
+| `BINANCE_ENABLED` | Enable Binance futures | `false` |
+| `BINANCE_TRADING_MODE` | `paper` / `live` (independent) | `paper` |
+| `DB_URL` | Database connection string | PostgreSQL |
+| `BINANCE_DEFAULT_LEVERAGE` | Futures leverage | `3` |
 
 ---
 
-## Key Features
+## Testing
 
-### Dynamic Stop-Loss (ATR + Market State)
-
-| Market State | ATR Mult | Floor | Cap |
-|---|---|---|---|
-| Strong Uptrend | 2.5x | 4% | 12% |
-| Uptrend | 2.0x | 4% | 10% |
-| Sideways | 2.0x | 4% | 7% |
-| Downtrend | 2.0x | 4% | 7% |
-
-### Trend Filter
-
-하락장(SMA20 < SMA60)에서 매수 50% 축소. 빗썸 현물 전용 (short 불가).
-
-### Volume Surge Rotation
-
-- 5분마다 20개 코인 거래량 스캔
-- `volume / volume_sma_20 >= 2.0`이면 서지 감지 (상위 ~9.5%)
-- 서지 코인에 전략 확인(combiner) 통과 시 자동 매수
-- 더 강한 서지 발견 시 기존 매도 → 새 코인 매수
-- 쿨다운 2시간
-- 추적 코인 5종 (BTC/ETH/XRP/SOL/ADA) + 로테이션 20종
-
-### Anti-Overtrading
-
-- 코인당 최소 1시간 간격
-- 일일 최대 10건
-- 결합 신뢰도 0.4 이상만 실행
-- 수수료 대비 수익성 체크
+```bash
+cd backend
+.venv/bin/python -m pytest tests/ -v
+# Tests use in-memory SQLite (aiosqlite)
+```
 
 ---
 
@@ -179,67 +147,36 @@ docker compose logs -f backend
 
 ```bash
 cd backend
-source .venv/bin/activate
 
-# 기본 백테스트 (BTC, 540일, 4시간봉)
-python backtest.py
+# 기본 (BTC, 540일, 4시간봉)
+.venv/bin/python backtest.py
 
-# 추세 필터 + 트레일링 스탑
-python backtest.py --trend-filter --trailing-activation 3 --trailing-stop 2
+# 선물 모드 (롱/숏 + 레버리지)
+.venv/bin/python backtest.py --futures --leverage 3
 
-# 동적 손절
-python backtest.py --dynamic-sl
-
-# 거래량 로테이션 모드 (20코인)
-python backtest.py --rotation
+# 로테이션 모드 (20코인 서지 감지)
+.venv/bin/python backtest.py --rotation --dynamic-rotation
 ```
 
 ---
 
-## API Endpoints
+## Docker (Full Stack)
 
-| Method | Path | Description |
-|---|---|---|
-| GET | /health | Health check |
-| GET | /api/v1/portfolio/summary | Portfolio summary |
-| GET | /api/v1/portfolio/positions | Current positions |
-| GET | /api/v1/portfolio/history | Portfolio history |
-| GET | /api/v1/trades | Trade history |
-| GET | /api/v1/strategies | Strategy list + weights |
-| GET | /api/v1/engine/status | Engine status |
-| GET | /api/v1/engine/rotation-status | Rotation status + surge scores |
-| POST | /api/v1/engine/start | Start engine |
-| POST | /api/v1/engine/stop | Stop engine |
-| GET | /api/v1/agents/trade-review/latest | Latest trade review |
-| WS | /ws/dashboard | Real-time events |
+```bash
+docker compose up -d --build
+docker compose logs -f backend
+```
 
 ---
 
-## Project Structure
+## Raspberry Pi (ARM64)
 
-```
-coin/
-├── backend/
-│   ├── main.py                 # FastAPI entrypoint
-│   ├── config.py               # Pydantic settings
-│   ├── backtest.py             # Backtester + rotation backtester
-│   ├── core/                   # Models, enums, schemas
-│   ├── db/                     # SQLAlchemy session
-│   ├── exchange/               # Bithumb V2 adapter, paper adapter
-│   ├── services/               # Market data, notification
-│   ├── strategies/             # 5 strategies + combiner + registry
-│   ├── engine/                 # Trading engine, order/portfolio mgr
-│   ├── agents/                 # AI agents (market, risk, trade review)
-│   └── api/                    # REST + WebSocket routes
-├── frontend/
-│   └── src/
-│       ├── components/         # Dashboard, charts, controls, rotation monitor
-│       ├── hooks/              # WebSocket, portfolio hooks
-│       ├── api/                # API client
-│       └── types/              # TypeScript types
-├── docker-compose.yml
-├── setup.sh                    # WSL setup script
-└── dev.sh                      # Local dev runner
+```bash
+# PostgreSQL만 Docker로 실행 (postgres:16-alpine ARM64 지원)
+docker compose up -d postgres
+
+# Backend는 직접 실행
+cd backend && .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 ---

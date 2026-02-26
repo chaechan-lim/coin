@@ -86,30 +86,15 @@ async def lifespan(app: FastAPI):
     logger.info("exchange_ready", mode=config.trading.mode, is_paper=is_paper)
 
     # ── 3. 빗썸 핵심 서비스 ───────────────────────────────────
-    # 라이브 모드: 실제 잔고 + DB 포지션 기반 총자산 계산 / 페이퍼 모드: 설정값 사용
+    # 라이브 모드: 실제 KRW 잔고 (sync_exchange_positions에서 전체 보정)
     if is_paper:
         initial_krw = config.trading.initial_balance_krw
     else:
         try:
             balances = await exchange.fetch_balance()
             krw_bal = balances.get("KRW", None)
-            actual_krw = krw_bal.free if krw_bal else 0
-
-            from sqlalchemy import select, func
-            from core.models import Position
-            session_factory = get_session_factory()
-            async with session_factory() as session:
-                result = await session.execute(
-                    select(func.coalesce(func.sum(Position.total_invested), 0))
-                    .where(Position.quantity > 0, Position.exchange == "bithumb")
-                )
-                total_invested = float(result.scalar())
-
-            initial_krw = actual_krw + total_invested
-            logger.info("live_balance_fetched",
-                        krw_balance=actual_krw,
-                        existing_invested=round(total_invested, 0),
-                        initial_total=round(initial_krw, 0))
+            initial_krw = krw_bal.free if krw_bal else config.trading.initial_balance_krw
+            logger.info("live_krw_balance", krw=round(initial_krw, 0))
         except Exception as e:
             initial_krw = config.trading.initial_balance_krw
             logger.warning("balance_fetch_failed_using_config", error=str(e), fallback=initial_krw)
@@ -125,11 +110,13 @@ async def lifespan(app: FastAPI):
         exchange_name="bithumb",
     )
 
-    # 라이브 모드: 시작 즉시 현금 잔고 보정
+    # 라이브 모드: 거래소 실제 잔고 동기화
     if not is_paper:
         session_factory = get_session_factory()
         async with session_factory() as sess:
-            await portfolio_mgr.reconcile_cash_from_db(sess)
+            await portfolio_mgr.sync_exchange_positions(
+                sess, exchange, config.trading.tracked_coins,
+            )
             await sess.commit()
 
     # ── 4. 빗썸 AI 에이전트 ───────────────────────────────────
@@ -189,29 +176,15 @@ async def lifespan(app: FastAPI):
             binance_is_paper = bt.mode == "paper"
             logger.info("binance_mode", mode=bt.mode, is_paper=binance_is_paper)
 
-            # 라이브: 실제 USDT 잔고 + DB 기존 포지션 / 페이퍼: 설정값
+            # 라이브: 실제 USDT 잔고 (sync_exchange_positions에서 전체 보정)
             if binance_is_paper:
                 initial_usdt = bt.initial_balance_usdt
             else:
                 try:
                     balances = await binance_adapter.fetch_balance()
                     usdt_bal = balances.get("USDT", None)
-                    actual_usdt = usdt_bal.free if usdt_bal else 0
-
-                    from sqlalchemy import select as sa_select, func as sa_func
-                    from core.models import Position as PosModel
-                    sf = get_session_factory()
-                    async with sf() as sess:
-                        res = await sess.execute(
-                            sa_select(sa_func.coalesce(sa_func.sum(PosModel.total_invested), 0))
-                            .where(PosModel.quantity > 0, PosModel.exchange == "binance_futures")
-                        )
-                        total_invested_usdt = float(res.scalar())
-                    initial_usdt = actual_usdt + total_invested_usdt
-                    logger.info("binance_live_balance",
-                                usdt_free=round(actual_usdt, 2),
-                                invested=round(total_invested_usdt, 2),
-                                initial_total=round(initial_usdt, 2))
+                    initial_usdt = usdt_bal.free if usdt_bal else bt.initial_balance_usdt
+                    logger.info("binance_live_usdt", usdt=round(initial_usdt, 2))
                 except Exception as e:
                     initial_usdt = bt.initial_balance_usdt
                     logger.warning("binance_balance_fetch_failed", error=str(e), fallback=initial_usdt)
@@ -228,7 +201,7 @@ async def lifespan(app: FastAPI):
                 exchange_name="binance_futures",
             )
 
-            binance_market_agent = MarketAnalysisAgent(binance_market_data)
+            binance_market_agent = MarketAnalysisAgent(binance_market_data, market_symbol="BTC/USDT")
             binance_risk_agent = RiskManagementAgent(config.risk, binance_market_data, exchange_name="binance_futures")
             binance_trade_review = TradeReviewAgent(review_window_hours=24, exchange_name="binance_futures")
             binance_coordinator = AgentCoordinator(
@@ -250,11 +223,13 @@ async def lifespan(app: FastAPI):
             binance_engine.set_broadcast_callback(ws_manager.broadcast)
             _binance_engine = binance_engine
 
-            # 라이브 모드: 시작 즉시 현금 잔고 보정
+            # 라이브 모드: 거래소 실제 잔고 동기화
             if not binance_is_paper:
                 sf = get_session_factory()
                 async with sf() as sess:
-                    await binance_portfolio_mgr.reconcile_cash_from_db(sess)
+                    await binance_portfolio_mgr.sync_exchange_positions(
+                        sess, binance_adapter, config.binance.tracked_coins,
+                    )
                     await sess.commit()
 
             # EngineRegistry 등록 (바이낸스)
@@ -311,6 +286,13 @@ async def lifespan(app: FastAPI):
 
     # 최초 시장 분석 실행
     asyncio.create_task(_run_initial_analysis(coordinator, portfolio_mgr, config))
+
+    # 바이낸스 최초 시장 분석
+    if config.binance.enabled and _binance_engine:
+        binance_coord = engine_registry.get_coordinator("binance_futures")
+        binance_pm_init = engine_registry.get_portfolio_manager("binance_futures")
+        if binance_coord and binance_pm_init:
+            asyncio.create_task(_run_initial_analysis(binance_coord, binance_pm_init, config))
 
     await notification.send_engine_alert(
         f"🚀 트레이딩 봇 시작 ({config.trading.mode.upper()} 모드)\n"

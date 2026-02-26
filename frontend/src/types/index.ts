@@ -67,6 +67,11 @@ export interface Order {
   executed_quantity: number | null
   fee: number
   is_paper: boolean
+  // Futures-specific
+  direction?: string | null
+  leverage?: number | null
+  margin_used?: number | null
+  // Strategy attribution
   strategy_name: string
   signal_confidence: number | null
   signal_reason: string | null

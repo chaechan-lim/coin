@@ -40,7 +40,8 @@ async def _calc_trade_summary(session: AsyncSession, period_days: int | None = 7
         qty = order.executed_quantity or order.requested_quantity
         price = order.executed_price or order.requested_price
         fee = order.fee or 0
-        in_period = start is None or order.created_at >= start
+        from core.utils import ensure_aware
+        in_period = start is None or ensure_aware(order.created_at) >= start
 
         if not price or not qty:
             continue

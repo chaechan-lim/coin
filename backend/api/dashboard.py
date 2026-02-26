@@ -108,10 +108,24 @@ async def start_engine(exchange: str = Query("bithumb")):
 
 
 @router.post("/engine/stop")
-async def stop_engine(exchange: str = Query("bithumb")):
+async def stop_engine(
+    exchange: str = Query("bithumb"),
+    force: bool = Query(False),
+):
     eng = _get_engine(exchange)
     if not eng:
         raise HTTPException(status_code=500, detail=f"Engine '{exchange}' not initialized")
+
+    # 선물 엔진: 포지션 있으면 force 없이 경고만 반환
+    if exchange == "binance_futures" and not force:
+        has_positions = getattr(eng, "has_open_positions", False)
+        if has_positions:
+            return {
+                "status": "warning",
+                "exchange": exchange,
+                "message": "레버리지 포지션 보유 중입니다. 강제 중지하려면 force=true를 사용하세요.",
+            }
+
     await eng.stop()
     return {"status": "stopped", "exchange": exchange}
 
