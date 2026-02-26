@@ -71,11 +71,18 @@ class BithumbAdapter(ExchangeAdapter):
 
     async def fetch_ticker(self, symbol: str) -> Ticker:
         data = await self._call(self._exchange.fetch_ticker, symbol)
+        last = float(data["last"] or 0)
+        bid = float(data["bid"] or 0)
+        ask = float(data["ask"] or 0)
+        # fallback: ticker에 last가 없으면 bid/ask 중간값 사용
+        if last == 0 and bid > 0 and ask > 0:
+            last = (bid + ask) / 2
+            logger.debug("ticker_last_fallback_midprice", symbol=symbol, mid=last)
         return Ticker(
             symbol=symbol,
-            last=float(data["last"] or 0),
-            bid=float(data["bid"] or 0),
-            ask=float(data["ask"] or 0),
+            last=last,
+            bid=bid,
+            ask=ask,
             high=float(data["high"] or 0),
             low=float(data["low"] or 0),
             volume=float(data["baseVolume"] or 0),

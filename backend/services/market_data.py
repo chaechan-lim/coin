@@ -54,7 +54,18 @@ class MarketDataService:
 
     async def get_current_price(self, symbol: str) -> float:
         ticker = await self.get_ticker(symbol)
-        return ticker.last
+        if ticker.last > 0:
+            return ticker.last
+        # fallback: ticker.last=0이면 오더북 mid-price 시도
+        try:
+            ob = await self._exchange.fetch_orderbook(symbol, limit=5)
+            if ob.bids and ob.asks:
+                mid = (ob.bids[0][0] + ob.asks[0][0]) / 2
+                logger.warning("price_fallback_orderbook", symbol=symbol, mid=mid)
+                return mid
+        except Exception as e:
+            logger.warning("orderbook_fallback_failed", symbol=symbol, error=str(e))
+        return 0.0
 
     def _candles_to_dataframe(self, candles: list[Candle]) -> pd.DataFrame:
         data = {
