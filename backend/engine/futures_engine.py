@@ -86,7 +86,7 @@ class BinanceFuturesEngine(TradingEngine):
         """선물 평가 루프 — 로테이션(서지) 로직 제외, 펀딩비 업데이트 추가."""
         from db.session import get_session_factory
 
-        self._maybe_reset_daily_counts()
+        self._reset_daily_counter()
 
         session_factory = get_session_factory()
         async with session_factory() as session:
@@ -117,9 +117,18 @@ class BinanceFuturesEngine(TradingEngine):
                 # 펀딩비 업데이트 (30분마다)
                 await self._maybe_update_funding_rates()
 
-                # 스냅샷
-                await self._portfolio_manager.take_snapshot(session)
-                await session.commit()
+                # 스냅샷 (DB locked 재시도)
+                for _attempt in range(3):
+                    try:
+                        await self._portfolio_manager.take_snapshot(session)
+                        await session.commit()
+                        break
+                    except Exception as snap_err:
+                        if "database is locked" in str(snap_err) and _attempt < 2:
+                            await session.rollback()
+                            await asyncio.sleep(1)
+                        else:
+                            raise
 
                 # WebSocket broadcast
                 if self._broadcast_callback:

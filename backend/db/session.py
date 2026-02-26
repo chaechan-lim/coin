@@ -10,7 +10,7 @@ def _set_sqlite_pragmas(dbapi_conn, connection_record):
     """SQLite 연결 시 WAL 모드 + busy_timeout 설정."""
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA busy_timeout=10000")
     cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.close()
 
