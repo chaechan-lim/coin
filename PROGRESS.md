@@ -9,6 +9,7 @@
 빗썸(Bithumb) 거래소 기반의 24시간 자동 암호화폐 트레이딩 시스템.
 6개 전략 가중 투표 (HOLD=기권 방식) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭) 포함.
 **현재 라이브 운영 중** (5종 추적 + 동적 로테이션(거래대금 10B+ 자동 선정), 500K KRW, SQLite WAL).
+**바이낸스 USDM 선물** 어댑터 + 선물 백테스트 (롱/숏/레버리지/청산/펀딩비) 추가.
 
 ---
 
@@ -20,7 +21,7 @@
 | 프론트엔드 | React 18, TypeScript, Vite, TailwindCSS, Recharts, lightweight-charts |
 | DB | SQLite + WAL (현재) / PostgreSQL 16 (마이그레이션 예정) |
 | Cache / PubSub | Redis 7 (Docker, 선택) |
-| 거래소 연동 | Bithumb V2 API (ccxt public + aiohttp JWT private) |
+| 거래소 연동 | Bithumb V2 (ccxt+JWT), Binance USDM 선물 (ccxt binanceusdm) |
 | 기술적 지표 | pandas + pandas-ta |
 | 배포 | Docker Compose (restart: always → 24/7) |
 
