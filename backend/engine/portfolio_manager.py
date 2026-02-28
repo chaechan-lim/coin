@@ -426,6 +426,53 @@ class PortfolioManager:
             else:
                 total_invested += db_pos.total_invested
 
+        # 선물: fetch_positions에만 있고 balances에 없는 포지션 동기화
+        if is_futures and futures_positions:
+            from datetime import datetime, timezone
+            for fp_sym, fp_data in futures_positions.items():
+                # fp_sym 형식: "SOL/USDT:USDT" → pair: "SOL/USDT"
+                pair = fp_sym.replace(":USDT", "")
+                if pair in db_positions:
+                    continue  # 이미 위 루프에서 처리됨
+                # balances 루프에서 이미 처리된 심볼도 스킵
+                base_sym = pair.split("/")[0]
+                if base_sym in balances and balances[base_sym].total > 0:
+                    continue
+
+                contracts = float(fp_data.get("contracts", 0) or 0)
+                if contracts <= 0:
+                    continue
+                margin = float(fp_data.get("initialMargin", 0) or 0)
+                if margin < 1.0:
+                    continue
+                direction = fp_data.get("side", "long")
+                leverage = int(fp_data.get("leverage", 1) or 1)
+                entry_price = float(fp_data.get("entryPrice", 0) or 0)
+                liq_price = float(fp_data.get("liquidationPrice", 0) or 0) or None
+
+                new_pos = Position(
+                    exchange=self._exchange_name,
+                    symbol=pair,
+                    quantity=contracts,
+                    average_buy_price=entry_price,
+                    total_invested=margin,
+                    is_paper=self._is_paper,
+                    entered_at=datetime.now(timezone.utc),
+                    direction=direction,
+                    leverage=leverage,
+                    liquidation_price=liq_price,
+                    margin_used=margin,
+                )
+                session.add(new_pos)
+                total_invested += margin
+                synced_count += 1
+                logger.info(
+                    "futures_position_synced",
+                    symbol=pair, contracts=contracts, direction=direction,
+                    margin=round(margin, 2), leverage=leverage,
+                    entry_price=entry_price,
+                )
+
         await session.flush()
 
         # 실제 현금 기준으로 cash_balance 재설정 (initial_balance는 고정 원금 유지)
