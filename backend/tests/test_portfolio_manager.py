@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.models import Position, Order
+from core.models import Position, Order, PortfolioSnapshot, CapitalTransaction
 from engine.portfolio_manager import PortfolioManager
 
 
@@ -265,3 +265,183 @@ async def test_partial_sell_unrealized_pnl_correct(session):
     assert summary["unrealized_pnl"] == pytest.approx(9500, abs=100)
     assert len(summary["positions"]) == 1
     assert summary["positions"][0]["quantity"] == pytest.approx(500)
+
+
+# ── Capital Transaction + Peak Adjustment Tests ──
+
+
+@pytest.mark.asyncio
+async def test_load_initial_balance_from_deposits(session):
+    """initial_balance is recalculated from confirmed CapitalTransactions."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+    )
+    # Seed deposit
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="deposit", amount=500_000,
+        currency="KRW", source="seed", confirmed=True,
+    ))
+    await session.flush()
+
+    await pm.load_initial_balance_from_db(session)
+    assert pm._initial_balance == pytest.approx(500_000)
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_reduces_initial_balance(session):
+    """Withdrawal reduces initial_balance."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+    )
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="deposit", amount=500_000,
+        currency="KRW", source="seed", confirmed=True,
+    ))
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="withdrawal", amount=200_000,
+        currency="KRW", source="manual", confirmed=True,
+    ))
+    await session.flush()
+
+    await pm.load_initial_balance_from_db(session)
+    assert pm._initial_balance == pytest.approx(300_000)
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_adjusts_peak_proportionally(session):
+    """Peak value is scaled down proportionally on withdrawal."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+    )
+    pm._peak_value = 520_000  # Simulate a peak above initial
+
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="deposit", amount=500_000,
+        currency="KRW", source="seed", confirmed=True,
+    ))
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="withdrawal", amount=200_000,
+        currency="KRW", source="manual", confirmed=True,
+    ))
+    await session.flush()
+
+    await pm.load_initial_balance_from_db(session)
+
+    # Ratio = 300_000 / 500_000 = 0.6
+    # New peak = 520_000 * 0.6 = 312_000
+    assert pm._initial_balance == pytest.approx(300_000)
+    assert pm._peak_value == pytest.approx(312_000, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_peak_prevents_fake_drawdown(session):
+    """After withdrawal, drawdown reflects actual loss, not capital movement."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+    )
+    pm._peak_value = 500_000
+
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="deposit", amount=500_000,
+        currency="KRW", source="seed", confirmed=True,
+    ))
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="withdrawal", amount=200_000,
+        currency="KRW", source="manual", confirmed=True,
+    ))
+    await session.flush()
+
+    await pm.load_initial_balance_from_db(session)
+    # Peak should be 300_000, cash is still 500_000 (not adjusted here)
+    # In real flow, sync_exchange_positions adjusts cash
+    pm._cash_balance = 300_000
+
+    summary = await pm.get_portfolio_summary(session)
+    # total_value == cash == 300_000, peak == 300_000 → drawdown ~0%
+    assert summary["drawdown_pct"] == pytest.approx(0, abs=0.1)
+
+
+@pytest.mark.asyncio
+async def test_no_withdrawal_peak_unchanged(session):
+    """Deposit only → peak is not adjusted."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+    )
+    pm._peak_value = 520_000
+
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="deposit", amount=500_000,
+        currency="KRW", source="seed", confirmed=True,
+    ))
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="deposit", amount=100_000,
+        currency="KRW", source="manual", confirmed=True,
+    ))
+    await session.flush()
+
+    await pm.load_initial_balance_from_db(session)
+    # No withdrawal → ratio > 1 → peak not changed
+    assert pm._initial_balance == pytest.approx(600_000)
+    assert pm._peak_value == pytest.approx(520_000)
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_transactions_ignored(session):
+    """Unconfirmed transactions don't affect initial_balance."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+    )
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="deposit", amount=500_000,
+        currency="KRW", source="seed", confirmed=True,
+    ))
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="deposit", amount=100_000,
+        currency="KRW", source="auto_detected", confirmed=False,
+    ))
+    await session.flush()
+
+    await pm.load_initial_balance_from_db(session)
+    assert pm._initial_balance == pytest.approx(500_000)
+
+
+@pytest.mark.asyncio
+async def test_restore_state_from_snapshot(session):
+    """restore_state_from_db restores peak and realized_pnl from snapshot."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+    )
+    snapshot = PortfolioSnapshot(
+        exchange="bithumb",
+        total_value_krw=480_000,
+        cash_balance_krw=200_000,
+        invested_value_krw=280_000,
+        peak_value=510_000,
+        realized_pnl=5_000,
+    )
+    session.add(snapshot)
+    await session.flush()
+
+    await pm.restore_state_from_db(session)
+    assert pm._peak_value == pytest.approx(510_000)
+    assert pm._realized_pnl == pytest.approx(5_000)
+
+
+@pytest.mark.asyncio
+async def test_restore_state_no_snapshot_uses_cash(session):
+    """No snapshot → peak set to current cash_balance."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+    )
+    pm._cash_balance = 300_000
+
+    await pm.restore_state_from_db(session)
+    assert pm._peak_value == pytest.approx(300_000)
