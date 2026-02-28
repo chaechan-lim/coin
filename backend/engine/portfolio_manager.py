@@ -432,6 +432,25 @@ class PortfolioManager:
                     symbol=pair, old=old_qty, new=bal.total,
                 )
             else:
+                # 수량 일치 — 선물 메타데이터(레버리지/방향/마진) 보정
+                if is_futures and fp_data:
+                    changed = False
+                    if leverage > 1 and getattr(db_pos, "leverage", 1) != leverage:
+                        db_pos.leverage = leverage
+                        changed = True
+                    if direction and getattr(db_pos, "direction", None) != direction:
+                        db_pos.direction = direction
+                        changed = True
+                    if margin > 0 and abs(getattr(db_pos, "margin_used", 0) - margin) > 0.01:
+                        db_pos.total_invested = margin
+                        db_pos.margin_used = margin
+                        changed = True
+                    if liq_price and getattr(db_pos, "liquidation_price", None) != liq_price:
+                        db_pos.liquidation_price = liq_price
+                        changed = True
+                    if changed:
+                        logger.info("position_metadata_corrected",
+                                    symbol=pair, leverage=leverage, direction=direction)
                 total_invested += db_pos.total_invested
 
         # 선물: fetch_positions에만 있고 balances에 없는 포지션 동기화
