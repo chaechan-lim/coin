@@ -289,6 +289,7 @@ class Backtester:
         dynamic_sl: bool = False,           # ATR+시장상태 동적 손절
         agent_market: bool = True,          # Agent 스코어링 시장 감지
         trade_cooldown: int = 12,           # 매매 간 최소 캔들 수
+        asymmetric: bool = False,           # 비대칭 전략 (하락장 방어 / 상승장 공격)
     ):
         self._exchange = exchange
         self._initial_balance = initial_balance
@@ -302,6 +303,7 @@ class Backtester:
         self._dynamic_sl = dynamic_sl
         self._agent_market = agent_market
         self._trade_cooldown = trade_cooldown
+        self._asymmetric = asymmetric
 
         # 전략 로드 (인스턴스 생성)
         all_strats = StrategyRegistry.create_all()
@@ -370,9 +372,10 @@ class Backtester:
                      if self._trailing_activation > 0 else "OFF")
         aw_str = "ON" if self._adaptive_weights else "OFF"
         mm_str = "Agent(5-factor)" if self._agent_market else "Legacy(SMA+ADX)"
+        asym_str = "ON" if self._asymmetric else "OFF"
         print(f"  손절: {sl_str} | 익절: {tp_str} | 최소 신뢰도: {self._min_confidence}")
         print(f"  추세 필터: {tf_str} | 트레일링: {trail_str} | 적응형 가중치: {aw_str}")
-        print(f"  시장 감지: {mm_str} | 쿨다운: {self._trade_cooldown}캔들")
+        print(f"  시장 감지: {mm_str} | 쿨다운: {self._trade_cooldown}캔들 | 비대칭: {asym_str}")
         print(f"{'='*60}")
 
         df = await self.fetch_history(symbol, timeframe, days)
@@ -453,16 +456,29 @@ class Backtester:
                 if current_price > peak_price_since_entry:
                     peak_price_since_entry = current_price
 
+                # 비대칭 트레일링: 상승장이면 넓게, 하락장이면 타이트하게
+                if self._asymmetric:
+                    _asym_trail = {
+                        "strong_uptrend": (5.0, 4.0),  # 활성 5%, 스탑 4%
+                        "uptrend":        (4.0, 3.5),  # 활성 4%, 스탑 3.5%
+                        "sideways":       (2.5, 2.0),  # 활성 2.5%, 스탑 2%
+                    }
+                    eff_trail_act, eff_trail_stop = _asym_trail.get(
+                        current_market_state, (self._trailing_activation, self._trailing_stop))
+                else:
+                    eff_trail_act = self._trailing_activation
+                    eff_trail_stop = self._trailing_stop
+
                 # 트레일링 활성화 체크
-                if (self._trailing_activation > 0
+                if (eff_trail_act > 0
                         and not trailing_active
-                        and unrealized_pct >= self._trailing_activation):
+                        and unrealized_pct >= eff_trail_act):
                     trailing_active = True
 
                 # 트레일링 스탑 발동
-                if trailing_active and self._trailing_stop > 0:
+                if trailing_active and eff_trail_stop > 0:
                     drop_from_peak = (peak_price_since_entry - current_price) / peak_price_since_entry * 100
-                    if drop_from_peak >= self._trailing_stop:
+                    if drop_from_peak >= eff_trail_stop:
                         actual_pnl_pct = unrealized_pct
                         proceeds, pnl, t = self._execute_sell(
                             ts, current_price, holdings, avg_buy_price,
@@ -564,14 +580,37 @@ class Backtester:
 
             # ── 매수 ──────────────────────────────────────────
             if decision.action == SignalType.BUY and holdings == 0:
-                # 시장 신뢰도 낮으면 진입 기준 상향 (불확실 시 진입 억제)
-                buy_threshold = self._min_confidence
-                if market_confidence < 0.35:
-                    buy_threshold = self._min_confidence + 0.10
+                # ── 비대칭 전략: 시장 상태별 차등 매수 기준 ──
+                if self._asymmetric:
+                    # 하락장 방어: crash/downtrend에서 매수 완전 차단
+                    if current_market_state in ("crash", "downtrend"):
+                        continue
+                    # 시장 상태별 신뢰도 임계값 조정
+                    _asym_conf = {
+                        "strong_uptrend": max(self._min_confidence - 0.15, 0.35),
+                        "uptrend":        max(self._min_confidence - 0.10, 0.40),
+                        "sideways":       self._min_confidence + 0.05,
+                    }
+                    buy_threshold = _asym_conf.get(current_market_state, self._min_confidence)
+                else:
+                    # 기존 로직: 시장 신뢰도 낮으면 진입 기준 상향
+                    buy_threshold = self._min_confidence
+                    if market_confidence < 0.35:
+                        buy_threshold = self._min_confidence + 0.10
                 if decision.combined_confidence < buy_threshold:
                     continue
 
-                trade_size = cash * 0.95
+                # ── 비대칭 포지션 사이징 ──
+                if self._asymmetric:
+                    _asym_size = {
+                        "strong_uptrend": 0.95,   # 풀 사이즈
+                        "uptrend":        0.80,   # 80%
+                        "sideways":       0.50,   # 50% (보수적)
+                    }
+                    size_mult = _asym_size.get(current_market_state, 0.50)
+                    trade_size = cash * size_mult
+                else:
+                    trade_size = cash * 0.95
                 if trade_size < MIN_TRADE_KRW:
                     continue
 
@@ -1009,6 +1048,7 @@ class FuturesBacktester:
         position_pct: float = 0.30,
         short_all: bool = False,             # 모든 시장에서 숏 허용
         short_sideways: bool = False,        # sideways+downtrend+crash에서 숏 허용
+        dynamic_position: bool = False,      # 시장 상태별 동적 포지션 사이징
     ):
         self._exchange = exchange
         self._initial_balance = initial_balance
@@ -1027,6 +1067,8 @@ class FuturesBacktester:
         self._funding_rate = funding_rate
         self._short_all = short_all
         self._short_sideways = short_sideways
+        self._dynamic_position = dynamic_position
+        self._base_position_pct = position_pct  # 동적 사이징 기준값
 
         # ── 레버리지 적응형 파라미터 ──────────────────────────
         import math
@@ -1113,7 +1155,8 @@ class FuturesBacktester:
         print(f"  선물 백테스트: {symbol} | {timeframe} | {days}일")
         print(f"  전략: {', '.join(self._strategies.keys())}")
         print(f"  레버리지: {self._leverage}x | 수수료: {self._futures_fee*100:.2f}%")
-        print(f"  펀딩비: {self._funding_rate*100:.3f}%/8h | 포지션: 현금 {self._position_pct*100:.1f}%")
+        dpos_str = f"동적(기본 {self._base_position_pct*100:.0f}%)" if self._dynamic_position else f"고정 {self._position_pct*100:.1f}%"
+        print(f"  펀딩비: {self._funding_rate*100:.3f}%/8h | 포지션: {dpos_str}")
         sl_str = "동적(ATR+시장)" if self._dynamic_sl else (
             f"고정 {self._effective_sl:.1f}%" if self._effective_sl > 0 else "OFF")
         tp_str = f"{self._effective_tp:.1f}%" if self._effective_tp > 0 else "OFF"
@@ -1368,6 +1411,21 @@ class FuturesBacktester:
 
             # ── 포지션 없음: 롱/숏 진입 ────────────────────────
             if position is None:
+                # 동적 포지션 사이징: 시장 상태별 포지션 크기 조절
+                if self._dynamic_position:
+                    import math as _m
+                    _dyn_pos_mult = {
+                        "strong_uptrend": 1.6,   # 강세: 공격적 롱
+                        "uptrend":        1.2,   # 상승: 보통 롱
+                        "sideways":       0.7,   # 횡보: 보수적
+                        "downtrend":      1.2,   # 하락: 공격적 숏
+                        "crash":          0.8,   # 폭락: 보수적 숏 (반등 리스크)
+                    }
+                    dyn_mult = _dyn_pos_mult.get(current_market_state, 1.0)
+                    eff_position_pct = self._base_position_pct * dyn_mult / _m.sqrt(self._leverage)
+                else:
+                    eff_position_pct = self._position_pct
+
                 if decision.action == SignalType.BUY:
                     buy_threshold = self._min_confidence
                     if market_confidence < 0.35:
@@ -1375,7 +1433,7 @@ class FuturesBacktester:
                     if decision.combined_confidence < buy_threshold:
                         continue
 
-                    margin = cash * self._position_pct
+                    margin = cash * eff_position_pct
                     if margin < 1.0:  # 최소 1 USDT
                         continue
 
@@ -1428,7 +1486,7 @@ class FuturesBacktester:
                     if decision.combined_confidence < short_threshold:
                         continue
 
-                    margin = cash * self._position_pct
+                    margin = cash * eff_position_pct
                     if margin < 1.0:
                         continue
 
@@ -2315,6 +2373,9 @@ async def main():
                         help="Agent 스코어링 시장 감지 (기본 ON)")
     parser.add_argument("--no-agent-market",    dest="agent_market", action="store_false",
                         help="레거시(SMA+ADX) 시장 감지")
+    # 비대칭 전략 (하락장 방어 / 상승장 공격)
+    parser.add_argument("--asymmetric",        action="store_true", default=False,
+                        help="비대칭 전략: 하락장 매수 차단 + 상승장 공격적 진입")
     # 로테이션 모드
     parser.add_argument("--rotation",       action="store_true",
                         help="거래량 서지 코인 로테이션 모드")
@@ -2353,6 +2414,8 @@ async def main():
                         help="모든 시장에서 숏 허용 (기본: downtrend/crash만)")
     parser.add_argument("--short-sideways", action="store_true", default=False,
                         help="sideways+downtrend+crash에서 숏 허용")
+    parser.add_argument("--dynamic-position", action="store_true", default=False,
+                        help="선물: 시장 상태별 동적 포지션 사이징")
 
     args = parser.parse_args()
 
@@ -2411,6 +2474,7 @@ async def main():
             position_pct=args.position_pct,
             short_all=args.short_all,
             short_sideways=args.short_sideways,
+            dynamic_position=args.dynamic_position,
         )
 
         # 선물 심볼 자동 변환: BTC/KRW → BTC/USDT
@@ -2507,6 +2571,7 @@ async def main():
         dynamic_sl=args.dynamic_sl,
         agent_market=args.agent_market,
         trade_cooldown=args.trade_cooldown,
+        asymmetric=args.asymmetric,
     )
 
     symbols = (

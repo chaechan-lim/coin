@@ -30,6 +30,7 @@ class TradingConfig(BaseSettings):
     daily_trade_limit: int = 10        # (레거시, 미사용) 하위 호환용
     min_combined_confidence: float = 0.50
     min_profit_vs_fee_ratio: float = 2.0  # expected return > 2x round-trip fee
+    asymmetric_mode: bool = True  # 비대칭 전략: 하락장 매수차단 + 상승장 공격
 
     # 거래량 급등 로테이션 설정 (tracked_coins와 별도 — 서지 전용)
     rotation_enabled: bool = True
@@ -100,7 +101,7 @@ class BinanceTradingConfig(BaseSettings):
     evaluation_interval_sec: int = 300
     initial_balance_usdt: float = 1000.0
     min_combined_confidence: float = 0.55
-    max_trade_size_pct: float = 0.25
+    max_trade_size_pct: float = 0.35
     daily_buy_limit: int = 15
     max_daily_coin_buys: int = 3
     ws_price_monitor: bool = True  # WebSocket 실시간 가격 모니터 활성화

@@ -1110,16 +1110,33 @@ class TradingEngine:
         price = ticker.last
 
         if decision.action == SignalType.BUY:
-            # 시장 신뢰도 낮으면 진입 기준 상향 (불확실 시 진입 억제)
-            min_conf = self._config.trading.min_combined_confidence
-            if self._market_confidence < 0.35:
-                min_conf += 0.10
+            # ── 비대칭 전략: 시장 상태별 차등 매수 기준 ──
+            if self._config.trading.asymmetric_mode:
+                # 하락장 매수 완전 차단
+                if self._market_state in ("crash", "downtrend"):
+                    logger.info("asymmetric_buy_blocked",
+                                symbol=symbol, market_state=self._market_state)
+                    return
+                # 시장 상태별 신뢰도 임계값
+                base_conf = self._config.trading.min_combined_confidence
+                _asym_conf = {
+                    "strong_uptrend": max(base_conf - 0.15, 0.35),
+                    "uptrend":        max(base_conf - 0.10, 0.40),
+                    "sideways":       base_conf + 0.05,
+                }
+                min_conf = _asym_conf.get(self._market_state, base_conf)
+            else:
+                # 기존 로직
+                min_conf = self._config.trading.min_combined_confidence
+                if self._market_confidence < 0.35:
+                    min_conf += 0.10
+
             if decision.combined_confidence < min_conf:
                 logger.debug(
                     "buy_confidence_too_low", symbol=symbol,
                     combined=round(decision.combined_confidence, 3),
                     threshold=round(min_conf, 3),
-                    market_confidence=self._market_confidence,
+                    market_state=self._market_state,
                 )
                 return
 
@@ -1130,15 +1147,24 @@ class TradingEngine:
             if result.scalar_one_or_none():
                 return
 
-            # 포지션 사이징: max_trade_size_pct 사용 (소액 테스트 대응)
+            # 포지션 사이징
             cash = self._portfolio_manager.cash_balance
-            size_pct = self._config.risk.max_trade_size_pct
-            if trend_action == "heavy_reduce":
-                size_pct *= 0.25  # crash: 25% 축소
-                logger.info("buy_reduced_crash", symbol=symbol, size_pct=round(size_pct, 3))
-            elif trend_action == "reduce":
-                size_pct *= 0.5  # downtrend: 50% 축소
-                logger.info("buy_reduced_downtrend", symbol=symbol, size_pct=round(size_pct, 3))
+            if self._config.trading.asymmetric_mode:
+                # 비대칭 사이징: 상승장 공격적, 횡보장 보수적
+                _asym_size = {
+                    "strong_uptrend": self._config.risk.max_trade_size_pct,       # 풀 사이즈
+                    "uptrend":        self._config.risk.max_trade_size_pct * 0.8,  # 80%
+                    "sideways":       self._config.risk.max_trade_size_pct * 0.5,  # 50%
+                }
+                size_pct = _asym_size.get(self._market_state, self._config.risk.max_trade_size_pct * 0.5)
+            else:
+                size_pct = self._config.risk.max_trade_size_pct
+                if trend_action == "heavy_reduce":
+                    size_pct *= 0.25
+                    logger.info("buy_reduced_crash", symbol=symbol, size_pct=round(size_pct, 3))
+                elif trend_action == "reduce":
+                    size_pct *= 0.5
+                    logger.info("buy_reduced_downtrend", symbol=symbol, size_pct=round(size_pct, 3))
             amount_krw = cash * size_pct
 
             # 최소 주문금액 미달 시 잔고 전체 시도
