@@ -1,6 +1,6 @@
 # 코인 자동 매매 시스템 — 구현 진행 현황
 
-> 최종 업데이트: 2026-02-26
+> 최종 업데이트: 2026-02-28
 
 ---
 
@@ -680,5 +680,6 @@ docker compose restart backend
 | v0.14.1 | 2026-02-27 | **P1 최적화**: 4h 타임프레임, SL8/TP16/트레일5-3.5%, 동적 SL(ATR), 숏 전면 허용, 포지션 35% (PF 1.80, 알파 +62%) |
 | v0.14.2 | 2026-02-27 | 가격 0원 fallback: fetch_ticker last=None → bid/ask 중간값 → orderbook mid-price |
 | v0.15 | 2026-02-27 | **시스템 로그 강화 + LLM 매매 회고**: 매수/매도 이벤트 상세화(전략/신뢰도/PnL), 에이전트 결과 시스템 로그 발행, Claude API(haiku) 일일 심층 매매 회고 |
-| v0.16 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
+| v0.16 | 2026-02-28 | **포트폴리오 상태 복원 + 숏 P&L 수정 + Crash 숏 진입**: DB 스냅샷에서 peak/realized_pnl 복원 (재시작 팽창 방지), 원금 고정, 숏 P&L direction-aware 계산, crash MIN_ACTIVE_WEIGHT 완화(0.06), min notional 검증 |
+| v0.17 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
 | v1.0 | 예정 | 라즈베리파이 배포 + 장기 운영 안정화 |

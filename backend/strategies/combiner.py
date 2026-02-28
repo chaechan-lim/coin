@@ -79,7 +79,7 @@ class SignalCombiner:
     # 참여 가중치가 너무 낮으면 (소수 약한 전략만 의견) → HOLD.
     MIN_ACTIVE_WEIGHT = 0.12
 
-    def combine(self, signals: list[Signal]) -> CombinedDecision:
+    def combine(self, signals: list[Signal], market_state: str | None = None) -> CombinedDecision:
         """
         Weighted voting to combine signals (HOLD = abstain).
 
@@ -111,13 +111,18 @@ class SignalCombiner:
                 active_weight += weight
             # HOLD: 기권 — 투표 미참여
 
+        # crash 시장에서는 단일 전략 SELL도 허용 (숏 진입 활성화)
+        effective_min = self.MIN_ACTIVE_WEIGHT
+        if market_state == MarketState.CRASH.value:
+            effective_min = 0.06
+
         # 의견을 낸 전략이 너무 적으면 HOLD
-        if active_weight < self.MIN_ACTIVE_WEIGHT:
+        if active_weight < effective_min:
             return CombinedDecision(
                 action=SignalType.HOLD,
                 combined_confidence=0.0,
                 contributing_signals=signals,
-                final_reason=f"Active weight {active_weight:.2f} below {self.MIN_ACTIVE_WEIGHT} (all abstain)",
+                final_reason=f"Active weight {active_weight:.2f} below {effective_min} (all abstain)",
             )
 
         # 참여 가중치로 정규화

@@ -492,7 +492,7 @@ class BinanceFuturesEngine(TradingEngine):
         for signal in signals:
             await self._order_manager.log_signal_only(session, signal, symbol)
 
-        decision = self._combiner.combine(signals)
+        decision = self._combiner.combine(signals, market_state=self._market_state)
         if decision.action == SignalType.HOLD:
             return
 
@@ -737,6 +737,20 @@ class BinanceFuturesEngine(TradingEngine):
                 # 숏 진입 (전체 시장 허용 — P1 백테스트 결과)
                 await self._open_short(session, symbol, price, primary_signal, decision)
 
+    def _get_min_notional(self, symbol: str) -> float:
+        """거래소에서 최소 notional 읽기. 없으면 5.0 USDT 기본값."""
+        try:
+            exchange = self._exchange
+            if hasattr(exchange, '_exchange'):
+                exchange = exchange._exchange
+            market = exchange.market(symbol)
+            min_cost = market.get("limits", {}).get("cost", {}).get("min")
+            if min_cost and min_cost > 0:
+                return float(min_cost)
+        except Exception:
+            pass
+        return 5.0  # Binance USDM 기본값
+
     def _adjust_amount(self, symbol: str, amount: float) -> float | None:
         """거래소 최소 수량 정밀도에 맞게 수량 보정. 최소 미만이면 None."""
         try:
@@ -775,6 +789,14 @@ class BinanceFuturesEngine(TradingEngine):
         amount = self._adjust_amount(symbol, amount)
         if amount is None:
             logger.debug("futures_amount_below_min", symbol=symbol, margin=round(margin, 2))
+            return
+
+        # min notional 체크
+        actual_notional = amount * price
+        min_notional = self._get_min_notional(symbol)
+        if actual_notional < min_notional:
+            logger.warning("below_min_notional", symbol=symbol,
+                           notional=round(actual_notional, 2), min_notional=min_notional)
             return
 
         # 수수료 마진 (0.04%)
@@ -866,6 +888,14 @@ class BinanceFuturesEngine(TradingEngine):
         amount = self._adjust_amount(symbol, amount)
         if amount is None:
             logger.debug("futures_amount_below_min", symbol=symbol, margin=round(margin, 2))
+            return
+
+        # min notional 체크
+        actual_notional = amount * price
+        min_notional = self._get_min_notional(symbol)
+        if actual_notional < min_notional:
+            logger.warning("below_min_notional", symbol=symbol,
+                           notional=round(actual_notional, 2), min_notional=min_notional)
             return
 
         margin_with_fee = margin * (1 + self._futures_fee)

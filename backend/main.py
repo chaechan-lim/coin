@@ -86,18 +86,8 @@ async def lifespan(app: FastAPI):
     logger.info("exchange_ready", mode=config.trading.mode, is_paper=is_paper)
 
     # ── 3. 빗썸 핵심 서비스 ───────────────────────────────────
-    # 라이브 모드: 실제 KRW 잔고 (sync_exchange_positions에서 전체 보정)
-    if is_paper:
-        initial_krw = config.trading.initial_balance_krw
-    else:
-        try:
-            balances = await exchange.fetch_balance()
-            krw_bal = balances.get("KRW", None)
-            initial_krw = krw_bal.free if krw_bal else config.trading.initial_balance_krw
-            logger.info("live_krw_balance", krw=round(initial_krw, 0))
-        except Exception as e:
-            initial_krw = config.trading.initial_balance_krw
-            logger.warning("balance_fetch_failed_using_config", error=str(e), fallback=initial_krw)
+    # 원금은 항상 config에서 고정 (서버 재시작마다 재계산 방지)
+    initial_krw = config.trading.initial_balance_krw
 
     market_data = MarketDataService(exchange)
     notification = NotificationService(config.notification)
@@ -110,13 +100,14 @@ async def lifespan(app: FastAPI):
         exchange_name="bithumb",
     )
 
-    # 라이브 모드: 거래소 실제 잔고 동기화
+    # 라이브 모드: 거래소 실제 잔고 동기화 + DB 스냅샷 복원
     if not is_paper:
         session_factory = get_session_factory()
         async with session_factory() as sess:
             await portfolio_mgr.sync_exchange_positions(
                 sess, exchange, config.trading.tracked_coins,
             )
+            await portfolio_mgr.restore_state_from_db(sess)
             await sess.commit()
 
     # ── 4. 빗썸 AI 에이전트 ───────────────────────────────────
@@ -176,18 +167,8 @@ async def lifespan(app: FastAPI):
             binance_is_paper = bt.mode == "paper"
             logger.info("binance_mode", mode=bt.mode, is_paper=binance_is_paper)
 
-            # 라이브: 실제 USDT 잔고 (sync_exchange_positions에서 전체 보정)
-            if binance_is_paper:
-                initial_usdt = bt.initial_balance_usdt
-            else:
-                try:
-                    balances = await binance_adapter.fetch_balance()
-                    usdt_bal = balances.get("USDT", None)
-                    initial_usdt = usdt_bal.free if usdt_bal else bt.initial_balance_usdt
-                    logger.info("binance_live_usdt", usdt=round(initial_usdt, 2))
-                except Exception as e:
-                    initial_usdt = bt.initial_balance_usdt
-                    logger.warning("binance_balance_fetch_failed", error=str(e), fallback=initial_usdt)
+            # 원금은 항상 config에서 고정 (서버 재시작마다 재계산 방지)
+            initial_usdt = bt.initial_balance_usdt
 
             binance_combiner = SignalCombiner(min_confidence=bt.min_combined_confidence)
             binance_order_mgr = OrderManager(
@@ -223,13 +204,14 @@ async def lifespan(app: FastAPI):
             binance_engine.set_broadcast_callback(ws_manager.broadcast)
             _binance_engine = binance_engine
 
-            # 라이브 모드: 거래소 실제 잔고 동기화
+            # 라이브 모드: 거래소 실제 잔고 동기화 + DB 스냅샷 복원
             if not binance_is_paper:
                 sf = get_session_factory()
                 async with sf() as sess:
                     await binance_portfolio_mgr.sync_exchange_positions(
                         sess, binance_adapter, config.binance.tracked_coins,
                     )
+                    await binance_portfolio_mgr.restore_state_from_db(sess)
                     await sess.commit()
 
             # EngineRegistry 등록 (바이낸스)

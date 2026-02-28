@@ -282,10 +282,6 @@ class PortfolioManager:
         old_cash = self._cash_balance
         self._cash_balance = self._initial_balance - total_invested
         if abs(old_cash - self._cash_balance) > 1.0:
-            # peak_value가 잘못된 값이면 리셋 (재시작 직후 보정)
-            correct_total = self._cash_balance + total_invested
-            if self._peak_value > correct_total * 1.5:
-                self._peak_value = correct_total
             logger.warning(
                 "cash_balance_reconciled",
                 old=round(old_cash, 0),
@@ -386,18 +382,9 @@ class PortfolioManager:
 
         await session.flush()
 
-        # 실제 현금 기준으로 cash_balance + initial_balance 재설정
+        # 실제 현금 기준으로 cash_balance 재설정 (initial_balance는 고정 원금 유지)
         old_cash = self._cash_balance
         self._cash_balance = actual_cash
-
-        # initial_balance = 실제 현금 + DB 전체 투자금
-        result2 = await session.execute(
-            select(func.coalesce(func.sum(Position.total_invested), 0))
-            .where(Position.quantity > 0, Position.exchange == self._exchange_name)
-        )
-        db_total_invested = float(result2.scalar())
-        self._initial_balance = actual_cash + db_total_invested
-        self._peak_value = max(self._peak_value, self._initial_balance)
 
         if synced_count > 0 or abs(old_cash - actual_cash) > 1.0:
             logger.info(
@@ -407,6 +394,27 @@ class PortfolioManager:
                 actual_cash=round(actual_cash, 2),
                 initial_balance=round(self._initial_balance, 2),
             )
+
+    async def restore_state_from_db(self, session: AsyncSession) -> None:
+        """서버 재시작 시 최신 스냅샷에서 peak_value, realized_pnl 복원."""
+        result = await session.execute(
+            select(PortfolioSnapshot)
+            .where(PortfolioSnapshot.exchange == self._exchange_name)
+            .order_by(PortfolioSnapshot.snapshot_at.desc())
+            .limit(1)
+        )
+        snapshot = result.scalar_one_or_none()
+        if snapshot:
+            self._peak_value = snapshot.peak_value or self._peak_value
+            self._realized_pnl = snapshot.realized_pnl or 0.0
+            logger.info(
+                "portfolio_state_restored",
+                exchange=self._exchange_name,
+                peak_value=round(self._peak_value, 2),
+                realized_pnl=round(self._realized_pnl, 2),
+            )
+        else:
+            logger.info("no_snapshot_found_using_defaults", exchange=self._exchange_name)
 
     @property
     def cash_balance(self) -> float:

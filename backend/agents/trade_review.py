@@ -100,56 +100,110 @@ class TradeReviewAgent:
         buys = [o for o in orders if o.side == "buy"]
         sells = [o for o in orders if o.side == "sell"]
 
-        # 매수/매도 매칭: 코인별 매수 기록 추적
+        # 선물 숏 여부 판별: direction=="short"인 주문이 있는 심볼
+        short_symbols = {
+            o.symbol for o in orders
+            if getattr(o, "direction", None) == "short"
+        }
+
+        # 매수/매도 매칭: 코인별 기록 추적
         sell_pnls = []
         buy_records: dict[str, list[dict]] = defaultdict(list)
+        sell_records: dict[str, list[dict]] = defaultdict(list)  # 숏 entry 추적
         total_fees = 0.0
 
         for o in orders:
             fee = o.fee or 0
             total_fees += fee
-            if o.side == "buy":
-                buy_records[o.symbol].append({
-                    "price": o.executed_price or o.requested_price,
-                    "qty": o.executed_quantity or o.requested_quantity,
-                    "strategy": o.strategy_name,
-                    "time": o.filled_at,
-                    "fee": fee,
-                })
-            elif o.side == "sell":
-                sell_price = o.executed_price or o.requested_price
-                sell_qty = o.executed_quantity or o.requested_quantity
-                coin_buys = buy_records.get(o.symbol, [])
-                avg_buy = (
-                    sum(b["price"] for b in coin_buys) / len(coin_buys)
-                    if coin_buys
-                    else sell_price
-                )
-                # 보유 시간 계산 (마지막 매수 ~ 매도)
-                hold_minutes = None
-                buy_strategy = None
-                if coin_buys:
-                    last_buy = coin_buys[-1]
-                    buy_strategy = last_buy["strategy"]
-                    if last_buy["time"] and o.filled_at:
-                        hold_minutes = (o.filled_at - last_buy["time"]).total_seconds() / 60
+            price = o.executed_price or o.requested_price
+            qty = o.executed_quantity or o.requested_quantity
 
-                pnl = (sell_price - avg_buy) * sell_qty - fee
-                pnl_pct = (sell_price - avg_buy) / avg_buy * 100 if avg_buy > 0 else 0
-                sell_pnls.append({
-                    "symbol": o.symbol,
-                    "strategy": o.strategy_name,      # 매도 전략
-                    "buy_strategy": buy_strategy,      # 매수 전략
-                    "pnl": pnl,
-                    "pnl_pct": pnl_pct,
-                    "sell_price": sell_price,
-                    "avg_buy": avg_buy,
-                    "sell_time": o.filled_at,
-                    "hold_minutes": hold_minutes,
-                    "fee": fee,
-                    "reason": o.signal_reason or "",
-                    "is_surge": buy_strategy == "rotation_surge",
-                })
+            if o.symbol in short_symbols:
+                # 숏 거래: sell = entry(진입), buy = exit(청산)
+                if o.side == "sell":
+                    sell_records[o.symbol].append({
+                        "price": price,
+                        "qty": qty,
+                        "strategy": o.strategy_name,
+                        "time": o.filled_at,
+                        "fee": fee,
+                    })
+                elif o.side == "buy":
+                    # 숏 청산 (buy = exit)
+                    coin_sells = sell_records.get(o.symbol, [])
+                    avg_entry = (
+                        sum(s["price"] for s in coin_sells) / len(coin_sells)
+                        if coin_sells
+                        else price
+                    )
+                    hold_minutes = None
+                    entry_strategy = None
+                    if coin_sells:
+                        last_entry = coin_sells[-1]
+                        entry_strategy = last_entry["strategy"]
+                        if last_entry["time"] and o.filled_at:
+                            hold_minutes = (o.filled_at - last_entry["time"]).total_seconds() / 60
+
+                    # 숏 P&L = (진입매도가 - 청산매수가) * qty - fees
+                    pnl = (avg_entry - price) * qty - fee
+                    pnl_pct = (avg_entry - price) / avg_entry * 100 if avg_entry > 0 else 0
+                    sell_pnls.append({
+                        "symbol": o.symbol,
+                        "strategy": o.strategy_name,
+                        "buy_strategy": entry_strategy,
+                        "pnl": pnl,
+                        "pnl_pct": pnl_pct,
+                        "sell_price": avg_entry,   # entry price
+                        "avg_buy": price,          # exit price
+                        "sell_time": o.filled_at,
+                        "hold_minutes": hold_minutes,
+                        "fee": fee,
+                        "reason": o.signal_reason or "",
+                        "is_surge": entry_strategy == "rotation_surge",
+                        "direction": "short",
+                    })
+            else:
+                # 현물/롱: 기존 로직 (buy = entry, sell = exit)
+                if o.side == "buy":
+                    buy_records[o.symbol].append({
+                        "price": price,
+                        "qty": qty,
+                        "strategy": o.strategy_name,
+                        "time": o.filled_at,
+                        "fee": fee,
+                    })
+                elif o.side == "sell":
+                    coin_buys = buy_records.get(o.symbol, [])
+                    avg_buy = (
+                        sum(b["price"] for b in coin_buys) / len(coin_buys)
+                        if coin_buys
+                        else price
+                    )
+                    hold_minutes = None
+                    buy_strategy = None
+                    if coin_buys:
+                        last_buy = coin_buys[-1]
+                        buy_strategy = last_buy["strategy"]
+                        if last_buy["time"] and o.filled_at:
+                            hold_minutes = (o.filled_at - last_buy["time"]).total_seconds() / 60
+
+                    pnl = (price - avg_buy) * qty - fee
+                    pnl_pct = (price - avg_buy) / avg_buy * 100 if avg_buy > 0 else 0
+                    sell_pnls.append({
+                        "symbol": o.symbol,
+                        "strategy": o.strategy_name,
+                        "buy_strategy": buy_strategy,
+                        "pnl": pnl,
+                        "pnl_pct": pnl_pct,
+                        "sell_price": price,
+                        "avg_buy": avg_buy,
+                        "sell_time": o.filled_at,
+                        "hold_minutes": hold_minutes,
+                        "fee": fee,
+                        "reason": o.signal_reason or "",
+                        "is_surge": buy_strategy == "rotation_surge",
+                        "direction": "long",
+                    })
 
         # 승/패
         wins = [t for t in sell_pnls if t["pnl"] > 0]
