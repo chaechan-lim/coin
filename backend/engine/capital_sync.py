@@ -16,7 +16,7 @@ logger = structlog.get_logger(__name__)
 async def sync_binance_deposits(session: AsyncSession, adapter) -> list[CapitalTransaction]:
     """바이낸스 USDT 입금을 자동 감지하여 미확인 CapitalTransaction 생성."""
     try:
-        deposits = await adapter.exchange.fetch_deposits("USDT")
+        deposits = await adapter._exchange.fetch_deposits("USDT")
     except Exception as e:
         logger.warning("fetch_binance_deposits_failed", error=str(e))
         return []

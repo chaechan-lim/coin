@@ -343,7 +343,7 @@ async def lifespan(app: FastAPI):
             async def capital_sync_binance():
                 sf = get_session_factory()
                 async with sf() as sess:
-                    new_txs = await sync_binance_deposits(sess, binance_adapter_for_sync.exchange)
+                    new_txs = await sync_binance_deposits(sess, binance_adapter_for_sync._exchange)
                     if new_txs:
                         b_pm = engine_registry.get_portfolio_manager("binance_futures")
                         if b_pm:
@@ -362,7 +362,7 @@ async def lifespan(app: FastAPI):
                 b_pm = engine_registry.get_portfolio_manager("bithumb")
                 b_eng = engine_registry.get_engine("bithumb")
                 if b_pm and b_eng:
-                    await detect_bithumb_balance_change(sess, b_pm, b_eng.exchange)
+                    await detect_bithumb_balance_change(sess, b_pm, b_eng._exchange)
                 await sess.commit()
         _scheduler.add_job(
             _wrap(capital_detect_bithumb),
