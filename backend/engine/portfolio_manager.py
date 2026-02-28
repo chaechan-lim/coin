@@ -459,11 +459,54 @@ class PortfolioManager:
             for fp_sym, fp_data in futures_positions.items():
                 # fp_sym 형식: "SOL/USDT:USDT" → pair: "SOL/USDT"
                 pair = fp_sym.replace(":USDT", "")
-                if pair in db_positions:
-                    continue  # 이미 위 루프에서 처리됨
-                # balances 루프에서 이미 처리된 심볼도 스킵
+
+                # balances 루프에서 이미 처리된 심볼은 스킵
                 base_sym = pair.split("/")[0]
                 if base_sym in balances and balances[base_sym].total > 0:
+                    continue
+
+                # DB에 이미 있는 포지션 → 메타데이터만 보정
+                if pair in db_positions:
+                    db_pos = db_positions[pair]
+                    fp_margin = float(fp_data.get("initialMargin", 0) or 0)
+                    fp_direction = fp_data.get("side", "long")
+                    fp_raw_lev = fp_data.get("leverage")
+                    if fp_raw_lev:
+                        fp_leverage = int(fp_raw_lev)
+                    elif fp_margin > 0:
+                        fp_notional = abs(float(fp_data.get("notional", 0) or 0))
+                        fp_leverage = max(1, round(fp_notional / fp_margin)) if fp_notional > 0 else 1
+                    else:
+                        fp_leverage = 1
+                    fp_liq = float(fp_data.get("liquidationPrice", 0) or 0) or None
+                    fp_entry = float(fp_data.get("entryPrice", 0) or 0)
+                    fp_contracts = float(fp_data.get("contracts", 0) or 0)
+
+                    changed = False
+                    if fp_leverage > 1 and getattr(db_pos, "leverage", 1) != fp_leverage:
+                        db_pos.leverage = fp_leverage
+                        changed = True
+                    if fp_direction and getattr(db_pos, "direction", None) != fp_direction:
+                        db_pos.direction = fp_direction
+                        changed = True
+                    if fp_margin > 0 and abs(getattr(db_pos, "margin_used", 0) - fp_margin) > 0.01:
+                        db_pos.total_invested = fp_margin
+                        db_pos.margin_used = fp_margin
+                        changed = True
+                    if fp_liq and getattr(db_pos, "liquidation_price", None) != fp_liq:
+                        db_pos.liquidation_price = fp_liq
+                        changed = True
+                    if fp_entry > 0 and abs(db_pos.average_buy_price - fp_entry) > 0.0001:
+                        db_pos.average_buy_price = fp_entry
+                        changed = True
+                    if fp_contracts > 0 and abs(db_pos.quantity - fp_contracts) / max(db_pos.quantity, 0.0001) > 0.01:
+                        db_pos.quantity = fp_contracts
+                        changed = True
+                    if changed:
+                        logger.info("futures_metadata_corrected",
+                                    symbol=pair, leverage=fp_leverage,
+                                    direction=fp_direction, margin=round(fp_margin, 2))
+                    total_invested += db_pos.total_invested
                     continue
 
                 contracts = float(fp_data.get("contracts", 0) or 0)
