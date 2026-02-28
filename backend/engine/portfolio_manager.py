@@ -256,7 +256,10 @@ class PortfolioManager:
         return snapshot
 
     async def reconcile_cash_from_db(self, session: AsyncSession) -> None:
-        """DB 포지션 기준으로 현금 잔고를 재계산 (인메모리 누수 방지)."""
+        """DB 포지션 기준으로 현금 잔고를 재계산 (인메모리 누수 방지).
+
+        공식: cash = initial_balance - total_invested + realized_pnl - total_fees
+        """
         result = await session.execute(
             select(Position).where(
                 Position.quantity > 0,
@@ -280,13 +283,15 @@ class PortfolioManager:
             total_fees = float(trade_fee_result.scalar())
 
         old_cash = self._cash_balance
-        self._cash_balance = self._initial_balance - total_invested
+        self._cash_balance = (
+            self._initial_balance - total_invested + self._realized_pnl - total_fees
+        )
         if abs(old_cash - self._cash_balance) > 1.0:
             logger.warning(
                 "cash_balance_reconciled",
-                old=round(old_cash, 0),
-                new=round(self._cash_balance, 0),
-                diff=round(old_cash - self._cash_balance, 0),
+                old=round(old_cash, 2),
+                new=round(self._cash_balance, 2),
+                diff=round(old_cash - self._cash_balance, 2),
             )
 
     async def sync_exchange_positions(

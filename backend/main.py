@@ -112,24 +112,37 @@ async def lifespan(app: FastAPI):
             await portfolio_mgr.restore_state_from_db(sess)
 
             # 시드 입금 자동 생성 (CapitalTransaction 0건이면)
-            from core.models import CapitalTransaction
+            # 신규 DB: 실제 총자산(현금+포지션) 기준으로 시드 생성
+            from core.models import CapitalTransaction, Position as PositionModel
             count_result = await sess.execute(
                 select(func.count()).select_from(CapitalTransaction)
                 .where(CapitalTransaction.exchange == "bithumb")
             )
             if count_result.scalar() == 0:
+                # 실제 총자산 계산: sync 후 cash + 포지션 invested 합계
+                pos_result = await sess.execute(
+                    select(func.coalesce(func.sum(PositionModel.total_invested), 0))
+                    .where(PositionModel.exchange == "bithumb", PositionModel.quantity > 0)
+                )
+                actual_invested = float(pos_result.scalar())
+                actual_total = portfolio_mgr.cash_balance + actual_invested
+                seed_amount = actual_total if actual_total > 0 else initial_krw
+
                 seed = CapitalTransaction(
                     exchange="bithumb",
                     tx_type="deposit",
-                    amount=initial_krw,
+                    amount=round(seed_amount, 0),
                     currency="KRW",
-                    note="초기 원금 (자동 생성)",
+                    note=f"초기 원금 (자동 생성, 실제 자산 기준)",
                     source="seed",
                     confirmed=True,
                 )
                 sess.add(seed)
                 await sess.flush()
-                logger.info("bithumb_seed_deposit_created", amount=initial_krw)
+                logger.info("bithumb_seed_deposit_created",
+                            amount=round(seed_amount, 0),
+                            cash=round(portfolio_mgr.cash_balance, 0),
+                            invested=round(actual_invested, 0))
 
             await portfolio_mgr.load_initial_balance_from_db(sess)
             await sess.commit()
@@ -238,24 +251,34 @@ async def lifespan(app: FastAPI):
                     await binance_portfolio_mgr.restore_state_from_db(sess)
 
                     # 시드 입금 자동 생성 (CapitalTransaction 0건이면)
-                    from core.models import CapitalTransaction
                     cnt_result = await sess.execute(
                         select(func.count()).select_from(CapitalTransaction)
                         .where(CapitalTransaction.exchange == "binance_futures")
                     )
                     if cnt_result.scalar() == 0:
+                        pos_result = await sess.execute(
+                            select(func.coalesce(func.sum(PositionModel.total_invested), 0))
+                            .where(PositionModel.exchange == "binance_futures", PositionModel.quantity > 0)
+                        )
+                        actual_invested = float(pos_result.scalar())
+                        actual_total = binance_portfolio_mgr.cash_balance + actual_invested
+                        seed_amount = actual_total if actual_total > 0 else initial_usdt
+
                         seed = CapitalTransaction(
                             exchange="binance_futures",
                             tx_type="deposit",
-                            amount=initial_usdt,
+                            amount=round(seed_amount, 2),
                             currency="USDT",
-                            note="초기 원금 (자동 생성)",
+                            note=f"초기 원금 (자동 생성, 실제 자산 기준)",
                             source="seed",
                             confirmed=True,
                         )
                         sess.add(seed)
                         await sess.flush()
-                        logger.info("binance_seed_deposit_created", amount=initial_usdt)
+                        logger.info("binance_seed_deposit_created",
+                                    amount=round(seed_amount, 2),
+                                    cash=round(binance_portfolio_mgr.cash_balance, 2),
+                                    invested=round(actual_invested, 2))
 
                     await binance_portfolio_mgr.load_initial_balance_from_db(sess)
                     await sess.commit()
