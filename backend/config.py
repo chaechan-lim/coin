@@ -100,7 +100,7 @@ class BinanceTradingConfig(BaseSettings):
     evaluation_interval_sec: int = 300
     initial_balance_usdt: float = 1000.0
     min_combined_confidence: float = 0.55
-    max_trade_size_pct: float = 0.35
+    max_trade_size_pct: float = 0.25
     daily_buy_limit: int = 15
     max_daily_coin_buys: int = 3
     ws_price_monitor: bool = True  # WebSocket 실시간 가격 모니터 활성화

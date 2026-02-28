@@ -274,7 +274,7 @@ coin/
 | 원금 대비 수익 표시 | ✅ initial_balance_krw + total_pnl_pct 원금 기준 |
 | 전략 성과 P&L 수정 | ✅ FIFO 원가 매칭 (기존: sell.requested_price 비교 → 오계산) |
 | 모바일 반응형 UI | ✅ 탭 스크롤, 테이블→카드, 터치 타겟, 전 컴포넌트 |
-| 단위 테스트 | ✅ 111개 (pytest + 인메모리 SQLite) |
+| 단위 테스트 | ✅ 125개 (pytest + 인메모리 SQLite) |
 | 거래 기본 필터 | ✅ 체결(filled)만 기본 표시, status 파라미터 |
 | 시작 시 현금 보정 | ✅ reconcile_cash_from_db at startup (peak 오염 방지) |
 | 0% 승률 전략 제거 | ✅ volatility_breakout/supertrend 비활성 → 6전략 체제 |
@@ -294,7 +294,10 @@ coin/
 | **자동 리밸런싱** | ✅ 비중 40% 초과 → 35%까지 자동 부분 매도 (현물+선물, 1시간 쿨다운) |
 | 바이낸스 현물 연동 | ⬜ BinanceSpotAdapter (ccxt binance), 현물 TradingEngine 추가 (계획) |
 | 시장 상태별 전략 on/off | ⬜ 횡보 시 추세추종 완전 비활성 (향후) |
-| 라즈베리파이 배포 | ⬜ 예정 |
+| 라즈베리파이 배포 | ✅ 완료 (192.168.50.244, systemd) |
+| 매매 회고 선물 인식 | ✅ 방향/레버리지/마진/청산가, LLM 선물 컨텍스트, 통화 자동 전환 |
+| 선물 레버리지 sync | ✅ ccxt leverage=None fallback, fetch_balance 미포함 포지션 보정 |
+| 선물 포지션 최적화 | ✅ 사이징 35%→25%, conf 0.55 (MDD 3.9%, PF 1.38) |
 
 ---
 
@@ -422,7 +425,8 @@ EngineRegistry (싱글턴)
 - **4h 타임프레임**: 전략 시그널 4h 캔들 기반 (노이즈 감소, PF 1.80)
 - SL 8%/TP 16%/트레일 5%/3.5%: `/ sqrt(leverage)` 자동 축소 (P1 최적화)
 - **동적 SL**: ATR 기반 + 시장 상태별 프로필 (crash=3~5%, uptrend=4~10%)
-- 포지션 사이징: 35% (P1 최적화)
+- 포지션 사이징: 25% (v0.17.2 백테스트 최적화, MDD 3.9%)
+- min_confidence: 0.55 (v0.17.2)
 - 청산가 2% 이내 긴급 청산
 - 펀딩비 30분 주기 조회
 - 로테이션 비활성 (선물 전용)
@@ -682,5 +686,7 @@ docker compose restart backend
 | v0.15 | 2026-02-27 | **시스템 로그 강화 + LLM 매매 회고**: 매수/매도 이벤트 상세화(전략/신뢰도/PnL), 에이전트 결과 시스템 로그 발행, Claude API(haiku) 일일 심층 매매 회고 |
 | v0.16 | 2026-02-28 | **포트폴리오 상태 복원 + 숏 P&L 수정 + Crash 숏 진입**: DB 스냅샷에서 peak/realized_pnl 복원 (재시작 팽창 방지), 원금 고정, 숏 P&L direction-aware 계산, crash MIN_ACTIVE_WEIGHT 완화(0.06), min notional 검증 |
 | v0.17 | 2026-02-28 | **입출금 추적 + 동적 원금 관리**: CapitalTransaction DB 모델, 수동/자동 입출금 기록, 바이낸스 USDT 자동 감지(30분), 빗썸 KRW 잔고 변동 감지(5분), 시드 deposit 자동 생성, initial_balance DB 기반 재계산, 신규 DB peak_value 실제 자산 초기화, 프론트 입출금 관리 모달 |
+| v0.17.1 | 2026-02-28 | **매매 회고 선물 인식**: 방향/레버리지/마진/청산가 반영, 숏 P&L direction-aware, LLM 프롬프트 선물 컨텍스트, 통화 자동 전환 (USDT/KRW) |
+| v0.17.2 | 2026-02-28 | **선물 레버리지 sync 수정 + 백테스트 최적화**: ccxt leverage=None fallback(notional/margin 계산), fetch_balance 미포함 포지션 메타데이터 보정, 선물 포지션 사이징 35%→25% + conf 0.55 (MDD 7.3%→3.9%, PF 1.25→1.38) |
 | v0.18 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
 | v1.0 | 진행중 | **라즈베리파이 배포 완료**, 장기 운영 안정화 |
