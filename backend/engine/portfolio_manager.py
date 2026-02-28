@@ -612,7 +612,22 @@ class PortfolioManager:
         )
         deposits, withdrawals = result.one()
         if deposits > 0 or withdrawals > 0:
+            old_initial = self._initial_balance
             self._initial_balance = deposits - withdrawals
+
+            # 출금 시 peak_value 비례 조정 (가짜 드로다운 방지)
+            if old_initial > 0 and withdrawals > 0:
+                ratio = self._initial_balance / old_initial
+                if 0 < ratio < 1:
+                    self._peak_value = self._peak_value * ratio
+                    logger.info(
+                        "peak_adjusted_for_withdrawal",
+                        exchange=self._exchange_name,
+                        old_peak=round(self._peak_value / ratio, 2),
+                        new_peak=round(self._peak_value, 2),
+                        ratio=round(ratio, 4),
+                    )
+
             logger.info(
                 "initial_balance_from_capital",
                 exchange=self._exchange_name,
