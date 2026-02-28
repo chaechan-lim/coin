@@ -329,6 +329,20 @@ class PortfolioManager:
         synced_count = 0
         total_invested = 0.0
 
+        # 선물: fetch_positions로 실제 마진/방향/레버리지 조회
+        is_futures = "futures" in self._exchange_name
+        futures_positions = {}
+        if is_futures:
+            try:
+                raw_positions = await exchange_adapter._exchange.fetch_positions()
+                for fp in raw_positions:
+                    contracts = float(fp.get("contracts", 0) or 0)
+                    if contracts > 0:
+                        sym = fp.get("symbol", "")
+                        futures_positions[sym] = fp
+            except Exception as e:
+                logger.warning("fetch_futures_positions_failed", error=str(e))
+
         for symbol, bal in balances.items():
             if symbol == cash_symbol or bal.total <= 0:
                 continue
@@ -341,11 +355,28 @@ class PortfolioManager:
                 current_price = await self._market_data.get_current_price(pair)
                 coin_value = bal.total * current_price
                 # 현물: 1000원 미만, 선물: 1 USDT 미만 무시
-                min_value = 1.0 if "futures" in self._exchange_name else 1000
+                min_value = 1.0 if is_futures else 1000
                 if coin_value < min_value:
                     continue
             except Exception:
                 continue
+
+            # 선물: 실제 마진/방향/레버리지 가져오기
+            fp_data = futures_positions.get(f"{pair}:USDT") if is_futures else None
+            if is_futures and fp_data:
+                margin = float(fp_data.get("initialMargin", 0) or 0)
+                direction = fp_data.get("side", "long")
+                leverage = int(fp_data.get("leverage", 1) or 1)
+                entry_price = float(fp_data.get("entryPrice", 0) or current_price)
+                liq_price = float(fp_data.get("liquidationPrice", 0) or 0) or None
+                invested = margin  # 선물: 마진이 실제 투자금
+            else:
+                margin = 0
+                direction = "long"
+                leverage = 1
+                entry_price = current_price
+                liq_price = None
+                invested = bal.total * current_price  # 현물: 노셔널
 
             db_pos = db_positions.get(pair)
 
@@ -356,10 +387,14 @@ class PortfolioManager:
                     exchange=self._exchange_name,
                     symbol=pair,
                     quantity=bal.total,
-                    average_buy_price=current_price,  # 현재가를 진입가로 설정
-                    total_invested=bal.total * current_price,
+                    average_buy_price=entry_price,
+                    total_invested=invested,
                     is_paper=self._is_paper,
                     entered_at=datetime.now(timezone.utc),
+                    direction=direction,
+                    leverage=leverage,
+                    liquidation_price=liq_price,
+                    margin_used=margin,
                 )
                 session.add(new_pos)
                 total_invested += new_pos.total_invested
@@ -367,14 +402,20 @@ class PortfolioManager:
                 logger.info(
                     "position_synced_from_exchange",
                     symbol=pair, quantity=bal.total,
-                    price=current_price, value=round(coin_value, 2),
+                    price=entry_price, invested=round(invested, 2),
+                    direction=direction, leverage=leverage,
                 )
             elif abs(db_pos.quantity - bal.total) / max(db_pos.quantity, 0.0001) > 0.01:
                 # DB 수량과 거래소 수량이 1% 이상 차이 → 거래소 기준으로 보정
                 old_qty = db_pos.quantity
                 db_pos.quantity = bal.total
-                # total_invested도 비례 조정
-                if old_qty > 0:
+                if is_futures and fp_data:
+                    db_pos.total_invested = margin
+                    db_pos.direction = direction
+                    db_pos.leverage = leverage
+                    db_pos.liquidation_price = liq_price
+                    db_pos.margin_used = margin
+                elif old_qty > 0:
                     ratio = bal.total / old_qty
                     db_pos.total_invested *= ratio
                 total_invested += db_pos.total_invested
