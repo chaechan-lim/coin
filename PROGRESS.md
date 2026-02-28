@@ -1,6 +1,6 @@
 # 코인 자동 매매 시스템 — 구현 진행 현황
 
-> 최종 업데이트: 2026-02-28
+> 최종 업데이트: 2026-03-01
 
 ---
 
@@ -8,7 +8,7 @@
 
 빗썸(Bithumb) 현물 + 바이낸스(Binance) USDM 선물 **듀얼 엔진** 24시간 자동 암호화폐 트레이딩 시스템.
 6개 전략 가중 투표 (HOLD=기권 방식) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭, 거래소 전환) 포함.
-**현재 라이브 운영 중**: 빗썸 현물 (~548K KRW) + 바이낸스 선물 (~174.92 USDT, 3x 레버리지), **PostgreSQL 16** (docker compose), **라즈베리파이 배포 완료**.
+**현재 라이브 운영 중**: 빗썸 현물 (~308K KRW) + 바이낸스 선물 (~308 USDT, 3x 레버리지), **PostgreSQL 16** (docker compose), **라즈베리파이 배포 완료**, **HTTPS (nginx self-signed)**.
 **듀얼 엔진 아키텍처**: 빗썸 TradingEngine + 바이낸스 BinanceFuturesEngine 독립 병렬 실행, EngineRegistry 중앙 관리, exchange 컬럼 기반 데이터 격리.
 **바이낸스 선물 라이브**: 독립 모드 분리 (빗썸 paper/live + 바이낸스 paper/live 별도), 시장가 주문, 실제 USDT 잔고 조회.
 **에이전트 심볼 분기**: MarketAnalysisAgent `market_symbol` 파라미터 — 빗썸 BTC/KRW, 바이낸스 BTC/USDT 자동 분기.
@@ -96,6 +96,7 @@ coin/
 │   │   ├── futures_engine.py    ✅ 완료 (BinanceFuturesEngine 서브클래스)
 │   │   ├── order_manager.py     ✅ 완료
 │   │   ├── portfolio_manager.py ✅ 완료
+│   │   ├── capital_sync.py      ✅ 완료 (입출금 자동 감지)
 │   │   └── scheduler.py         ✅ 완료
 │   ├── api/
 │   │   ├── __init__.py          ✅
@@ -106,6 +107,7 @@ coin/
 │   │   ├── portfolio.py         ✅ 완료
 │   │   ├── trades.py            ✅ 완료
 │   │   ├── strategies.py        ✅ 완료
+│   │   ├── capital.py           ✅ 완료 (입출금 CRUD)
 │   │   └── websocket.py         ✅ 완료
 │   ├── tests/
 │   │   ├── __init__.py          ✅
@@ -113,7 +115,7 @@ coin/
 │   │   ├── test_api_strategies.py ✅ 완료 (7 tests)
 │   │   ├── test_api_trades.py   ✅ 완료 (5 tests)
 │   │   ├── test_api_portfolio.py ✅ 완료 (4 tests)
-│   │   ├── test_portfolio_manager.py ✅ 완료 (9 tests)
+│   │   ├── test_portfolio_manager.py ✅ 완료 (17 tests)
 │   │   ├── test_risk_management.py ✅ 완료 (5 tests)
 │   │   ├── test_exchange_filter.py ✅ 완료 (5 tests, 거래소 격리)
 │   │   └── test_futures_engine.py ✅ 완료 (11 tests, 선물 엔진)
@@ -140,7 +142,8 @@ coin/
         │   ├── AgentStatus.tsx  ✅ 완료
         │   ├── EngineControl.tsx ✅ 완료
         │   ├── RotationMonitor.tsx ✅ 완료
-        │   └── SystemLog.tsx      ✅ 완료 (서버 이벤트 타임라인)
+        │   ├── SystemLog.tsx      ✅ 완료 (서버 이벤트 타임라인)
+        │   └── CapitalManager.tsx ✅ 완료 (입출금 관리 모달)
         ├── hooks/
         │   ├── useWebSocket.ts  ✅ 완료
         │   └── usePortfolio.ts  ✅ 완료
@@ -274,7 +277,7 @@ coin/
 | 원금 대비 수익 표시 | ✅ initial_balance_krw + total_pnl_pct 원금 기준 |
 | 전략 성과 P&L 수정 | ✅ FIFO 원가 매칭 (기존: sell.requested_price 비교 → 오계산) |
 | 모바일 반응형 UI | ✅ 탭 스크롤, 테이블→카드, 터치 타겟, 전 컴포넌트 |
-| 단위 테스트 | ✅ 125개 (pytest + 인메모리 SQLite) |
+| 단위 테스트 | ✅ 133개 (pytest + 인메모리 SQLite) |
 | 거래 기본 필터 | ✅ 체결(filled)만 기본 표시, status 파라미터 |
 | 시작 시 현금 보정 | ✅ reconcile_cash_from_db at startup (peak 오염 방지) |
 | 0% 승률 전략 제거 | ✅ volatility_breakout/supertrend 비활성 → 6전략 체제 |
@@ -299,6 +302,9 @@ coin/
 | 선물 레버리지 sync | ✅ ccxt leverage=None fallback, fetch_balance 미포함 포지션 보정 |
 | 선물 포지션 최적화 | ✅ 사이징 35%, conf 0.55 (MDD 5.42%, PF 1.80) |
 | **현물 비대칭 전략** | ✅ 하락장 매수 차단, 상승장 공격적 매수 (알파 +25.38%) |
+| **HTTPS 배포** | ✅ nginx 리버스 프록시, self-signed cert (10년), IP SAN |
+| **출금 peak 비례 조정** | ✅ load_initial_balance_from_db()에서 peak *= ratio (가짜 드로다운 방지) |
+| **capital_sync 스케줄러 버그** | ✅ engine.exchange → engine._exchange (AttributeError 수정) |
 
 ---
 
@@ -707,5 +713,6 @@ docker compose restart backend
 | v0.17.1 | 2026-02-28 | **매매 회고 선물 인식**: 방향/레버리지/마진/청산가 반영, 숏 P&L direction-aware, LLM 프롬프트 선물 컨텍스트, 통화 자동 전환 (USDT/KRW) |
 | v0.17.2 | 2026-02-28 | **선물 레버리지 sync 수정 + 백테스트 최적화**: ccxt leverage=None fallback(notional/margin 계산), fetch_balance 미포함 포지션 메타데이터 보정, 선물 포지션 사이징 35%→25% + conf 0.55 (MDD 7.3%→3.9%, PF 1.25→1.38) |
 | v0.17.3 | 2026-03-01 | **현물 비대칭 전략 + 선물 pos 35%**: 하락장 매수 완전 차단 + 상승장 공격적 매수 (알파 +25.38%), 선물 포지션 사이징 25%→35% (PF 1.80, +15.48%, MDD 5.42%) |
+| v0.17.4 | 2026-03-01 | **HTTPS + 입출금 안정화**: nginx self-signed HTTPS, 출금 시 peak_value 비례 조정 (가짜 드로다운 방지), capital_sync 스케줄러 AttributeError 수정, 포트폴리오 테스트 8건 추가 (133개), 빗썸→바이낸스 207K KRW 이체 기록 |
 | v0.18 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
 | v1.0 | 진행중 | **라즈베리파이 배포 완료**, 장기 운영 안정화 |
