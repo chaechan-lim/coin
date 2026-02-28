@@ -366,7 +366,15 @@ class PortfolioManager:
             if is_futures and fp_data:
                 margin = float(fp_data.get("initialMargin", 0) or 0)
                 direction = fp_data.get("side", "long")
-                leverage = int(fp_data.get("leverage", 1) or 1)
+                raw_lev = fp_data.get("leverage")
+                if raw_lev:
+                    leverage = int(raw_lev)
+                elif margin > 0:
+                    # ccxt가 leverage=None 반환 시 notional/margin으로 계산
+                    notional = abs(float(fp_data.get("notional", 0) or 0))
+                    leverage = max(1, round(notional / margin)) if notional > 0 else 1
+                else:
+                    leverage = 1
                 entry_price = float(fp_data.get("entryPrice", 0) or current_price)
                 liq_price = float(fp_data.get("liquidationPrice", 0) or 0) or None
                 invested = margin  # 선물: 마진이 실제 투자금
@@ -446,7 +454,14 @@ class PortfolioManager:
                 if margin < 1.0:
                     continue
                 direction = fp_data.get("side", "long")
-                leverage = int(fp_data.get("leverage", 1) or 1)
+                raw_lev = fp_data.get("leverage")
+                if raw_lev:
+                    leverage = int(raw_lev)
+                elif margin > 0:
+                    notional = abs(float(fp_data.get("notional", 0) or 0))
+                    leverage = max(1, round(notional / margin)) if notional > 0 else 1
+                else:
+                    leverage = 1
                 entry_price = float(fp_data.get("entryPrice", 0) or 0)
                 liq_price = float(fp_data.get("liquidationPrice", 0) or 0) or None
 
