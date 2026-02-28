@@ -17,6 +17,8 @@ if sys.platform == "win32":
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from sqlalchemy import select, func
+
 from config import get_config
 from db.session import get_engine, get_session_factory
 from core.models import Base
@@ -100,7 +102,7 @@ async def lifespan(app: FastAPI):
         exchange_name="bithumb",
     )
 
-    # 라이브 모드: 거래소 실제 잔고 동기화 + DB 스냅샷 복원
+    # 라이브 모드: 거래소 실제 잔고 동기화 + DB 스냅샷 복원 + 원금 관리
     if not is_paper:
         session_factory = get_session_factory()
         async with session_factory() as sess:
@@ -108,6 +110,28 @@ async def lifespan(app: FastAPI):
                 sess, exchange, config.trading.tracked_coins,
             )
             await portfolio_mgr.restore_state_from_db(sess)
+
+            # 시드 입금 자동 생성 (CapitalTransaction 0건이면)
+            from core.models import CapitalTransaction
+            count_result = await sess.execute(
+                select(func.count()).select_from(CapitalTransaction)
+                .where(CapitalTransaction.exchange == "bithumb")
+            )
+            if count_result.scalar() == 0:
+                seed = CapitalTransaction(
+                    exchange="bithumb",
+                    tx_type="deposit",
+                    amount=initial_krw,
+                    currency="KRW",
+                    note="초기 원금 (자동 생성)",
+                    source="seed",
+                    confirmed=True,
+                )
+                sess.add(seed)
+                await sess.flush()
+                logger.info("bithumb_seed_deposit_created", amount=initial_krw)
+
+            await portfolio_mgr.load_initial_balance_from_db(sess)
             await sess.commit()
 
     # ── 4. 빗썸 AI 에이전트 ───────────────────────────────────
@@ -204,7 +228,7 @@ async def lifespan(app: FastAPI):
             binance_engine.set_broadcast_callback(ws_manager.broadcast)
             _binance_engine = binance_engine
 
-            # 라이브 모드: 거래소 실제 잔고 동기화 + DB 스냅샷 복원
+            # 라이브 모드: 거래소 실제 잔고 동기화 + DB 스냅샷 복원 + 원금 관리
             if not binance_is_paper:
                 sf = get_session_factory()
                 async with sf() as sess:
@@ -212,6 +236,28 @@ async def lifespan(app: FastAPI):
                         sess, binance_adapter, config.binance.tracked_coins,
                     )
                     await binance_portfolio_mgr.restore_state_from_db(sess)
+
+                    # 시드 입금 자동 생성 (CapitalTransaction 0건이면)
+                    from core.models import CapitalTransaction
+                    cnt_result = await sess.execute(
+                        select(func.count()).select_from(CapitalTransaction)
+                        .where(CapitalTransaction.exchange == "binance_futures")
+                    )
+                    if cnt_result.scalar() == 0:
+                        seed = CapitalTransaction(
+                            exchange="binance_futures",
+                            tx_type="deposit",
+                            amount=initial_usdt,
+                            currency="USDT",
+                            note="초기 원금 (자동 생성)",
+                            source="seed",
+                            confirmed=True,
+                        )
+                        sess.add(seed)
+                        await sess.flush()
+                        logger.info("binance_seed_deposit_created", amount=initial_usdt)
+
+                    await binance_portfolio_mgr.load_initial_balance_from_db(sess)
                     await sess.commit()
 
             # EngineRegistry 등록 (바이낸스)
@@ -263,6 +309,43 @@ async def lifespan(app: FastAPI):
                 name="binance_trade_review",
                 seconds=3600,
             )
+
+    # ── 입출금 자동 감지 스케줄러 ───────────────────────────────
+    from engine.capital_sync import sync_binance_deposits, detect_bithumb_balance_change
+    from engine.scheduler import _wrap
+
+    if config.binance.enabled and _binance_engine and not (config.binance_trading.mode == "paper"):
+        binance_adapter_for_sync = engine_registry.get_engine("binance_futures")
+        if binance_adapter_for_sync:
+            async def capital_sync_binance():
+                sf = get_session_factory()
+                async with sf() as sess:
+                    new_txs = await sync_binance_deposits(sess, binance_adapter_for_sync.exchange)
+                    if new_txs:
+                        b_pm = engine_registry.get_portfolio_manager("binance_futures")
+                        if b_pm:
+                            await b_pm.load_initial_balance_from_db(sess)
+                    await sess.commit()
+            _scheduler.add_job(
+                _wrap(capital_sync_binance),
+                name="capital_sync_binance",
+                seconds=1800,
+            )
+
+    if not is_paper:
+        async def capital_detect_bithumb():
+            sf = get_session_factory()
+            async with sf() as sess:
+                b_pm = engine_registry.get_portfolio_manager("bithumb")
+                b_eng = engine_registry.get_engine("bithumb")
+                if b_pm and b_eng:
+                    await detect_bithumb_balance_change(sess, b_pm, b_eng.exchange)
+                await sess.commit()
+        _scheduler.add_job(
+            _wrap(capital_detect_bithumb),
+            name="capital_detect_bithumb",
+            seconds=300,
+        )
 
     _scheduler.start()
 

@@ -181,6 +181,35 @@ class ServerEventResponse(BaseModel):
 
 
 # -- Rotation Monitor --
+# -- Capital Transactions --
+class CapitalTransactionCreate(BaseModel):
+    exchange: str
+    tx_type: str  # "deposit" / "withdrawal"
+    amount: float
+    note: str | None = None
+
+
+class CapitalTransactionResponse(BaseModel):
+    id: int
+    exchange: str
+    tx_type: str
+    amount: float
+    currency: str
+    note: str | None
+    source: str
+    confirmed: bool
+    created_at: datetime
+
+
+class CapitalSummaryResponse(BaseModel):
+    exchange: str
+    total_deposits: float
+    total_withdrawals: float
+    net_capital: float
+    currency: str
+    transaction_count: int
+
+
 class SurgeScoreItem(BaseModel):
     symbol: str
     score: float

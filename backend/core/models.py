@@ -180,6 +180,24 @@ class AgentAnalysisLog(Base):
     analyzed_at = Column(DateTime, default=_utcnow)
 
 
+class CapitalTransaction(Base):
+    __tablename__ = "capital_transactions"
+    __table_args__ = (
+        Index("ix_capital_tx_exchange_at", "exchange", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    exchange = Column(String(20), nullable=False)        # "bithumb" / "binance_futures"
+    tx_type = Column(String(15), nullable=False)         # "deposit" / "withdrawal"
+    amount = Column(Float, nullable=False)               # KRW or USDT
+    currency = Column(String(10), nullable=False)        # "KRW" / "USDT"
+    note = Column(Text, nullable=True)
+    source = Column(String(20), default="manual")        # "manual" / "auto_detected" / "seed"
+    confirmed = Column(Boolean, default=True)
+    exchange_tx_id = Column(String(100), nullable=True)  # 거래소 tx ID (자동 감지 시)
+    created_at = Column(DateTime, default=_utcnow)
+
+
 class ServerEvent(Base):
     __tablename__ = "server_events"
     __table_args__ = (

@@ -15,6 +15,8 @@ import type {
   EngineStatus,
   RotationStatus,
   ServerEvent,
+  CapitalTransaction,
+  CapitalSummary,
 } from '../types'
 
 const api = axios.create({
@@ -119,3 +121,23 @@ export const getServerEvents = (params?: {
 
 export const getServerEventCounts = () =>
   api.get<Record<string, number>>('/events/counts').then((r) => r.data)
+
+// ── Capital Transactions ───────────────────────────────────
+export const getCapitalTransactions = (exchange: ExchangeName = 'bithumb') =>
+  api.get<CapitalTransaction[]>('/capital/transactions', { params: { exchange } }).then((r) => r.data)
+
+export const getCapitalSummary = (exchange: ExchangeName = 'bithumb') =>
+  api.get<CapitalSummary>('/capital/summary', { params: { exchange } }).then((r) => r.data)
+
+export const createCapitalTransaction = (data: {
+  exchange: string
+  tx_type: string
+  amount: number
+  note?: string
+}) => api.post<CapitalTransaction>('/capital/transactions', data).then((r) => r.data)
+
+export const confirmCapitalTransaction = (id: number) =>
+  api.post<CapitalTransaction>(`/capital/confirm/${id}`).then((r) => r.data)
+
+export const deleteCapitalTransaction = (id: number) =>
+  api.delete(`/capital/transactions/${id}`).then((r) => r.data)

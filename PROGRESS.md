@@ -8,7 +8,7 @@
 
 빗썸(Bithumb) 현물 + 바이낸스(Binance) USDM 선물 **듀얼 엔진** 24시간 자동 암호화폐 트레이딩 시스템.
 6개 전략 가중 투표 (HOLD=기권 방식) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭, 거래소 전환) 포함.
-**현재 라이브 운영 중**: 빗썸 현물 (~548K KRW) + 바이낸스 선물 (~174.92 USDT, 3x 레버리지), **PostgreSQL 16** (docker compose).
+**현재 라이브 운영 중**: 빗썸 현물 (~548K KRW) + 바이낸스 선물 (~174.92 USDT, 3x 레버리지), **PostgreSQL 16** (docker compose), **라즈베리파이 배포 완료**.
 **듀얼 엔진 아키텍처**: 빗썸 TradingEngine + 바이낸스 BinanceFuturesEngine 독립 병렬 실행, EngineRegistry 중앙 관리, exchange 컬럼 기반 데이터 격리.
 **바이낸스 선물 라이브**: 독립 모드 분리 (빗썸 paper/live + 바이낸스 paper/live 별도), 시장가 주문, 실제 USDT 잔고 조회.
 **에이전트 심볼 분기**: MarketAnalysisAgent `market_symbol` 파라미터 — 빗썸 BTC/KRW, 바이낸스 BTC/USDT 자동 분기.
@@ -681,5 +681,6 @@ docker compose restart backend
 | v0.14.2 | 2026-02-27 | 가격 0원 fallback: fetch_ticker last=None → bid/ask 중간값 → orderbook mid-price |
 | v0.15 | 2026-02-27 | **시스템 로그 강화 + LLM 매매 회고**: 매수/매도 이벤트 상세화(전략/신뢰도/PnL), 에이전트 결과 시스템 로그 발행, Claude API(haiku) 일일 심층 매매 회고 |
 | v0.16 | 2026-02-28 | **포트폴리오 상태 복원 + 숏 P&L 수정 + Crash 숏 진입**: DB 스냅샷에서 peak/realized_pnl 복원 (재시작 팽창 방지), 원금 고정, 숏 P&L direction-aware 계산, crash MIN_ACTIVE_WEIGHT 완화(0.06), min notional 검증 |
-| v0.17 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
-| v1.0 | 예정 | 라즈베리파이 배포 + 장기 운영 안정화 |
+| v0.17 | 2026-02-28 | **입출금 추적 + 동적 원금 관리**: CapitalTransaction DB 모델, 수동/자동 입출금 기록, 바이낸스 USDT 자동 감지(30분), 빗썸 KRW 잔고 변동 감지(5분), 시드 deposit 자동 생성, initial_balance DB 기반 재계산, 신규 DB peak_value 실제 자산 초기화, 프론트 입출금 관리 모달 |
+| v0.18 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
+| v1.0 | 진행중 | **라즈베리파이 배포 완료**, 장기 운영 안정화 |

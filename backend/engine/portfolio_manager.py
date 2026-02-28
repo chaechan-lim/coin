@@ -1,6 +1,6 @@
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, case
 from core.utils import utcnow
 
 from core.models import Position, PortfolioSnapshot, Trade, Order
@@ -414,7 +414,42 @@ class PortfolioManager:
                 realized_pnl=round(self._realized_pnl, 2),
             )
         else:
-            logger.info("no_snapshot_found_using_defaults", exchange=self._exchange_name)
+            # 첫 실행: peak를 현재 실제 자산으로 설정 (config값보다 낮을 수 있음)
+            actual_total = self._cash_balance
+            if actual_total > 0:
+                self._peak_value = actual_total
+            logger.info(
+                "no_snapshot_peak_from_actual",
+                exchange=self._exchange_name,
+                peak_value=round(self._peak_value, 2),
+            )
+
+    async def load_initial_balance_from_db(self, session: AsyncSession) -> None:
+        """DB CapitalTransaction에서 확정된 입출금 합계로 initial_balance 재계산."""
+        from core.models import CapitalTransaction
+        result = await session.execute(
+            select(
+                func.coalesce(func.sum(
+                    case((CapitalTransaction.tx_type == "deposit", CapitalTransaction.amount), else_=0)
+                ), 0),
+                func.coalesce(func.sum(
+                    case((CapitalTransaction.tx_type == "withdrawal", CapitalTransaction.amount), else_=0)
+                ), 0),
+            ).where(
+                CapitalTransaction.exchange == self._exchange_name,
+                CapitalTransaction.confirmed == True,  # noqa: E712
+            )
+        )
+        deposits, withdrawals = result.one()
+        if deposits > 0 or withdrawals > 0:
+            self._initial_balance = deposits - withdrawals
+            logger.info(
+                "initial_balance_from_capital",
+                exchange=self._exchange_name,
+                deposits=round(deposits, 2),
+                withdrawals=round(withdrawals, 2),
+                initial_balance=round(self._initial_balance, 2),
+            )
 
     @property
     def cash_balance(self) -> float:

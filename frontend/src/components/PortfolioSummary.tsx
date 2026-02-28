@@ -1,4 +1,6 @@
+import { useState } from 'react'
 import { usePortfolioSummary } from '../hooks/usePortfolio'
+import { CapitalManager } from './CapitalManager'
 import type { ExchangeName } from '../types'
 
 function StatCard({
@@ -6,17 +8,24 @@ function StatCard({
   value,
   sub,
   color,
+  action,
 }: {
   label: string
   value: string
   sub?: string
   color?: string
+  action?: React.ReactNode
 }) {
   return (
     <div className="bg-gray-800 rounded-xl p-4 flex flex-col gap-1">
       <span className="text-gray-400 text-xs">{label}</span>
       <span className={`text-xl font-bold ${color ?? 'text-white'}`}>{value}</span>
-      {sub && <span className="text-gray-500 text-xs">{sub}</span>}
+      {(sub || action) && (
+        <div className="flex items-center gap-1.5">
+          {sub && <span className="text-gray-500 text-xs">{sub}</span>}
+          {action}
+        </div>
+      )}
     </div>
   )
 }
@@ -38,6 +47,7 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
   const isUsdt = exchange === 'binance_futures'
   const fmt = isUsdt ? fmtUsdt : fmtKrw
   const { data, isLoading } = usePortfolioSummary(exchange)
+  const [capitalOpen, setCapitalOpen] = useState(false)
 
   if (isLoading || !data) {
     return (
@@ -63,6 +73,14 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
           label="총 자산"
           value={fmt(data.total_value_krw)}
           sub={data.initial_balance_krw > 0 ? `원금 ${fmt(data.initial_balance_krw)}` : undefined}
+          action={
+            <button
+              onClick={() => setCapitalOpen(true)}
+              className="text-[10px] px-1.5 py-0.5 rounded bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 font-medium"
+            >
+              입출금
+            </button>
+          }
         />
         <StatCard
           label="원금 대비 수익"
@@ -197,6 +215,8 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
           </div>
         </div>
       )}
+
+      <CapitalManager exchange={exchange} open={capitalOpen} onClose={() => setCapitalOpen(false)} />
     </div>
   )
 }

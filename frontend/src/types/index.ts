@@ -196,6 +196,28 @@ export interface ServerEvent {
   created_at: string
 }
 
+// ── Capital Transactions ─────────────────────────────────────
+export interface CapitalTransaction {
+  id: number
+  exchange: ExchangeName
+  tx_type: 'deposit' | 'withdrawal'
+  amount: number
+  currency: string
+  note: string | null
+  source: 'manual' | 'auto_detected' | 'seed'
+  confirmed: boolean
+  created_at: string
+}
+
+export interface CapitalSummary {
+  exchange: string
+  total_deposits: number
+  total_withdrawals: number
+  net_capital: number
+  currency: string
+  transaction_count: number
+}
+
 // ── WebSocket Events ─────────────────────────────────────────
 export type WsEvent =
   | { event: 'portfolio_update'; data: PortfolioSummary }
