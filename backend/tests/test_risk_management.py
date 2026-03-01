@@ -130,6 +130,78 @@ async def test_no_drawdown_when_at_peak(session):
 
 
 @pytest.mark.asyncio
+async def test_drawdown_uses_peak_value_not_max_total(session):
+    """출금 후 peak_value가 조정된 경우, MAX(total_value)가 아닌 latest peak_value 사용."""
+    agent = _make_agent(max_drawdown_pct=0.10, max_single_coin_pct=0.99)
+
+    # 과거 스냅샷: total_value=500k (출금 전 높은 값)
+    old_snap = PortfolioSnapshot(
+        total_value_krw=500_000,
+        cash_balance_krw=500_000,
+        invested_value_krw=0,
+        realized_pnl=0, unrealized_pnl=0,
+        peak_value=500_000, drawdown_pct=0,
+    )
+    session.add(old_snap)
+    await session.flush()
+
+    # 출금 후 최신 스냅샷: total_value=300k, peak_value=300k (비례 조정됨)
+    from sqlalchemy import update as sa_update
+    new_snap = PortfolioSnapshot(
+        total_value_krw=300_000,
+        cash_balance_krw=0,
+        invested_value_krw=300_000,
+        realized_pnl=0, unrealized_pnl=0,
+        peak_value=300_000, drawdown_pct=0,
+    )
+    session.add(new_snap)
+    await session.flush()
+
+    pos = Position(
+        symbol="BTC/KRW", quantity=0.001,
+        average_buy_price=50_000_000, total_invested=50_000,
+        is_paper=True,
+    )
+    session.add(pos)
+    await session.flush()
+
+    # 현재 가치 = 240k + 50k = 290k
+    # peak_value=300k → drawdown = 3.3% (< 10%) → 알림 없어야 함
+    # 만약 MAX(total)=500k 사용하면 → drawdown = 42% → 가짜 알림 발생
+    alerts = await agent.evaluate(session, cash_balance=240_000)
+    drawdown_alerts = [a for a in alerts if "낙폭" in a.message]
+    assert len(drawdown_alerts) == 0
+
+
+@pytest.mark.asyncio
+async def test_drawdown_no_peak_no_alert(session):
+    """peak_value가 없거나 0이면 drawdown 체크 skip."""
+    agent = _make_agent(max_drawdown_pct=0.10, max_single_coin_pct=0.99)
+
+    snap = PortfolioSnapshot(
+        total_value_krw=500_000,
+        cash_balance_krw=500_000,
+        invested_value_krw=0,
+        realized_pnl=0, unrealized_pnl=0,
+        peak_value=0, drawdown_pct=0,
+    )
+    session.add(snap)
+
+    pos = Position(
+        symbol="BTC/KRW", quantity=0.001,
+        average_buy_price=50_000_000, total_invested=50_000,
+        is_paper=True,
+    )
+    session.add(pos)
+    await session.flush()
+
+    # peak=0이면 drawdown 체크 안 함
+    alerts = await agent.evaluate(session, cash_balance=100_000)
+    drawdown_alerts = [a for a in alerts if "낙폭" in a.message]
+    assert len(drawdown_alerts) == 0
+
+
+@pytest.mark.asyncio
 async def test_concentration_alert(session):
     """Single coin > max_single_coin_pct → alert."""
     agent = _make_agent(max_single_coin_pct=0.40)

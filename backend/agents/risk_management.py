@@ -109,12 +109,14 @@ class RiskManagementAgent:
     ) -> None:
         """Check maximum drawdown from portfolio peak.
 
-        peak = MAX(total_value_krw) from snapshots (실제 포트폴리오 가치의 최대값).
-        기존 MAX(peak_value) 방식은 인메모리 값 의존 → 재시작 시 리셋 문제.
+        최신 스냅샷의 peak_value 사용 — 출금 시 비례 조정이 반영된 값.
+        MAX(total_value_krw)는 출금 전 값이 포함되어 가짜 드로다운 발생.
         """
         result = await session.execute(
-            select(func.max(PortfolioSnapshot.total_value_krw))
+            select(PortfolioSnapshot.peak_value)
             .where(PortfolioSnapshot.exchange == self._exchange_name)
+            .order_by(PortfolioSnapshot.snapshot_at.desc())
+            .limit(1)
         )
         peak = result.scalar()
         if not peak or peak <= 0:
