@@ -26,6 +26,7 @@ class PortfolioManager:
         self._exchange_name = exchange_name
         self._peak_value = initial_balance_krw
         self._realized_pnl = 0.0
+        self._peak_already_adjusted = False
 
     async def update_position_on_buy(
         self, session: AsyncSession, symbol: str, quantity: float, price: float, cost: float, fee: float,
@@ -591,6 +592,8 @@ class PortfolioManager:
         if snapshot:
             self._peak_value = snapshot.peak_value or self._peak_value
             self._realized_pnl = snapshot.realized_pnl or 0.0
+            # 스냅샷의 peak는 이미 출금 조정이 반영된 값 → 이중 조정 방지
+            self._peak_already_adjusted = True
             logger.info(
                 "portfolio_state_restored",
                 exchange=self._exchange_name,
@@ -630,7 +633,8 @@ class PortfolioManager:
             self._initial_balance = deposits - withdrawals
 
             # 출금 시 peak_value 비례 조정 (가짜 드로다운 방지)
-            if old_initial > 0 and withdrawals > 0:
+            # 단, restore_state_from_db()에서 이미 조정된 peak를 복원한 경우 이중 적용 방지
+            if old_initial > 0 and withdrawals > 0 and not self._peak_already_adjusted:
                 ratio = self._initial_balance / old_initial
                 if 0 < ratio < 1:
                     self._peak_value = self._peak_value * ratio

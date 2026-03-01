@@ -447,6 +447,73 @@ async def test_restore_state_no_snapshot_uses_cash(session):
     assert pm._peak_value == pytest.approx(300_000)
 
 
+# ── Peak 이중 조정 방지 (재시작 시 restore + load_initial) ──
+
+
+@pytest.mark.asyncio
+async def test_restore_then_load_no_double_peak_adjustment(session):
+    """restore_state_from_db 후 load_initial_balance_from_db → peak 이중 조정 안 됨."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+    )
+    # 스냅샷에 이미 출금 조정된 peak 저장
+    snapshot = PortfolioSnapshot(
+        exchange="bithumb",
+        total_value_krw=300_000,
+        cash_balance_krw=300_000,
+        invested_value_krw=0,
+        peak_value=312_000,  # 이미 0.6 ratio 적용된 값
+        realized_pnl=0,
+    )
+    session.add(snapshot)
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="deposit", amount=500_000,
+        currency="KRW", source="seed", confirmed=True,
+    ))
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="withdrawal", amount=200_000,
+        currency="KRW", source="manual", confirmed=True,
+    ))
+    await session.flush()
+
+    # 재시작 시 순서: restore → load_initial
+    await pm.restore_state_from_db(session)
+    assert pm._peak_value == pytest.approx(312_000)
+
+    await pm.load_initial_balance_from_db(session)
+    # 이중 조정 방지: peak는 312_000 유지 (187_200이 되면 안 됨)
+    assert pm._peak_value == pytest.approx(312_000)
+    assert pm._initial_balance == pytest.approx(300_000)
+
+
+@pytest.mark.asyncio
+async def test_first_run_withdrawal_adjusts_peak(session):
+    """스냅샷 없는 최초 실행 시에는 peak 조정이 정상 적용."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+    )
+    pm._peak_value = 520_000
+
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="deposit", amount=500_000,
+        currency="KRW", source="seed", confirmed=True,
+    ))
+    session.add(CapitalTransaction(
+        exchange="bithumb", tx_type="withdrawal", amount=200_000,
+        currency="KRW", source="manual", confirmed=True,
+    ))
+    await session.flush()
+
+    # 스냅샷 없이 restore → peak_already_adjusted = False
+    await pm.restore_state_from_db(session)
+
+    await pm.load_initial_balance_from_db(session)
+    # 최초 실행: restore에서 peak=cash=500_000, ratio=0.6 → peak=300_000
+    assert pm._peak_value == pytest.approx(300_000, abs=1)
+
+
 # ── Futures Cash Balance (unrealized PnL double-count fix) Tests ──
 
 
