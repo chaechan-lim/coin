@@ -42,6 +42,7 @@ coin/
 ├── backend/
 │   ├── main.py                  ✅ 완료
 │   ├── config.py                ✅ 완료
+│   ├── fetch_long_history.py    ✅ 완료 (바이낸스 장기 OHLCV → KRW CSV 캐시)
 │   ├── requirements.txt         ✅ 완료
 │   ├── Dockerfile               ✅ 완료
 │   ├── alembic.ini              ✅ 완료
@@ -260,7 +261,7 @@ coin/
 | 구조화된 로깅 (structlog) | ✅ 코드 내 적용 완료 |
 | 에러 핸들링 / 재연결 | ✅ 기본 구현 완료 |
 | 멀티 알림 (Telegram/Discord/Slack) | ✅ 3 프로바이더 지원, 복수 동시 발송, 15 tests |
-| Discord 이벤트 알림 (Embed) | ✅ event_bus 훅, 매매/시그널/리스크/일일요약 자동 전송, 레이트리밋, 17 tests |
+| Discord 이벤트 알림 (Embed) | ✅ event_bus 훅, 매매/시그널/리스크/일일요약 자동 전송, **매수/진입 시 손절가·익절가 표시**, 레이트리밋, 22 tests |
 | SQLite WAL 모드 | ✅ 동시 접근 안정화 |
 | 주문 fill 폴링 | ✅ 지정가 주문 체결/수수료 추적 |
 | emit_event 재시도 | ✅ DB locked 3회 재시도 |
@@ -279,7 +280,7 @@ coin/
 | 원금 대비 수익 표시 | ✅ initial_balance_krw + total_pnl_pct 원금 기준 |
 | 전략 성과 P&L 수정 | ✅ Lot-based FIFO 원가 매칭, **진입 전략에 PnL 귀속** (기존: 청산 전략에 PnL 귀속 → 오계산) |
 | 모바일 반응형 UI | ✅ 탭 스크롤, 테이블→카드, 터치 타겟, 전 컴포넌트 |
-| 단위 테스트 | ✅ 187개 (pytest + 인메모리 SQLite) |
+| 단위 테스트 | ✅ 194개 (pytest + 인메모리 SQLite) |
 | 거래 기본 필터 | ✅ 체결(filled)만 기본 표시, status 파라미터 |
 | 시작 시 현금 보정 | ✅ reconcile_cash_from_db at startup (peak 오염 방지) |
 | 0% 승률 전략 제거 | ✅ volatility_breakout/supertrend 비활성 → 6전략 체제 |
@@ -314,7 +315,7 @@ coin/
 |---|---|---|
 | 바이낸스 현물 연동 (v0.18) | 중 | ⬜ BinanceSpotAdapter, 현물 TradingEngine 추가 |
 | 시장 상태별 전략 on/off | 낮 | ⬜ 횡보 시 추세추종 완전 비활성 |
-| 멀티 심볼 백테스트 | 중 | ⬜ 현재 단일 심볼 → 포트폴리오 레벨 백테스트 |
+| 멀티 심볼 백테스트 | 중 | ✅ `--portfolio` 모드 (PortfolioBacktester, 540일 지원, fetch_long_history.py) |
 | Alembic 마이그레이션 정리 | 낮 | ⬜ 초기 마이그레이션 + 수동 migrate.py 혼재 |
 | 로그 로테이션/모니터링 | 낮 | ⬜ systemd journal 기반, 별도 로그 관리 미설정 |
 | 프론트엔드 nginx 직접 서빙 | 낮 | ⬜ 현재 serve -s dist → nginx static 전환 가능 |
@@ -731,5 +732,6 @@ docker compose restart backend
 | v0.17.6 | 2026-03-01 | **전략 성과 PnL 진입 전략 귀속**: Lot-based FIFO로 청산 PnL을 진입 전략에 귀속 (기존: 청산 전략에 귀속→futures_stop에 PnL 집중), DB 변경 없음, 155 테스트 |
 | v0.17.7 | 2026-03-01 | **멀티 알림 (Telegram/Discord/Slack)**: 3 프로바이더 동시 지원, 쉼표 구분 복수 발송, HTML→마크다운 변환, 15 tests (170개 총) |
 | v0.17.8 | 2026-03-01 | **Discord 이벤트 알림 강화**: event_bus notification 훅, DiscordEventHandler (Embed 포맷, 카테고리 필터, 5/5s 레이트리밋), 매매/SL·TP/선물/로테이션/리스크/시그널/일일요약 자동 전송, 통합 시그널 emit 추가, 일일 요약 스케줄러, 17 tests (187개 총) |
+| v0.17.9 | 2026-03-01 | **매수/진입 알림 손절가·익절가 표시 + 540일 백테스트**: 현물 매수·선물 롱/숏 진입 시 sl_price·tp_price Discord 알림 추가, combiner 로그 symbol 추가, fetch_long_history.py (바이낸스 장기 데이터→KRW CSV), 22 discord tests + 19 combiner tests (194개 총) |
 | v0.18 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
 | v1.0 | 진행중 | **라즈베리파이 배포 완료**, 장기 운영 안정화 |
