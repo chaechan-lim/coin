@@ -89,7 +89,11 @@ async def get_strategy_performance(
 
     # 2) 심볼별 포지션 추적 (FIFO 원가 계산)
     from collections import defaultdict
-    positions: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "cost": 0.0})
+    is_futures = "futures" in exchange
+
+    # 롱: buy=진입, sell=청산 / 숏: sell=진입, buy=청산
+    long_positions: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "cost": 0.0})
+    short_positions: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "cost": 0.0})
 
     winning = 0
     losing = 0
@@ -106,34 +110,64 @@ async def get_strategy_performance(
         if not price or not qty:
             continue
 
-        if order.side == "buy":
-            positions[sym]["cost"] += price * qty + fee
-            positions[sym]["qty"] += qty
-            # 기간 내 매수만 카운트
-            if order.strategy_name == name and ensure_aware(order.created_at) >= start:
-                trade_count += 1
+        direction = getattr(order, "direction", None) or "long"
+        is_short = is_futures and direction == "short"
+        in_period = order.strategy_name == name and ensure_aware(order.created_at) >= start
 
-        elif order.side == "sell":
-            pos = positions[sym]
-            if pos["qty"] > 0:
-                avg_buy = pos["cost"] / pos["qty"]
-                sell_qty = min(qty, pos["qty"])
-                pnl = (price - avg_buy) * sell_qty - fee
-
-                # 기간 내 + 해당 전략 매도만 성과에 반영
-                if order.strategy_name == name and ensure_aware(order.created_at) >= start:
-                    total_pnl += pnl
-                    ret_pct = pnl / (avg_buy * sell_qty) * 100 if avg_buy > 0 else 0
-                    returns.append(ret_pct)
+        if is_short:
+            # 숏: sell=진입, buy=청산
+            if order.side == "sell":
+                short_positions[sym]["cost"] += price * qty + fee
+                short_positions[sym]["qty"] += qty
+                if in_period:
                     trade_count += 1
-                    if pnl > 0:
-                        winning += 1
-                    else:
-                        losing += 1
+            elif order.side == "buy":
+                pos = short_positions[sym]
+                if pos["qty"] > 0:
+                    avg_entry = pos["cost"] / pos["qty"]
+                    close_qty = min(qty, pos["qty"])
+                    # 숏 PnL = (진입가 - 청산가) × qty - fee
+                    pnl = (avg_entry - price) * close_qty - fee
 
-                # 포지션 차감 (항상)
-                pos["cost"] -= avg_buy * sell_qty
-                pos["qty"] -= sell_qty
+                    if in_period:
+                        total_pnl += pnl
+                        ret_pct = pnl / (avg_entry * close_qty) * 100 if avg_entry > 0 else 0
+                        returns.append(ret_pct)
+                        trade_count += 1
+                        if pnl > 0:
+                            winning += 1
+                        else:
+                            losing += 1
+
+                    pos["cost"] -= avg_entry * close_qty
+                    pos["qty"] -= close_qty
+        else:
+            # 롱/현물: buy=진입, sell=청산
+            if order.side == "buy":
+                long_positions[sym]["cost"] += price * qty + fee
+                long_positions[sym]["qty"] += qty
+                if in_period:
+                    trade_count += 1
+
+            elif order.side == "sell":
+                pos = long_positions[sym]
+                if pos["qty"] > 0:
+                    avg_buy = pos["cost"] / pos["qty"]
+                    sell_qty = min(qty, pos["qty"])
+                    pnl = (price - avg_buy) * sell_qty - fee
+
+                    if in_period:
+                        total_pnl += pnl
+                        ret_pct = pnl / (avg_buy * sell_qty) * 100 if avg_buy > 0 else 0
+                        returns.append(ret_pct)
+                        trade_count += 1
+                        if pnl > 0:
+                            winning += 1
+                        else:
+                            losing += 1
+
+                    pos["cost"] -= avg_buy * sell_qty
+                    pos["qty"] -= sell_qty
 
     win_rate = winning / (winning + losing) * 100 if (winning + losing) > 0 else 0
     avg_return = sum(returns) / len(returns) if returns else 0

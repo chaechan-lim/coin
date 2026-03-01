@@ -18,19 +18,25 @@ async def _insert_orders(session: AsyncSession, orders: list[Order]):
     await session.flush()
 
 
-async def _calc_performance(session: AsyncSession, strategy_name: str, days: int = 30):
+async def _calc_performance(
+    session: AsyncSession, strategy_name: str, days: int = 30, exchange: str = "bithumb",
+):
     """Replicate the strategy performance calculation from api/strategies.py."""
     from collections import defaultdict
-    from core.utils import utcnow
+    from core.utils import utcnow, ensure_aware
 
     start = utcnow() - timedelta(days=days)
+    is_futures = "futures" in exchange
 
     result = await session.execute(
-        select(Order).where(Order.status == "filled").order_by(Order.created_at)
+        select(Order)
+        .where(Order.status == "filled", Order.exchange == exchange)
+        .order_by(Order.created_at)
     )
     all_orders = list(result.scalars().all())
 
-    positions: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "cost": 0.0})
+    long_positions: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "cost": 0.0})
+    short_positions: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "cost": 0.0})
     winning = 0
     losing = 0
     total_pnl = 0.0
@@ -46,31 +52,60 @@ async def _calc_performance(session: AsyncSession, strategy_name: str, days: int
         if not price or not qty:
             continue
 
-        from core.utils import ensure_aware
-        if order.side == "buy":
-            positions[sym]["cost"] += price * qty + fee
-            positions[sym]["qty"] += qty
-            if order.strategy_name == strategy_name and ensure_aware(order.created_at) >= start:
-                trade_count += 1
-        elif order.side == "sell":
-            pos = positions[sym]
-            if pos["qty"] > 0:
-                avg_buy = pos["cost"] / pos["qty"]
-                sell_qty = min(qty, pos["qty"])
-                pnl = (price - avg_buy) * sell_qty - fee
+        direction = getattr(order, "direction", None) or "long"
+        is_short = is_futures and direction == "short"
+        in_period = order.strategy_name == strategy_name and ensure_aware(order.created_at) >= start
 
-                if order.strategy_name == strategy_name and ensure_aware(order.created_at) >= start:
-                    total_pnl += pnl
-                    ret_pct = pnl / (avg_buy * sell_qty) * 100 if avg_buy > 0 else 0
-                    returns.append(ret_pct)
+        if is_short:
+            if order.side == "sell":
+                short_positions[sym]["cost"] += price * qty + fee
+                short_positions[sym]["qty"] += qty
+                if in_period:
                     trade_count += 1
-                    if pnl > 0:
-                        winning += 1
-                    else:
-                        losing += 1
+            elif order.side == "buy":
+                pos = short_positions[sym]
+                if pos["qty"] > 0:
+                    avg_entry = pos["cost"] / pos["qty"]
+                    close_qty = min(qty, pos["qty"])
+                    pnl = (avg_entry - price) * close_qty - fee
 
-                pos["cost"] -= avg_buy * sell_qty
-                pos["qty"] -= sell_qty
+                    if in_period:
+                        total_pnl += pnl
+                        ret_pct = pnl / (avg_entry * close_qty) * 100 if avg_entry > 0 else 0
+                        returns.append(ret_pct)
+                        trade_count += 1
+                        if pnl > 0:
+                            winning += 1
+                        else:
+                            losing += 1
+
+                    pos["cost"] -= avg_entry * close_qty
+                    pos["qty"] -= close_qty
+        else:
+            if order.side == "buy":
+                long_positions[sym]["cost"] += price * qty + fee
+                long_positions[sym]["qty"] += qty
+                if in_period:
+                    trade_count += 1
+            elif order.side == "sell":
+                pos = long_positions[sym]
+                if pos["qty"] > 0:
+                    avg_buy = pos["cost"] / pos["qty"]
+                    sell_qty = min(qty, pos["qty"])
+                    pnl = (price - avg_buy) * sell_qty - fee
+
+                    if in_period:
+                        total_pnl += pnl
+                        ret_pct = pnl / (avg_buy * sell_qty) * 100 if avg_buy > 0 else 0
+                        returns.append(ret_pct)
+                        trade_count += 1
+                        if pnl > 0:
+                            winning += 1
+                        else:
+                            losing += 1
+
+                    pos["cost"] -= avg_buy * sell_qty
+                    pos["qty"] -= sell_qty
 
     win_rate = winning / (winning + losing) * 100 if (winning + losing) > 0 else 0
     avg_return = sum(returns) / len(returns) if returns else 0
@@ -214,3 +249,130 @@ async def test_fee_included_in_cost_basis(session):
     # sell pnl = (50M - 50.5M)*0.001 - 500 = -500 - 500 = -1000
     assert result["total_pnl"] < 0, "Fees should cause net loss on flat trade"
     assert result["losing"] == 1
+
+
+# ── Futures Short PnL Tests ──
+
+
+@pytest.mark.asyncio
+async def test_futures_short_profitable(session):
+    """선물 숏: 높은 가격에 진입(sell), 낮은 가격에 청산(buy) → 수익."""
+    now = datetime.now(timezone.utc)
+    await _insert_orders(session, [
+        # 숏 진입: sell at 100,000
+        make_order(
+            symbol="BTC/USDT", side="sell", executed_price=100_000,
+            requested_quantity=0.01, executed_quantity=0.01,
+            fee=0.04, exchange="binance_futures", direction="short",
+            created_at=now - timedelta(hours=2),
+        ),
+        # 숏 청산: buy at 95,000
+        make_order(
+            symbol="BTC/USDT", side="buy", executed_price=95_000,
+            requested_quantity=0.01, executed_quantity=0.01,
+            fee=0.038, exchange="binance_futures", direction="short",
+            created_at=now - timedelta(hours=1),
+        ),
+    ])
+    await session.commit()
+
+    result = await _calc_performance(session, "rsi", exchange="binance_futures")
+    # PnL = (100000 - 95000) * 0.01 - 0.038 = 49.962
+    assert result["total_pnl"] > 0, f"Short should be profitable, got {result['total_pnl']}"
+    assert result["winning"] == 1
+    assert result["losing"] == 0
+
+
+@pytest.mark.asyncio
+async def test_futures_short_loss(session):
+    """선물 숏: 낮은 가격에 진입, 높은 가격에 청산 → 손실."""
+    now = datetime.now(timezone.utc)
+    await _insert_orders(session, [
+        make_order(
+            symbol="ETH/USDT", side="sell", executed_price=3000,
+            requested_quantity=0.1, executed_quantity=0.1,
+            fee=0.12, exchange="binance_futures", direction="short",
+            created_at=now - timedelta(hours=2),
+        ),
+        make_order(
+            symbol="ETH/USDT", side="buy", executed_price=3200,
+            requested_quantity=0.1, executed_quantity=0.1,
+            fee=0.128, exchange="binance_futures", direction="short",
+            created_at=now - timedelta(hours=1),
+        ),
+    ])
+    await session.commit()
+
+    result = await _calc_performance(session, "rsi", exchange="binance_futures")
+    # PnL = (3000 - 3200) * 0.1 - 0.128 = -20.128
+    assert result["total_pnl"] < 0, f"Short should be loss, got {result['total_pnl']}"
+    assert result["winning"] == 0
+    assert result["losing"] == 1
+
+
+@pytest.mark.asyncio
+async def test_futures_long_still_works(session):
+    """선물 롱은 기존과 동일하게 작동."""
+    now = datetime.now(timezone.utc)
+    await _insert_orders(session, [
+        make_order(
+            symbol="BTC/USDT", side="buy", executed_price=90_000,
+            requested_quantity=0.01, executed_quantity=0.01,
+            fee=0.036, exchange="binance_futures", direction="long",
+            created_at=now - timedelta(hours=2),
+        ),
+        make_order(
+            symbol="BTC/USDT", side="sell", executed_price=95_000,
+            requested_quantity=0.01, executed_quantity=0.01,
+            fee=0.038, exchange="binance_futures", direction="long",
+            created_at=now - timedelta(hours=1),
+        ),
+    ])
+    await session.commit()
+
+    result = await _calc_performance(session, "rsi", exchange="binance_futures")
+    assert result["total_pnl"] > 0
+    assert result["winning"] == 1
+
+
+@pytest.mark.asyncio
+async def test_futures_mixed_long_short(session):
+    """선물 롱+숏 혼합 시 각각 독립 계산."""
+    now = datetime.now(timezone.utc)
+    await _insert_orders(session, [
+        # 롱: buy 90k → sell 95k → profit
+        make_order(
+            symbol="BTC/USDT", side="buy", executed_price=90_000,
+            requested_quantity=0.01, executed_quantity=0.01,
+            fee=0, exchange="binance_futures", direction="long",
+            created_at=now - timedelta(hours=4),
+        ),
+        make_order(
+            symbol="BTC/USDT", side="sell", executed_price=95_000,
+            requested_quantity=0.01, executed_quantity=0.01,
+            fee=0, exchange="binance_futures", direction="long",
+            created_at=now - timedelta(hours=3),
+        ),
+        # 숏: sell 95k → buy 93k → profit
+        make_order(
+            symbol="BTC/USDT", side="sell", executed_price=95_000,
+            requested_quantity=0.01, executed_quantity=0.01,
+            fee=0, exchange="binance_futures", direction="short",
+            created_at=now - timedelta(hours=2),
+        ),
+        make_order(
+            symbol="BTC/USDT", side="buy", executed_price=93_000,
+            requested_quantity=0.01, executed_quantity=0.01,
+            fee=0, exchange="binance_futures", direction="short",
+            created_at=now - timedelta(hours=1),
+        ),
+    ])
+    await session.commit()
+
+    result = await _calc_performance(session, "rsi", exchange="binance_futures")
+    # 롱 PnL: (95k-90k)*0.01 = 50
+    # 숏 PnL: (95k-93k)*0.01 = 20
+    # 합계: 70
+    assert result["total_pnl"] == pytest.approx(70, abs=1)
+    assert result["winning"] == 2
+    assert result["losing"] == 0

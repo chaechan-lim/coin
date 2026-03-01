@@ -7,7 +7,7 @@ from core.utils import utcnow
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from core.models import Trade, Order, Position
+from core.models import Trade, Order, Position, CapitalTransaction
 from config import get_config
 
 logger = structlog.get_logger(__name__)
@@ -57,6 +57,23 @@ class TradeReviewAgent:
         if self._is_futures:
             return f"{amount:+,.2f} {self._currency}"
         return f"{amount:+,.0f} {self._currency}"
+
+    def _get_analysis_instructions(self) -> str:
+        """거래소별 LLM 분석 지시사항."""
+        if self._is_futures:
+            return (
+                "- 이 시스템은 USDM 선물 자동매매입니다. 롱/숏 양방향 거래를 합니다.\n"
+                "- 롱은 상승장, 숏은 하락장에서 수익을 내기 위한 **의도된 전략**입니다.\n"
+                "- 숏이 손실을 봤다면 '숏을 비활성화하라'가 아니라, 진입 타이밍/조건을 분석해주세요.\n"
+                "- 방향별 성과를 분리 분석하되, 각 방향의 시장 상황 적합성을 평가해주세요.\n"
+                "- 레버리지 3x, 동적 SL(ATR 기반), 듀얼 타임프레임(4h+1h) 기반입니다.\n"
+                "- 전략이 수익이 나고 있다면 긍정적으로 평가하고, 불필요한 변경을 권하지 마세요."
+            )
+        return (
+            "- 이 시스템은 현물 거래소입니다. 매수/매도 기반 분석을 해주세요.\n"
+            "- 비대칭 전략: 하락장에서 매수 차단, 상승장에서 적극 매수합니다.\n"
+            "- 서지(surge) 매매: 급등 코인 자동 감지 후 매수합니다."
+        )
 
     def _fmt_price(self, price: float) -> str:
         """가격 포맷."""
@@ -282,10 +299,12 @@ class TradeReviewAgent:
 
         # LLM 인사이트 (활성화 시 규칙 기반 대체)
         if self._llm_client:
+            # 입출금 정보 조회
+            capital_summary = await self._get_capital_summary(session)
             llm_insights, llm_recs = await self._generate_llm_insights(
                 sell_pnls, dict(by_strategy), dict(by_symbol), open_positions,
                 total_pnl, win_rate, profit_factor, total_fees,
-                len(buys), len(sells),
+                len(buys), len(sells), capital_summary,
             )
             if llm_insights:
                 insights = llm_insights
@@ -581,11 +600,11 @@ class TradeReviewAgent:
                 short_wr = sum(1 for t in short_trades if t["pnl"] > 0) / len(short_trades)
                 if long_wr > 0 and short_wr == 0 and len(short_trades) >= 2:
                     recs.append(
-                        f"숏 포지션 {len(short_trades)}건 전패 — 숏 진입 조건 강화 또는 숏 비활성화 검토"
+                        f"숏 포지션 {len(short_trades)}건 전패 — 숏 진입 타이밍/조건 강화 필요"
                     )
                 elif short_wr > 0 and long_wr == 0 and len(long_trades) >= 2:
                     recs.append(
-                        f"롱 포지션 {len(long_trades)}건 전패 — 시장 하락세 지속, 롱 진입 보수적 운영 검토"
+                        f"롱 포지션 {len(long_trades)}건 전패 — 롱 진입 타이밍/조건 강화 필요"
                     )
         else:
             # 현물 서지 매매 평가
@@ -651,6 +670,51 @@ class TradeReviewAgent:
 
         return recs
 
+    async def _get_capital_summary(self, session: AsyncSession) -> dict:
+        """입출금 내역 요약 조회."""
+        from sqlalchemy import func, case
+        result = await session.execute(
+            select(
+                func.coalesce(func.sum(
+                    case((CapitalTransaction.tx_type == "deposit", CapitalTransaction.amount), else_=0)
+                ), 0),
+                func.coalesce(func.sum(
+                    case((CapitalTransaction.tx_type == "withdrawal", CapitalTransaction.amount), else_=0)
+                ), 0),
+            ).where(
+                CapitalTransaction.exchange == self._exchange_name,
+                CapitalTransaction.confirmed == True,  # noqa: E712
+            )
+        )
+        deposits, withdrawals = result.one()
+
+        # 최근 출금 내역 (24시간 이내)
+        cutoff = utcnow() - timedelta(hours=self._review_window_hours)
+        recent_result = await session.execute(
+            select(CapitalTransaction)
+            .where(
+                CapitalTransaction.exchange == self._exchange_name,
+                CapitalTransaction.confirmed == True,  # noqa: E712
+                CapitalTransaction.created_at >= cutoff,
+            )
+            .order_by(CapitalTransaction.created_at.desc())
+        )
+        recent_txs = list(recent_result.scalars().all())
+
+        return {
+            "total_deposits": float(deposits),
+            "total_withdrawals": float(withdrawals),
+            "net_capital": float(deposits - withdrawals),
+            "recent_transactions": [
+                {
+                    "type": tx.tx_type,
+                    "amount": float(tx.amount),
+                    "currency": tx.currency,
+                }
+                for tx in recent_txs
+            ],
+        }
+
     def _init_llm(self) -> None:
         """LLM 클라이언트 초기화. API 키 없으면 비활성."""
         try:
@@ -678,6 +742,7 @@ class TradeReviewAgent:
         total_fees: float,
         buy_count: int,
         sell_count: int,
+        capital_summary: dict | None = None,
     ) -> tuple[list[str], list[str]]:
         """Claude API로 매매 회고 인사이트 생성."""
         if not self._llm_client or not self._llm_config:
@@ -688,11 +753,15 @@ class TradeReviewAgent:
         # 거래소 유형 설명
         if self._is_futures:
             exchange_desc = (
-                "바이낸스 USDM 선물 (레버리지 거래, 롱/숏 양방향 가능)\n"
-                "- 통화: USDT\n"
+                "바이낸스 USDM 선물 (레버리지 3x, 롱/숏 양방향)\n"
+                "- 통화: USDT, 수수료: maker/taker 0.04%\n"
                 "- 마진(margin): 실제 투입 금액, 노셔널: 마진×레버리지\n"
-                "- 청산가(liquidation price): 강제 청산 발동 가격\n"
-                "- 수수료: maker/taker 0.04%"
+                "- 전략 체계: 4h(장기) + 1h(단기) 듀얼 타임프레임 분석\n"
+                "- 방향 결정: 6개 전략(MA, RSI, MACD, Bollinger, Stochastic, OBV)의 "
+                "가중 합산 시그널이 BUY → 롱, SELL → 숏 진입\n"
+                "- 시장 상태별 포지션 사이징: crash 25%, downtrend 50%, 나머지 100%\n"
+                "- 숏은 하락장에서 수익을 내기 위한 **의도된 전략**임\n"
+                "- SL 8%, TP 16%, 트레일링 5/3.5% (레버리지 축소 적용)"
             )
         else:
             exchange_desc = (
@@ -769,6 +838,31 @@ class TradeReviewAgent:
         pnl_fmt = f"{total_pnl:+,.2f} {cur}" if self._is_futures else f"{total_pnl:+,.0f} {cur}"
         fee_fmt = f"{total_fees:,.2f} {cur}" if self._is_futures else f"{total_fees:,.0f} {cur}"
 
+        # 입출금 요약 (가용 시)
+        capital_text = ""
+        if capital_summary:
+            dep = capital_summary["total_deposits"]
+            wd = capital_summary["total_withdrawals"]
+            net = capital_summary["net_capital"]
+            recent = capital_summary["recent_transactions"]
+
+            if dep > 0 or wd > 0:
+                if self._is_futures:
+                    capital_text = f"\n## 입출금 현황\n- 총 입금: {dep:,.2f} {cur}, 총 출금: {wd:,.2f} {cur}, 순 원금: {net:,.2f} {cur}"
+                else:
+                    capital_text = f"\n## 입출금 현황\n- 총 입금: {dep:,.0f} {cur}, 총 출금: {wd:,.0f} {cur}, 순 원금: {net:,.0f} {cur}"
+
+                if recent:
+                    recent_lines = []
+                    for tx in recent:
+                        tx_label = "입금" if tx["type"] == "deposit" else "출금"
+                        if self._is_futures:
+                            recent_lines.append(f"  - {tx_label}: {tx['amount']:,.2f} {tx['currency']}")
+                        else:
+                            recent_lines.append(f"  - {tx_label}: {tx['amount']:,.0f} {tx['currency']}")
+                    capital_text += f"\n- 최근 {self._review_window_hours}시간 입출금:\n" + "\n".join(recent_lines)
+                capital_text += "\n- **주의: 출금은 자본 회수이지 거래 손실이 아닙니다. PnL 분석에서 출금을 손실로 해석하지 마세요.**"
+
         prompt = f"""당신은 암호화폐 자동매매 시스템의 트레이딩 분석가입니다.
 아래 최근 24시간 매매 데이터를 분석하고, 한국어로 인사이트와 추천을 생성해주세요.
 
@@ -780,7 +874,7 @@ class TradeReviewAgent:
 - 승률: {win_rate:.0%}, PF: {profit_factor:.2f}
 - 실현 PnL: {pnl_fmt}
 - 수수료: {fee_fmt}
-{direction_summary}
+{direction_summary}{capital_text}
 ## 최근 청산 거래
 {trades_text}
 
@@ -792,9 +886,8 @@ class TradeReviewAgent:
 
 ---
 주의사항:
-- 이 시스템은 {'USDM 선물 거래소입니다. 레버리지, 마진, 청산가 등 선물 특성을 반영하여 분석해주세요.' if self._is_futures else '현물 거래소입니다. 매수/매도 기반 분석을 해주세요.'}
-- {'롱/숏 양방향 거래를 하고 있으므로 각 방향별 성과를 분리 분석해주세요.' if self._is_futures else ''}
 - 통화 단위는 {cur}입니다.
+{self._get_analysis_instructions()}
 
 다음 형식으로 응답하세요:
 

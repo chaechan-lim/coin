@@ -445,3 +445,155 @@ async def test_restore_state_no_snapshot_uses_cash(session):
 
     await pm.restore_state_from_db(session)
     assert pm._peak_value == pytest.approx(300_000)
+
+
+# ── Futures Cash Balance (unrealized PnL double-count fix) Tests ──
+
+
+@pytest.mark.asyncio
+async def test_futures_sync_cash_excludes_unrealized_pnl(session):
+    """선물 sync에서 cash_balance는 walletBalance - margin (unrealizedPnL 제외)."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"BTC/USDT": 100_000}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+
+    # Mock exchange adapter
+    adapter = AsyncMock()
+    # Binance USDT: free=280 (wallet+unPnl-margin), used=30 (margin), total=320 (wallet+unPnl)
+    # wallet=300, unPnl=20, margin=40
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=280, used=40, total=320),
+    })
+    # Mock futures positions: 1 position with 20 USDT unrealized PnL
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[
+        {
+            "symbol": "BTC/USDT:USDT",
+            "contracts": 0.001,
+            "side": "long",
+            "initialMargin": 40,
+            "leverage": "3",
+            "entryPrice": 95000,
+            "liquidationPrice": 60000,
+            "notional": 120,
+            "unrealizedPnl": 20,
+        }
+    ])
+
+    # DB에 이미 포지션 존재
+    pos = Position(
+        exchange="binance_futures", symbol="BTC/USDT",
+        quantity=0.001, average_buy_price=95000,
+        total_invested=40, is_paper=False,
+        direction="long", leverage=3, margin_used=40,
+    )
+    session.add(pos)
+    await session.flush()
+
+    await pm.sync_exchange_positions(session, adapter, ["BTC/USDT"])
+
+    # cash = wallet(300) - margin(40) = 260, NOT 280 (which includes unPnL)
+    assert pm.cash_balance == pytest.approx(260, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_futures_total_value_no_double_unrealized_pnl(session):
+    """선물 total_value = wallet + unrealizedPnL (이중 계산 없음)."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"ETH/USDT": 3500}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+
+    adapter = AsyncMock()
+    # contracts=0.01, entry=3000, current=3500 → unPnl = 0.01*(3500-3000) = 5
+    # wallet=300, margin=50 → free = 300+5-50 = 255, total = 300+5 = 305
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=255, used=50, total=305),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[
+        {
+            "symbol": "ETH/USDT:USDT",
+            "contracts": 0.01,
+            "side": "long",
+            "initialMargin": 50,
+            "leverage": "3",
+            "entryPrice": 3000,
+            "liquidationPrice": 2000,
+            "notional": 150,
+            "unrealizedPnl": 5,
+        }
+    ])
+
+    pos = Position(
+        exchange="binance_futures", symbol="ETH/USDT",
+        quantity=0.01, average_buy_price=3000,
+        total_invested=50, is_paper=False,
+        direction="long", leverage=3, margin_used=50,
+    )
+    session.add(pos)
+    await session.flush()
+
+    await pm.sync_exchange_positions(session, adapter, ["ETH/USDT"])
+
+    # cash = wallet(300) - margin(50) = 250
+    assert pm.cash_balance == pytest.approx(250, abs=1)
+
+    summary = await pm.get_portfolio_summary(session)
+    # total = cash(250) + position_value(margin+unPnL = 50+5 = 55) = 305
+    # = wallet(300) + unPnL(5) = 305 (equity) ✓
+    assert summary["total_value_krw"] == pytest.approx(305, abs=2)
+
+
+@pytest.mark.asyncio
+async def test_futures_sync_no_positions_cash_equals_wallet(session):
+    """선물 포지션 없을 때 cash = wallet balance 전체."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+
+    adapter = AsyncMock()
+    # No positions: free=300, used=0, total=300 (wallet=300, unPnl=0)
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=300, used=0, total=300),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, [])
+
+    # cash = wallet(300) - margin(0) = 300
+    assert pm.cash_balance == pytest.approx(300, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_spot_sync_cash_uses_free_balance(session):
+    """현물 sync에서는 기존대로 free balance 사용."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+        exchange_name="bithumb",
+    )
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "KRW": Balance(currency="KRW", free=450_000, used=50_000, total=500_000),
+    })
+
+    await pm.sync_exchange_positions(session, adapter, [])
+
+    # 현물은 free 그대로
+    assert pm.cash_balance == pytest.approx(450_000, abs=1)

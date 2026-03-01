@@ -554,14 +554,28 @@ class PortfolioManager:
 
         # 실제 현금 기준으로 cash_balance 재설정 (initial_balance는 고정 원금 유지)
         old_cash = self._cash_balance
-        self._cash_balance = actual_cash
 
-        if synced_count > 0 or abs(old_cash - actual_cash) > 1.0:
+        if is_futures:
+            # 바이낸스 선물: USDT.free = walletBalance + unrealizedPnL - initialMargin
+            # get_portfolio_summary에서 position value = margin + unrealizedPnL을 더하므로
+            # cash_balance에 unrealizedPnL이 포함되면 이중 계산됨
+            # 수정: cash = walletBalance - totalMargin (unrealizedPnL 제외)
+            total_unrealized_exchange = sum(
+                float(fp.get("unrealizedPnl", 0) or 0)
+                for fp in futures_positions.values()
+            )
+            cash_total = cash_bal.total if cash_bal else 0
+            wallet_balance = cash_total - total_unrealized_exchange
+            self._cash_balance = wallet_balance - total_invested
+        else:
+            self._cash_balance = actual_cash
+
+        if synced_count > 0 or abs(old_cash - self._cash_balance) > 1.0:
             logger.info(
                 "exchange_positions_synced",
                 exchange=self._exchange_name,
                 synced=synced_count,
-                actual_cash=round(actual_cash, 2),
+                cash_balance=round(self._cash_balance, 2),
                 initial_balance=round(self._initial_balance, 2),
             )
 

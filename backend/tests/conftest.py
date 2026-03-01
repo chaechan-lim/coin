@@ -66,6 +66,7 @@ def make_order(
     status="filled",
     created_at=None,
     exchange="bithumb",
+    direction=None,
 ) -> Order:
     return Order(
         exchange=exchange,
@@ -84,6 +85,7 @@ def make_order(
         signal_confidence=0.7,
         signal_reason="test",
         created_at=created_at or datetime.now(timezone.utc),
+        direction=direction,
     )
 
 
