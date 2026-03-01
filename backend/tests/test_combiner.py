@@ -190,6 +190,32 @@ class TestDefaultWeights:
         assert set(combiner.weights.keys()) == expected
 
 
+# ── symbol 파라미터 ─────────────────────────────────────────
+
+
+class TestSymbolParameter:
+    def test_combine_with_symbol(self):
+        """symbol 파라미터 전달 시 정상 동작."""
+        combiner = SignalCombiner(
+            strategy_weights={"rsi": 0.25},
+            min_confidence=0.50,
+        )
+        result = combiner.combine(
+            [_signal("rsi", SignalType.BUY, 0.80)],
+            symbol="BTC/KRW",
+        )
+        assert result.action == SignalType.BUY
+
+    def test_combine_without_symbol(self):
+        """symbol 없이도 기존과 동일하게 동작."""
+        combiner = SignalCombiner(
+            strategy_weights={"rsi": 0.25},
+            min_confidence=0.50,
+        )
+        result = combiner.combine([_signal("rsi", SignalType.BUY, 0.80)])
+        assert result.action == SignalType.BUY
+
+
 # ── 미등록 전략 기본 가중치 ───────────────────────────────────
 
 

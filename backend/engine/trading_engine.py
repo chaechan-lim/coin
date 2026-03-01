@@ -776,7 +776,7 @@ class TradingEngine:
 
         # ── 4. 결합 판단 + 실행 ──
         if signals:
-            decision = self._combiner.combine(signals)
+            decision = self._combiner.combine(signals, symbol=symbol)
 
             # 통합 시그널 이벤트 (BUY/SELL만, HOLD 제외)
             if decision.action != SignalType.HOLD:
@@ -952,7 +952,7 @@ class TradingEngine:
         if not signals:
             return False, 0.0
 
-        decision = self._combiner.combine(signals)
+        decision = self._combiner.combine(signals, symbol=symbol)
 
         # BUY 시그널이 있으면 즉시 확인
         if (decision.action == SignalType.BUY
@@ -1241,8 +1241,12 @@ class TradingEngine:
                 sl_pct=round(sl_pct, 2),
                 market_state=self._market_state,
             )
+            tracker = self._position_trackers[symbol]
+            sl_price = round(price * (1 - tracker.stop_loss_pct / 100))
+            tp_price = round(price * (1 + tracker.take_profit_pct / 100))
             await emit_event("info", "trade", f"매수: {symbol}", metadata={
                 "price": price, "sl_pct": round(sl_pct, 2),
+                "sl_price": sl_price, "tp_price": tp_price,
                 "strategy": primary_signal.strategy_name,
                 "confidence": round(decision.combined_confidence, 2),
                 "amount_krw": round(amount_krw, 0),

@@ -79,7 +79,7 @@ class SignalCombiner:
     # 참여 가중치가 너무 낮으면 (소수 약한 전략만 의견) → HOLD.
     MIN_ACTIVE_WEIGHT = 0.12
 
-    def combine(self, signals: list[Signal], market_state: str | None = None) -> CombinedDecision:
+    def combine(self, signals: list[Signal], market_state: str | None = None, symbol: str | None = None) -> CombinedDecision:
         """
         Weighted voting to combine signals (HOLD = abstain).
 
@@ -158,6 +158,7 @@ class SignalCombiner:
 
         logger.info(
             "signals_combined",
+            symbol=symbol or "unknown",
             action=winning_type.value,
             confidence=winning_score,
             active_weight=round(active_weight, 3),

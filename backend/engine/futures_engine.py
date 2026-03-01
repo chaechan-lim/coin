@@ -492,7 +492,7 @@ class BinanceFuturesEngine(TradingEngine):
         for signal in signals:
             await self._order_manager.log_signal_only(session, signal, symbol)
 
-        decision = self._combiner.combine(signals, market_state=self._market_state)
+        decision = self._combiner.combine(signals, market_state=self._market_state, symbol=symbol)
         if decision.action == SignalType.HOLD:
             return
 
@@ -862,12 +862,16 @@ class BinanceFuturesEngine(TradingEngine):
             leverage=self._leverage, margin=round(margin, 2),
             sl_pct=round(sl_pct / sqrt_lev, 2),
         )
+        tracker = self._position_trackers[symbol]
+        sl_price = round(price * (1 - tracker.stop_loss_pct / 100), 4)
+        tp_price = round(price * (1 + tracker.take_profit_pct / 100), 4)
         await emit_event("info", "trade", f"선물 롱: {symbol}", metadata={
             "price": price, "leverage": self._leverage,
             "margin": round(margin, 2),
             "strategy": signal.strategy_name,
             "confidence": round(decision.combined_confidence, 2),
             "sl_pct": round(sl_pct / sqrt_lev, 2),
+            "sl_price": sl_price, "tp_price": tp_price,
             "market_state": self._market_state,
         })
 
@@ -960,12 +964,16 @@ class BinanceFuturesEngine(TradingEngine):
             leverage=self._leverage, margin=round(margin, 2),
             sl_pct=round(sl_pct / sqrt_lev, 2),
         )
+        tracker = self._position_trackers[symbol]
+        sl_price = round(price * (1 + tracker.stop_loss_pct / 100), 4)
+        tp_price = round(price * (1 - tracker.take_profit_pct / 100), 4)
         await emit_event("info", "trade", f"선물 숏: {symbol}", metadata={
             "price": price, "leverage": self._leverage,
             "margin": round(margin, 2),
             "strategy": signal.strategy_name,
             "confidence": round(decision.combined_confidence, 2),
             "sl_pct": round(sl_pct / sqrt_lev, 2),
+            "sl_price": sl_price, "tp_price": tp_price,
             "market_state": self._market_state,
         })
 

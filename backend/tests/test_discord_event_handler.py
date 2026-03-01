@@ -32,6 +32,38 @@ def test_trade_buy_embed():
     assert any(f["name"] == "전략" for f in embed["fields"])
 
 
+def test_trade_buy_embed_with_sl_tp():
+    """현물 매수 시 손절가/익절가 필드 표시."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "trade", "매수: BTC/KRW", None,
+        {
+            "price": 100_000_000, "amount_krw": 500_000,
+            "strategy": "rsi", "confidence": 0.72,
+            "sl_price": 95_000_000, "tp_price": 110_000_000,
+            "market_state": "sideways",
+        },
+    )
+    assert embed is not None
+    sl = [f for f in embed["fields"] if f["name"] == "손절가"]
+    tp = [f for f in embed["fields"] if f["name"] == "익절가"]
+    assert len(sl) == 1
+    assert "95,000,000" in sl[0]["value"]
+    assert len(tp) == 1
+    assert "110,000,000" in tp[0]["value"]
+
+
+def test_trade_sell_embed_no_sl_tp():
+    """매도 시에는 sl_price/tp_price 없으므로 손절가/익절가 필드 없음."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "trade", "매도: ETH/KRW", None,
+        {"price": 5_000_000, "strategy": "macd_crossover", "confidence": 0.65, "pnl_pct": 3.5},
+    )
+    assert embed is not None
+    assert not any(f["name"] in ("손절가", "익절가") for f in embed["fields"])
+
+
 def test_trade_sell_embed():
     h = _make_handler()
     embed = h._format_event(
@@ -70,6 +102,56 @@ def test_futures_long_embed():
     assert embed["color"] == 0x2ECC71  # green (long)
     lev = [f for f in embed["fields"] if f["name"] == "레버리지"]
     assert lev[0]["value"] == "3x"
+
+
+def test_futures_long_embed_with_sl_tp():
+    """선물 롱 진입 시 손절가/익절가 표시 (가격 >= 10 → 소수점 2자리)."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "futures_trade", "선물 롱: SOL/USDT", None,
+        {
+            "price": 86.48, "strategy": "rsi", "confidence": 0.72,
+            "leverage": 3, "sl_price": 82.42, "tp_price": 94.42,
+        },
+    )
+    assert embed is not None
+    sl = [f for f in embed["fields"] if f["name"] == "손절가"]
+    tp = [f for f in embed["fields"] if f["name"] == "익절가"]
+    assert len(sl) == 1
+    assert "82.42" in sl[0]["value"]
+    assert "USDT" in sl[0]["value"]
+    assert len(tp) == 1
+    assert "94.42" in tp[0]["value"]
+
+
+def test_futures_short_embed_with_sl_tp_small_price():
+    """선물 숏 진입 시 손절가/익절가 표시 (가격 < 10 → 소수점 4자리)."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "futures_trade", "선물 숏: DOGE/USDT", None,
+        {
+            "price": 0.0954, "strategy": "bollinger_rsi", "confidence": 0.68,
+            "leverage": 3, "sl_price": 0.0998, "tp_price": 0.0877,
+        },
+    )
+    assert embed is not None
+    sl = [f for f in embed["fields"] if f["name"] == "손절가"]
+    tp = [f for f in embed["fields"] if f["name"] == "익절가"]
+    assert len(sl) == 1
+    assert "0.0998" in sl[0]["value"]
+    assert len(tp) == 1
+    assert "0.0877" in tp[0]["value"]
+
+
+def test_futures_close_embed_no_sl_tp():
+    """선물 청산 시에는 sl_price/tp_price 없으므로 손절가/익절가 필드 없음."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "futures_trade", "선물 청산: BTC/USDT", None,
+        {"price": 65000.0, "pnl_pct": 5.2, "leverage": 3},
+    )
+    assert embed is not None
+    assert not any(f["name"] in ("손절가", "익절가") for f in embed["fields"])
 
 
 def test_futures_short_embed():

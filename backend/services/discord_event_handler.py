@@ -137,6 +137,10 @@ class DiscordEventHandler:
             pnl = meta["pnl_pct"]
             sign = "+" if pnl >= 0 else ""
             fields.append({"name": "PnL", "value": f"{sign}{pnl:.2f}%", "inline": True})
+        if meta.get("sl_price") is not None:
+            fields.append({"name": "손절가", "value": f"{meta['sl_price']:,.0f}", "inline": True})
+        if meta.get("tp_price") is not None:
+            fields.append({"name": "익절가", "value": f"{meta['tp_price']:,.0f}", "inline": True})
         if meta.get("market_state"):
             fields.append({"name": "시장", "value": meta["market_state"], "inline": True})
         return {"title": title, "color": color, "fields": fields}
@@ -182,6 +186,14 @@ class DiscordEventHandler:
             fields.append({"name": "PnL", "value": f"{sign}{pnl:.2f}%", "inline": True})
         if meta.get("leverage"):
             fields.append({"name": "레버리지", "value": f"{meta['leverage']}x", "inline": True})
+        if meta.get("sl_price") is not None:
+            v = meta["sl_price"]
+            fmt = f"{v:,.2f}" if v >= 10 else f"{v:,.4f}"
+            fields.append({"name": "손절가", "value": f"{fmt} USDT", "inline": True})
+        if meta.get("tp_price") is not None:
+            v = meta["tp_price"]
+            fmt = f"{v:,.2f}" if v >= 10 else f"{v:,.4f}"
+            fields.append({"name": "익절가", "value": f"{fmt} USDT", "inline": True})
         return {"title": title, "color": color, "fields": fields}
 
     def _format_rotation(self, title: str, meta: dict) -> dict:
