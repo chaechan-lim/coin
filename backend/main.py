@@ -401,13 +401,23 @@ async def lifespan(app: FastAPI):
         if binance_coord and binance_pm_init:
             asyncio.create_task(_run_initial_analysis(binance_coord, binance_pm_init, config))
 
+    # 실제 추적 코인 리스트 (엔진 인스턴스 기반)
+    spot_coins = _engine_instance._config.trading.tracked_coins if _engine_instance else config.trading.tracked_coins
+    futures_coins = _binance_engine._config.binance.tracked_coins if _binance_engine else config.binance.tracked_coins
+
     await notification.send_engine_alert(
         f"🚀 트레이딩 봇 시작 ({config.trading.mode.upper()} 모드)\n"
-        f"추적 코인: {', '.join(config.trading.tracked_coins)}"
-        + (f"\n바이낸스 선물: {', '.join(config.binance.tracked_coins)}" if config.binance.enabled else "")
+        f"추적 코인: {', '.join(spot_coins)}"
+        + (f"\n바이낸스 선물: {', '.join(futures_coins)}" if config.binance.enabled else "")
     )
     logger.info("startup_complete")
-    await emit_event("info", "system", "서버 시작", detail=f"{config.trading.mode} 모드")
+    startup_detail = (
+        f"{config.trading.mode} 모드 | "
+        f"현물: {', '.join(spot_coins)}"
+    )
+    if config.binance.enabled:
+        startup_detail += f" | 선물: {', '.join(futures_coins)}"
+    await emit_event("info", "system", "서버 시작", detail=startup_detail)
 
     yield  # ─── 앱 실행 중 ───
 
