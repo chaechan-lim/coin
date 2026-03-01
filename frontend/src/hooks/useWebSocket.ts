@@ -13,14 +13,13 @@ export function useWebSocket(onMessage: EventHandler) {
     const url = `${protocol}://${window.location.host}/ws/dashboard`
     const ws = new WebSocket(url)
     wsRef.current = ws
+    let pingInterval: ReturnType<typeof setInterval> | undefined
 
     ws.onopen = () => {
       setConnected(true)
-      // Send ping every 30s to keep alive
-      const pingInterval = setInterval(() => {
+      pingInterval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send('ping')
       }, 30_000)
-      ws.onclose = () => clearInterval(pingInterval)
     }
 
     ws.onmessage = (e) => {
@@ -33,8 +32,8 @@ export function useWebSocket(onMessage: EventHandler) {
     }
 
     ws.onclose = () => {
+      clearInterval(pingInterval)
       setConnected(false)
-      // Reconnect after 3s
       reconnectTimer.current = setTimeout(connect, 3_000)
     }
 

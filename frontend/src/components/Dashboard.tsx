@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { PortfolioSummary } from './PortfolioSummary'
 import { PortfolioChart } from './PortfolioChart'
@@ -37,6 +37,7 @@ export function Dashboard() {
   const [liveEvents, setLiveEvents] = useState<string[]>([])
   const [realtimeServerEvents, setRealtimeServerEvents] = useState<ServerEvent[]>([])
   const qc = useQueryClient()
+  const serverEventInvalidateTimer = useRef<ReturnType<typeof setTimeout>>()
 
   // 사용 가능한 거래소 목록 조회
   const { data: exchangeInfo } = useQuery({
@@ -81,7 +82,11 @@ export function Dashboard() {
       } else if (event.event === 'server_event') {
         const d = event.data
         setRealtimeServerEvents((prev) => [d, ...prev.slice(0, 99)])
-        qc.invalidateQueries({ queryKey: ['serverEvents'] })
+        // Debounce query invalidation to avoid excessive API calls
+        clearTimeout(serverEventInvalidateTimer.current)
+        serverEventInvalidateTimer.current = setTimeout(() => {
+          qc.invalidateQueries({ queryKey: ['serverEvents'] })
+        }, 2_000)
       }
     },
     [qc]
