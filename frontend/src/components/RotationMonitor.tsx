@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { getRotationStatus } from '../api/client'
+import { getRotationStatus, getMarketAnalysis } from '../api/client'
 import { format } from 'date-fns'
 import type { RotationStatus, ExchangeName } from '../types'
 
@@ -21,6 +21,14 @@ export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeN
     refetchInterval: 30_000,
   })
 
+  // 시장 상태는 에이전트 탭과 동일한 소스 사용 (동기화)
+  const { data: analysis } = useQuery({
+    queryKey: ['agents', 'market-analysis', exchange],
+    queryFn: () => getMarketAnalysis(exchange),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  })
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-64 text-gray-400">
@@ -37,8 +45,10 @@ export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeN
     )
   }
 
-  const marketInfo = MARKET_STATE_LABELS[data.market_state] ?? {
-    label: data.market_state,
+  // 에이전트 분석 상태 우선, 없으면 엔진 상태 폴백
+  const marketState = analysis?.state ?? data.market_state
+  const marketInfo = MARKET_STATE_LABELS[marketState] ?? {
+    label: marketState,
     color: 'text-gray-400',
   }
 
