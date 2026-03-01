@@ -453,29 +453,39 @@ async def lifespan(app: FastAPI):
 
 
 async def _build_positions_summary(registry) -> str:
-    """현재 보유 포지션 요약 문자열 생성."""
+    """현재 보유 포지션 요약 문자열 생성 (DB 조회)."""
+    from db.session import get_session_factory
+    from core.models import Position
+
     parts = []
-    for ex_name in registry.available_exchanges:
-        pm = registry.get_portfolio_manager(ex_name)
-        if not pm:
-            continue
-        pos_list = []
-        for sym, pos in pm.positions.items():
-            qty = pos.get("quantity", 0)
-            if qty <= 0:
-                continue
-            direction = pos.get("direction", "long")
-            arrow = "↑" if direction == "long" else "↓"
-            pnl = pos.get("unrealized_pnl_pct", 0)
-            sign = "+" if pnl >= 0 else ""
-            pos_list.append(f"{sym.split('/')[0]}{arrow}({sign}{pnl:.1f}%)")
-        currency = "USDT" if "binance" in ex_name else "KRW"
-        label = "현물" if "bithumb" in ex_name else "선물"
-        cash = pm.cash_balance
-        if pos_list:
-            parts.append(f"[{label}] {', '.join(pos_list)} | 현금 {cash:,.0f} {currency}")
-        else:
-            parts.append(f"[{label}] 포지션 없음 | 현금 {cash:,.0f} {currency}")
+    try:
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            for ex_name in registry.available_exchanges:
+                pm = registry.get_portfolio_manager(ex_name)
+                if not pm:
+                    continue
+                result = await session.execute(
+                    select(Position).where(
+                        Position.exchange == ex_name,
+                        Position.quantity > 0,
+                    )
+                )
+                positions = result.scalars().all()
+                pos_list = []
+                for pos in positions:
+                    direction = getattr(pos, "direction", "long") or "long"
+                    arrow = "↑" if direction == "long" else "↓"
+                    pos_list.append(f"{pos.symbol.split('/')[0]}{arrow}")
+                currency = "USDT" if "binance" in ex_name else "KRW"
+                label = "현물" if "bithumb" in ex_name else "선물"
+                cash = pm.cash_balance
+                if pos_list:
+                    parts.append(f"[{label}] {', '.join(pos_list)} | 현금 {cash:,.0f} {currency}")
+                else:
+                    parts.append(f"[{label}] 포지션 없음 | 현금 {cash:,.0f} {currency}")
+    except Exception as e:
+        logger.warning("build_positions_summary_failed", error=str(e))
     return "\n".join(parts)
 
 
