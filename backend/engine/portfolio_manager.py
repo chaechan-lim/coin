@@ -172,6 +172,19 @@ class PortfolioManager:
                 total_invested += pos.total_invested
                 total_current_value += current_value
 
+                # SL/TP 가격 계산
+                sl_pct = getattr(pos, "stop_loss_pct", None)
+                tp_pct = getattr(pos, "take_profit_pct", None)
+                entry = pos.average_buy_price
+                _is_short = is_futures and getattr(pos, "direction", "long") == "short"
+
+                sl_price = None
+                tp_price = None
+                if sl_pct and entry:
+                    sl_price = entry * (1 + sl_pct / 100) if _is_short else entry * (1 - sl_pct / 100)
+                if tp_pct and entry:
+                    tp_price = entry * (1 - tp_pct / 100) if _is_short else entry * (1 + tp_pct / 100)
+
                 position_details.append({
                     "symbol": pos.symbol,
                     "quantity": pos.quantity,
@@ -183,6 +196,10 @@ class PortfolioManager:
                     "direction": getattr(pos, "direction", None),
                     "leverage": getattr(pos, "leverage", None),
                     "liquidation_price": getattr(pos, "liquidation_price", None),
+                    "stop_loss_price": round(sl_price, 4) if sl_price else None,
+                    "take_profit_price": round(tp_price, 4) if tp_price else None,
+                    "trailing_active": getattr(pos, "trailing_active", None),
+                    "is_surge": getattr(pos, "is_surge", None),
                 })
             except Exception as e:
                 logger.warning("price_fetch_failed", symbol=pos.symbol, error=str(e))

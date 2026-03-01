@@ -124,6 +124,14 @@ class Position(Base):
     liquidation_price = Column(Float, nullable=True)
     margin_used = Column(Float, default=0.0)
     entered_at = Column(DateTime, nullable=True)
+    # PositionTracker 영속화 (SL/TP/trailing 재시작 복원)
+    stop_loss_pct = Column(Float, nullable=True)
+    take_profit_pct = Column(Float, nullable=True)
+    trailing_activation_pct = Column(Float, nullable=True)
+    trailing_stop_pct = Column(Float, nullable=True)
+    trailing_active = Column(Boolean, default=False)
+    highest_price = Column(Float, nullable=True)
+    max_hold_hours = Column(Float, nullable=True)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 

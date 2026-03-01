@@ -504,26 +504,49 @@ class BinanceFuturesEngine(TradingEngine):
         """선물 SL/TP/청산가 체크 — 숏은 방향 반전."""
         tracker = self._position_trackers.get(symbol)
         if not tracker:
-            # 트래커 복원
-            lev = position.leverage or self._leverage
-            sqrt_lev = math.sqrt(lev)
-            sl_pct = _FUTURES_DEFAULT_SL_PCT / sqrt_lev
-            tp_pct = _FUTURES_DEFAULT_TP_PCT / sqrt_lev
-            trail_act = _FUTURES_TRAILING_ACTIVATION / sqrt_lev
-            trail_stop = _FUTURES_TRAILING_STOP / sqrt_lev
-            tracker = PositionTracker(
-                entry_price=position.average_buy_price,
-                highest_price=position.average_buy_price,
-                stop_loss_pct=sl_pct,
-                take_profit_pct=tp_pct,
-                trailing_activation_pct=trail_act,
-                trailing_stop_pct=trail_stop,
-            )
-            if position.entered_at:
-                ea = position.entered_at
-                if ea.tzinfo is None:
-                    ea = ea.replace(tzinfo=timezone.utc)
-                tracker.entered_at = ea
+            if position.stop_loss_pct is not None:
+                # DB에 저장된 트래커 값으로 복원
+                tracker = PositionTracker(
+                    entry_price=position.average_buy_price,
+                    highest_price=position.highest_price or position.average_buy_price,
+                    stop_loss_pct=position.stop_loss_pct,
+                    take_profit_pct=position.take_profit_pct or 10.0,
+                    trailing_activation_pct=position.trailing_activation_pct or 3.0,
+                    trailing_stop_pct=position.trailing_stop_pct or 3.0,
+                    trailing_active=position.trailing_active or False,
+                    is_surge=position.is_surge or False,
+                    max_hold_hours=position.max_hold_hours or 0,
+                )
+                if position.entered_at:
+                    ea = position.entered_at
+                    if ea.tzinfo is None:
+                        ea = ea.replace(tzinfo=timezone.utc)
+                    tracker.entered_at = ea
+                logger.info("tracker_restored_from_db", symbol=symbol,
+                            sl=round(tracker.stop_loss_pct, 2),
+                            trailing_active=tracker.trailing_active,
+                            highest_price=round(tracker.highest_price, 4))
+            else:
+                # 마이그레이션 전 포지션 → 기본값으로 복원
+                lev = position.leverage or self._leverage
+                sqrt_lev = math.sqrt(lev)
+                sl_pct = _FUTURES_DEFAULT_SL_PCT / sqrt_lev
+                tp_pct = _FUTURES_DEFAULT_TP_PCT / sqrt_lev
+                trail_act = _FUTURES_TRAILING_ACTIVATION / sqrt_lev
+                trail_stop = _FUTURES_TRAILING_STOP / sqrt_lev
+                tracker = PositionTracker(
+                    entry_price=position.average_buy_price,
+                    highest_price=position.average_buy_price,
+                    stop_loss_pct=sl_pct,
+                    take_profit_pct=tp_pct,
+                    trailing_activation_pct=trail_act,
+                    trailing_stop_pct=trail_stop,
+                )
+                if position.entered_at:
+                    ea = position.entered_at
+                    if ea.tzinfo is None:
+                        ea = ea.replace(tzinfo=timezone.utc)
+                    tracker.entered_at = ea
             self._position_trackers[symbol] = tracker
 
         try:
@@ -547,15 +570,18 @@ class BinanceFuturesEngine(TradingEngine):
                 return True
 
         # PnL 계산 (방향별)
+        tracker_changed = False
         if direction == "long":
             pnl_pct = (price - entry) / entry * 100
             if price > tracker.highest_price:
                 tracker.highest_price = price
+                tracker_changed = True
         else:  # short
             pnl_pct = (entry - price) / entry * 100
             # 숏은 lowest_price 추적 (highest_price 변수를 lowest로 재활용)
             if price < tracker.highest_price:
                 tracker.highest_price = price  # lowest price for short
+                tracker_changed = True
 
         sell_reason = None
 
@@ -564,6 +590,7 @@ class BinanceFuturesEngine(TradingEngine):
                 and not tracker.trailing_active
                 and pnl_pct >= tracker.trailing_activation_pct):
             tracker.trailing_active = True
+            tracker_changed = True
 
         # 트레일링 스탑
         if tracker.trailing_active and tracker.trailing_stop_pct > 0:
@@ -584,6 +611,10 @@ class BinanceFuturesEngine(TradingEngine):
                 and tracker.take_profit_pct > 0
                 and pnl_pct >= tracker.take_profit_pct):
             sell_reason = f"TP: +{pnl_pct:.2f}% (목표 +{tracker.take_profit_pct:.1f}%)"
+
+        # trailing_active/highest_price 변경 시 DB 반영
+        if tracker_changed and not sell_reason:
+            await self._save_tracker_to_db(session, symbol, tracker)
 
         if sell_reason:
             await self._close_position(session, symbol, position, price, sell_reason)
@@ -853,6 +884,7 @@ class BinanceFuturesEngine(TradingEngine):
             trailing_activation_pct=_FUTURES_TRAILING_ACTIVATION / sqrt_lev,
             trailing_stop_pct=_FUTURES_TRAILING_STOP / sqrt_lev,
         )
+        await self._save_tracker_to_db(session, symbol, self._position_trackers[symbol])
 
         self._daily_buy_count += 1
         self._daily_coin_buy_count[symbol] = self._daily_coin_buy_count.get(symbol, 0) + 1
@@ -955,6 +987,7 @@ class BinanceFuturesEngine(TradingEngine):
             trailing_activation_pct=_FUTURES_TRAILING_ACTIVATION / sqrt_lev,
             trailing_stop_pct=_FUTURES_TRAILING_STOP / sqrt_lev,
         )
+        await self._save_tracker_to_db(session, symbol, self._position_trackers[symbol])
 
         self._daily_buy_count += 1
         self._daily_coin_buy_count[symbol] = self._daily_coin_buy_count.get(symbol, 0) + 1

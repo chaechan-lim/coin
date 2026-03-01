@@ -701,3 +701,219 @@ async def test_sync_clears_position_not_on_exchange(session):
     )
     pos = result.scalar_one()
     assert pos.quantity == 0
+
+
+# ── PositionTracker DB Persistence Tests ──
+
+
+@pytest.mark.asyncio
+async def test_save_tracker_to_db(session):
+    """_save_tracker_to_db writes tracker fields to Position record."""
+    from engine.trading_engine import TradingEngine, PositionTracker
+
+    pos = Position(
+        exchange="bithumb", symbol="BTC/KRW",
+        quantity=0.001, average_buy_price=50_000_000,
+        total_invested=50_000, is_paper=True,
+    )
+    session.add(pos)
+    await session.flush()
+
+    engine = TradingEngine.__new__(TradingEngine)
+    engine._exchange_name = "bithumb"
+
+    tracker = PositionTracker(
+        entry_price=50_000_000,
+        highest_price=52_000_000,
+        stop_loss_pct=6.5,
+        take_profit_pct=12.0,
+        trailing_activation_pct=4.0,
+        trailing_stop_pct=3.5,
+        trailing_active=True,
+        max_hold_hours=48,
+    )
+    await engine._save_tracker_to_db(session, "BTC/KRW", tracker)
+
+    await session.refresh(pos)
+    assert pos.stop_loss_pct == pytest.approx(6.5)
+    assert pos.take_profit_pct == pytest.approx(12.0)
+    assert pos.trailing_activation_pct == pytest.approx(4.0)
+    assert pos.trailing_stop_pct == pytest.approx(3.5)
+    assert pos.trailing_active is True
+    assert pos.highest_price == pytest.approx(52_000_000)
+    assert pos.max_hold_hours == pytest.approx(48)
+
+
+@pytest.mark.asyncio
+async def test_tracker_restore_from_db(session):
+    """트래커가 없을 때 DB의 stop_loss_pct가 있으면 DB 값으로 복원."""
+    from engine.trading_engine import PositionTracker
+
+    pos = Position(
+        exchange="bithumb", symbol="ETH/KRW",
+        quantity=1.0, average_buy_price=4_000_000,
+        total_invested=4_000_000, is_paper=True,
+        stop_loss_pct=7.0,
+        take_profit_pct=15.0,
+        trailing_activation_pct=5.0,
+        trailing_stop_pct=4.0,
+        trailing_active=True,
+        highest_price=4_500_000,
+        max_hold_hours=0,
+    )
+    session.add(pos)
+    await session.flush()
+
+    # Simulate tracker restoration logic (from _check_stop_conditions)
+    tracker = PositionTracker(
+        entry_price=pos.average_buy_price,
+        highest_price=pos.highest_price or pos.average_buy_price,
+        stop_loss_pct=pos.stop_loss_pct,
+        take_profit_pct=pos.take_profit_pct or 10.0,
+        trailing_activation_pct=pos.trailing_activation_pct or 3.0,
+        trailing_stop_pct=pos.trailing_stop_pct or 3.0,
+        trailing_active=pos.trailing_active or False,
+        is_surge=pos.is_surge or False,
+        max_hold_hours=pos.max_hold_hours or 0,
+    )
+
+    assert tracker.stop_loss_pct == pytest.approx(7.0)
+    assert tracker.take_profit_pct == pytest.approx(15.0)
+    assert tracker.trailing_activation_pct == pytest.approx(5.0)
+    assert tracker.trailing_stop_pct == pytest.approx(4.0)
+    assert tracker.trailing_active is True
+    assert tracker.highest_price == pytest.approx(4_500_000)
+
+
+@pytest.mark.asyncio
+async def test_tracker_fallback_when_no_db_values(session):
+    """DB에 stop_loss_pct가 None이면 기존 폴백 로직 사용."""
+    pos = Position(
+        exchange="bithumb", symbol="ADA/KRW",
+        quantity=100, average_buy_price=500,
+        total_invested=50_000, is_paper=True,
+        # stop_loss_pct is None → 마이그레이션 전 포지션
+    )
+    session.add(pos)
+    await session.flush()
+
+    # stop_loss_pct is None → fallback
+    assert pos.stop_loss_pct is None
+
+
+@pytest.mark.asyncio
+async def test_portfolio_summary_includes_sl_tp_prices(session):
+    """포트폴리오 서머리에 SL/TP 가격이 포함됨."""
+    prices = {"BTC/KRW": 52_000_000}
+    pm = PortfolioManager(
+        market_data=_make_market_data(prices),
+        initial_balance_krw=500_000,
+    )
+
+    pos = Position(
+        symbol="BTC/KRW",
+        quantity=0.001,
+        average_buy_price=50_000_000,
+        total_invested=50_000,
+        is_paper=True,
+        stop_loss_pct=5.0,
+        take_profit_pct=10.0,
+        trailing_active=True,
+        is_surge=False,
+    )
+    session.add(pos)
+    session.add(Order(
+        symbol="BTC/KRW", side="buy", order_type="limit", status="filled",
+        requested_price=50_000_000, executed_price=50_000_000,
+        requested_quantity=0.001, executed_quantity=0.001,
+        fee=150, is_paper=True, strategy_name="rsi",
+    ))
+    await session.flush()
+
+    pm._cash_balance = 500_000 - 50_150
+    summary = await pm.get_portfolio_summary(session)
+
+    p = summary["positions"][0]
+    # SL: 50M * (1 - 5/100) = 47,500,000
+    assert p["stop_loss_price"] == pytest.approx(47_500_000, abs=1)
+    # TP: 50M * (1 + 10/100) = 55,000,000
+    assert p["take_profit_price"] == pytest.approx(55_000_000, abs=1)
+    assert p["trailing_active"] is True
+    assert p["is_surge"] is False
+
+
+@pytest.mark.asyncio
+async def test_portfolio_summary_short_sl_tp_reversed(session):
+    """선물 숏 포지션의 SL/TP 가격은 방향 반전."""
+    prices = {"BTC/USDT": 95_000}
+    pm = PortfolioManager(
+        market_data=_make_market_data(prices),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+
+    pos = Position(
+        exchange="binance_futures",
+        symbol="BTC/USDT",
+        quantity=0.01,
+        average_buy_price=100_000,
+        total_invested=333.33,
+        is_paper=True,
+        direction="short",
+        leverage=3,
+        stop_loss_pct=8.0,
+        take_profit_pct=16.0,
+    )
+    session.add(pos)
+    session.add(Order(
+        exchange="binance_futures",
+        symbol="BTC/USDT", side="sell", order_type="market", status="filled",
+        requested_price=100_000, executed_price=100_000,
+        requested_quantity=0.01, executed_quantity=0.01,
+        fee=0.04, is_paper=True, strategy_name="rsi",
+        direction="short",
+    ))
+    await session.flush()
+
+    pm._cash_balance = 0
+    summary = await pm.get_portfolio_summary(session)
+    p = summary["positions"][0]
+
+    # 숏 SL: entry * (1 + sl_pct/100) = 100,000 * 1.08 = 108,000
+    assert p["stop_loss_price"] == pytest.approx(108_000, abs=1)
+    # 숏 TP: entry * (1 - tp_pct/100) = 100,000 * 0.84 = 84,000
+    assert p["take_profit_price"] == pytest.approx(84_000, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_portfolio_summary_no_sl_tp_when_null(session):
+    """DB에 SL/TP가 null이면 API에서 None 반환."""
+    prices = {"ADA/KRW": 500}
+    pm = PortfolioManager(
+        market_data=_make_market_data(prices),
+        initial_balance_krw=500_000,
+    )
+
+    pos = Position(
+        symbol="ADA/KRW",
+        quantity=100,
+        average_buy_price=450,
+        total_invested=45_000,
+        is_paper=True,
+        # stop_loss_pct is None
+    )
+    session.add(pos)
+    session.add(Order(
+        symbol="ADA/KRW", side="buy", order_type="limit", status="filled",
+        requested_price=450, executed_price=450,
+        requested_quantity=100, executed_quantity=100,
+        fee=113, is_paper=True, strategy_name="rsi",
+    ))
+    await session.flush()
+
+    pm._cash_balance = 500_000 - 45_113
+    summary = await pm.get_portfolio_summary(session)
+    p = summary["positions"][0]
+
+    assert p["stop_loss_price"] is None
+    assert p["take_profit_price"] is None

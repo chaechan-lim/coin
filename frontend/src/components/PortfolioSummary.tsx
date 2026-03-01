@@ -124,6 +124,8 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
                 <th className="px-4 py-2 text-right">현재가</th>
                 <th className="px-4 py-2 text-right">{isUsdt ? '마진' : '평가금액'}</th>
                 {isUsdt && <th className="px-4 py-2 text-right">청산가</th>}
+                <th className="px-4 py-2 text-right">손절가</th>
+                <th className="px-4 py-2 text-right">익절가</th>
                 <th className="px-4 py-2 text-right">미실현 손익</th>
               </tr>
             </thead>
@@ -138,6 +140,12 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
                       {pos.leverage && pos.leverage > 1 && (
                         <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400 font-semibold">{pos.leverage}x</span>
                       )}
+                      {pos.trailing_active && (
+                        <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400 font-semibold">TRAIL</span>
+                      )}
+                      {pos.is_surge && (
+                        <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-400 font-semibold">SURGE</span>
+                      )}
                     </td>
                     {isUsdt && (
                       <td className={`px-4 py-2 text-center font-semibold text-xs ${dirColor}`}>{dirLabel}</td>
@@ -151,6 +159,20 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
                         {pos.liquidation_price ? pos.liquidation_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-'}
                       </td>
                     )}
+                    <td className="px-4 py-2 text-right text-red-400/80 text-xs">
+                      {pos.stop_loss_price
+                        ? isUsdt
+                          ? pos.stop_loss_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+                          : pos.stop_loss_price.toLocaleString()
+                        : '-'}
+                    </td>
+                    <td className="px-4 py-2 text-right text-buy/80 text-xs">
+                      {pos.take_profit_price
+                        ? isUsdt
+                          ? pos.take_profit_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+                          : pos.take_profit_price.toLocaleString()
+                        : '-'}
+                    </td>
                     <td className={`px-4 py-2 text-right font-semibold ${pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}`}>
                       {pos.unrealized_pnl >= 0 ? '+' : ''}{isUsdt ? pos.unrealized_pnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.unrealized_pnl.toLocaleString()}
                       <span className="text-xs ml-1">({fmtPct(pos.unrealized_pnl_pct)})</span>
@@ -168,7 +190,7 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
               return (
                 <div key={pos.symbol} className="px-4 py-3 space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium text-white">{pos.symbol.replace(/\/(KRW|USDT)/, '')}</span>
                       {isUsdt && (
                         <>
@@ -177,6 +199,12 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400 font-semibold">{pos.leverage}x</span>
                           )}
                         </>
+                      )}
+                      {pos.trailing_active && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400 font-semibold">TRAIL</span>
+                      )}
+                      {pos.is_surge && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-400 font-semibold">SURGE</span>
                       )}
                     </div>
                     <span className={`font-semibold ${pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}`}>
@@ -207,6 +235,30 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
                         <span className="text-gray-500">청산가</span>
                         <span className="text-red-400/80">{pos.liquidation_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                       </div>
+                    )}
+                    {(pos.stop_loss_price || pos.take_profit_price) && (
+                      <>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">손절가</span>
+                          <span className="text-red-400/80">
+                            {pos.stop_loss_price
+                              ? isUsdt
+                                ? pos.stop_loss_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+                                : pos.stop_loss_price.toLocaleString()
+                              : '-'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">익절가</span>
+                          <span className="text-buy/80">
+                            {pos.take_profit_price
+                              ? isUsdt
+                                ? pos.take_profit_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+                                : pos.take_profit_price.toLocaleString()
+                              : '-'}
+                          </span>
+                        </div>
+                      </>
                     )}
                   </div>
                 </div>

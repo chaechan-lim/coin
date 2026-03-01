@@ -106,6 +106,25 @@ class TradingEngine:
     def set_broadcast_callback(self, callback) -> None:
         self._broadcast_callback = callback
 
+    async def _save_tracker_to_db(self, session: AsyncSession, symbol: str, tracker: PositionTracker) -> None:
+        """PositionTracker 상태를 DB Position 레코드에 저장."""
+        result = await session.execute(
+            select(Position).where(
+                Position.symbol == symbol,
+                Position.exchange == self._exchange_name,
+            )
+        )
+        pos = result.scalar_one_or_none()
+        if pos:
+            pos.stop_loss_pct = tracker.stop_loss_pct
+            pos.take_profit_pct = tracker.take_profit_pct
+            pos.trailing_activation_pct = tracker.trailing_activation_pct
+            pos.trailing_stop_pct = tracker.trailing_stop_pct
+            pos.trailing_active = tracker.trailing_active
+            pos.highest_price = tracker.highest_price
+            pos.max_hold_hours = tracker.max_hold_hours
+            await session.flush()
+
     async def initialize(self) -> None:
         """Initialize strategies and load configurations."""
         import strategies.volatility_breakout
@@ -407,8 +426,30 @@ class TradingEngine:
         tracker = self._position_trackers.get(symbol)
         if not tracker:
             # 트래커 없으면 DB에서 복원 (재시작 후)
-            if getattr(position, 'is_surge', False):
-                # 서지 코인 → 서지 프로필 복원
+            if position.stop_loss_pct is not None:
+                # DB에 저장된 트래커 값으로 복원
+                tracker = PositionTracker(
+                    entry_price=position.average_buy_price,
+                    highest_price=position.highest_price or position.average_buy_price,
+                    stop_loss_pct=position.stop_loss_pct,
+                    take_profit_pct=position.take_profit_pct or 10.0,
+                    trailing_activation_pct=position.trailing_activation_pct or 3.0,
+                    trailing_stop_pct=position.trailing_stop_pct or 3.0,
+                    trailing_active=position.trailing_active or False,
+                    is_surge=position.is_surge or False,
+                    max_hold_hours=position.max_hold_hours or 0,
+                )
+                if position.entered_at:
+                    ea = position.entered_at
+                    if ea.tzinfo is None:
+                        ea = ea.replace(tzinfo=timezone.utc)
+                    tracker.entered_at = ea
+                logger.info("tracker_restored_from_db", symbol=symbol,
+                            sl=round(tracker.stop_loss_pct, 2),
+                            trailing_active=tracker.trailing_active,
+                            highest_price=round(tracker.highest_price, 2))
+            elif getattr(position, 'is_surge', False):
+                # 서지 코인 → 서지 프로필 복원 (마이그레이션 전 포지션)
                 tracker = PositionTracker(
                     entry_price=position.average_buy_price,
                     highest_price=position.average_buy_price,
@@ -426,7 +467,7 @@ class TradingEngine:
                     tracker.entered_at = ea
                 logger.info("tracker_restored_surge", symbol=symbol)
             else:
-                # 일반 코인 → 동적 SL 계산
+                # 일반 코인 → 동적 SL 계산 (마이그레이션 전 포지션)
                 tracker = PositionTracker(
                     entry_price=position.average_buy_price,
                     highest_price=position.average_buy_price,
@@ -453,9 +494,11 @@ class TradingEngine:
             logger.warning("price_fetch_failed_sl_check", symbol=symbol, error=str(e))
             return False
 
-        # 최고가 업데이트
+        # 최고가 업데이트 + DB 반영
+        tracker_changed = False
         if price > tracker.highest_price:
             tracker.highest_price = price
+            tracker_changed = True
 
         entry = tracker.entry_price
         pnl_pct = (price - entry) / entry * 100
@@ -469,6 +512,7 @@ class TradingEngine:
                 and not tracker.trailing_active
                 and pnl_pct >= tracker.trailing_activation_pct):
             tracker.trailing_active = True
+            tracker_changed = True
 
         # 2. 트레일링 스탑 발동
         if tracker.trailing_active and tracker.trailing_stop_pct > 0:
@@ -495,6 +539,10 @@ class TradingEngine:
             held_hours = (datetime.now(timezone.utc) - tracker.entered_at).total_seconds() / 3600
             if held_hours >= tracker.max_hold_hours:
                 sell_reason = f"보유 시간 초과: {held_hours:.1f}h (한도 {tracker.max_hold_hours:.0f}h, 수익 {pnl_pct:+.1f}%)"
+
+        # trailing_active/highest_price 변경 시 DB 반영
+        if tracker_changed and not sell_reason:
+            await self._save_tracker_to_db(session, symbol, tracker)
 
         if sell_reason:
             logger.info(
@@ -1064,6 +1112,7 @@ class TradingEngine:
                 is_surge=True,
                 max_hold_hours=48,
             )
+            await self._save_tracker_to_db(session, symbol, self._position_trackers[symbol])
 
             self._last_trade_time[symbol] = datetime.now(timezone.utc)
             self._daily_trade_count += 1
@@ -1233,6 +1282,7 @@ class TradingEngine:
                 highest_price=price,
                 stop_loss_pct=sl_pct,
             )
+            await self._save_tracker_to_db(session, symbol, self._position_trackers[symbol])
 
             logger.info(
                 "position_opened",

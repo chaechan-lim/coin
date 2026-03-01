@@ -16,6 +16,11 @@ class PositionResponse(BaseModel):
     direction: Optional[str] = None
     leverage: Optional[int] = None
     liquidation_price: Optional[float] = None
+    # SL/TP target prices
+    stop_loss_price: Optional[float] = None
+    take_profit_price: Optional[float] = None
+    trailing_active: Optional[bool] = None
+    is_surge: Optional[bool] = None
 
 
 class PortfolioSummaryResponse(BaseModel):

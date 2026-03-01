@@ -19,6 +19,11 @@ export interface Position {
   direction?: string | null
   leverage?: number | null
   liquidation_price?: number | null
+  // SL/TP target prices
+  stop_loss_price?: number | null
+  take_profit_price?: number | null
+  trailing_active?: boolean | null
+  is_surge?: boolean | null
 }
 
 export interface PortfolioSummary {
