@@ -72,9 +72,12 @@ class RedisConfig(BaseSettings):
 
 
 class NotificationConfig(BaseSettings):
+    enabled: bool = False
+    provider: str = "telegram"  # "telegram", "discord", "slack" (쉼표로 복수 가능: "telegram,discord")
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
-    enabled: bool = False
+    discord_webhook_url: str = ""
+    slack_webhook_url: str = ""
 
     model_config = {"env_prefix": "NOTIFY_"}
 

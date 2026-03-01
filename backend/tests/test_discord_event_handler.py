@@ -1,0 +1,226 @@
+"""DiscordEventHandler unit tests."""
+import time
+import pytest
+from unittest.mock import AsyncMock, patch, MagicMock
+
+from services.discord_event_handler import DiscordEventHandler
+
+
+# ── helpers ─────────────────────────────────────────────────────
+
+def _make_handler(url="https://discord.com/api/webhooks/test/token"):
+    return DiscordEventHandler(url)
+
+
+def _mock_response(status_code=204):
+    resp = MagicMock()
+    resp.status_code = status_code
+    return resp
+
+
+# ── 필터: 매수 이벤트 → embed 생성 ─────────────────────────────
+
+def test_trade_buy_embed():
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "trade", "매수: BTC/KRW", None,
+        {"price": 100_000_000, "amount_krw": 500_000, "strategy": "rsi", "confidence": 0.72, "market_state": "sideways"},
+    )
+    assert embed is not None
+    assert "매수" in embed["title"]
+    assert embed["color"] == 0x2ECC71  # green
+    assert any(f["name"] == "전략" for f in embed["fields"])
+
+
+def test_trade_sell_embed():
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "trade", "매도: ETH/KRW", None,
+        {"price": 5_000_000, "strategy": "macd_crossover", "confidence": 0.65, "pnl_pct": 3.5},
+    )
+    assert embed is not None
+    assert "매도" in embed["title"]
+    assert embed["color"] == 0xE74C3C  # red
+    pnl_field = [f for f in embed["fields"] if f["name"] == "PnL"]
+    assert len(pnl_field) == 1
+    assert "+3.50%" in pnl_field[0]["value"]
+
+
+# ── 필터: SL/TP 경고 ───────────────────────────────────────────
+
+def test_stop_loss_embed():
+    h = _make_handler()
+    embed = h._format_event(
+        "warning", "trade", "손절: BTC/KRW", "SL 4% 도달",
+        {"price": 95_000_000, "pnl_pct": -4.0, "reason": "stop_loss"},
+    )
+    assert embed is not None
+    assert embed["color"] == 0xF39C12  # orange
+
+
+# ── 필터: 선물 매매 ────────────────────────────────────────────
+
+def test_futures_long_embed():
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "futures_trade", "선물 롱: BTC/USDT", None,
+        {"price": 65000.0, "strategy": "rsi", "confidence": 0.60, "leverage": 3},
+    )
+    assert embed is not None
+    assert embed["color"] == 0x2ECC71  # green (long)
+    lev = [f for f in embed["fields"] if f["name"] == "레버리지"]
+    assert lev[0]["value"] == "3x"
+
+
+def test_futures_short_embed():
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "futures_trade", "선물 숏: ETH/USDT", None,
+        {"price": 3200.0, "strategy": "bollinger_rsi", "confidence": 0.58},
+    )
+    assert embed is not None
+    assert embed["color"] == 0xE74C3C  # red (short)
+
+
+# ── 필터: 로테이션 ─────────────────────────────────────────────
+
+def test_rotation_embed():
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "rotation", "서지 매수: DOGE/KRW", None,
+        {"price": 500, "surge_ratio": 5.2, "amount_krw": 75_000},
+    )
+    assert embed is not None
+    assert "🚀" in embed["title"]
+
+
+# ── 필터: 리스크 경고 ──────────────────────────────────────────
+
+def test_risk_warning_embed():
+    h = _make_handler()
+    embed = h._format_event(
+        "warning", "risk", "드로다운 경고", "MDD 8% 도달",
+        {"drawdown_pct": 8.0},
+    )
+    assert embed is not None
+    assert "🚨" in embed["title"]
+    assert embed["color"] == 0xF39C12
+
+
+# ── 필터: 시스템 ───────────────────────────────────────────────
+
+def test_system_embed():
+    h = _make_handler()
+    embed = h._format_event("info", "system", "서버 시작", "paper 모드", None)
+    assert embed is not None
+    assert "⚙️" in embed["title"]
+    assert embed["color"] == 0x3498DB
+
+
+# ── 필터: 시그널 ───────────────────────────────────────────────
+
+def test_signal_embed():
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "signal", "시그널: BTC/KRW BUY", "RSI oversold",
+        {"action": "BUY", "confidence": 0.72, "strategies": ["rsi(72%)", "bollinger_rsi(68%)"]},
+    )
+    assert embed is not None
+    assert "📊" in embed["title"]
+    assert embed["color"] == 0x9B59B6
+    strats = [f for f in embed["fields"] if f["name"] == "참여 전략"]
+    assert "rsi(72%)" in strats[0]["value"]
+
+
+# ── 필터: 일일 요약 ────────────────────────────────────────────
+
+def test_daily_summary_embed():
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "daily_summary", "일일 요약 [bithumb]", "총 자산: 520,000 KRW",
+        {"total_value": 520000, "daily_pnl_pct": 4.0, "positions": 3, "trades_today": 5},
+    )
+    assert embed is not None
+    assert "📋" in embed["title"]
+    pnl = [f for f in embed["fields"] if f["name"] == "일일 수익"]
+    assert "+4.00%" in pnl[0]["value"]
+
+
+# ── 필터: 무시되는 이벤트 (HOLD 등) ────────────────────────────
+
+def test_ignored_event_returns_none():
+    h = _make_handler()
+    assert h._format_event("debug", "engine", "heartbeat", None, None) is None
+    assert h._format_event("info", "portfolio", "스냅샷 저장", None, None) is None
+    assert h._format_event("info", "market", "시장 분석 완료", None, None) is None
+
+
+# ── 레이트 리밋 ────────────────────────────────────────────────
+
+def test_rate_limit_blocks_after_5():
+    h = _make_handler()
+    for i in range(5):
+        assert h._check_rate_limit() is True, f"call {i} should pass"
+    assert h._check_rate_limit() is False, "6th call should be blocked"
+
+
+def test_rate_limit_recovers_after_window():
+    h = _make_handler()
+    # 5건 소진
+    for _ in range(5):
+        h._check_rate_limit()
+    # 타임스탬프를 6초 전으로 조작
+    now = time.monotonic()
+    h._timestamps.clear()
+    for _ in range(5):
+        h._timestamps.append(now - 6.0)
+    assert h._check_rate_limit() is True
+
+
+# ── 에러 복원력: handle_event 절대 예외 미전파 ───────────────────
+
+@pytest.mark.asyncio
+async def test_handle_event_no_exception_on_send_error():
+    h = _make_handler()
+    h._client = AsyncMock()
+    h._client.post = AsyncMock(side_effect=Exception("network error"))
+    # 매수 이벤트 → 포맷 성공 → 전송 실패 → 예외 없이 종료
+    await h.handle_event(
+        "info", "trade", "매수: BTC/KRW", None,
+        {"price": 100_000_000, "strategy": "rsi", "confidence": 0.7},
+    )
+    # 예외 없이 도달하면 성공
+
+
+@pytest.mark.asyncio
+async def test_handle_event_ignored_silently():
+    h = _make_handler()
+    h._client = AsyncMock()
+    # 무시되는 이벤트 → _send_embed 호출 안 함
+    await h.handle_event("debug", "engine", "heartbeat", None, None)
+    h._client.post.assert_not_called()
+
+
+# ── 전송 성공 ──────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_send_embed_success():
+    h = _make_handler()
+    h._client = AsyncMock()
+    h._client.post = AsyncMock(return_value=_mock_response(204))
+    await h._send_embed({"title": "test", "color": 0x000000})
+    h._client.post.assert_called_once()
+    payload = h._client.post.call_args[1]["json"]
+    assert "embeds" in payload
+    assert payload["embeds"][0]["title"] == "test"
+
+
+# ── close ──────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_close():
+    h = _make_handler()
+    h._client = AsyncMock()
+    h._client.aclose = AsyncMock()
+    await h.close()
+    h._client.aclose.assert_called_once()

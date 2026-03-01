@@ -44,19 +44,21 @@ from api.portfolio import set_portfolio_manager
 from api.strategies import set_engine_and_combiner
 from api.dashboard import set_dashboard_deps
 from api.dependencies import engine_registry
-from core.event_bus import set_broadcast as set_event_broadcast, emit_event
+from core.event_bus import set_broadcast as set_event_broadcast, set_notification as set_event_notification, emit_event
+from services.discord_event_handler import DiscordEventHandler, send_daily_summary
 
 logger = structlog.get_logger(__name__)
 
 _scheduler = None
 _engine_instance: TradingEngine | None = None
 _binance_engine = None
+_discord_handler: DiscordEventHandler | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
-    global _scheduler, _engine_instance, _binance_engine
+    global _scheduler, _engine_instance, _binance_engine, _discord_handler
     config = get_config()
 
     logger.info("startup_begin", mode=config.trading.mode)
@@ -175,6 +177,13 @@ async def lifespan(app: FastAPI):
     # WebSocket 브로드캐스트 연결
     trading_engine.set_broadcast_callback(ws_manager.broadcast)
     set_event_broadcast(ws_manager.broadcast)
+
+    # Discord 이벤트 핸들러 연결
+    discord_webhook = config.notification.discord_webhook_url
+    if config.notification.enabled and discord_webhook:
+        _discord_handler = DiscordEventHandler(discord_webhook)
+        set_event_notification(_discord_handler.handle_event)
+        logger.info("discord_event_handler_registered")
 
     # ── 6. API 의존성 주입 (레거시 + 레지스트리) ────────────────
     set_portfolio_manager(portfolio_mgr)
@@ -370,6 +379,16 @@ async def lifespan(app: FastAPI):
             seconds=300,
         )
 
+    # ── 일일 요약 스케줄러 (Discord) ───────────────────────────
+    if _discord_handler and discord_webhook:
+        async def daily_summary_job():
+            await send_daily_summary(discord_webhook, engine_registry)
+        _scheduler.add_job(
+            _wrap(daily_summary_job),
+            name="daily_summary_discord",
+            seconds=86400,
+        )
+
     _scheduler.start()
 
     # 최초 시장 분석 실행
@@ -405,6 +424,8 @@ async def lifespan(app: FastAPI):
     if binance_exchange:
         await binance_exchange.close()
     await notification.send_engine_alert("🛑 트레이딩 봇 종료")
+    if _discord_handler:
+        await _discord_handler.close()
     logger.info("shutdown_complete")
 
 

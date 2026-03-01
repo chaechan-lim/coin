@@ -6,37 +6,114 @@ logger = structlog.get_logger(__name__)
 
 
 class NotificationService:
-    """Telegram notification service for trading alerts."""
+    """Multi-provider notification service (Telegram, Discord, Slack)."""
 
     def __init__(self, config: NotificationConfig):
         self._config = config
-        self._base_url = f"https://api.telegram.org/bot{config.telegram_bot_token}"
+        self._providers: list[str] = [
+            p.strip() for p in config.provider.split(",") if p.strip()
+        ]
 
     async def send(self, message: str) -> bool:
-        """Send a notification message."""
-        if not self._config.enabled or not self._config.telegram_bot_token:
+        """Send a notification to all configured providers."""
+        if not self._config.enabled:
             logger.debug("notification_skipped", message=message[:50])
+            return False
+
+        results = []
+        for provider in self._providers:
+            if provider == "telegram":
+                results.append(await self._send_telegram(message))
+            elif provider == "discord":
+                results.append(await self._send_discord(message))
+            elif provider == "slack":
+                results.append(await self._send_slack(message))
+            else:
+                logger.warning("unknown_notification_provider", provider=provider)
+
+        return any(results)
+
+    # ── Telegram ────────────────────────────────────────────────
+
+    async def _send_telegram(self, message: str) -> bool:
+        token = self._config.telegram_bot_token
+        chat_id = self._config.telegram_chat_id
+        if not token or not chat_id:
+            logger.debug("telegram_not_configured")
             return False
 
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
-                    f"{self._base_url}/sendMessage",
+                    f"https://api.telegram.org/bot{token}/sendMessage",
                     json={
-                        "chat_id": self._config.telegram_chat_id,
+                        "chat_id": chat_id,
                         "text": message,
                         "parse_mode": "HTML",
                     },
                 )
                 if resp.status_code == 200:
-                    logger.info("notification_sent")
+                    logger.info("notification_sent", provider="telegram")
                     return True
-                else:
-                    logger.warning("notification_failed", status=resp.status_code)
-                    return False
+                logger.warning("notification_failed", provider="telegram", status=resp.status_code)
+                return False
         except Exception as e:
-            logger.error("notification_error", error=str(e))
+            logger.error("notification_error", provider="telegram", error=str(e))
             return False
+
+    # ── Discord ─────────────────────────────────────────────────
+
+    async def _send_discord(self, message: str) -> bool:
+        url = self._config.discord_webhook_url
+        if not url:
+            logger.debug("discord_not_configured")
+            return False
+
+        # HTML 태그를 Discord 마크다운으로 변환
+        text = _html_to_markdown(message)
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    url,
+                    json={"content": text},
+                )
+                if resp.status_code in (200, 204):
+                    logger.info("notification_sent", provider="discord")
+                    return True
+                logger.warning("notification_failed", provider="discord", status=resp.status_code)
+                return False
+        except Exception as e:
+            logger.error("notification_error", provider="discord", error=str(e))
+            return False
+
+    # ── Slack ───────────────────────────────────────────────────
+
+    async def _send_slack(self, message: str) -> bool:
+        url = self._config.slack_webhook_url
+        if not url:
+            logger.debug("slack_not_configured")
+            return False
+
+        # HTML 태그를 Slack mrkdwn으로 변환
+        text = _html_to_slack(message)
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    url,
+                    json={"text": text},
+                )
+                if resp.status_code == 200:
+                    logger.info("notification_sent", provider="slack")
+                    return True
+                logger.warning("notification_failed", provider="slack", status=resp.status_code)
+                return False
+        except Exception as e:
+            logger.error("notification_error", provider="slack", error=str(e))
+            return False
+
+    # ── High-level alert methods ────────────────────────────────
 
     async def send_trade_alert(
         self,
@@ -63,3 +140,15 @@ class NotificationService:
 
     async def send_engine_alert(self, message: str) -> None:
         await self.send(f"⚙️ <b>엔진 알림</b>\n{message}")
+
+
+# ── HTML → Markdown converters ──────────────────────────────────
+
+def _html_to_markdown(html: str) -> str:
+    """Convert simple HTML tags to Discord markdown."""
+    return html.replace("<b>", "**").replace("</b>", "**")
+
+
+def _html_to_slack(html: str) -> str:
+    """Convert simple HTML tags to Slack mrkdwn."""
+    return html.replace("<b>", "*").replace("</b>", "*")

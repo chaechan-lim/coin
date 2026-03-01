@@ -68,7 +68,8 @@ coin/
 │   ├── services/
 │   │   ├── __init__.py          ✅
 │   │   ├── market_data.py       ✅ 완료
-│   │   └── notification.py      ✅ 완료
+│   │   ├── notification.py      ✅ 완료
+│   │   └── discord_event_handler.py ✅ 완료 (이벤트 기반 Discord Embed 알림)
 │   ├── strategies/
 │   │   ├── __init__.py          ✅
 │   │   ├── base.py              ✅ 완료
@@ -258,7 +259,8 @@ coin/
 |---|---|
 | 구조화된 로깅 (structlog) | ✅ 코드 내 적용 완료 |
 | 에러 핸들링 / 재연결 | ✅ 기본 구현 완료 |
-| 텔레그램 알림 | ✅ 구현 완료 (설정만 필요) |
+| 멀티 알림 (Telegram/Discord/Slack) | ✅ 3 프로바이더 지원, 복수 동시 발송, 15 tests |
+| Discord 이벤트 알림 (Embed) | ✅ event_bus 훅, 매매/시그널/리스크/일일요약 자동 전송, 레이트리밋, 17 tests |
 | SQLite WAL 모드 | ✅ 동시 접근 안정화 |
 | 주문 fill 폴링 | ✅ 지정가 주문 체결/수수료 추적 |
 | emit_event 재시도 | ✅ DB locked 3회 재시도 |
@@ -277,7 +279,7 @@ coin/
 | 원금 대비 수익 표시 | ✅ initial_balance_krw + total_pnl_pct 원금 기준 |
 | 전략 성과 P&L 수정 | ✅ Lot-based FIFO 원가 매칭, **진입 전략에 PnL 귀속** (기존: 청산 전략에 PnL 귀속 → 오계산) |
 | 모바일 반응형 UI | ✅ 탭 스크롤, 테이블→카드, 터치 타겟, 전 컴포넌트 |
-| 단위 테스트 | ✅ 133개 (pytest + 인메모리 SQLite) |
+| 단위 테스트 | ✅ 187개 (pytest + 인메모리 SQLite) |
 | 거래 기본 필터 | ✅ 체결(filled)만 기본 표시, status 파라미터 |
 | 시작 시 현금 보정 | ✅ reconcile_cash_from_db at startup (peak 오염 방지) |
 | 0% 승률 전략 제거 | ✅ volatility_breakout/supertrend 비활성 → 6전략 체제 |
@@ -305,6 +307,17 @@ coin/
 | **HTTPS 배포** | ✅ nginx 리버스 프록시, self-signed cert (10년), IP SAN |
 | **출금 peak 비례 조정** | ✅ load_initial_balance_from_db()에서 peak *= ratio (가짜 드로다운 방지) |
 | **capital_sync 스케줄러 버그** | ✅ engine.exchange → engine._exchange (AttributeError 수정) |
+
+### ⬜ Phase 6 — 남은 과제
+
+| 항목 | 우선순위 | 상태 |
+|---|---|---|
+| 바이낸스 현물 연동 (v0.18) | 중 | ⬜ BinanceSpotAdapter, 현물 TradingEngine 추가 |
+| 시장 상태별 전략 on/off | 낮 | ⬜ 횡보 시 추세추종 완전 비활성 |
+| 멀티 심볼 백테스트 | 중 | ⬜ 현재 단일 심볼 → 포트폴리오 레벨 백테스트 |
+| Alembic 마이그레이션 정리 | 낮 | ⬜ 초기 마이그레이션 + 수동 migrate.py 혼재 |
+| 로그 로테이션/모니터링 | 낮 | ⬜ systemd journal 기반, 별도 로그 관리 미설정 |
+| 프론트엔드 nginx 직접 서빙 | 낮 | ⬜ 현재 serve -s dist → nginx static 전환 가능 |
 
 ---
 
@@ -716,5 +729,7 @@ docker compose restart backend
 | v0.17.4 | 2026-03-01 | **HTTPS + 입출금 안정화**: nginx self-signed HTTPS, 출금 시 peak_value 비례 조정 (가짜 드로다운 방지), capital_sync 스케줄러 AttributeError 수정, 포트폴리오 테스트 8건 추가 (133개), 빗썸→바이낸스 207K KRW 이체 기록 |
 | v0.17.5 | 2026-03-01 | **선물 자산/전략/에이전트 4건 버그 수정**: (1) 선물 총자산 미실현PnL 이중계산 수정 (USDT.free에 unPnL 포함→wallet-margin 기반), (2) 전략 성과 API 숏 PnL 계산 수정 (sell=진입,buy=청산 인식), (3) 선물 에이전트 인사이트 프롬프트 개선 (숏=의도된 전략 명시, 듀얼 타임프레임 설명), (4) 현물 에이전트 출금=손실 인식 수정 (입출금 내역 LLM 컨텍스트 전달), (5) 리스크 에이전트 드로다운 peak_value 기반으로 변경 (MAX total_value → latest peak_value, 출금 후 가짜 드로다운 방지), 스파이크 스냅샷 클린업 스크립트, 152 테스트 |
 | v0.17.6 | 2026-03-01 | **전략 성과 PnL 진입 전략 귀속**: Lot-based FIFO로 청산 PnL을 진입 전략에 귀속 (기존: 청산 전략에 귀속→futures_stop에 PnL 집중), DB 변경 없음, 155 테스트 |
+| v0.17.7 | 2026-03-01 | **멀티 알림 (Telegram/Discord/Slack)**: 3 프로바이더 동시 지원, 쉼표 구분 복수 발송, HTML→마크다운 변환, 15 tests (170개 총) |
+| v0.17.8 | 2026-03-01 | **Discord 이벤트 알림 강화**: event_bus notification 훅, DiscordEventHandler (Embed 포맷, 카테고리 필터, 5/5s 레이트리밋), 매매/SL·TP/선물/로테이션/리스크/시그널/일일요약 자동 전송, 통합 시그널 emit 추가, 일일 요약 스케줄러, 17 tests (187개 총) |
 | v0.18 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
 | v1.0 | 진행중 | **라즈베리파이 배포 완료**, 장기 운영 안정화 |

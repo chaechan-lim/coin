@@ -777,6 +777,28 @@ class TradingEngine:
         # ── 4. 결합 판단 + 실행 ──
         if signals:
             decision = self._combiner.combine(signals)
+
+            # 통합 시그널 이벤트 (BUY/SELL만, HOLD 제외)
+            if decision.action != SignalType.HOLD:
+                action_str = decision.action.name
+                contribs = [
+                    f"{s.strategy_name}({s.confidence:.0%})"
+                    for s in decision.contributing_signals
+                    if s.signal_type == decision.action
+                ]
+                await emit_event(
+                    "info", "signal",
+                    f"시그널: {symbol} {action_str}",
+                    detail=decision.final_reason,
+                    metadata={
+                        "symbol": symbol,
+                        "action": action_str,
+                        "confidence": round(decision.combined_confidence, 2),
+                        "strategies": contribs,
+                        "market_state": self._market_state,
+                    },
+                )
+
             # can_buy=False → 매수만 차단, 매도는 항상 허용
             if can_buy or decision.action == SignalType.SELL:
                 await self._process_decision(session, symbol, decision)
