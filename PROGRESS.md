@@ -275,7 +275,7 @@ coin/
 | 미체결 주문 표시 수정 | ✅ was_executed = (status == FILLED) |
 | 매수 비중 상향 | ✅ max_trade_size_pct 0.30 → 0.50 |
 | 원금 대비 수익 표시 | ✅ initial_balance_krw + total_pnl_pct 원금 기준 |
-| 전략 성과 P&L 수정 | ✅ FIFO 원가 매칭 (기존: sell.requested_price 비교 → 오계산) |
+| 전략 성과 P&L 수정 | ✅ Lot-based FIFO 원가 매칭, **진입 전략에 PnL 귀속** (기존: 청산 전략에 PnL 귀속 → 오계산) |
 | 모바일 반응형 UI | ✅ 탭 스크롤, 테이블→카드, 터치 타겟, 전 컴포넌트 |
 | 단위 테스트 | ✅ 133개 (pytest + 인메모리 SQLite) |
 | 거래 기본 필터 | ✅ 체결(filled)만 기본 표시, status 파라미터 |
@@ -714,6 +714,7 @@ docker compose restart backend
 | v0.17.2 | 2026-02-28 | **선물 레버리지 sync 수정 + 백테스트 최적화**: ccxt leverage=None fallback(notional/margin 계산), fetch_balance 미포함 포지션 메타데이터 보정, 선물 포지션 사이징 35%→25% + conf 0.55 (MDD 7.3%→3.9%, PF 1.25→1.38) |
 | v0.17.3 | 2026-03-01 | **현물 비대칭 전략 + 선물 pos 35%**: 하락장 매수 완전 차단 + 상승장 공격적 매수 (알파 +25.38%), 선물 포지션 사이징 25%→35% (PF 1.80, +15.48%, MDD 5.42%) |
 | v0.17.4 | 2026-03-01 | **HTTPS + 입출금 안정화**: nginx self-signed HTTPS, 출금 시 peak_value 비례 조정 (가짜 드로다운 방지), capital_sync 스케줄러 AttributeError 수정, 포트폴리오 테스트 8건 추가 (133개), 빗썸→바이낸스 207K KRW 이체 기록 |
-| v0.17.5 | 2026-03-01 | **선물 자산/전략/에이전트 4건 버그 수정**: (1) 선물 총자산 미실현PnL 이중계산 수정 (USDT.free에 unPnL 포함→wallet-margin 기반), (2) 전략 성과 API 숏 PnL 계산 수정 (sell=진입,buy=청산 인식), (3) 선물 에이전트 인사이트 프롬프트 개선 (숏=의도된 전략 명시, 듀얼 타임프레임 설명), (4) 현물 에이전트 출금=손실 인식 수정 (입출금 내역 LLM 컨텍스트 전달), 스파이크 스냅샷 클린업 스크립트, 150 테스트 |
+| v0.17.5 | 2026-03-01 | **선물 자산/전략/에이전트 4건 버그 수정**: (1) 선물 총자산 미실현PnL 이중계산 수정 (USDT.free에 unPnL 포함→wallet-margin 기반), (2) 전략 성과 API 숏 PnL 계산 수정 (sell=진입,buy=청산 인식), (3) 선물 에이전트 인사이트 프롬프트 개선 (숏=의도된 전략 명시, 듀얼 타임프레임 설명), (4) 현물 에이전트 출금=손실 인식 수정 (입출금 내역 LLM 컨텍스트 전달), (5) 리스크 에이전트 드로다운 peak_value 기반으로 변경 (MAX total_value → latest peak_value, 출금 후 가짜 드로다운 방지), 스파이크 스냅샷 클린업 스크립트, 152 테스트 |
+| v0.17.6 | 2026-03-01 | **전략 성과 PnL 진입 전략 귀속**: Lot-based FIFO로 청산 PnL을 진입 전략에 귀속 (기존: 청산 전략에 귀속→futures_stop에 PnL 집중), DB 변경 없음, 155 테스트 |
 | v0.18 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
 | v1.0 | 진행중 | **라즈베리파이 배포 완료**, 장기 운영 안정화 |

@@ -35,8 +35,8 @@ async def _calc_performance(
     )
     all_orders = list(result.scalars().all())
 
-    long_positions: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "cost": 0.0})
-    short_positions: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "cost": 0.0})
+    long_lots: dict[str, list[dict]] = defaultdict(list)
+    short_lots: dict[str, list[dict]] = defaultdict(list)
     winning = 0
     losing = 0
     total_pnl = 0.0
@@ -54,21 +54,28 @@ async def _calc_performance(
 
         direction = getattr(order, "direction", None) or "long"
         is_short = is_futures and direction == "short"
-        in_period = order.strategy_name == strategy_name and ensure_aware(order.created_at) >= start
 
         if is_short:
             if order.side == "sell":
-                short_positions[sym]["cost"] += price * qty + fee
-                short_positions[sym]["qty"] += qty
-                if in_period:
+                short_lots[sym].append({
+                    "strategy": order.strategy_name,
+                    "qty": qty,
+                    "cost": price * qty + fee,
+                    "time": order.created_at,
+                })
+                if order.strategy_name == strategy_name and ensure_aware(order.created_at) >= start:
                     trade_count += 1
             elif order.side == "buy":
-                pos = short_positions[sym]
-                if pos["qty"] > 0:
-                    avg_entry = pos["cost"] / pos["qty"]
-                    close_qty = min(qty, pos["qty"])
-                    pnl = (avg_entry - price) * close_qty - fee
+                remaining = qty
+                fee_remaining = fee
+                while remaining > 0 and short_lots[sym]:
+                    lot = short_lots[sym][0]
+                    close_qty = min(remaining, lot["qty"])
+                    avg_entry = lot["cost"] / lot["qty"]
+                    lot_fee = fee_remaining * (close_qty / qty) if qty > 0 else 0
+                    pnl = (avg_entry - price) * close_qty - lot_fee
 
+                    in_period = lot["strategy"] == strategy_name and ensure_aware(lot["time"]) >= start
                     if in_period:
                         total_pnl += pnl
                         ret_pct = pnl / (avg_entry * close_qty) * 100 if avg_entry > 0 else 0
@@ -79,24 +86,36 @@ async def _calc_performance(
                         else:
                             losing += 1
 
-                    pos["cost"] -= avg_entry * close_qty
-                    pos["qty"] -= close_qty
+                    lot["qty"] -= close_qty
+                    lot["cost"] -= avg_entry * close_qty
+                    fee_remaining -= lot_fee
+                    remaining -= close_qty
+                    if lot["qty"] <= 1e-12:
+                        short_lots[sym].pop(0)
         else:
             if order.side == "buy":
-                long_positions[sym]["cost"] += price * qty + fee
-                long_positions[sym]["qty"] += qty
-                if in_period:
+                long_lots[sym].append({
+                    "strategy": order.strategy_name,
+                    "qty": qty,
+                    "cost": price * qty + fee,
+                    "time": order.created_at,
+                })
+                if order.strategy_name == strategy_name and ensure_aware(order.created_at) >= start:
                     trade_count += 1
             elif order.side == "sell":
-                pos = long_positions[sym]
-                if pos["qty"] > 0:
-                    avg_buy = pos["cost"] / pos["qty"]
-                    sell_qty = min(qty, pos["qty"])
-                    pnl = (price - avg_buy) * sell_qty - fee
+                remaining = qty
+                fee_remaining = fee
+                while remaining > 0 and long_lots[sym]:
+                    lot = long_lots[sym][0]
+                    close_qty = min(remaining, lot["qty"])
+                    avg_entry = lot["cost"] / lot["qty"]
+                    lot_fee = fee_remaining * (close_qty / qty) if qty > 0 else 0
+                    pnl = (price - avg_entry) * close_qty - lot_fee
 
+                    in_period = lot["strategy"] == strategy_name and ensure_aware(lot["time"]) >= start
                     if in_period:
                         total_pnl += pnl
-                        ret_pct = pnl / (avg_buy * sell_qty) * 100 if avg_buy > 0 else 0
+                        ret_pct = pnl / (avg_entry * close_qty) * 100 if avg_entry > 0 else 0
                         returns.append(ret_pct)
                         trade_count += 1
                         if pnl > 0:
@@ -104,8 +123,12 @@ async def _calc_performance(
                         else:
                             losing += 1
 
-                    pos["cost"] -= avg_buy * sell_qty
-                    pos["qty"] -= sell_qty
+                    lot["qty"] -= close_qty
+                    lot["cost"] -= avg_entry * close_qty
+                    fee_remaining -= lot_fee
+                    remaining -= close_qty
+                    if lot["qty"] <= 1e-12:
+                        long_lots[sym].pop(0)
 
     win_rate = winning / (winning + losing) * 100 if (winning + losing) > 0 else 0
     avg_return = sum(returns) / len(returns) if returns else 0
@@ -175,7 +198,7 @@ async def test_no_sell_orders_means_no_pnl(session):
 
 @pytest.mark.asyncio
 async def test_cross_strategy_buy_cost_basis(session):
-    """Buy from strategy A, sell from strategy B → B uses correct cost basis."""
+    """Buy from strategy A, sell from strategy B → PnL attributed to entry strategy A."""
     now = datetime.now(timezone.utc)
     await _insert_orders(session, [
         make_order(side="buy", strategy_name="ma_crossover",
@@ -187,11 +210,15 @@ async def test_cross_strategy_buy_cost_basis(session):
     ])
     await session.commit()
 
-    result = await _calc_performance(session, "rsi")
-    # sell at 52M, cost basis from ma_crossover buy at 50M
-    assert result["total_pnl"] > 0
-    assert result["winning"] == 1
-    assert result["trade_count"] == 1  # only the sell is rsi's
+    # PnL is now attributed to the entry strategy (ma_crossover), not exit (rsi)
+    result_entry = await _calc_performance(session, "ma_crossover")
+    assert result_entry["total_pnl"] > 0
+    assert result_entry["winning"] == 1
+    assert result_entry["trade_count"] == 2  # 1 entry + 1 exit(PnL)
+
+    result_exit = await _calc_performance(session, "rsi")
+    assert result_exit["total_pnl"] == 0
+    assert result_exit["trade_count"] == 0  # rsi has no entries/exits attributed
 
 
 @pytest.mark.asyncio
@@ -376,3 +403,125 @@ async def test_futures_mixed_long_short(session):
     assert result["total_pnl"] == pytest.approx(70, abs=1)
     assert result["winning"] == 2
     assert result["losing"] == 0
+
+
+# ── Entry Strategy PnL Attribution Tests ──
+
+
+@pytest.mark.asyncio
+async def test_entry_strategy_gets_pnl_not_exit(session):
+    """ma_crossover 매수 → futures_stop 매도 → PnL은 ma_crossover에 귀속."""
+    now = datetime.now(timezone.utc)
+    await _insert_orders(session, [
+        make_order(
+            symbol="BTC/USDT", side="buy", strategy_name="ma_crossover",
+            executed_price=90_000, requested_quantity=0.01, executed_quantity=0.01,
+            fee=0.036, exchange="binance_futures", direction="long",
+            created_at=now - timedelta(hours=2),
+        ),
+        make_order(
+            symbol="BTC/USDT", side="sell", strategy_name="futures_stop",
+            executed_price=95_000, requested_quantity=0.01, executed_quantity=0.01,
+            fee=0.038, exchange="binance_futures", direction="long",
+            created_at=now - timedelta(hours=1),
+        ),
+    ])
+    await session.commit()
+
+    # PnL attributed to entry strategy (ma_crossover)
+    result_entry = await _calc_performance(session, "ma_crossover", exchange="binance_futures")
+    assert result_entry["total_pnl"] > 0, f"Entry strategy should have PnL, got {result_entry['total_pnl']}"
+    assert result_entry["winning"] == 1
+    assert result_entry["trade_count"] == 2  # 1 entry + 1 exit(PnL)
+
+    # Exit strategy (futures_stop) should have 0 trades/PnL
+    result_exit = await _calc_performance(session, "futures_stop", exchange="binance_futures")
+    assert result_exit["total_pnl"] == 0
+    assert result_exit["trade_count"] == 0
+    assert result_exit["winning"] == 0
+
+
+@pytest.mark.asyncio
+async def test_multiple_entry_strategies_fifo(session):
+    """2개 전략이 각각 매수 → FIFO로 첫 번째 전략에 먼저 PnL 귀속."""
+    now = datetime.now(timezone.utc)
+    await _insert_orders(session, [
+        # 1st entry: ma_crossover buys 0.01 at 90k
+        make_order(
+            symbol="BTC/USDT", side="buy", strategy_name="ma_crossover",
+            executed_price=90_000, requested_quantity=0.01, executed_quantity=0.01,
+            fee=0, exchange="binance_futures", direction="long",
+            created_at=now - timedelta(hours=3),
+        ),
+        # 2nd entry: rsi buys 0.01 at 92k
+        make_order(
+            symbol="BTC/USDT", side="buy", strategy_name="rsi",
+            executed_price=92_000, requested_quantity=0.01, executed_quantity=0.01,
+            fee=0, exchange="binance_futures", direction="long",
+            created_at=now - timedelta(hours=2),
+        ),
+        # Exit: sell 0.02 at 95k (closes both lots)
+        make_order(
+            symbol="BTC/USDT", side="sell", strategy_name="futures_stop",
+            executed_price=95_000, requested_quantity=0.02, executed_quantity=0.02,
+            fee=0, exchange="binance_futures", direction="long",
+            created_at=now - timedelta(hours=1),
+        ),
+    ])
+    await session.commit()
+
+    # ma_crossover: entry + FIFO exit PnL = (95k-90k)*0.01 = 50
+    result_ma = await _calc_performance(session, "ma_crossover", exchange="binance_futures")
+    assert result_ma["total_pnl"] == pytest.approx(50, abs=1)
+    assert result_ma["winning"] == 1
+    assert result_ma["trade_count"] == 2  # 1 entry + 1 exit
+
+    # rsi: entry + FIFO exit PnL = (95k-92k)*0.01 = 30
+    result_rsi = await _calc_performance(session, "rsi", exchange="binance_futures")
+    assert result_rsi["total_pnl"] == pytest.approx(30, abs=1)
+    assert result_rsi["winning"] == 1
+    assert result_rsi["trade_count"] == 2  # 1 entry + 1 exit
+
+    # futures_stop: no entries → 0
+    result_stop = await _calc_performance(session, "futures_stop", exchange="binance_futures")
+    assert result_stop["total_pnl"] == 0
+    assert result_stop["trade_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_exit_only_strategy_shows_zero(session):
+    """청산 전용 전략(futures_stop)은 0 trades, 0 PnL."""
+    now = datetime.now(timezone.utc)
+    await _insert_orders(session, [
+        make_order(
+            symbol="ETH/USDT", side="buy", strategy_name="bollinger_rsi",
+            executed_price=3000, requested_quantity=0.1, executed_quantity=0.1,
+            fee=0.12, exchange="binance_futures", direction="long",
+            created_at=now - timedelta(hours=3),
+        ),
+        make_order(
+            symbol="ETH/USDT", side="sell", strategy_name="futures_stop",
+            executed_price=3100, requested_quantity=0.1, executed_quantity=0.1,
+            fee=0.124, exchange="binance_futures", direction="long",
+            created_at=now - timedelta(hours=2),
+        ),
+        make_order(
+            symbol="BTC/USDT", side="buy", strategy_name="rsi",
+            executed_price=90_000, requested_quantity=0.01, executed_quantity=0.01,
+            fee=0.036, exchange="binance_futures", direction="long",
+            created_at=now - timedelta(hours=1),
+        ),
+        make_order(
+            symbol="BTC/USDT", side="sell", strategy_name="futures_stop",
+            executed_price=88_000, requested_quantity=0.01, executed_quantity=0.01,
+            fee=0.035, exchange="binance_futures", direction="long",
+            created_at=now - timedelta(minutes=30),
+        ),
+    ])
+    await session.commit()
+
+    result_stop = await _calc_performance(session, "futures_stop", exchange="binance_futures")
+    assert result_stop["total_pnl"] == 0
+    assert result_stop["trade_count"] == 0
+    assert result_stop["winning"] == 0
+    assert result_stop["losing"] == 0

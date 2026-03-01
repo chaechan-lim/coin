@@ -87,13 +87,13 @@ async def get_strategy_performance(
     )
     all_orders = list(result.scalars().all())
 
-    # 2) 심볼별 포지션 추적 (FIFO 원가 계산)
+    # 2) 심볼별 로트 추적 (Lot-based FIFO — 진입 전략에 PnL 귀속)
     from collections import defaultdict
     is_futures = "futures" in exchange
 
-    # 롱: buy=진입, sell=청산 / 숏: sell=진입, buy=청산
-    long_positions: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "cost": 0.0})
-    short_positions: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "cost": 0.0})
+    # 각 로트: {"strategy": str, "qty": float, "cost": float, "time": datetime}
+    long_lots: dict[str, list[dict]] = defaultdict(list)
+    short_lots: dict[str, list[dict]] = defaultdict(list)
 
     winning = 0
     losing = 0
@@ -112,23 +112,30 @@ async def get_strategy_performance(
 
         direction = getattr(order, "direction", None) or "long"
         is_short = is_futures and direction == "short"
-        in_period = order.strategy_name == name and ensure_aware(order.created_at) >= start
 
         if is_short:
             # 숏: sell=진입, buy=청산
             if order.side == "sell":
-                short_positions[sym]["cost"] += price * qty + fee
-                short_positions[sym]["qty"] += qty
-                if in_period:
+                short_lots[sym].append({
+                    "strategy": order.strategy_name,
+                    "qty": qty,
+                    "cost": price * qty + fee,
+                    "time": order.created_at,
+                })
+                # 진입 카운트: 진입 전략 기준
+                if order.strategy_name == name and ensure_aware(order.created_at) >= start:
                     trade_count += 1
             elif order.side == "buy":
-                pos = short_positions[sym]
-                if pos["qty"] > 0:
-                    avg_entry = pos["cost"] / pos["qty"]
-                    close_qty = min(qty, pos["qty"])
-                    # 숏 PnL = (진입가 - 청산가) × qty - fee
-                    pnl = (avg_entry - price) * close_qty - fee
+                remaining = qty
+                fee_remaining = fee
+                while remaining > 0 and short_lots[sym]:
+                    lot = short_lots[sym][0]
+                    close_qty = min(remaining, lot["qty"])
+                    avg_entry = lot["cost"] / lot["qty"]
+                    lot_fee = fee_remaining * (close_qty / qty) if qty > 0 else 0
+                    pnl = (avg_entry - price) * close_qty - lot_fee
 
+                    in_period = lot["strategy"] == name and ensure_aware(lot["time"]) >= start
                     if in_period:
                         total_pnl += pnl
                         ret_pct = pnl / (avg_entry * close_qty) * 100 if avg_entry > 0 else 0
@@ -139,26 +146,38 @@ async def get_strategy_performance(
                         else:
                             losing += 1
 
-                    pos["cost"] -= avg_entry * close_qty
-                    pos["qty"] -= close_qty
+                    lot["qty"] -= close_qty
+                    lot["cost"] -= avg_entry * close_qty
+                    fee_remaining -= lot_fee
+                    remaining -= close_qty
+                    if lot["qty"] <= 1e-12:
+                        short_lots[sym].pop(0)
         else:
             # 롱/현물: buy=진입, sell=청산
             if order.side == "buy":
-                long_positions[sym]["cost"] += price * qty + fee
-                long_positions[sym]["qty"] += qty
-                if in_period:
+                long_lots[sym].append({
+                    "strategy": order.strategy_name,
+                    "qty": qty,
+                    "cost": price * qty + fee,
+                    "time": order.created_at,
+                })
+                if order.strategy_name == name and ensure_aware(order.created_at) >= start:
                     trade_count += 1
 
             elif order.side == "sell":
-                pos = long_positions[sym]
-                if pos["qty"] > 0:
-                    avg_buy = pos["cost"] / pos["qty"]
-                    sell_qty = min(qty, pos["qty"])
-                    pnl = (price - avg_buy) * sell_qty - fee
+                remaining = qty
+                fee_remaining = fee
+                while remaining > 0 and long_lots[sym]:
+                    lot = long_lots[sym][0]
+                    close_qty = min(remaining, lot["qty"])
+                    avg_entry = lot["cost"] / lot["qty"]
+                    lot_fee = fee_remaining * (close_qty / qty) if qty > 0 else 0
+                    pnl = (price - avg_entry) * close_qty - lot_fee
 
+                    in_period = lot["strategy"] == name and ensure_aware(lot["time"]) >= start
                     if in_period:
                         total_pnl += pnl
-                        ret_pct = pnl / (avg_buy * sell_qty) * 100 if avg_buy > 0 else 0
+                        ret_pct = pnl / (avg_entry * close_qty) * 100 if avg_entry > 0 else 0
                         returns.append(ret_pct)
                         trade_count += 1
                         if pnl > 0:
@@ -166,8 +185,12 @@ async def get_strategy_performance(
                         else:
                             losing += 1
 
-                    pos["cost"] -= avg_buy * sell_qty
-                    pos["qty"] -= sell_qty
+                    lot["qty"] -= close_qty
+                    lot["cost"] -= avg_entry * close_qty
+                    fee_remaining -= lot_fee
+                    remaining -= close_qty
+                    if lot["qty"] <= 1e-12:
+                        long_lots[sym].pop(0)
 
     win_rate = winning / (winning + losing) * 100 if (winning + losing) > 0 else 0
     avg_return = sum(returns) / len(returns) if returns else 0
