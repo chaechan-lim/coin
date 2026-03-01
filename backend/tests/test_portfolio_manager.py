@@ -4,6 +4,7 @@ Tests for PortfolioManager (engine/portfolio_manager.py).
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.models import Position, Order, PortfolioSnapshot, CapitalTransaction
@@ -664,3 +665,39 @@ async def test_spot_sync_cash_uses_free_balance(session):
 
     # 현물은 free 그대로
     assert pm.cash_balance == pytest.approx(450_000, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_sync_clears_position_not_on_exchange(session):
+    """거래소에 없는 포지션(수동 매도)은 quantity=0으로 정리."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"MOCA/KRW": 23.0}),
+        initial_balance_krw=300_000,
+        exchange_name="bithumb",
+    )
+
+    # DB에 MOCA/KRW 포지션 존재
+    session.add(Position(
+        exchange="bithumb", symbol="MOCA/KRW",
+        quantity=43.56, average_buy_price=23.11,
+        total_invested=1007, is_paper=False,
+    ))
+    await session.flush()
+
+    # 거래소에는 KRW만 있고 MOCA 없음 (수동 매도됨)
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "KRW": Balance(currency="KRW", free=315_000, used=0, total=315_000),
+    })
+
+    await pm.sync_exchange_positions(session, adapter, ["BTC/KRW"])
+    await session.flush()
+
+    # MOCA/KRW quantity가 0으로 정리됨
+    result = await session.execute(
+        select(Position).where(Position.symbol == "MOCA/KRW", Position.exchange == "bithumb")
+    )
+    pos = result.scalar_one()
+    assert pos.quantity == 0

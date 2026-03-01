@@ -551,6 +551,24 @@ class PortfolioManager:
                     entry_price=entry_price,
                 )
 
+        # DB에 있지만 거래소에 없는 포지션 → 수동 매도 등으로 사라진 경우 quantity=0 처리
+        exchange_symbols = set()
+        for symbol, bal in balances.items():
+            if symbol == cash_symbol or bal.total <= 0:
+                continue
+            exchange_symbols.add(f"{symbol}/{cash_symbol}")
+        if is_futures:
+            for fp_sym in futures_positions:
+                exchange_symbols.add(fp_sym.replace(":USDT", ""))
+        for db_sym, db_pos in db_positions.items():
+            if db_pos.quantity > 0 and db_sym not in exchange_symbols:
+                logger.info(
+                    "position_cleared_not_on_exchange",
+                    symbol=db_sym, old_qty=db_pos.quantity,
+                )
+                db_pos.quantity = 0
+                synced_count += 1
+
         await session.flush()
 
         # 실제 현금 기준으로 cash_balance 재설정 (initial_balance는 고정 원금 유지)

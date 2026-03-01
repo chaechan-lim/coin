@@ -389,6 +389,26 @@ async def lifespan(app: FastAPI):
             seconds=86400,
         )
 
+    # ── 포지션 동기화 스케줄러 (5분) — 수동 매매 반영 ─────────
+    async def position_sync_job():
+        sf = get_session_factory()
+        for ex_name in engine_registry.available_exchanges:
+            eng = engine_registry.get_engine(ex_name)
+            pm = engine_registry.get_portfolio_manager(ex_name)
+            if not eng or not pm:
+                continue
+            coins = eng._config.trading.tracked_coins if hasattr(eng._config, 'trading') else []
+            if "binance" in ex_name and hasattr(eng, 'tracked_coins'):
+                coins = eng.tracked_coins
+            async with sf() as sess:
+                await pm.sync_exchange_positions(sess, eng._exchange, coins)
+                await sess.commit()
+    _scheduler.add_job(
+        _wrap(position_sync_job),
+        name="position_sync",
+        seconds=300,
+    )
+
     _scheduler.start()
 
     # 최초 시장 분석 실행
