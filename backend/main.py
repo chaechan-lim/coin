@@ -401,28 +401,38 @@ async def lifespan(app: FastAPI):
         if binance_coord and binance_pm_init:
             asyncio.create_task(_run_initial_analysis(binance_coord, binance_pm_init, config))
 
-    # 실제 추적 코인 리스트 (엔진 인스턴스 기반)
+    # 실제 추적 코인 리스트 (엔진 인스턴스의 동적 코인 포함)
     spot_coins = _engine_instance._config.trading.tracked_coins if _engine_instance else config.trading.tracked_coins
-    futures_coins = _binance_engine._config.binance.tracked_coins if _binance_engine else config.binance.tracked_coins
+    futures_coins = _binance_engine.tracked_coins if _binance_engine else config.binance.tracked_coins
 
-    await notification.send_engine_alert(
+    # 현재 포지션 요약
+    positions_summary = await _build_positions_summary(engine_registry)
+
+    startup_msg = (
         f"🚀 트레이딩 봇 시작 ({config.trading.mode.upper()} 모드)\n"
-        f"추적 코인: {', '.join(spot_coins)}"
-        + (f"\n바이낸스 선물: {', '.join(futures_coins)}" if config.binance.enabled else "")
-    )
-    logger.info("startup_complete")
-    startup_detail = (
-        f"{config.trading.mode} 모드 | "
         f"현물: {', '.join(spot_coins)}"
     )
     if config.binance.enabled:
+        startup_msg += f"\n선물: {', '.join(futures_coins)}"
+    if positions_summary:
+        startup_msg += f"\n{positions_summary}"
+    await notification.send_engine_alert(startup_msg)
+
+    logger.info("startup_complete")
+    startup_detail = f"{config.trading.mode} 모드 | 현물: {', '.join(spot_coins)}"
+    if config.binance.enabled:
         startup_detail += f" | 선물: {', '.join(futures_coins)}"
-    await emit_event("info", "system", "서버 시작", detail=startup_detail)
+    metadata = {"spot_coins": spot_coins, "futures_coins": futures_coins if config.binance.enabled else []}
+    await emit_event("info", "system", "서버 시작", detail=startup_detail, metadata=metadata)
 
     yield  # ─── 앱 실행 중 ───
 
     # ── Shutdown ─────────────────────────────────────────────
-    await emit_event("info", "system", "서버 종료")
+    shutdown_positions = await _build_positions_summary(engine_registry)
+    shutdown_detail = "서버 종료"
+    if shutdown_positions:
+        shutdown_detail += f" | {shutdown_positions}"
+    await emit_event("info", "system", "서버 종료", detail=shutdown_detail)
     logger.info("shutdown_begin")
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)
@@ -433,10 +443,40 @@ async def lifespan(app: FastAPI):
     await exchange.close()
     if binance_exchange:
         await binance_exchange.close()
-    await notification.send_engine_alert("🛑 트레이딩 봇 종료")
+    shutdown_msg = "🛑 트레이딩 봇 종료"
+    if shutdown_positions:
+        shutdown_msg += f"\n{shutdown_positions}"
+    await notification.send_engine_alert(shutdown_msg)
     if _discord_handler:
         await _discord_handler.close()
     logger.info("shutdown_complete")
+
+
+async def _build_positions_summary(registry) -> str:
+    """현재 보유 포지션 요약 문자열 생성."""
+    parts = []
+    for ex_name in registry.available_exchanges:
+        pm = registry.get_portfolio_manager(ex_name)
+        if not pm:
+            continue
+        pos_list = []
+        for sym, pos in pm.positions.items():
+            qty = pos.get("quantity", 0)
+            if qty <= 0:
+                continue
+            direction = pos.get("direction", "long")
+            arrow = "↑" if direction == "long" else "↓"
+            pnl = pos.get("unrealized_pnl_pct", 0)
+            sign = "+" if pnl >= 0 else ""
+            pos_list.append(f"{sym.split('/')[0]}{arrow}({sign}{pnl:.1f}%)")
+        currency = "USDT" if "binance" in ex_name else "KRW"
+        label = "현물" if "bithumb" in ex_name else "선물"
+        cash = pm.cash_balance
+        if pos_list:
+            parts.append(f"[{label}] {', '.join(pos_list)} | 현금 {cash:,.0f} {currency}")
+        else:
+            parts.append(f"[{label}] 포지션 없음 | 현금 {cash:,.0f} {currency}")
+    return "\n".join(parts)
 
 
 async def _run_initial_analysis(coordinator, portfolio_mgr, config):
