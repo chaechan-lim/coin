@@ -59,7 +59,7 @@ export function Dashboard() {
         const d = event.data
         const side = d.side === 'buy' ? '▲매수' : '▼매도'
         setLiveEvents((prev) => [
-          `[${time}] ${side} ${d.symbol} @ ${d.price.toLocaleString()} [${d.strategy}]`,
+          `[${time}] ${side} ${d.symbol} @ ${d.price?.toLocaleString()} [${d.strategy}]`,
           ...prev.slice(0, 49),
         ])
         qc.invalidateQueries({ queryKey: ['trades'] })
@@ -82,7 +82,6 @@ export function Dashboard() {
       } else if (event.event === 'server_event') {
         const d = event.data
         setRealtimeServerEvents((prev) => [d, ...prev.slice(0, 99)])
-        // Debounce query invalidation to avoid excessive API calls
         clearTimeout(serverEventInvalidateTimer.current)
         serverEventInvalidateTimer.current = setTimeout(() => {
           qc.invalidateQueries({ queryKey: ['serverEvents'] })
