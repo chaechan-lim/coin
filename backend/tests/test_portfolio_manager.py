@@ -183,6 +183,30 @@ async def test_reconcile_cash(session):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_cash_skipped_for_futures(session):
+    """reconcile_cash_from_db is a no-op for futures (funding fees not in formula)."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300.0,
+        exchange_name="binance_futures",
+    )
+    # Simulate exchange sync set cash to 318 USDT
+    pm._cash_balance = 318.0
+
+    # Add a position so formula would give different result
+    pos = Position(
+        symbol="BTC/USDT", quantity=0.01, average_buy_price=95000.0,
+        total_invested=100.0, is_paper=True, exchange="binance_futures",
+    )
+    session.add(pos)
+    await session.flush()
+
+    # reconcile should NOT override for futures
+    await pm.reconcile_cash_from_db(session)
+    assert pm.cash_balance == 318.0  # unchanged — exchange sync is authoritative
+
+
+@pytest.mark.asyncio
 async def test_average_buy_price_updates_on_additional_buy(session):
     """Multiple buys update the average buy price correctly."""
     pm = PortfolioManager(
@@ -917,3 +941,49 @@ async def test_portfolio_summary_no_sl_tp_when_null(session):
 
     assert p["stop_loss_price"] is None
     assert p["take_profit_price"] is None
+
+
+# ── Trade Timestamp Persistence ──
+
+
+@pytest.mark.asyncio
+async def test_buy_records_last_trade_at(session):
+    """매수 시 Position.last_trade_at이 기록됨."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({"BTC/KRW": 50_000_000}),
+        initial_balance_krw=500_000,
+        is_paper=True,
+    )
+    await pm.update_position_on_buy(
+        session, "BTC/KRW", 0.001, 50_000_000, 50_000, 125,
+    )
+    result = await session.execute(
+        select(Position).where(Position.symbol == "BTC/KRW")
+    )
+    pos = result.scalar_one()
+    assert pos.last_trade_at is not None
+    assert pos.last_sell_at is None
+
+
+@pytest.mark.asyncio
+async def test_sell_records_both_timestamps(session):
+    """매도 시 last_trade_at + last_sell_at 모두 기록됨."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({"BTC/KRW": 55_000_000}),
+        initial_balance_krw=500_000,
+        is_paper=True,
+    )
+    await pm.update_position_on_buy(
+        session, "BTC/KRW", 0.001, 50_000_000, 50_000, 125,
+    )
+    await pm.update_position_on_sell(
+        session, "BTC/KRW", 0.001, 55_000_000, 55_000, 137,
+    )
+    result = await session.execute(
+        select(Position).where(Position.symbol == "BTC/KRW")
+    )
+    pos = result.scalar_one()
+    assert pos.last_trade_at is not None
+    assert pos.last_sell_at is not None
+    # 매도 후 last_sell_at >= last_trade_at (실제로 같은 시점)
+    assert pos.last_sell_at >= pos.last_trade_at

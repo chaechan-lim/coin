@@ -132,6 +132,9 @@ class Position(Base):
     trailing_active = Column(Boolean, default=False)
     highest_price = Column(Float, nullable=True)
     max_hold_hours = Column(Float, nullable=True)
+    # 매매 타이밍 추적 (재시작 시 쿨다운/washout 복원)
+    last_trade_at = Column(DateTime, nullable=True)
+    last_sell_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 

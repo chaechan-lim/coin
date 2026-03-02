@@ -42,6 +42,7 @@ class PortfolioManager:
         )
         position = result.scalar_one_or_none()
 
+        now = datetime.now(timezone.utc)
         if position:
             # Update average buy price
             total_cost = position.average_buy_price * position.quantity + price * quantity
@@ -51,7 +52,8 @@ class PortfolioManager:
             if is_surge:
                 position.is_surge = True
             if not position.entered_at:
-                position.entered_at = datetime.now(timezone.utc)
+                position.entered_at = now
+            position.last_trade_at = now
         else:
             position = Position(
                 exchange=self._exchange_name,
@@ -61,7 +63,8 @@ class PortfolioManager:
                 total_invested=cost + fee,
                 is_paper=self._is_paper,
                 is_surge=is_surge,
-                entered_at=datetime.now(timezone.utc),
+                entered_at=now,
+                last_trade_at=now,
             )
             session.add(position)
 
@@ -100,6 +103,7 @@ class PortfolioManager:
 
         old_quantity = position.quantity
         position.quantity -= quantity
+        now = utcnow()
         if position.quantity <= 0.0001:  # Effectively zero
             position.quantity = 0
             position.average_buy_price = 0
@@ -109,6 +113,10 @@ class PortfolioManager:
         else:
             # 부분 매도: total_invested를 남은 비율만큼 축소
             position.total_invested *= (position.quantity / old_quantity)
+
+        # 매매 타이밍 기록 (재시작 시 쿨다운/washout 복원)
+        position.last_trade_at = now
+        position.last_sell_at = now
 
         self._cash_balance += sell_proceeds
         await session.flush()
@@ -277,7 +285,13 @@ class PortfolioManager:
         """DB 포지션 기준으로 현금 잔고를 재계산 (인메모리 누수 방지).
 
         공식: cash = initial_balance - total_invested + realized_pnl - total_fees
+
+        선물은 건너뜀: 공식에 펀딩비(8h마다 ±)가 포함되지 않아 누적 오차 발생.
+        선물 현금은 sync_exchange_positions(5분)에서 거래소 API 기준으로 정확히 설정됨.
         """
+        if "futures" in self._exchange_name:
+            return
+
         result = await session.execute(
             select(Position).where(
                 Position.quantity > 0,

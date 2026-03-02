@@ -151,9 +151,27 @@ class TradingEngine:
             mode=self._config.trading.mode,
         )
 
+    async def _restore_trade_timestamps(self) -> None:
+        """DB에서 매매 타임스탬프 복원 (재시작 시 쿨다운/washout 유지)."""
+        from db.session import get_session_factory
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            result = await session.execute(
+                select(Position).where(Position.exchange == self._exchange_name)
+            )
+            for pos in result.scalars().all():
+                if pos.last_trade_at:
+                    self._last_trade_time[pos.symbol] = pos.last_trade_at
+                if pos.last_sell_at:
+                    self._last_sell_time[pos.symbol] = pos.last_sell_at
+        restored = len(self._last_trade_time)
+        if restored:
+            logger.info("trade_timestamps_restored", count=restored)
+
     async def start(self) -> None:
         """Start the trading engine main loop."""
         self._is_running = True
+        await self._restore_trade_timestamps()
         logger.info("engine_started")
         await emit_event("info", "engine", "엔진 시작", metadata={"mode": self._config.trading.mode})
         while self._is_running:

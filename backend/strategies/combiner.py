@@ -23,8 +23,8 @@ class SignalCombiner:
     DEFAULT_WEIGHTS = {
         "ma_crossover": 0.08,
         "rsi": 0.25,
-        "macd_crossover": 0.12,
-        "bollinger_rsi": 0.27,
+        "macd_crossover": 0.08,
+        "bollinger_rsi": 0.31,
         "stochastic_rsi": 0.15,
         "obv_divergence": 0.13,
     }
@@ -40,24 +40,24 @@ class SignalCombiner:
     # 시장 상태별 적응형 가중치 프로필 (8전략)
     ADAPTIVE_PROFILES: dict[str, dict[str, float]] = {
         MarketState.STRONG_UPTREND.value: {
-            "ma_crossover": 0.12, "rsi": 0.18, "macd_crossover": 0.18,
-            "bollinger_rsi": 0.22, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
+            "ma_crossover": 0.12, "rsi": 0.18, "macd_crossover": 0.12,
+            "bollinger_rsi": 0.28, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
         },
         MarketState.UPTREND.value: {
-            "ma_crossover": 0.10, "rsi": 0.22, "macd_crossover": 0.13,
-            "bollinger_rsi": 0.25, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
+            "ma_crossover": 0.10, "rsi": 0.22, "macd_crossover": 0.10,
+            "bollinger_rsi": 0.28, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
         },
         MarketState.SIDEWAYS.value: {
-            "ma_crossover": 0.05, "rsi": 0.27, "macd_crossover": 0.10,
-            "bollinger_rsi": 0.30, "stochastic_rsi": 0.15, "obv_divergence": 0.13,
+            "ma_crossover": 0.05, "rsi": 0.27, "macd_crossover": 0.08,
+            "bollinger_rsi": 0.32, "stochastic_rsi": 0.15, "obv_divergence": 0.13,
         },
         MarketState.DOWNTREND.value: {
-            "ma_crossover": 0.06, "rsi": 0.27, "macd_crossover": 0.10,
-            "bollinger_rsi": 0.30, "stochastic_rsi": 0.15, "obv_divergence": 0.12,
+            "ma_crossover": 0.06, "rsi": 0.27, "macd_crossover": 0.08,
+            "bollinger_rsi": 0.32, "stochastic_rsi": 0.15, "obv_divergence": 0.12,
         },
         MarketState.CRASH.value: {
-            "ma_crossover": 0.04, "rsi": 0.28, "macd_crossover": 0.08,
-            "bollinger_rsi": 0.32, "stochastic_rsi": 0.15, "obv_divergence": 0.13,
+            "ma_crossover": 0.04, "rsi": 0.28, "macd_crossover": 0.06,
+            "bollinger_rsi": 0.34, "stochastic_rsi": 0.15, "obv_divergence": 0.13,
         },
     }
 

@@ -108,6 +108,7 @@ class BinanceFuturesEngine(TradingEngine):
     async def start(self) -> None:
         """Start futures engine: WebSocket price monitor + strategy eval loop."""
         self._is_running = True
+        await self._restore_trade_timestamps()
         logger.info("engine_started", exchange="binance_futures")
         await emit_event("info", "engine", "선물 엔진 시작",
                          metadata={"mode": self._config.binance_trading.mode})
