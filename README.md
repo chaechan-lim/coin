@@ -1,7 +1,7 @@
 # Coin Auto-Trading System
 
 Bithumb (spot) + Binance USDM (futures) dual-engine auto-trading bot.
-6 active strategies, weighted voting, dynamic SL/TP, volume surge rotation, AI agents, React dashboard.
+6 active strategies, weighted voting, dynamic SL/TP, volume surge rotation, AI agents, React dashboard. 209 tests.
 
 ---
 
@@ -35,8 +35,8 @@ Bithumb (spot) + Binance USDM (futures) dual-engine auto-trading bot.
 
 | Engine | Exchange | Market | Features |
 |--------|----------|--------|----------|
-| TradingEngine | Bithumb V2 | Spot (KRW) | SL/TP/trailing, rotation, dynamic SL |
-| BinanceFuturesEngine | Binance USDM | Futures (USDT) | Long/short, leverage, liquidation guard |
+| TradingEngine | Bithumb V2 | Spot (KRW) | SL/TP/trailing, rotation, dynamic SL, asymmetric mode |
+| BinanceFuturesEngine | Binance USDM | Futures (USDT) | Long/short, 3x leverage, liquidation guard, WebSocket monitor |
 
 ### Strategies (6 active)
 
@@ -48,6 +48,16 @@ Bithumb (spot) + Binance USDM (futures) dual-engine auto-trading bot.
 | OBV Divergence | 0.13 | On-balance volume divergence |
 | MACD Crossover | 0.12 | MACD/Signal crossover |
 | MA Crossover | 0.08 | Moving average crossover |
+
+### Safety Features
+
+| Feature | Description |
+|---------|-------------|
+| Cross-exchange conflict | Blocks spot buy if futures short exists (and vice versa) |
+| Post-sell washout | 4h cooldown before re-buying same coin after sell |
+| PositionTracker DB | SL/TP/trailing survives server restart |
+| Snapshot reconcile | Prevents fake balance spikes from async interleaving |
+| Asymmetric mode | Blocks spot buys in downtrend/crash markets |
 
 ---
 
@@ -137,7 +147,7 @@ curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures&
 
 ```bash
 cd backend
-.venv/bin/python -m pytest tests/ -v
+.venv/bin/python -m pytest tests/ -v   # 209 tests
 # Tests use in-memory SQLite (aiosqlite)
 ```
 

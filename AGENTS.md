@@ -246,14 +246,14 @@ curl -X POST "http://localhost:8000/api/v1/engine/start?exchange=binance_futures
 
 ### 테스트
 ```bash
-cd backend && .venv/bin/python -m pytest tests/ -v    # 125 tests
+cd backend && .venv/bin/python -m pytest tests/ -v    # 209 tests
 ```
 
 ---
 
 ## DB Schema (주요 테이블)
 
-- **Position**: symbol, exchange, quantity, average_buy_price, direction, leverage, liquidation_price, margin_used
+- **Position**: symbol, exchange, quantity, average_buy_price, direction, leverage, liquidation_price, margin_used, stop_loss_pct, take_profit_pct, trailing_activation_pct, trailing_stop_pct, trailing_active, highest_price, max_hold_hours
 - **Order**: symbol, exchange, direction, leverage, margin_used, strategy_name, signal_confidence, contributing_strategies
 - **Trade**: symbol, exchange, side, price, quantity
 - **PortfolioSnapshot**: exchange, total_value_krw, peak_value, realized_pnl
@@ -275,3 +275,7 @@ cd backend && .venv/bin/python -m pytest tests/ -v    # 125 tests
 - **DB**: PostgreSQL 16 (docker compose), SQLite (테스트 폴백)
 - **캐시**: `backend/.cache/`에 CSV 캐싱 (API 제한 우회)
 - **DateTime**: 모든 컬럼 `DateTime(timezone=True)`, `_utcnow()` 헬퍼
+- **PositionTracker DB 영속화**: SL/TP/trailing 상태를 Position 테이블에 저장, 재시작 시 복원
+- **교차 거래소 안전장치**: 현물 롱 보유 시 선물 숏 차단, 선물 숏 보유 시 현물 매수 차단
+- **매도 후 재매수 대기**: `cooldown_after_sell_sec=14400` (4시간, 당일 왕복 방지)
+- **스냅샷 정합성**: sync/eval 인터리빙 방지 — 스냅샷 직전 `reconcile_cash_from_db()` 호출

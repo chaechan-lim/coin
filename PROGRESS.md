@@ -1,6 +1,6 @@
 # 코인 자동 매매 시스템 — 구현 진행 현황
 
-> 최종 업데이트: 2026-03-01
+> 최종 업데이트: 2026-03-02
 
 ---
 
@@ -8,7 +8,8 @@
 
 빗썸(Bithumb) 현물 + 바이낸스(Binance) USDM 선물 **듀얼 엔진** 24시간 자동 암호화폐 트레이딩 시스템.
 6개 전략 가중 투표 (HOLD=기권 방식) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭, 거래소 전환) 포함.
-**현재 라이브 운영 중**: 빗썸 현물 (~308K KRW) + 바이낸스 선물 (~308 USDT, 3x 레버리지), **PostgreSQL 16** (docker compose), **라즈베리파이 배포 완료**, **HTTPS (nginx self-signed)**.
+**현재 라이브 운영 중**: 빗썸 현물 (~308K KRW) + 바이낸스 선물 (~314 USDT, 3x 레버리지), **PostgreSQL 16** (docker compose), **라즈베리파이 배포 완료**, **HTTPS (nginx self-signed)**.
+**교차 거래소 안전장치**: 현물 롱↔선물 숏 동시 진입 차단, 매도 후 재매수 4시간 대기(washout), PositionTracker DB 영속화 (재시작 시 SL/TP/trailing 복원).
 **듀얼 엔진 아키텍처**: 빗썸 TradingEngine + 바이낸스 BinanceFuturesEngine 독립 병렬 실행, EngineRegistry 중앙 관리, exchange 컬럼 기반 데이터 격리.
 **바이낸스 선물 라이브**: 독립 모드 분리 (빗썸 paper/live + 바이낸스 paper/live 별도), 시장가 주문, 실제 USDT 잔고 조회.
 **에이전트 심볼 분기**: MarketAnalysisAgent `market_symbol` 파라미터 — 빗썸 BTC/KRW, 바이낸스 BTC/USDT 자동 분기.
@@ -261,6 +262,12 @@ coin/
 | 구조화된 로깅 (structlog) | ✅ 코드 내 적용 완료 |
 | 에러 핸들링 / 재연결 | ✅ 기본 구현 완료 |
 | 멀티 알림 (Telegram/Discord/Slack) | ✅ 3 프로바이더 지원, 복수 동시 발송, 15 tests |
+| PositionTracker DB 영속화 | ✅ SL/TP/trailing 재시작 복원, Position 7컬럼 추가 |
+| 프론트엔드 SL/TP 표시 | ✅ 포지션 손절가·익절가·TRAIL/SURGE 뱃지 |
+| 가짜 스파이크 방지 | ✅ 스냅샷 직전 reconcile, sync 후 reconcile |
+| 교차 거래소 충돌 차단 | ✅ 현물 롱↔선물 숏 동시 진입 방지 |
+| 매도 후 재매수 대기 | ✅ washout 4시간 (당일 왕복 방지) |
+| trade_review PnL 매칭 개선 | ✅ 윈도우 이전 진입 DB 조회, PF 캡핑 |
 | Discord 이벤트 알림 (Embed) | ✅ event_bus 훅, 매매/시그널/리스크/일일요약 자동 전송, **매수/진입 시 손절가·익절가 표시**, 레이트리밋, 22 tests |
 | SQLite WAL 모드 | ✅ 동시 접근 안정화 |
 | 주문 fill 폴링 | ✅ 지정가 주문 체결/수수료 추적 |
@@ -696,6 +703,8 @@ docker compose restart backend
 | 일일 매수 상한 | 20건 | 매수만 카운트 (매도 무제한) |
 | 코인당 일일 매수 상한 | 3건 | 동일 코인 과매매 방지 |
 | 코인당 최소 매수 간격 | 1시간 | 과매매 방지 |
+| 매도 후 재매수 대기 | 4시간 | 당일 왕복 방지 (washout) |
+| 교차 거래소 충돌 차단 | 자동 | 현물 롱↔선물 숏 동시 진입 차단 |
 
 ---
 
@@ -733,5 +742,8 @@ docker compose restart backend
 | v0.17.7 | 2026-03-01 | **멀티 알림 (Telegram/Discord/Slack)**: 3 프로바이더 동시 지원, 쉼표 구분 복수 발송, HTML→마크다운 변환, 15 tests (170개 총) |
 | v0.17.8 | 2026-03-01 | **Discord 이벤트 알림 강화**: event_bus notification 훅, DiscordEventHandler (Embed 포맷, 카테고리 필터, 5/5s 레이트리밋), 매매/SL·TP/선물/로테이션/리스크/시그널/일일요약 자동 전송, 통합 시그널 emit 추가, 일일 요약 스케줄러, 17 tests (187개 총) |
 | v0.17.9 | 2026-03-01 | **매수/진입 알림 손절가·익절가 표시 + 540일 백테스트**: 현물 매수·선물 롱/숏 진입 시 sl_price·tp_price Discord 알림 추가, combiner 로그 symbol 추가, fetch_long_history.py (바이낸스 장기 데이터→KRW CSV), 22 discord tests + 19 combiner tests (194개 총) |
-| v0.18 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
+| v0.18 | 2026-03-01 | **수동 매도 정리 + 포지션 동기화**: 수동 매도 포지션 자동 정리, 5분 주기 포지션 동기화 (197 tests) |
+| v0.19 | 2026-03-02 | **PositionTracker DB 영속화 + 프론트 SL/TP**: Position 모델에 7 트래커 컬럼 추가 (stop_loss_pct, take_profit_pct, trailing_activation_pct, trailing_stop_pct, trailing_active, highest_price, max_hold_hours), 매수/진입 시 DB 저장 + 재시작 시 DB 복원, 프론트엔드 포지션에 손절가·익절가 표시 + TRAIL/SURGE 뱃지 (203 tests) |
+| v0.19.1 | 2026-03-02 | **가짜 스파이크 방지 + 에이전트 수정 + 전략 안전장치**: (1) sync/eval 인터리빙 스파이크 방지 (스냅샷 직전 reconcile), (2) trade_review PnL 매칭 수정 (윈도우 이전 진입 DB 조회), (3) PF 캡핑 inf→99, (4) 교차 거래소 충돌 차단 (현물 롱↔선물 숏 동시 진입 방지), (5) 매도 후 재매수 4시간 대기 washout (당일 왕복 방지), 209 tests |
+| v0.20 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
 | v1.0 | 진행중 | **라즈베리파이 배포 완료**, 장기 운영 안정화 |
