@@ -76,6 +76,7 @@ class TradingEngine:
         self._paused_coins: set[str] = set()
         self._suppressed_coins: set[str] = set()
         self._last_trade_time: dict[str, datetime] = {}
+        self._last_sell_time: dict[str, datetime] = {}  # 매도 시각 (재매수 대기용)
         self._daily_buy_count = 0                       # 일일 총 매수 횟수
         self._daily_coin_buy_count: dict[str, int] = {} # 코인별 일일 매수 횟수
         self._daily_trade_count = 0                     # 레거시 (호환)
@@ -218,6 +219,15 @@ class TradingEngine:
                 if elapsed < self._config.trading.min_trade_interval_sec:
                     remaining = self._config.trading.min_trade_interval_sec - elapsed
                     return False, f"Coin cooldown: {remaining:.0f}s remaining"
+
+            # 매도 후 재매수 대기 (당일 왕복 방지)
+            last_sell = self._last_sell_time.get(symbol)
+            if last_sell:
+                sell_elapsed = (datetime.now(timezone.utc) - last_sell).total_seconds()
+                washout = self._config.trading.cooldown_after_sell_sec
+                if sell_elapsed < washout:
+                    remaining = washout - sell_elapsed
+                    return False, f"Post-sell washout: {remaining:.0f}s remaining"
 
             # 리스크 에이전트에 의한 매수 중지
             if symbol in self._paused_coins:
@@ -603,7 +613,9 @@ class TradingEngine:
         self._position_trackers.pop(symbol, None)
 
         # 매매 추적 (매도는 buy 카운터에 포함하지 않음)
-        self._last_trade_time[symbol] = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        self._last_trade_time[symbol] = now
+        self._last_sell_time[symbol] = now  # 매도 후 재매수 대기용
         self._daily_trade_count += 1
 
         # 브로드캐스트
@@ -760,6 +772,8 @@ class TradingEngine:
                         top_surges=[(s, round(sc, 1)) for s, sc in surges[:3]] if surges else [],
                     )
 
+                # 스냅샷 직전 현금 잔고 재보정 (eval 중 sync 인터리빙 방지)
+                await self._portfolio_manager.reconcile_cash_from_db(session)
                 await self._portfolio_manager.take_snapshot(session)
                 await session.commit()
 
@@ -1216,6 +1230,32 @@ class TradingEngine:
                 select(Position).where(Position.symbol == symbol, Position.quantity > 0, Position.exchange == self._exchange_name)
             )
             if result.scalar_one_or_none():
+                return
+
+            # 교차 거래소 포지션 충돌 체크 (현물 매수 vs 선물 숏)
+            cross_symbol = symbol.replace("/KRW", "/USDT")
+            cross_result = await session.execute(
+                select(Position).where(
+                    Position.symbol == cross_symbol,
+                    Position.quantity > 0,
+                    Position.exchange != self._exchange_name,
+                    Position.direction == "short",
+                )
+            )
+            cross_pos = cross_result.scalar_one_or_none()
+            if cross_pos:
+                logger.warning(
+                    "cross_exchange_conflict_blocked",
+                    symbol=symbol,
+                    cross_exchange=cross_pos.exchange,
+                    cross_direction="short",
+                    cross_qty=cross_pos.quantity,
+                )
+                await emit_event(
+                    "warning", "risk",
+                    f"교차 거래소 충돌: {symbol} 매수 차단 (선물 숏 보유 중)",
+                    metadata={"symbol": symbol, "cross_qty": cross_pos.quantity},
+                )
                 return
 
             # 포지션 사이징

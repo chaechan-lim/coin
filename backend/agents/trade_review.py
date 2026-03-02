@@ -147,6 +147,33 @@ class TradeReviewAgent:
         sell_records: dict[str, list[dict]] = defaultdict(list)  # 숏 entry 추적
         total_fees = 0.0
 
+        # 리뷰 윈도우 이전 진입 주문 조회용 헬퍼
+        async def _find_entry_before_cutoff(symbol: str, side: str, before_time):
+            """리뷰 기간 전에 체결된 가장 최근 진입 주문 조회."""
+            result = await session.execute(
+                select(Order)
+                .where(
+                    Order.symbol == symbol,
+                    Order.side == side,
+                    Order.status == "filled",
+                    Order.exchange == self._exchange_name,
+                    Order.filled_at < cutoff,
+                )
+                .order_by(Order.filled_at.desc())
+                .limit(3)
+            )
+            rows = list(result.scalars().all())
+            if not rows:
+                return None, None, None
+            avg_price = sum(
+                (r.executed_price or r.requested_price) for r in rows
+            ) / len(rows)
+            last = rows[0]
+            hold_min = None
+            if last.filled_at and before_time:
+                hold_min = (before_time - last.filled_at).total_seconds() / 60
+            return avg_price, last.strategy_name, hold_min
+
         for o in orders:
             fee = o.fee or 0
             total_fees += fee
@@ -166,18 +193,22 @@ class TradeReviewAgent:
                 elif o.side == "buy":
                     # 숏 청산 (buy = exit)
                     coin_sells = sell_records.get(o.symbol, [])
-                    avg_entry = (
-                        sum(s["price"] for s in coin_sells) / len(coin_sells)
-                        if coin_sells
-                        else price
-                    )
+                    avg_entry = None
                     hold_minutes = None
                     entry_strategy = None
                     if coin_sells:
+                        avg_entry = sum(s["price"] for s in coin_sells) / len(coin_sells)
                         last_entry = coin_sells[-1]
                         entry_strategy = last_entry["strategy"]
                         if last_entry["time"] and o.filled_at:
                             hold_minutes = (o.filled_at - last_entry["time"]).total_seconds() / 60
+                    else:
+                        # 리뷰 윈도우 이전 숏 진입 → DB에서 조회
+                        avg_entry, entry_strategy, hold_minutes = await _find_entry_before_cutoff(
+                            o.symbol, "sell", o.filled_at
+                        )
+                    if avg_entry is None:
+                        avg_entry = price  # 최후 폴백
 
                     # 숏 P&L = (진입매도가 - 청산매수가) * qty - fees
                     pnl = (avg_entry - price) * qty - fee
@@ -209,18 +240,22 @@ class TradeReviewAgent:
                     })
                 elif o.side == "sell":
                     coin_buys = buy_records.get(o.symbol, [])
-                    avg_buy = (
-                        sum(b["price"] for b in coin_buys) / len(coin_buys)
-                        if coin_buys
-                        else price
-                    )
+                    avg_buy = None
                     hold_minutes = None
                     buy_strategy = None
                     if coin_buys:
+                        avg_buy = sum(b["price"] for b in coin_buys) / len(coin_buys)
                         last_buy = coin_buys[-1]
                         buy_strategy = last_buy["strategy"]
                         if last_buy["time"] and o.filled_at:
                             hold_minutes = (o.filled_at - last_buy["time"]).total_seconds() / 60
+                    else:
+                        # 리뷰 윈도우 이전 진입 → DB에서 조회
+                        avg_buy, buy_strategy, hold_minutes = await _find_entry_before_cutoff(
+                            o.symbol, "buy", o.filled_at
+                        )
+                    if avg_buy is None:
+                        avg_buy = price  # 최후 폴백
 
                     pnl = (price - avg_buy) * qty - fee
                     pnl_pct = (price - avg_buy) / avg_buy * 100 if avg_buy > 0 else 0
@@ -252,7 +287,7 @@ class TradeReviewAgent:
         gross_profit = sum(t["pnl"] for t in wins) if wins else 0
         gross_loss = abs(sum(t["pnl"] for t in losses)) if losses else 0
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else (
-            float("inf") if gross_profit > 0 else 0
+            99.0 if gross_profit > 0 else 0
         )
 
         largest_win = max((t["pnl"] for t in sell_pnls), default=0)
@@ -322,7 +357,7 @@ class TradeReviewAgent:
             win_rate=round(win_rate, 4),
             total_realized_pnl=round(total_pnl, dp),
             avg_pnl_per_trade=round(total_pnl / total_sell, dp) if total_sell > 0 else 0,
-            profit_factor=round(profit_factor, 2) if profit_factor != float("inf") else 999.0,
+            profit_factor=round(min(profit_factor, 99.0), 2),
             largest_win=round(largest_win, dp),
             largest_loss=round(largest_loss, dp),
             by_strategy=dict(by_strategy),

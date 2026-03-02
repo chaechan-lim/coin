@@ -187,3 +187,80 @@ async def test_review_short_pnl_calculated(session):
     assert review.total_realized_pnl > 0
     assert review.win_count == 1
     assert review.loss_count == 0
+
+
+# ── PnL Matching: buy before review window ──
+
+
+@pytest.mark.asyncio
+async def test_review_pnl_matches_buy_before_window(session):
+    """매수가 리뷰 윈도우 이전이고 매도만 윈도우 내일 때 DB에서 매수 조회."""
+    agent = TradeReviewAgent(exchange_name="bithumb", review_window_hours=24)
+
+    now = datetime.now(timezone.utc)
+    # 48시간 전 매수 (리뷰 윈도우 밖)
+    buy_order = Order(
+        exchange="bithumb", symbol="BTC/KRW", side="buy",
+        order_type="market", status="filled",
+        requested_price=50_000_000, executed_price=50_000_000,
+        requested_quantity=0.001, executed_quantity=0.001,
+        fee=125, fee_currency="KRW", is_paper=False,
+        strategy_name="rsi", signal_confidence=0.7,
+        signal_reason="RSI oversold",
+        created_at=now - timedelta(hours=48),
+        filled_at=now - timedelta(hours=48),
+    )
+    session.add(buy_order)
+
+    # 2시간 전 매도 (리뷰 윈도우 안)
+    sell_order = Order(
+        exchange="bithumb", symbol="BTC/KRW", side="sell",
+        order_type="market", status="filled",
+        requested_price=55_000_000, executed_price=55_000_000,
+        requested_quantity=0.001, executed_quantity=0.001,
+        fee=137, fee_currency="KRW", is_paper=False,
+        strategy_name="rsi", signal_confidence=0.7,
+        signal_reason="TP reached",
+        created_at=now - timedelta(hours=2),
+        filled_at=now - timedelta(hours=2),
+    )
+    session.add(sell_order)
+    await session.flush()
+
+    review = await agent.review(session)
+    # PnL = (55M - 50M) * 0.001 - 137 = 5000 - 137 = 4863
+    assert review.total_realized_pnl > 4000  # 이전 버그: pnl=0
+    assert review.win_count == 1
+
+
+@pytest.mark.asyncio
+async def test_review_profit_factor_capped(session):
+    """손실 없는 경우 PF가 99.0으로 캡핑."""
+    agent = TradeReviewAgent(exchange_name="bithumb", review_window_hours=24)
+
+    now = datetime.now(timezone.utc)
+    # 매수 + 매도 (이익만)
+    session.add(Order(
+        exchange="bithumb", symbol="BTC/KRW", side="buy",
+        order_type="market", status="filled",
+        requested_price=50_000_000, executed_price=50_000_000,
+        requested_quantity=0.001, executed_quantity=0.001,
+        fee=125, fee_currency="KRW", is_paper=False,
+        strategy_name="rsi", signal_confidence=0.7, signal_reason="test",
+        created_at=now - timedelta(hours=3),
+        filled_at=now - timedelta(hours=3),
+    ))
+    session.add(Order(
+        exchange="bithumb", symbol="BTC/KRW", side="sell",
+        order_type="market", status="filled",
+        requested_price=55_000_000, executed_price=55_000_000,
+        requested_quantity=0.001, executed_quantity=0.001,
+        fee=137, fee_currency="KRW", is_paper=False,
+        strategy_name="rsi", signal_confidence=0.7, signal_reason="test",
+        created_at=now - timedelta(hours=2),
+        filled_at=now - timedelta(hours=2),
+    ))
+    await session.flush()
+
+    review = await agent.review(session)
+    assert review.profit_factor == 99.0  # 캡핑됨 (이전: 999.0)

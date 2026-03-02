@@ -24,6 +24,7 @@ class TradingConfig(BaseSettings):
         "ADA/KRW",
     ]
     min_trade_interval_sec: int = 3600  # 1 hour per coin
+    cooldown_after_sell_sec: int = 14400  # 매도 후 재매수 대기 (4시간, 당일 왕복 방지)
     cooldown_after_buy_sec: int = 1800  # 30 min
     daily_buy_limit: int = 20          # 일일 매수 상한 (매도는 무제한)
     max_daily_coin_buys: int = 3       # 코인당 일일 매수 상한 (왕복 3회)

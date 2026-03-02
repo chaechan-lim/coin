@@ -434,6 +434,9 @@ class BinanceFuturesEngine(TradingEngine):
                 # 펀딩비 업데이트 (30분마다)
                 await self._maybe_update_funding_rates()
 
+                # 스냅샷 직전 현금 잔고 재보정 (eval 중 sync 인터리빙 방지)
+                await self._portfolio_manager.reconcile_cash_from_db(session)
+
                 # 스냅샷 (DB locked 재시도)
                 for _attempt in range(3):
                     try:
@@ -650,6 +653,7 @@ class BinanceFuturesEngine(TradingEngine):
                 position.quantity * price, order.fee
             )
             self._position_trackers.pop(symbol, None)
+            self._last_sell_time[symbol] = datetime.now(timezone.utc)  # 재진입 대기용
             entry_price = position.average_buy_price or price
             pnl_pct = ((price - entry_price) / entry_price * 100) if direction == "long" else ((entry_price - price) / entry_price * 100)
             lev_val = position.leverage or self._leverage
@@ -912,6 +916,31 @@ class BinanceFuturesEngine(TradingEngine):
         signal: Signal, decision: CombinedDecision,
     ) -> None:
         """숏 포지션 진입."""
+        # 교차 거래소 포지션 충돌 체크 (선물 숏 vs 현물 롱)
+        cross_symbol = symbol.replace("/USDT", "/KRW")
+        cross_result = await session.execute(
+            select(Position).where(
+                Position.symbol == cross_symbol,
+                Position.quantity > 0,
+                Position.exchange != self._exchange_name,
+            )
+        )
+        cross_pos = cross_result.scalar_one_or_none()
+        if cross_pos:
+            logger.warning(
+                "cross_exchange_conflict_blocked",
+                symbol=symbol,
+                cross_exchange=cross_pos.exchange,
+                cross_direction="long",
+                cross_qty=cross_pos.quantity,
+            )
+            await emit_event(
+                "warning", "risk",
+                f"교차 거래소 충돌: {symbol} 숏 차단 (현물 롱 보유 중)",
+                metadata={"symbol": symbol, "cross_qty": cross_pos.quantity},
+            )
+            return
+
         cash = self._portfolio_manager.cash_balance
         bt = self._config.binance_trading
         size_pct = bt.max_trade_size_pct

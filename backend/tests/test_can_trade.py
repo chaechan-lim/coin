@@ -172,3 +172,37 @@ class TestDailyReset:
         engine._daily_reset_date = datetime.now(timezone.utc).date()
         ok, reason = engine._can_trade("BTC/KRW", side="buy")
         assert ok is False  # limit still enforced
+
+
+# ── 매도 후 재매수 대기 (washout) ──────────────────────────────
+
+
+class TestPostSellWashout:
+    def test_buy_blocked_during_washout(self):
+        """매도 직후 재매수 차단."""
+        engine = _make_engine(cooldown_after_sell_sec=14400)
+        engine._last_sell_time["BTC/KRW"] = datetime.now(timezone.utc) - timedelta(hours=1)
+        ok, reason = engine._can_trade("BTC/KRW", side="buy")
+        assert ok is False
+        assert "washout" in reason.lower()
+
+    def test_buy_allowed_after_washout(self):
+        """대기 시간 경과 후 매수 가능."""
+        engine = _make_engine(cooldown_after_sell_sec=14400)
+        engine._last_sell_time["BTC/KRW"] = datetime.now(timezone.utc) - timedelta(hours=5)
+        ok, reason = engine._can_trade("BTC/KRW", side="buy")
+        assert ok is True
+
+    def test_sell_not_affected_by_washout(self):
+        """매도는 washout 영향 안 받음."""
+        engine = _make_engine(cooldown_after_sell_sec=14400)
+        engine._last_sell_time["BTC/KRW"] = datetime.now(timezone.utc) - timedelta(minutes=10)
+        ok, reason = engine._can_trade("BTC/KRW", side="sell")
+        assert ok is True
+
+    def test_other_coin_not_affected(self):
+        """다른 코인은 영향 없음."""
+        engine = _make_engine(cooldown_after_sell_sec=14400)
+        engine._last_sell_time["BTC/KRW"] = datetime.now(timezone.utc) - timedelta(minutes=10)
+        ok, reason = engine._can_trade("ETH/KRW", side="buy")
+        assert ok is True

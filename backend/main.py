@@ -402,6 +402,8 @@ async def lifespan(app: FastAPI):
                 coins = eng.tracked_coins
             async with sf() as sess:
                 await pm.sync_exchange_positions(sess, eng._exchange, coins)
+                # sync 후 현금 잔고 보정 — 스냅샷 전 정합성 확보 (가짜 스파이크 방지)
+                await pm.reconcile_cash_from_db(sess)
                 await sess.commit()
     _scheduler.add_job(
         _wrap(position_sync_job),
