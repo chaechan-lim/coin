@@ -754,58 +754,62 @@ class TradingEngine:
         # 시장 상태 업데이트
         await self._maybe_update_market_state()
 
-        session_factory = get_session_factory()
-        async with session_factory() as session:
-            try:
-                # 매 사이클 시작 시 현금 잔고 정합성 확인
-                await self._portfolio_manager.reconcile_cash_from_db(session)
+        self._portfolio_manager._sync_guard = True
+        try:
+            session_factory = get_session_factory()
+            async with session_factory() as session:
+                try:
+                    # 매 사이클 시작 시 현금 잔고 정합성 확인
+                    await self._portfolio_manager.reconcile_cash_from_db(session)
 
-                # 포트폴리오 리밸런싱 (비중 초과 코인 자동 일부 매도)
-                await self._check_and_rebalance(session)
+                    # 포트폴리오 리밸런싱 (비중 초과 코인 자동 일부 매도)
+                    await self._check_and_rebalance(session)
 
-                coins = set(self._config.trading.tracked_coins)
+                    coins = set(self._config.trading.tracked_coins)
 
-                # 보유 중인 포지션도 평가 대상에 포함 (서지 코인 SL/TP/SELL)
-                result = await session.execute(
-                    select(Position.symbol).where(Position.quantity > 0, Position.exchange == self._exchange_name)
-                )
-                held = {r[0] for r in result.all()}
-                all_coins = list(coins | held)
-
-                for symbol in all_coins:
-                    try:
-                        await self._evaluate_coin(session, symbol)
-                    except Exception as coin_err:
-                        logger.error("evaluate_coin_error", symbol=symbol, error=str(coin_err))
-                        continue
-
-                # 거래량 급등 로테이션 모드
-                if self._config.trading.rotation_enabled:
-                    surges = await self._scan_volume_surges()
-                    if surges:
-                        await self._try_rotation(session, surges)
-                    logger.info(
-                        "surge_scan_complete",
-                        surge_count=len(surges),
-                        top_surges=[(s, round(sc, 1)) for s, sc in surges[:3]] if surges else [],
+                    # 보유 중인 포지션도 평가 대상에 포함 (서지 코인 SL/TP/SELL)
+                    result = await session.execute(
+                        select(Position.symbol).where(Position.quantity > 0, Position.exchange == self._exchange_name)
                     )
+                    held = {r[0] for r in result.all()}
+                    all_coins = list(coins | held)
 
-                # 스냅샷 직전 현금 잔고 재보정 (eval 중 sync 인터리빙 방지)
-                await self._portfolio_manager.reconcile_cash_from_db(session)
-                await self._portfolio_manager.take_snapshot(session)
-                await session.commit()
+                    for symbol in all_coins:
+                        try:
+                            await self._evaluate_coin(session, symbol)
+                        except Exception as coin_err:
+                            logger.error("evaluate_coin_error", symbol=symbol, error=str(coin_err))
+                            continue
 
-                if self._broadcast_callback:
-                    summary = await self._portfolio_manager.get_portfolio_summary(session)
-                    await self._broadcast_callback({
-                        "event": "portfolio_update",
-                        "data": summary,
-                    })
+                    # 거래량 급등 로테이션 모드
+                    if self._config.trading.rotation_enabled:
+                        surges = await self._scan_volume_surges()
+                        if surges:
+                            await self._try_rotation(session, surges)
+                        logger.info(
+                            "surge_scan_complete",
+                            surge_count=len(surges),
+                            top_surges=[(s, round(sc, 1)) for s, sc in surges[:3]] if surges else [],
+                        )
 
-            except Exception as e:
-                await session.rollback()
-                logger.error("evaluation_cycle_error", error=str(e), exc_info=True)
-                await emit_event("error", "engine", "평가 사이클 오류", detail=str(e))
+                    # 스냅샷 직전 현금 잔고 재보정 (eval 중 sync 인터리빙 방지)
+                    await self._portfolio_manager.reconcile_cash_from_db(session)
+                    await self._portfolio_manager.take_snapshot(session)
+                    await session.commit()
+
+                    if self._broadcast_callback:
+                        summary = await self._portfolio_manager.get_portfolio_summary(session)
+                        await self._broadcast_callback({
+                            "event": "portfolio_update",
+                            "data": summary,
+                        })
+
+                except Exception as e:
+                    await session.rollback()
+                    logger.error("evaluation_cycle_error", error=str(e), exc_info=True)
+                    await emit_event("error", "engine", "평가 사이클 오류", detail=str(e))
+        finally:
+            self._portfolio_manager._sync_guard = False
 
     async def _evaluate_coin(self, session: AsyncSession, symbol: str) -> None:
         """Evaluate a single coin: SL/TP first, then strategy signals."""

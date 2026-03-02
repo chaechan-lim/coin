@@ -18,7 +18,7 @@ class BollingerRSIStrategy(BaseStrategy):
     display_name = "볼린저 밴드 + RSI"
     applicable_market_types = ["sideways", "trending"]
     default_coins = ["ETH/KRW", "XRP/KRW", "ADA/KRW"]
-    required_timeframe = "1h"
+    required_timeframe = "4h"
     min_candles_required = 25
 
     def __init__(

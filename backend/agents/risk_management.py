@@ -38,6 +38,10 @@ class RiskManagementAgent:
         self._market_data = market_data
         self._exchange_name = exchange_name
         self._alerts: list[RiskAlert] = []
+        # 거래소별 통화 단위 + 포맷
+        self._is_futures = "futures" in exchange_name
+        self._currency_unit = "USDT" if self._is_futures else "원"
+        self._fmt = ",.2f" if self._is_futures else ",.0f"
 
     async def evaluate(
         self,
@@ -143,7 +147,7 @@ class RiskManagementAgent:
             self._alerts.append(RiskAlert(
                 level=level,
                 message=f"포트폴리오 낙폭 {drawdown*100:.1f}%가 한도 {self._config.max_drawdown_pct*100:.0f}% 초과. "
-                f"고점: {peak:,.0f}원, 현재: {current_value:,.0f}원",
+                f"고점: {peak:{self._fmt}}{self._currency_unit}, 현재: {current_value:{self._fmt}}{self._currency_unit}",
                 action=action,
                 affected_coins=[],
                 details={"drawdown_pct": round(drawdown * 100, 1), "peak": peak, "current": current_value},
@@ -175,7 +179,7 @@ class RiskManagementAgent:
             self._alerts.append(RiskAlert(
                 level=RiskLevel.CRITICAL,
                 message=f"일일 손실 {daily_loss*100:.1f}%가 한도 {self._config.daily_loss_limit_pct*100:.0f}% 초과. "
-                f"오늘 시작: {daily_start_value:,.0f}원, 현재: {current_value:,.0f}원",
+                f"오늘 시작: {daily_start_value:{self._fmt}}{self._currency_unit}, 현재: {current_value:{self._fmt}}{self._currency_unit}",
                 action="stop_buying",
                 affected_coins=[],
                 details={"daily_loss_pct": round(daily_loss * 100, 1), "start_value": daily_start_value},
@@ -193,7 +197,7 @@ class RiskManagementAgent:
             if pct > self._config.max_trade_size_pct * 2:  # Warn when double the trade size
                 self._alerts.append(RiskAlert(
                     level=RiskLevel.INFO,
-                    message=f"{symbol} 포지션 크기 {value:,.0f}원 ({pct*100:.1f}%) - 대형 포지션 주의",
+                    message=f"{symbol} 포지션 크기 {value:{self._fmt}}{self._currency_unit} ({pct*100:.1f}%) - 대형 포지션 주의",
                     action="log_only",
                     affected_coins=[symbol],
                     details={"position_value": value, "pct": round(pct * 100, 1)},

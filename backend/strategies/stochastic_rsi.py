@@ -20,7 +20,7 @@ class StochasticRSIStrategy(BaseStrategy):
     display_name = "Stochastic RSI"
     applicable_market_types = ["all"]
     default_coins = ["BTC/KRW", "ETH/KRW", "XRP/KRW", "SOL/KRW", "ADA/KRW"]
-    required_timeframe = "1h"
+    required_timeframe = "4h"
     min_candles_required = 30
 
     def __init__(

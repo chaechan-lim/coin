@@ -987,3 +987,142 @@ async def test_sell_records_both_timestamps(session):
     assert pos.last_sell_at is not None
     # 매도 후 last_sell_at >= last_trade_at (실제로 같은 시점)
     assert pos.last_sell_at >= pos.last_trade_at
+
+
+# ── Sync Guard Tests ──
+
+
+@pytest.mark.asyncio
+async def test_sync_guard_skips_during_eval(session):
+    """sync_guard=True → sync_exchange_positions는 아무것도 하지 않음."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+    pm._cash_balance = 260.0
+    pm._sync_guard = True
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=999, used=0, total=999),
+    })
+
+    await pm.sync_exchange_positions(session, adapter, [])
+    # fetch_balance가 호출되지 않아야 함 (guard에서 return)
+    adapter.fetch_balance.assert_not_called()
+    assert pm.cash_balance == 260.0  # 불변
+
+
+@pytest.mark.asyncio
+async def test_sync_guard_allows_normal(session):
+    """sync_guard=False → sync_exchange_positions 정상 동작."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+    pm._sync_guard = False
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=300, used=0, total=300),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, [])
+    adapter.fetch_balance.assert_called_once()
+    assert pm.cash_balance == pytest.approx(300, abs=1)
+
+
+# ── Spike Detection Tests ──
+
+
+@pytest.mark.asyncio
+async def test_spike_clamps_peak(session):
+    """66% 점프 → peak 업데이트 건너뜀."""
+    prices = {"BTC/USDT": 100_000}
+    pm = PortfolioManager(
+        market_data=_make_market_data(prices),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+    pm._peak_value = 300
+    pm._cash_balance = 250
+    pm._last_total_value = 300  # 이전 총자산
+
+    # 포지션 추가 → 자산이 갑자기 500으로 점프 (66%)
+    pos = Position(
+        exchange="binance_futures", symbol="BTC/USDT",
+        quantity=0.01, average_buy_price=95_000,
+        total_invested=250, is_paper=True,
+        direction="long", leverage=3,
+    )
+    session.add(pos)
+    session.add(Order(
+        exchange="binance_futures",
+        symbol="BTC/USDT", side="buy", order_type="market", status="filled",
+        requested_price=95_000, executed_price=95_000,
+        requested_quantity=0.01, executed_quantity=0.01,
+        fee=0.1, is_paper=True, strategy_name="rsi",
+    ))
+    await session.flush()
+
+    summary = await pm.get_portfolio_summary(session)
+    # peak는 300 유지 (스파이크로 인한 업데이트 차단)
+    assert pm._peak_value == 300
+
+
+@pytest.mark.asyncio
+async def test_normal_growth_updates_peak(session):
+    """3% 성장 → peak 정상 갱신."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+    )
+    pm._peak_value = 500_000
+    pm._last_total_value = 500_000
+
+    # 소폭 상승
+    pm._cash_balance = 515_000
+    summary = await pm.get_portfolio_summary(session)
+    # 3% 상승 → peak 갱신됨
+    assert pm._peak_value == 515_000
+    assert pm._last_total_value == 515_000
+
+
+@pytest.mark.asyncio
+async def test_spike_logs_warning(session):
+    """스파이크 감지 시 peak 업데이트 안 됨 + _last_total_value 불변."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+    pm._peak_value = 300
+    pm._cash_balance = 600  # 100% 점프
+    pm._last_total_value = 300
+
+    await pm.get_portfolio_summary(session)
+
+    # 스파이크 → peak 불변, _last_total_value도 갱신 안 됨
+    assert pm._peak_value == 300
+    assert pm._last_total_value == 300
+
+
+@pytest.mark.asyncio
+async def test_first_summary_initializes_last_total(session):
+    """첫 호출 시 _last_total_value가 None → 초기화."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500_000,
+    )
+    assert pm._last_total_value is None
+
+    await pm.get_portfolio_summary(session)
+    assert pm._last_total_value == 500_000

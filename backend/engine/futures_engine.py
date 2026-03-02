@@ -394,75 +394,79 @@ class BinanceFuturesEngine(TradingEngine):
 
         self._reset_daily_counter()
 
-        session_factory = get_session_factory()
-        async with session_factory() as session:
-            try:
-                # 동적 종목 갱신 (6시간마다)
-                await self._refresh_dynamic_coins()
+        self._portfolio_manager._sync_guard = True
+        try:
+            session_factory = get_session_factory()
+            async with session_factory() as session:
+                try:
+                    # 동적 종목 갱신 (6시간마다)
+                    await self._refresh_dynamic_coins()
 
-                # 시장 상태 업데이트 (BTC/USDT 기준)
-                await self._maybe_update_market_state(session)
+                    # 시장 상태 업데이트 (BTC/USDT 기준)
+                    await self._maybe_update_market_state(session)
 
-                # 현금 잔고 보정
-                await self._portfolio_manager.reconcile_cash_from_db(session)
+                    # 현금 잔고 보정
+                    await self._portfolio_manager.reconcile_cash_from_db(session)
 
-                # 포트폴리오 리밸런싱 (비중 초과 포지션 자동 일부 청산)
-                await self._check_and_rebalance(session)
+                    # 포트폴리오 리밸런싱 (비중 초과 포지션 자동 일부 청산)
+                    await self._check_and_rebalance(session)
 
-                # 추적 코인 + 보유 중인 포지션 합집합
-                tracked = set(self.tracked_coins)
-                result = await session.execute(
-                    select(Position.symbol).where(
-                        Position.quantity > 0,
-                        Position.exchange == self._exchange_name,
-                    )
-                )
-                held = {r[0] for r in result.all()}
-                coins_to_eval = tracked | held
-
-                for symbol in coins_to_eval:
-                    try:
-                        await self._evaluate_futures_coin(session, symbol)
-                    except Exception as e:
-                        logger.error("futures_eval_error", symbol=symbol, error=str(e))
-                        await emit_event(
-                            "error", "engine",
-                            f"선물 평가 오류: {symbol}",
-                            detail=str(e),
-                            metadata={"symbol": symbol},
+                    # 추적 코인 + 보유 중인 포지션 합집합
+                    tracked = set(self.tracked_coins)
+                    result = await session.execute(
+                        select(Position.symbol).where(
+                            Position.quantity > 0,
+                            Position.exchange == self._exchange_name,
                         )
+                    )
+                    held = {r[0] for r in result.all()}
+                    coins_to_eval = tracked | held
 
-                # 펀딩비 업데이트 (30분마다)
-                await self._maybe_update_funding_rates()
+                    for symbol in coins_to_eval:
+                        try:
+                            await self._evaluate_futures_coin(session, symbol)
+                        except Exception as e:
+                            logger.error("futures_eval_error", symbol=symbol, error=str(e))
+                            await emit_event(
+                                "error", "engine",
+                                f"선물 평가 오류: {symbol}",
+                                detail=str(e),
+                                metadata={"symbol": symbol},
+                            )
 
-                # 스냅샷 직전 현금 잔고 재보정 (eval 중 sync 인터리빙 방지)
-                await self._portfolio_manager.reconcile_cash_from_db(session)
+                    # 펀딩비 업데이트 (30분마다)
+                    await self._maybe_update_funding_rates()
 
-                # 스냅샷 (DB locked 재시도)
-                for _attempt in range(3):
-                    try:
-                        await self._portfolio_manager.take_snapshot(session)
-                        await session.commit()
-                        break
-                    except Exception as snap_err:
-                        if "database is locked" in str(snap_err) and _attempt < 2:
-                            await session.rollback()
-                            await asyncio.sleep(1)
-                        else:
-                            raise
+                    # 스냅샷 직전 현금 잔고 재보정 (eval 중 sync 인터리빙 방지)
+                    await self._portfolio_manager.reconcile_cash_from_db(session)
 
-                # WebSocket broadcast
-                if self._broadcast_callback:
-                    summary = await self._portfolio_manager.get_portfolio_summary(session)
-                    await self._broadcast_callback({
-                        "event": "portfolio_update",
-                        "exchange": "binance_futures",
-                        "data": summary,
-                    })
+                    # 스냅샷 (DB locked 재시도)
+                    for _attempt in range(3):
+                        try:
+                            await self._portfolio_manager.take_snapshot(session)
+                            await session.commit()
+                            break
+                        except Exception as snap_err:
+                            if "database is locked" in str(snap_err) and _attempt < 2:
+                                await session.rollback()
+                                await asyncio.sleep(1)
+                            else:
+                                raise
 
-            except Exception as e:
-                logger.error("futures_cycle_error", error=str(e), exc_info=True)
-                await session.rollback()
+                    # WebSocket broadcast
+                    if self._broadcast_callback:
+                        summary = await self._portfolio_manager.get_portfolio_summary(session)
+                        await self._broadcast_callback({
+                            "event": "portfolio_update",
+                            "exchange": "binance_futures",
+                            "data": summary,
+                        })
+
+                except Exception as e:
+                    logger.error("futures_cycle_error", error=str(e), exc_info=True)
+                    await session.rollback()
+        finally:
+            self._portfolio_manager._sync_guard = False
 
     async def _evaluate_futures_coin(self, session: AsyncSession, symbol: str) -> None:
         """선물 코인 평가: SL/TP + 청산가 체크 + 양방향 매매."""

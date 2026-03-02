@@ -27,6 +27,8 @@ class PortfolioManager:
         self._peak_value = initial_balance_krw
         self._realized_pnl = 0.0
         self._peak_already_adjusted = False
+        self._sync_guard = False  # eval 중 sync 차단
+        self._last_total_value: float | None = None  # 스파이크 감지용
 
     async def update_position_on_buy(
         self, session: AsyncSession, symbol: str, quantity: float, price: float, cost: float, fee: float,
@@ -233,9 +235,26 @@ class PortfolioManager:
         total_value = self._cash_balance + total_current_value
         total_unrealized_pnl = total_current_value - total_invested
 
-        # Track peak for drawdown
-        if total_value > self._peak_value:
-            self._peak_value = total_value
+        # Track peak for drawdown — 스파이크 방어 포함
+        if self._last_total_value is None:
+            # 첫 호출: 초기화
+            self._last_total_value = total_value
+        else:
+            change_pct = abs(total_value - self._last_total_value) / self._last_total_value * 100 if self._last_total_value > 0 else 0
+            if change_pct > 15:
+                # 스파이크 감지: peak 업데이트 건너뜀
+                logger.warning(
+                    "spike_detected_peak_not_updated",
+                    exchange=self._exchange_name,
+                    last_total=round(self._last_total_value, 2),
+                    current_total=round(total_value, 2),
+                    change_pct=round(change_pct, 2),
+                )
+            else:
+                # 정상 변동: peak 업데이트 + last_total 갱신
+                if total_value > self._peak_value:
+                    self._peak_value = total_value
+                self._last_total_value = total_value
         drawdown_pct = (
             (self._peak_value - total_value) / self._peak_value * 100
             if self._peak_value > 0 else 0
@@ -335,6 +354,10 @@ class PortfolioManager:
         - DB 포지션 수량 vs 거래소 실제 수량 불일치 → 거래소 기준으로 보정
         - 실제 현금 잔고로 cash_balance 갱신
         """
+        if self._sync_guard:
+            logger.info("sync_skipped_during_eval", exchange=self._exchange_name)
+            return
+
         try:
             balances = await exchange_adapter.fetch_balance()
         except Exception as e:

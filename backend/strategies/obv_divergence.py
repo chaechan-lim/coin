@@ -20,7 +20,7 @@ class OBVDivergenceStrategy(BaseStrategy):
     display_name = "OBV 다이버전스"
     applicable_market_types = ["all"]
     default_coins = ["BTC/KRW", "ETH/KRW", "XRP/KRW", "SOL/KRW", "ADA/KRW"]
-    required_timeframe = "1h"
+    required_timeframe = "4h"
     min_candles_required = 30
 
     def __init__(self, lookback: int = 10, sma_length: int = 20):

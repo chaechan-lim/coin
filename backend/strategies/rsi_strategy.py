@@ -17,7 +17,7 @@ class RSIStrategy(BaseStrategy):
     display_name = "RSI 과매수/과매도"
     applicable_market_types = ["all"]
     default_coins = ["BTC/KRW", "ETH/KRW", "XRP/KRW", "SOL/KRW", "ADA/KRW"]
-    required_timeframe = "1h"
+    required_timeframe = "4h"
     min_candles_required = 20
 
     def __init__(

@@ -16,7 +16,7 @@ class MACDCrossoverStrategy(BaseStrategy):
     display_name = "MACD 크로스오버"
     applicable_market_types = ["trending"]
     default_coins = ["BTC/KRW", "ETH/KRW", "SOL/KRW"]
-    required_timeframe = "1h"
+    required_timeframe = "4h"
     min_candles_required = 35
 
     def __init__(self, fast: int = 12, slow: int = 26, signal_period: int = 9):

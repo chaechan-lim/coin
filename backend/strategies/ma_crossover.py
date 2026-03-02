@@ -16,7 +16,7 @@ class MACrossoverStrategy(BaseStrategy):
     display_name = "이동평균 크로스오버"
     applicable_market_types = ["trending"]
     default_coins = ["BTC/KRW", "ETH/KRW", "XRP/KRW"]
-    required_timeframe = "1h"
+    required_timeframe = "4h"
     min_candles_required = 55  # Need at least long_period + buffer
 
     def __init__(self, short_period: int = 20, long_period: int = 50):
