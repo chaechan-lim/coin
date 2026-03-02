@@ -8,7 +8,7 @@
 
 빗썸(Bithumb) 현물 + 바이낸스(Binance) USDM 선물 **듀얼 엔진** 24시간 자동 암호화폐 트레이딩 시스템.
 6개 전략 가중 투표 (HOLD=기권 방식) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭, 거래소 전환) 포함.
-**현재 라이브 운영 중**: 빗썸 현물 (~308K KRW) + 바이낸스 선물 (~314 USDT, 3x 레버리지), **PostgreSQL 16** (docker compose), **라즈베리파이 배포 완료**, **HTTPS (nginx self-signed)**.
+**현재 라이브 운영 중**: 빗썸 현물 (~308K KRW) + 바이낸스 선물 (~320 USDT, 3x 레버리지), **PostgreSQL 16** (docker compose), **라즈베리파이 배포 완료**, **HTTPS (nginx self-signed)**.
 **교차 거래소 안전장치**: 현물 롱↔선물 숏 동시 진입 차단, 매도 후 재매수 4시간 대기(washout), PositionTracker DB 영속화 (재시작 시 SL/TP/trailing 복원).
 **듀얼 엔진 아키텍처**: 빗썸 TradingEngine + 바이낸스 BinanceFuturesEngine 독립 병렬 실행, EngineRegistry 중앙 관리, exchange 컬럼 기반 데이터 격리.
 **바이낸스 선물 라이브**: 독립 모드 분리 (빗썸 paper/live + 바이낸스 paper/live 별도), 시장가 주문, 실제 USDT 잔고 조회.
@@ -264,10 +264,13 @@ coin/
 | 멀티 알림 (Telegram/Discord/Slack) | ✅ 3 프로바이더 지원, 복수 동시 발송, 15 tests |
 | PositionTracker DB 영속화 | ✅ SL/TP/trailing 재시작 복원, Position 7컬럼 추가 |
 | 프론트엔드 SL/TP 표시 | ✅ 포지션 손절가·익절가·TRAIL/SURGE 뱃지 |
-| 가짜 스파이크 방지 | ✅ 스냅샷 직전 reconcile, sync 후 reconcile |
+| 가짜 스파이크 방지 | ✅ 스냅샷 직전 reconcile (현물), 선물은 거래소 API sync 기준 |
 | 교차 거래소 충돌 차단 | ✅ 현물 롱↔선물 숏 동시 진입 방지 |
-| 매도 후 재매수 대기 | ✅ washout 4시간 (당일 왕복 방지) |
+| 매도 후 재매수 대기 | ✅ washout 4시간 (당일 왕복 방지), DB 타임스탬프 영속화 |
 | trade_review PnL 매칭 개선 | ✅ 윈도우 이전 진입 DB 조회, PF 캡핑 |
+| 선물 잔고 정합성 개선 | ✅ reconcile 공식 → 거래소 API 기준 (펀딩비 누적 오차 해소) |
+| MACD 가중치 최적화 | ✅ 0.12→0.08, bollinger_rsi에 재분배 (백테스트 검증) |
+| 프론트엔드 배포 자동화 | ✅ systemd ExecStartPre=npm run build (재시작 시 자동 빌드) |
 | Discord 이벤트 알림 (Embed) | ✅ event_bus 훅, 매매/시그널/리스크/일일요약 자동 전송, **매수/진입 시 손절가·익절가 표시**, 레이트리밋, 22 tests |
 | SQLite WAL 모드 | ✅ 동시 접근 안정화 |
 | 주문 fill 폴링 | ✅ 지정가 주문 체결/수수료 추적 |
@@ -287,7 +290,7 @@ coin/
 | 원금 대비 수익 표시 | ✅ initial_balance_krw + total_pnl_pct 원금 기준 |
 | 전략 성과 P&L 수정 | ✅ Lot-based FIFO 원가 매칭, **진입 전략에 PnL 귀속** (기존: 청산 전략에 PnL 귀속 → 오계산) |
 | 모바일 반응형 UI | ✅ 탭 스크롤, 테이블→카드, 터치 타겟, 전 컴포넌트 |
-| 단위 테스트 | ✅ 194개 (pytest + 인메모리 SQLite) |
+| 단위 테스트 | ✅ 212개 (pytest + 인메모리 SQLite) |
 | 거래 기본 필터 | ✅ 체결(filled)만 기본 표시, status 파라미터 |
 | 시작 시 현금 보정 | ✅ reconcile_cash_from_db at startup (peak 오염 방지) |
 | 0% 승률 전략 제거 | ✅ volatility_breakout/supertrend 비활성 → 6전략 체제 |
@@ -352,11 +355,11 @@ coin/
 
 | 시장 상태 | MA | RSI | MACD | Boll+RSI | StochRSI | OBV |
 |---|---|---|---|---|---|---|
-| 강한 상승장 | 0.12 | 0.20 | 0.15 | 0.22 | 0.15 | 0.16 |
-| 상승장 | 0.10 | 0.22 | 0.14 | 0.25 | 0.14 | 0.15 |
-| 횡보장 (기본) | 0.08 | 0.25 | 0.12 | 0.27 | 0.15 | 0.13 |
-| 하락장 | 0.07 | 0.26 | 0.11 | 0.28 | 0.15 | 0.13 |
-| 폭락장 | 0.05 | 0.28 | 0.10 | 0.30 | 0.14 | 0.13 |
+| 강한 상승장 | 0.12 | 0.18 | 0.12 | 0.28 | 0.15 | 0.15 |
+| 상승장 | 0.10 | 0.22 | 0.10 | 0.28 | 0.15 | 0.15 |
+| 횡보장 (기본) | 0.08 | 0.25 | 0.08 | 0.31 | 0.15 | 0.13 |
+| 하락장 | 0.06 | 0.27 | 0.08 | 0.32 | 0.15 | 0.12 |
+| 폭락장 | 0.04 | 0.28 | 0.06 | 0.34 | 0.15 | 0.13 |
 
 ### 5요소 시장 상태 감지 (Agent-style)
 
@@ -745,5 +748,6 @@ docker compose restart backend
 | v0.18 | 2026-03-01 | **수동 매도 정리 + 포지션 동기화**: 수동 매도 포지션 자동 정리, 5분 주기 포지션 동기화 (197 tests) |
 | v0.19 | 2026-03-02 | **PositionTracker DB 영속화 + 프론트 SL/TP**: Position 모델에 7 트래커 컬럼 추가 (stop_loss_pct, take_profit_pct, trailing_activation_pct, trailing_stop_pct, trailing_active, highest_price, max_hold_hours), 매수/진입 시 DB 저장 + 재시작 시 DB 복원, 프론트엔드 포지션에 손절가·익절가 표시 + TRAIL/SURGE 뱃지 (203 tests) |
 | v0.19.1 | 2026-03-02 | **가짜 스파이크 방지 + 에이전트 수정 + 전략 안전장치**: (1) sync/eval 인터리빙 스파이크 방지 (스냅샷 직전 reconcile), (2) trade_review PnL 매칭 수정 (윈도우 이전 진입 DB 조회), (3) PF 캡핑 inf→99, (4) 교차 거래소 충돌 차단 (현물 롱↔선물 숏 동시 진입 방지), (5) 매도 후 재매수 4시간 대기 washout (당일 왕복 방지), 209 tests |
+| v0.19.2 | 2026-03-02 | **선물 잔고 정합성 + 타임스탬프 영속화 + MACD 최적화**: (1) 선물 reconcile_cash_from_db 건너뜀 — 펀딩비 미포함 누적 오차 해소, 거래소 API sync가 진실의 원천, (2) Position.last_trade_at/last_sell_at DB 컬럼 추가 — 재시작 시 쿨다운/washout 복원, (3) MACD 가중치 0.12→0.08 (bollinger_rsi에 재분배, 백테스트 검증), (4) 프론트엔드 systemd ExecStartPre 빌드 자동화, 212 tests |
 | v0.20 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
 | v1.0 | 진행중 | **라즈베리파이 배포 완료**, 장기 운영 안정화 |

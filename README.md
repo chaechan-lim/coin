@@ -1,7 +1,7 @@
 # Coin Auto-Trading System
 
 Bithumb (spot) + Binance USDM (futures) dual-engine auto-trading bot.
-6 active strategies, weighted voting, dynamic SL/TP, volume surge rotation, AI agents, React dashboard. 209 tests.
+6 active strategies, weighted voting, dynamic SL/TP, volume surge rotation, AI agents, React dashboard. 212 tests.
 
 ---
 
@@ -147,7 +147,7 @@ curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures&
 
 ```bash
 cd backend
-.venv/bin/python -m pytest tests/ -v   # 209 tests
+.venv/bin/python -m pytest tests/ -v   # 212 tests
 # Tests use in-memory SQLite (aiosqlite)
 ```
 
