@@ -260,8 +260,8 @@ class PortfolioManager:
             if self._peak_value > 0 else 0
         )
 
-        # USDT(선물)는 소수점 2자리, KRW(현물)는 정수
-        dp = 2 if "futures" in self._exchange_name else 0
+        # USDT(바이낸스)는 소수점 2자리, KRW(빗썸)는 정수
+        dp = 2 if "binance" in self._exchange_name else 0
 
         return {
             "exchange": self._exchange_name,
@@ -282,9 +282,39 @@ class PortfolioManager:
             "positions": position_details,
         }
 
-    async def take_snapshot(self, session: AsyncSession) -> PortfolioSnapshot:
-        """Take a portfolio snapshot for historical tracking."""
+    async def take_snapshot(self, session: AsyncSession) -> PortfolioSnapshot | None:
+        """Take a portfolio snapshot for historical tracking.
+
+        스파이크 방어: 직전 스냅샷 대비 cash_balance가 비정상 급변하면 스냅샷 건너뜀.
+        sync_exchange_positions()가 cash를 잘못 계산하면 cash↑ inv↓가 동시 발생.
+        진짜 시장 급등/급락은 invested가 변하지 cash가 갑자기 뛰지 않으므로
+        cash 변동률로 판별하면 정당한 가격 변동은 통과시키면서 sync 스파이크만 차단.
+        """
         summary = await self.get_portfolio_summary(session)
+        new_cash = summary["cash_balance_krw"]
+
+        # 직전 스냅샷의 cash와 비교 — DB 기준이라 인메모리 오염 영향 없음
+        prev_result = await session.execute(
+            select(PortfolioSnapshot.cash_balance_krw)
+            .where(PortfolioSnapshot.exchange == self._exchange_name)
+            .order_by(PortfolioSnapshot.snapshot_at.desc())
+            .limit(1)
+        )
+        prev_cash = prev_result.scalar()
+
+        if prev_cash is not None and prev_cash > 0:
+            cash_change_pct = abs(new_cash - prev_cash) / prev_cash * 100
+            # 매매 없이 cash가 5분 만에 20%+ 변동 → sync 오염
+            # (매매 시에는 cash 변동이 position 변동과 상쇄되므로 total은 유지)
+            if cash_change_pct > 20:
+                logger.warning(
+                    "snapshot_skipped_cash_spike",
+                    exchange=self._exchange_name,
+                    prev_cash=round(prev_cash, 2),
+                    new_cash=round(new_cash, 2),
+                    cash_change_pct=round(cash_change_pct, 1),
+                )
+                return None
 
         snapshot = PortfolioSnapshot(
             exchange=self._exchange_name,
@@ -365,7 +395,7 @@ class PortfolioManager:
             return
 
         # 현금 통화 결정
-        if "futures" in self._exchange_name:
+        if "binance" in self._exchange_name:
             cash_symbol = "USDT"
         else:
             cash_symbol = "KRW"
@@ -409,8 +439,8 @@ class PortfolioManager:
             try:
                 current_price = await self._market_data.get_current_price(pair)
                 coin_value = bal.total * current_price
-                # 현물: 1000원 미만, 선물: 1 USDT 미만 무시
-                min_value = 1.0 if is_futures else 1000
+                # 바이낸스: 1 USDT 미만, 빗썸: 1000원 미만 무시
+                min_value = 1.0 if "binance" in self._exchange_name else 1000
                 if coin_value < min_value:
                     continue
             except Exception:

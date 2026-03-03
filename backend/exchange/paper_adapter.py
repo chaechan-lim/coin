@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from exchange.base import ExchangeAdapter
-from exchange.bithumb_adapter import BithumbAdapter
 from exchange.data_models import Candle, Ticker, OrderResult, Balance, OrderBook
 from core.exceptions import InsufficientBalanceError, OrderNotFoundError
 
@@ -17,29 +16,43 @@ class PaperAdapter(ExchangeAdapter):
 
     def __init__(
         self,
-        real_adapter: BithumbAdapter,
+        real_adapter: ExchangeAdapter,
         initial_balance_krw: float = 500_000,
         slippage_pct: float = 0.001,
         taker_fee_pct: float = 0.0025,
         maker_fee_pct: float = 0.0004,
+        base_currency: str = "KRW",
     ):
         self._real = real_adapter
         self._slippage_pct = slippage_pct
         self._taker_fee_pct = taker_fee_pct
         self._maker_fee_pct = maker_fee_pct
+        self._base_currency = base_currency
 
         # Simulated state
-        self._krw_balance = initial_balance_krw
+        self._balance = initial_balance_krw
         self._holdings: dict[str, float] = {}  # currency -> amount
         self._orders: dict[str, dict] = {}  # order_id -> order_data
         self._order_counter = 0
         self._lock = asyncio.Lock()
 
+        # 하위 호환: _krw_balance 속성
+        self._krw_balance = self._balance
+
+    @property
+    def _krw_balance(self) -> float:
+        return self._balance
+
+    @_krw_balance.setter
+    def _krw_balance(self, value: float) -> None:
+        self._balance = value
+
     async def initialize(self) -> None:
         await self._real.initialize()
         logger.info(
             "paper_adapter_initialized",
-            balance_krw=self._krw_balance,
+            balance=self._balance,
+            currency=self._base_currency,
         )
 
     async def close(self) -> None:
@@ -64,11 +77,11 @@ class PaperAdapter(ExchangeAdapter):
     async def fetch_balance(self) -> dict[str, Balance]:
         async with self._lock:
             balances = {
-                "KRW": Balance(
-                    currency="KRW",
-                    free=self._krw_balance,
+                self._base_currency: Balance(
+                    currency=self._base_currency,
+                    free=self._balance,
                     used=0.0,
-                    total=self._krw_balance,
+                    total=self._balance,
                 ),
             }
             for currency, amount in self._holdings.items():
@@ -104,12 +117,12 @@ class PaperAdapter(ExchangeAdapter):
             fee = cost * self._taker_fee_pct
             total_cost = cost + fee
 
-            if total_cost > self._krw_balance:
+            if total_cost > self._balance:
                 raise InsufficientBalanceError(
-                    f"Need {total_cost:.0f} KRW but have {self._krw_balance:.0f}"
+                    f"Need {total_cost:.2f} {self._base_currency} but have {self._balance:.2f}"
                 )
 
-            self._krw_balance -= total_cost
+            self._balance -= total_cost
             currency = self._extract_currency(symbol)
             self._holdings[currency] = self._holdings.get(currency, 0) + amount
 
@@ -128,7 +141,7 @@ class PaperAdapter(ExchangeAdapter):
                 remaining=0.0,
                 cost=cost,
                 fee=fee,
-                fee_currency="KRW",
+                fee_currency=self._base_currency,
                 timestamp=now,
             )
             self._orders[order_id] = {
@@ -142,7 +155,7 @@ class PaperAdapter(ExchangeAdapter):
                 amount=amount,
                 price=fill_price,
                 cost=total_cost,
-                balance_after=self._krw_balance,
+                balance_after=self._balance,
             )
             return result
 
@@ -165,7 +178,7 @@ class PaperAdapter(ExchangeAdapter):
             self._holdings[currency] = held - amount
             if self._holdings[currency] <= 0:
                 del self._holdings[currency]
-            self._krw_balance += proceeds
+            self._balance += proceeds
 
             order_id = self._next_order_id()
             now = datetime.now(timezone.utc)
@@ -182,7 +195,7 @@ class PaperAdapter(ExchangeAdapter):
                 remaining=0.0,
                 cost=cost,
                 fee=fee,
-                fee_currency="KRW",
+                fee_currency=self._base_currency,
                 timestamp=now,
             )
             self._orders[order_id] = {
@@ -196,7 +209,7 @@ class PaperAdapter(ExchangeAdapter):
                 amount=amount,
                 price=fill_price,
                 proceeds=proceeds,
-                balance_after=self._krw_balance,
+                balance_after=self._balance,
             )
             return result
 

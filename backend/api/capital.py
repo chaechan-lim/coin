@@ -20,6 +20,7 @@ router = APIRouter(prefix="/capital", tags=["capital"])
 _EXCHANGE_CURRENCY = {
     "bithumb": "KRW",
     "binance_futures": "USDT",
+    "binance_spot": "USDT",
 }
 
 

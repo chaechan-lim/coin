@@ -440,11 +440,12 @@ class BinanceFuturesEngine(TradingEngine):
                     # 스냅샷 직전 현금 잔고 재보정 (eval 중 sync 인터리빙 방지)
                     await self._portfolio_manager.reconcile_cash_from_db(session)
 
-                    # 스냅샷 (DB locked 재시도)
+                    # 스냅샷 (DB locked 재시도, 스파이크 시 자동 스킵)
                     for _attempt in range(3):
                         try:
-                            await self._portfolio_manager.take_snapshot(session)
-                            await session.commit()
+                            snap = await self._portfolio_manager.take_snapshot(session)
+                            if snap is not None:
+                                await session.commit()
                             break
                         except Exception as snap_err:
                             if "database is locked" in str(snap_err) and _attempt < 2:
@@ -663,7 +664,7 @@ class BinanceFuturesEngine(TradingEngine):
             pnl_pct = ((price - entry_price) / entry_price * 100) if direction == "long" else ((entry_price - price) / entry_price * 100)
             lev_val = position.leverage or self._leverage
             logger.info("futures_position_closed", symbol=symbol, direction=direction, reason=reason, pnl_pct=round(pnl_pct, 2))
-            await emit_event("info", "trade",
+            await emit_event("info", "futures_trade",
                              f"선물 {direction} 청산: {symbol}",
                              metadata={
                                  "price": price, "reason": reason,
@@ -906,7 +907,7 @@ class BinanceFuturesEngine(TradingEngine):
         tracker = self._position_trackers[symbol]
         sl_price = round(price * (1 - tracker.stop_loss_pct / 100), 4)
         tp_price = round(price * (1 + tracker.take_profit_pct / 100), 4)
-        await emit_event("info", "trade", f"선물 롱: {symbol}", metadata={
+        await emit_event("info", "futures_trade", f"선물 롱: {symbol}", metadata={
             "price": price, "leverage": self._leverage,
             "margin": round(margin, 2),
             "strategy": signal.strategy_name,
@@ -921,16 +922,17 @@ class BinanceFuturesEngine(TradingEngine):
         signal: Signal, decision: CombinedDecision,
     ) -> None:
         """숏 포지션 진입."""
-        # 교차 거래소 포지션 충돌 체크 (선물 숏 vs 현물 롱)
-        cross_symbol = symbol.replace("/USDT", "/KRW")
+        # 교차 거래소 포지션 충돌 체크 (선물 숏 vs 현물 롱 — 빗썸/바이낸스 현물 모두)
+        base = symbol.split("/")[0]
         cross_result = await session.execute(
             select(Position).where(
-                Position.symbol == cross_symbol,
+                Position.symbol.like(f"{base}/%"),
                 Position.quantity > 0,
                 Position.exchange != self._exchange_name,
+                Position.direction != "short",
             )
         )
-        cross_pos = cross_result.scalar_one_or_none()
+        cross_pos = cross_result.scalars().first()
         if cross_pos:
             logger.warning(
                 "cross_exchange_conflict_blocked",
@@ -1034,7 +1036,7 @@ class BinanceFuturesEngine(TradingEngine):
         tracker = self._position_trackers[symbol]
         sl_price = round(price * (1 + tracker.stop_loss_pct / 100), 4)
         tp_price = round(price * (1 - tracker.take_profit_pct / 100), 4)
-        await emit_event("info", "trade", f"선물 숏: {symbol}", metadata={
+        await emit_event("info", "futures_trade", f"선물 숏: {symbol}", metadata={
             "price": price, "leverage": self._leverage,
             "margin": round(margin, 2),
             "strategy": signal.strategy_name,

@@ -61,6 +61,8 @@ class TradingEngine:
         combiner: SignalCombiner,
         agent_coordinator=None,
         exchange_name: str = "bithumb",
+        tracked_coins: list[str] | None = None,
+        evaluation_interval_sec: int | None = None,
     ):
         self._config = config
         self._exchange = exchange
@@ -70,6 +72,8 @@ class TradingEngine:
         self._combiner = combiner
         self._agent_coordinator = agent_coordinator
         self._exchange_name = exchange_name
+        self._tracked_coins = tracked_coins
+        self._eval_interval = evaluation_interval_sec
 
         self._strategies: dict[str, BaseStrategy] = {}
         self._is_running = False
@@ -103,6 +107,21 @@ class TradingEngine:
 
         # WebSocket broadcast callback
         self._broadcast_callback = None
+
+    @property
+    def _min_order_amount(self) -> float:
+        """최소 주문금액: 바이낸스 5 USDT, 빗썸 500 KRW."""
+        return 5.0 if "binance" in self._exchange_name else 500
+
+    @property
+    def _fee_margin(self) -> float:
+        """수수료 마진: 바이낸스 0.2%, 빗썸 0.3%."""
+        return 1.002 if "binance" in self._exchange_name else 1.003
+
+    @property
+    def _min_fallback_amount(self) -> float:
+        """잔고 전체 시도 기준: 바이낸스 10 USDT, 빗썸 5000 KRW."""
+        return 10.0 if "binance" in self._exchange_name else 5000
 
     def set_broadcast_callback(self, callback) -> None:
         self._broadcast_callback = callback
@@ -179,7 +198,7 @@ class TradingEngine:
                 await self._evaluation_cycle()
             except Exception as e:
                 logger.error("engine_cycle_error", error=str(e), exc_info=True)
-            await asyncio.sleep(self._config.trading.evaluation_interval_sec)
+            await asyncio.sleep(self._eval_interval or self._config.trading.evaluation_interval_sec)
 
     async def stop(self) -> None:
         """Stop the trading engine gracefully."""
@@ -608,7 +627,8 @@ class TradingEngine:
         )
 
         order = await self._order_manager.create_order(
-            session, symbol, "sell", position.quantity, price, sell_signal
+            session, symbol, "sell", position.quantity, price, sell_signal,
+            order_type="market",
         )
 
         # 미체결 주문은 거래소 취소 + 포트폴리오 건드리지 않음
@@ -765,7 +785,7 @@ class TradingEngine:
                     # 포트폴리오 리밸런싱 (비중 초과 코인 자동 일부 매도)
                     await self._check_and_rebalance(session)
 
-                    coins = set(self._config.trading.tracked_coins)
+                    coins = set(self._tracked_coins or self._config.trading.tracked_coins)
 
                     # 보유 중인 포지션도 평가 대상에 포함 (서지 코인 SL/TP/SELL)
                     result = await session.execute(
@@ -794,8 +814,9 @@ class TradingEngine:
 
                     # 스냅샷 직전 현금 잔고 재보정 (eval 중 sync 인터리빙 방지)
                     await self._portfolio_manager.reconcile_cash_from_db(session)
-                    await self._portfolio_manager.take_snapshot(session)
-                    await session.commit()
+                    snap = await self._portfolio_manager.take_snapshot(session)
+                    if snap is not None:
+                        await session.commit()
 
                     if self._broadcast_callback:
                         summary = await self._portfolio_manager.get_portfolio_summary(session)
@@ -1101,10 +1122,9 @@ class TradingEngine:
             cash = self._portfolio_manager.cash_balance
             surge_size_pct = 0.15  # 현금의 15%
             amount_krw = cash * surge_size_pct
-            amount_krw = amount_krw / 1.003  # 수수료 마진
+            amount_krw = amount_krw / self._fee_margin
 
-            min_order_krw = 500
-            if amount_krw < min_order_krw:
+            if amount_krw < self._min_order_amount:
                 logger.debug("rotation_buy_too_small", symbol=symbol, amount_krw=amount_krw)
                 return
 
@@ -1119,6 +1139,7 @@ class TradingEngine:
 
             order = await self._order_manager.create_order(
                 session, symbol, "buy", amount, price, buy_signal,
+                order_type="market",
             )
 
             # 미체결 주문은 거래소 취소 + 포트폴리오 건드리지 않음
@@ -1255,16 +1276,16 @@ class TradingEngine:
                 return
 
             # 교차 거래소 포지션 충돌 체크 (현물 매수 vs 선물 숏)
-            cross_symbol = symbol.replace("/KRW", "/USDT")
+            base = symbol.split("/")[0]
             cross_result = await session.execute(
                 select(Position).where(
-                    Position.symbol == cross_symbol,
+                    Position.symbol.like(f"{base}/%"),
                     Position.quantity > 0,
                     Position.exchange != self._exchange_name,
                     Position.direction == "short",
                 )
             )
-            cross_pos = cross_result.scalar_one_or_none()
+            cross_pos = cross_result.scalars().first()
             if cross_pos:
                 logger.warning(
                     "cross_exchange_conflict_blocked",
@@ -1301,21 +1322,21 @@ class TradingEngine:
             amount_krw = cash * size_pct
 
             # 최소 주문금액 미달 시 잔고 전체 시도
-            if amount_krw < 5000 and cash >= 5000:
+            if amount_krw < self._min_fallback_amount and cash >= self._min_fallback_amount:
                 amount_krw = cash
 
-            # 수수료(0.25%) 감안 — 총비용이 잔고 초과하지 않도록
-            amount_krw = amount_krw / 1.003  # 0.3% 마진 (수수료 + 안전마진)
+            # 수수료 감안 — 총비용이 잔고 초과하지 않도록
+            amount_krw = amount_krw / self._fee_margin
 
-            min_order_krw = 500  # 빗썸 최소 주문금액
-            if amount_krw < min_order_krw:
+            if amount_krw < self._min_order_amount:
                 logger.debug("order_too_small", symbol=symbol, amount_krw=amount_krw)
                 return
 
             amount = amount_krw / price
 
             order = await self._order_manager.create_order(
-                session, symbol, "buy", amount, price, primary_signal, decision
+                session, symbol, "buy", amount, price, primary_signal, decision,
+                order_type="market",
             )
 
             # 미체결 주문은 거래소 취소 + 포트폴리오 건드리지 않음
@@ -1374,7 +1395,8 @@ class TradingEngine:
                 return
 
             order = await self._order_manager.create_order(
-                session, symbol, "sell", position.quantity, price, primary_signal, decision
+                session, symbol, "sell", position.quantity, price, primary_signal, decision,
+                order_type="market",
             )
 
             # 미체결 주문은 거래소 취소 + 포트폴리오 건드리지 않음

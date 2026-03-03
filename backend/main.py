@@ -52,13 +52,14 @@ logger = structlog.get_logger(__name__)
 _scheduler = None
 _engine_instance: TradingEngine | None = None
 _binance_engine = None
+_binance_spot_engine = None
 _discord_handler: DiscordEventHandler | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
-    global _scheduler, _engine_instance, _binance_engine, _discord_handler
+    global _scheduler, _engine_instance, _binance_engine, _binance_spot_engine, _discord_handler
     config = get_config()
 
     logger.info("startup_begin", mode=config.trading.mode)
@@ -307,6 +308,130 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("binance_futures_init_failed", error=str(e), exc_info=True)
 
+    # ── 7b. 바이낸스 현물 (조건부) ─────────────────────────────
+    binance_spot_exchange = None
+    if config.binance.spot_enabled:
+        try:
+            from exchange.binance_spot_adapter import BinanceSpotAdapter
+
+            spot_adapter = BinanceSpotAdapter(
+                api_key=config.binance.api_key,
+                api_secret=config.binance.api_secret,
+                testnet=config.binance.testnet,
+            )
+            await spot_adapter.initialize()
+            binance_spot_exchange = spot_adapter
+
+            bst = config.binance_spot_trading
+            spot_is_paper = bst.mode == "paper"
+            logger.info("binance_spot_mode", mode=bst.mode, is_paper=spot_is_paper)
+
+            initial_spot_usdt = bst.initial_balance_usdt
+
+            if spot_is_paper:
+                spot_exchange = PaperAdapter(
+                    real_adapter=spot_adapter,
+                    initial_balance_krw=initial_spot_usdt,
+                    taker_fee_pct=0.001,
+                    base_currency="USDT",
+                )
+                await spot_exchange.initialize()
+            else:
+                spot_exchange = spot_adapter
+
+            spot_market_data = MarketDataService(spot_exchange)
+            spot_combiner = SignalCombiner(min_confidence=bst.min_combined_confidence)
+            spot_order_mgr = OrderManager(
+                spot_exchange, is_paper=spot_is_paper,
+                exchange_name="binance_spot", fee_currency="USDT",
+            )
+            spot_portfolio_mgr = PortfolioManager(
+                market_data=spot_market_data,
+                initial_balance_krw=initial_spot_usdt,
+                is_paper=spot_is_paper,
+                exchange_name="binance_spot",
+            )
+
+            spot_market_agent = MarketAnalysisAgent(spot_market_data, market_symbol="BTC/USDT")
+            spot_risk_agent = RiskManagementAgent(config.risk, spot_market_data, exchange_name="binance_spot")
+            spot_trade_review = TradeReviewAgent(review_window_hours=24, exchange_name="binance_spot")
+            spot_coordinator = AgentCoordinator(
+                spot_market_agent, spot_risk_agent, spot_combiner, spot_trade_review,
+                exchange_name="binance_spot",
+            )
+
+            spot_engine = TradingEngine(
+                config=config,
+                exchange=spot_exchange,
+                market_data=spot_market_data,
+                order_manager=spot_order_mgr,
+                portfolio_manager=spot_portfolio_mgr,
+                combiner=spot_combiner,
+                agent_coordinator=spot_coordinator,
+                exchange_name="binance_spot",
+                tracked_coins=config.binance.tracked_coins,
+                evaluation_interval_sec=bst.evaluation_interval_sec,
+            )
+            spot_coordinator.set_engine(spot_engine)
+            await spot_engine.initialize()
+            spot_engine.set_broadcast_callback(ws_manager.broadcast)
+            _binance_spot_engine = spot_engine
+
+            # 라이브 모드: 거래소 실제 잔고 동기화 + DB 스냅샷 복원 + 원금 관리
+            if not spot_is_paper:
+                sf = get_session_factory()
+                async with sf() as sess:
+                    await spot_portfolio_mgr.sync_exchange_positions(
+                        sess, spot_adapter, config.binance.tracked_coins,
+                    )
+                    await spot_portfolio_mgr.restore_state_from_db(sess)
+
+                    # 시드 입금 자동 생성
+                    cnt_result = await sess.execute(
+                        select(func.count()).select_from(CapitalTransaction)
+                        .where(CapitalTransaction.exchange == "binance_spot")
+                    )
+                    if cnt_result.scalar() == 0:
+                        pos_result = await sess.execute(
+                            select(func.coalesce(func.sum(PositionModel.total_invested), 0))
+                            .where(PositionModel.exchange == "binance_spot", PositionModel.quantity > 0)
+                        )
+                        actual_invested = float(pos_result.scalar())
+                        actual_total = spot_portfolio_mgr.cash_balance + actual_invested
+                        seed_amount = actual_total if actual_total > 0 else initial_spot_usdt
+
+                        seed = CapitalTransaction(
+                            exchange="binance_spot",
+                            tx_type="deposit",
+                            amount=round(seed_amount, 2),
+                            currency="USDT",
+                            note="초기 원금 (자동 생성, 실제 자산 기준)",
+                            source="seed",
+                            confirmed=True,
+                        )
+                        sess.add(seed)
+                        await sess.flush()
+                        logger.info("binance_spot_seed_deposit_created",
+                                    amount=round(seed_amount, 2),
+                                    cash=round(spot_portfolio_mgr.cash_balance, 2),
+                                    invested=round(actual_invested, 2))
+
+                    await spot_portfolio_mgr.load_initial_balance_from_db(sess)
+                    await sess.commit()
+
+            engine_registry.register(
+                "binance_spot", spot_engine, spot_portfolio_mgr,
+                spot_combiner, spot_coordinator,
+            )
+
+            logger.info("binance_spot_engine_ready",
+                         mode=bst.mode,
+                         is_paper=spot_is_paper,
+                         initial_usdt=round(initial_spot_usdt, 2),
+                         tracked_coins=config.binance.tracked_coins)
+        except Exception as e:
+            logger.error("binance_spot_init_failed", error=str(e), exc_info=True)
+
     # ── 8. 스케줄러 시작 ─────────────────────────────────────
     session_factory = get_session_factory()
     _scheduler = setup_scheduler(
@@ -339,6 +464,30 @@ async def lifespan(app: FastAPI):
             _scheduler.add_job(
                 _wrap(binance_coord.run_trade_review),
                 name="binance_trade_review",
+                seconds=3600,
+            )
+
+    # 바이낸스 현물 스케줄 잡 추가
+    if config.binance.spot_enabled and _binance_spot_engine:
+        spot_coord = engine_registry.get_coordinator("binance_spot")
+        spot_pm = engine_registry.get_portfolio_manager("binance_spot")
+        if spot_coord and spot_pm:
+            _scheduler.add_job(
+                _wrap(spot_coord.run_market_analysis),
+                name="binance_spot_market_analysis",
+                seconds=900,
+            )
+
+            async def binance_spot_risk_check():
+                await spot_coord.run_risk_evaluation(spot_pm.cash_balance)
+            _scheduler.add_job(
+                _wrap(binance_spot_risk_check),
+                name="binance_spot_risk_check",
+                seconds=300,
+            )
+            _scheduler.add_job(
+                _wrap(spot_coord.run_trade_review),
+                name="binance_spot_trade_review",
                 seconds=3600,
             )
 
@@ -397,9 +546,12 @@ async def lifespan(app: FastAPI):
             pm = engine_registry.get_portfolio_manager(ex_name)
             if not eng or not pm:
                 continue
-            coins = eng._config.trading.tracked_coins if hasattr(eng._config, 'trading') else []
-            if "binance" in ex_name and hasattr(eng, 'tracked_coins'):
+            if hasattr(eng, '_tracked_coins') and eng._tracked_coins:
+                coins = eng._tracked_coins
+            elif "binance" in ex_name and hasattr(eng, 'tracked_coins'):
                 coins = eng.tracked_coins
+            else:
+                coins = eng._config.trading.tracked_coins if hasattr(eng._config, 'trading') else []
             async with sf() as sess:
                 await pm.sync_exchange_positions(sess, eng._exchange, coins)
                 await sess.commit()
@@ -421,6 +573,13 @@ async def lifespan(app: FastAPI):
         if binance_coord and binance_pm_init:
             asyncio.create_task(_run_initial_analysis(binance_coord, binance_pm_init, config))
 
+    # 바이낸스 현물 최초 시장 분석
+    if config.binance.spot_enabled and _binance_spot_engine:
+        spot_coord = engine_registry.get_coordinator("binance_spot")
+        spot_pm_init = engine_registry.get_portfolio_manager("binance_spot")
+        if spot_coord and spot_pm_init:
+            asyncio.create_task(_run_initial_analysis(spot_coord, spot_pm_init, config))
+
     # 실제 추적 코인 리스트 (엔진 인스턴스의 동적 코인 포함)
     spot_coins = _engine_instance._config.trading.tracked_coins if _engine_instance else config.trading.tracked_coins
     futures_coins = _binance_engine.tracked_coins if _binance_engine else config.binance.tracked_coins
@@ -430,18 +589,22 @@ async def lifespan(app: FastAPI):
 
     startup_msg = (
         f"🚀 트레이딩 봇 시작 ({config.trading.mode.upper()} 모드)\n"
-        f"현물: {', '.join(spot_coins)}"
+        f"빗썸 현물: {', '.join(spot_coins)}"
     )
     if config.binance.enabled:
         startup_msg += f"\n선물: {', '.join(futures_coins)}"
+    if config.binance.spot_enabled:
+        startup_msg += f"\n바이낸스 현물: {', '.join(config.binance.tracked_coins)}"
     if positions_summary:
         startup_msg += f"\n{positions_summary}"
     await notification.send_engine_alert(startup_msg)
 
     logger.info("startup_complete")
-    startup_detail = f"{config.trading.mode} 모드 | 현물: {', '.join(spot_coins)}"
+    startup_detail = f"{config.trading.mode} 모드 | 빗썸 현물: {', '.join(spot_coins)}"
     if config.binance.enabled:
         startup_detail += f" | 선물: {', '.join(futures_coins)}"
+    if config.binance.spot_enabled:
+        startup_detail += f" | 바이낸스 현물: {', '.join(config.binance.tracked_coins)}"
     metadata = {"spot_coins": spot_coins, "futures_coins": futures_coins if config.binance.enabled else []}
     await emit_event("info", "system", "서버 시작", detail=startup_detail, metadata=metadata)
 
@@ -460,9 +623,13 @@ async def lifespan(app: FastAPI):
         await _engine_instance.stop()
     if _binance_engine:
         await _binance_engine.stop()
+    if _binance_spot_engine:
+        await _binance_spot_engine.stop()
     await exchange.close()
     if binance_exchange:
         await binance_exchange.close()
+    if binance_spot_exchange:
+        await binance_spot_exchange.close()
     shutdown_msg = "🛑 트레이딩 봇 종료"
     if shutdown_positions:
         shutdown_msg += f"\n{shutdown_positions}"
@@ -498,7 +665,12 @@ async def _build_positions_summary(registry) -> str:
                     arrow = "↑" if direction == "long" else "↓"
                     pos_list.append(f"{pos.symbol.split('/')[0]}{arrow}")
                 currency = "USDT" if "binance" in ex_name else "KRW"
-                label = "현물" if "bithumb" in ex_name else "선물"
+                if "bithumb" in ex_name:
+                    label = "빗썸 현물"
+                elif "binance_spot" in ex_name:
+                    label = "바이낸스 현물"
+                else:
+                    label = "선물"
                 cash = pm.cash_balance
                 if pos_list:
                     parts.append(f"[{label}] {', '.join(pos_list)} | 현금 {cash:,.0f} {currency}")
@@ -552,6 +724,8 @@ def create_app() -> FastAPI:
             "engine_running": _engine_instance.is_running if _engine_instance else False,
             "binance_enabled": config.binance.enabled,
             "binance_running": _binance_engine.is_running if _binance_engine else False,
+            "binance_spot_enabled": config.binance.spot_enabled,
+            "binance_spot_running": _binance_spot_engine.is_running if _binance_spot_engine else False,
             "exchanges": engine_registry.available_exchanges,
         }
 

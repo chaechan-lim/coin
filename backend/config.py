@@ -85,6 +85,7 @@ class NotificationConfig(BaseSettings):
 
 class BinanceConfig(BaseSettings):
     enabled: bool = False
+    spot_enabled: bool = False
     api_key: str = ""
     api_secret: str = ""
     testnet: bool = True
@@ -113,6 +114,22 @@ class BinanceTradingConfig(BaseSettings):
     model_config = {"env_prefix": "BINANCE_TRADING_"}
 
 
+class BinanceSpotTradingConfig(BaseSettings):
+    """바이낸스 현물 전용 트레이딩 설정."""
+    mode: str = "paper"  # "paper" or "live" (독립)
+    evaluation_interval_sec: int = 300
+    initial_balance_usdt: float = 500.0
+    min_combined_confidence: float = 0.50
+    max_trade_size_pct: float = 0.20
+    daily_buy_limit: int = 20
+    max_daily_coin_buys: int = 3
+    cooldown_after_sell_sec: int = 14400
+    cooldown_after_buy_sec: int = 1800
+    rotation_enabled: bool = False
+
+    model_config = {"env_prefix": "BINANCE_SPOT_TRADING_"}
+
+
 class LLMConfig(BaseSettings):
     enabled: bool = False
     api_key: str = ""
@@ -126,6 +143,7 @@ class AppConfig(BaseSettings):
     exchange: ExchangeConfig = Field(default_factory=ExchangeConfig)
     binance: BinanceConfig = Field(default_factory=BinanceConfig)
     binance_trading: BinanceTradingConfig = Field(default_factory=BinanceTradingConfig)
+    binance_spot_trading: BinanceSpotTradingConfig = Field(default_factory=BinanceSpotTradingConfig)
     trading: TradingConfig = Field(default_factory=TradingConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
