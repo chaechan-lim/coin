@@ -563,7 +563,7 @@ async def lifespan(app: FastAPI):
             seconds=86400,
         )
 
-    # ── 포지션 동기화 스케줄러 (5분) — 수동 매매 반영 ─────────
+    # ── 포지션 동기화 스케줄러 (1분) — 수동 매매 반영, 잔고 실시간성 개선 ──
     async def position_sync_job():
         sf = get_session_factory()
         for ex_name in engine_registry.available_exchanges:
@@ -583,7 +583,7 @@ async def lifespan(app: FastAPI):
     _scheduler.add_job(
         _wrap(position_sync_job),
         name="position_sync",
-        seconds=300,
+        seconds=60,
     )
 
     _scheduler.start()

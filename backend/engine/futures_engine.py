@@ -175,12 +175,19 @@ class BinanceFuturesEngine(TradingEngine):
                 await asyncio.sleep(3)
 
     async def _balance_monitor_loop(self) -> None:
-        """WebSocket으로 선물 잔고 실시간 수신 → PM cash_balance 즉시 갱신."""
+        """WebSocket으로 선물 잔고+포지션 실시간 수신."""
+        await asyncio.gather(
+            self._ws_balance_loop(),
+            self._ws_position_loop(),
+            return_exceptions=True,
+        )
+
+    async def _ws_balance_loop(self) -> None:
+        """잔고 실시간 수신 → PM cash_balance 즉시 갱신."""
         while self._is_running:
             try:
                 balance = await self._exchange.watch_balance()
                 usdt = balance.get("USDT", {})
-                # ccxt.pro watch_balance: free, used, total
                 wallet_total = float(usdt.get("total", 0) or 0)
                 margin_used = float(usdt.get("used", 0) or 0)
                 cash = wallet_total - margin_used
@@ -195,7 +202,66 @@ class BinanceFuturesEngine(TradingEngine):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning("balance_monitor_error", error=str(e))
+                logger.warning("ws_balance_error", error=str(e))
+                await asyncio.sleep(5)
+
+    async def _ws_position_loop(self) -> None:
+        """포지션 실시간 수신 → DB 포지션 즉시 갱신 (margin, unrealizedPnl, 수량)."""
+        from db.session import get_session_factory
+        while self._is_running:
+            try:
+                positions = await self._exchange.watch_positions()
+                if not positions:
+                    continue
+                session_factory = get_session_factory()
+                async with session_factory() as session:
+                    for fp in positions:
+                        contracts = float(fp.get("contracts", 0) or 0)
+                        sym = fp.get("symbol", "").replace(":USDT", "")
+                        if not sym:
+                            continue
+
+                        result = await session.execute(
+                            select(Position).where(
+                                Position.symbol == sym,
+                                Position.exchange == self._exchange_name,
+                            )
+                        )
+                        db_pos = result.scalar_one_or_none()
+                        if not db_pos:
+                            continue
+
+                        changed = False
+                        margin = float(fp.get("initialMargin", 0) or 0)
+                        entry = float(fp.get("entryPrice", 0) or 0)
+                        liq = float(fp.get("liquidationPrice", 0) or 0) or None
+                        unrealized = float(fp.get("unrealizedPnl", 0) or 0)
+
+                        if contracts > 0 and abs(db_pos.quantity - contracts) / max(db_pos.quantity, 0.0001) > 0.01:
+                            db_pos.quantity = contracts
+                            changed = True
+                        if margin > 0 and abs((db_pos.margin_used or 0) - margin) > 0.1:
+                            db_pos.total_invested = margin
+                            db_pos.margin_used = margin
+                            changed = True
+                        if entry > 0 and abs(db_pos.average_buy_price - entry) > 0.0001:
+                            db_pos.average_buy_price = entry
+                            changed = True
+                        if liq and db_pos.liquidation_price != liq:
+                            db_pos.liquidation_price = liq
+                            changed = True
+                        if contracts > 0 and entry > 0:
+                            db_pos.current_price = float(fp.get("markPrice", 0) or entry)
+                            db_pos.current_value = margin + unrealized
+
+                        if changed:
+                            await session.commit()
+                            logger.debug("ws_position_updated", symbol=sym,
+                                         margin=round(margin, 2), contracts=contracts)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("ws_position_error", error=str(e))
                 await asyncio.sleep(5)
 
     async def _realtime_stop_check(self, symbol: str, price: float) -> None:
