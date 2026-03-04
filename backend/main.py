@@ -113,6 +113,9 @@ async def lifespan(app: FastAPI):
                 sess, exchange, config.trading.tracked_coins,
             )
             await portfolio_mgr.restore_state_from_db(sess)
+            spike_fixed = await PortfolioManager.cleanup_spike_snapshots(sess, "bithumb")
+            if spike_fixed:
+                logger.info("bithumb_spike_cleanup", fixed=spike_fixed)
 
             # 시드 입금 자동 생성 (CapitalTransaction 0건이면)
             # 신규 DB: 실제 총자산(현금+포지션) 기준으로 시드 생성
@@ -259,6 +262,9 @@ async def lifespan(app: FastAPI):
                         sess, binance_adapter, config.binance.tracked_coins,
                     )
                     await binance_portfolio_mgr.restore_state_from_db(sess)
+                    spike_fixed = await PortfolioManager.cleanup_spike_snapshots(sess, "binance_futures")
+                    if spike_fixed:
+                        logger.info("futures_spike_cleanup", fixed=spike_fixed)
 
                     # 시드 입금 자동 생성 (CapitalTransaction 0건이면)
                     cnt_result = await sess.execute(
@@ -385,6 +391,9 @@ async def lifespan(app: FastAPI):
                         sess, spot_adapter, config.binance.tracked_coins,
                     )
                     await spot_portfolio_mgr.restore_state_from_db(sess)
+                    spike_fixed = await PortfolioManager.cleanup_spike_snapshots(sess, "binance_spot")
+                    if spike_fixed:
+                        logger.info("spot_spike_cleanup", fixed=spike_fixed)
 
                     # 시드 입금 자동 생성
                     cnt_result = await sess.execute(

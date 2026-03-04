@@ -285,41 +285,70 @@ class PortfolioManager:
     async def take_snapshot(self, session: AsyncSession) -> PortfolioSnapshot | None:
         """Take a portfolio snapshot for historical tracking.
 
-        스파이크 방어: 직전 스냅샷 대비 cash_balance가 비정상 급변하면 스냅샷 건너뜀.
-        sync_exchange_positions()가 cash를 잘못 계산하면 cash↑ inv↓가 동시 발생.
-        진짜 시장 급등/급락은 invested가 변하지 cash가 갑자기 뛰지 않으므로
-        cash 변동률로 판별하면 정당한 가격 변동은 통과시키면서 sync 스파이크만 차단.
+        스파이크 방어 (2중):
+        1. 직전 스냅샷 대비 cash_balance 20%+ 급변 → 건너뜀 (sync 오염)
+        2. 직전 3개 스냅샷 중앙값 대비 total_value 15%+ 급변 → 건너뜀 (이중계산)
         """
         summary = await self.get_portfolio_summary(session)
+        new_total = summary["total_value_krw"]
         new_cash = summary["cash_balance_krw"]
 
-        # 직전 스냅샷의 cash와 비교 — DB 기준이라 인메모리 오염 영향 없음
+        # 직전 스냅샷 3개 조회 (cash + total + invested 스파이크 감지용, 단일 쿼리)
         prev_result = await session.execute(
-            select(PortfolioSnapshot.cash_balance_krw)
+            select(
+                PortfolioSnapshot.total_value_krw,
+                PortfolioSnapshot.cash_balance_krw,
+                PortfolioSnapshot.invested_value_krw,
+            )
             .where(PortfolioSnapshot.exchange == self._exchange_name)
             .order_by(PortfolioSnapshot.snapshot_at.desc())
-            .limit(1)
+            .limit(3)
         )
-        prev_cash = prev_result.scalar()
+        prev_rows = prev_result.all()
 
-        if prev_cash is not None and prev_cash > 0:
-            cash_change_pct = abs(new_cash - prev_cash) / prev_cash * 100
-            # 매매 없이 cash가 5분 만에 20%+ 변동 → sync 오염
-            # (매매 시에는 cash 변동이 position 변동과 상쇄되므로 total은 유지)
-            if cash_change_pct > 20:
-                logger.warning(
-                    "snapshot_skipped_cash_spike",
-                    exchange=self._exchange_name,
-                    prev_cash=round(prev_cash, 2),
-                    new_cash=round(new_cash, 2),
-                    cash_change_pct=round(cash_change_pct, 1),
-                )
-                return None
+        if prev_rows:
+            # 1) Cash spike check (직전 1개)
+            prev_cash = prev_rows[0][1]
+            if prev_cash is not None and prev_cash > 0:
+                cash_change_pct = abs(new_cash - prev_cash) / prev_cash * 100
+                if cash_change_pct > 20:
+                    logger.warning(
+                        "snapshot_skipped_cash_spike",
+                        exchange=self._exchange_name,
+                        prev_cash=round(prev_cash, 2),
+                        new_cash=round(new_cash, 2),
+                        cash_change_pct=round(cash_change_pct, 1),
+                    )
+                    return None
+
+            # 2) Total value spike check (중앙값 기준, invested 변동으로 설명 불가능한 경우만)
+            #    시장 급등/급락 시 invested가 변하지만, 스파이크는 cash 이상으로 total만 뜀
+            prev_totals = [r[0] for r in prev_rows if r[0] and r[0] > 0]
+            if prev_totals:
+                baseline = sorted(prev_totals)[len(prev_totals) // 2]
+                if baseline > 0:
+                    total_change_pct = abs(new_total - baseline) / baseline * 100
+                    if total_change_pct > 15:
+                        # invested 변동이 total 변동의 50% 이상 설명 → 실제 시장 변동
+                        total_change = abs(new_total - baseline)
+                        prev_inv_vals = [r[2] for r in prev_rows if r[2] is not None]
+                        inv_baseline = sorted(prev_inv_vals)[len(prev_inv_vals) // 2] if prev_inv_vals else 0
+                        inv_change = abs(summary["invested_value_krw"] - inv_baseline)
+                        if total_change > 0 and inv_change / total_change < 0.5:
+                            logger.warning(
+                                "snapshot_skipped_total_spike",
+                                exchange=self._exchange_name,
+                                baseline=round(baseline, 2),
+                                new_total=round(new_total, 2),
+                                total_change_pct=round(total_change_pct, 1),
+                                inv_change=round(inv_change, 2),
+                            )
+                            return None
 
         snapshot = PortfolioSnapshot(
             exchange=self._exchange_name,
-            total_value_krw=summary["total_value_krw"],
-            cash_balance_krw=summary["cash_balance_krw"],
+            total_value_krw=new_total,
+            cash_balance_krw=new_cash,
             invested_value_krw=summary["invested_value_krw"],
             realized_pnl=summary["realized_pnl"],
             unrealized_pnl=summary["unrealized_pnl"],
@@ -329,6 +358,68 @@ class PortfolioManager:
         session.add(snapshot)
         await session.flush()
         return snapshot
+
+    @staticmethod
+    async def cleanup_spike_snapshots(session: AsyncSession, exchange_name: str) -> int:
+        """기존 스파이크 스냅샷 자동 보정 (서버 시작 시 실행).
+
+        ±5개 윈도우에서 중앙값 기준 10% 이상 벗어나는 스냅샷의 total_value를
+        중앙값으로 보정하고, peak_value/drawdown_pct도 재계산.
+        """
+        result = await session.execute(
+            select(PortfolioSnapshot)
+            .where(PortfolioSnapshot.exchange == exchange_name)
+            .order_by(PortfolioSnapshot.snapshot_at.asc())
+        )
+        snapshots = list(result.scalars().all())
+
+        if len(snapshots) < 5:
+            return 0
+
+        fixed_count = 0
+        values = [s.total_value_krw for s in snapshots]
+
+        # Pass 1: 스파이크 감지 및 보정
+        for i in range(len(snapshots)):
+            start = max(0, i - 5)
+            end = min(len(values), i + 6)
+            window = [values[j] for j in range(start, end) if j != i and values[j] > 0]
+            if len(window) < 3:
+                continue
+            median = sorted(window)[len(window) // 2]
+            if median <= 0:
+                continue
+
+            change_pct = abs(values[i] - median) / median * 100
+            if change_pct > 10:
+                old_val = values[i]
+                corrected = round(median, 2)
+                snapshots[i].total_value_krw = corrected
+                values[i] = corrected
+                fixed_count += 1
+                logger.info(
+                    "spike_snapshot_corrected",
+                    exchange=exchange_name,
+                    snapshot_id=snapshots[i].id,
+                    old_total=round(old_val, 2),
+                    new_total=corrected,
+                    change_pct=round(change_pct, 1),
+                )
+
+        # Pass 2: peak_value & drawdown 재계산 (보정된 total 기준)
+        if fixed_count > 0:
+            running_peak = values[0]
+            for i, snap in enumerate(snapshots):
+                if values[i] > running_peak:
+                    running_peak = values[i]
+                snap.peak_value = round(running_peak, 2)
+                snap.drawdown_pct = round(
+                    (running_peak - values[i]) / running_peak * 100, 2
+                ) if running_peak > 0 else 0
+            await session.flush()
+            logger.info("spike_cleanup_complete", exchange=exchange_name, fixed=fixed_count)
+
+        return fixed_count
 
     async def reconcile_cash_from_db(self, session: AsyncSession) -> None:
         """DB 포지션 기준으로 현금 잔고를 재계산 (인메모리 누수 방지).
