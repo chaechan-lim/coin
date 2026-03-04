@@ -1,7 +1,7 @@
 """
 Tests for PortfolioManager (engine/portfolio_manager.py).
 """
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select
@@ -1220,3 +1220,469 @@ async def test_snapshot_passes_on_market_surge(session):
     # cash 변동 없음 → 정상 기록됨 (시장 급등은 차단하지 않음)
     assert snap2 is not None
     assert snap2.total_value_krw > snap1.total_value_krw
+
+
+# ── Snapshot Total Spike + Cash Delta Check Tests ──
+
+
+@pytest.mark.asyncio
+async def test_snapshot_blocked_total_spike_with_cash_change(session):
+    """total 10%+ 변동 + cash 3%+ 변동 → 스냅샷 차단 (매매 직후 sync 오염)."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+    pm._peak_value = 300
+    pm._cash_balance = 300
+    pm._last_total_value = 300
+
+    # 정상 스냅샷 기록 (baseline=300)
+    snap1 = await pm.take_snapshot(session)
+    assert snap1 is not None
+
+    # sync 오염: cash가 급등 → total도 >10% 상승
+    # new_total = cash(350) + invested(0) = 350, baseline=300, +16.7%
+    # cash_delta = |350-300|/300 = 16.7% > 3% → 차단
+    pm._cash_balance = 350
+    pm._last_total_value = 350
+
+    snap2 = await pm.take_snapshot(session)
+    assert snap2 is None  # 차단됨
+
+
+@pytest.mark.asyncio
+async def test_snapshot_allowed_total_spike_without_cash_change(session):
+    """total 12% 변동이지만 cash 변동 <3% → 시장 변동으로 판단, 스냅샷 허용."""
+    prices = {"BTC/USDT": 100_000}
+    pm = PortfolioManager(
+        market_data=_make_market_data(prices),
+        initial_balance_krw=250,
+        exchange_name="binance_futures",
+    )
+    pm._peak_value = 350
+    pm._cash_balance = 200
+    pm._last_total_value = 350
+
+    # baseline 스냅샷: total=350, cash=200
+    snap1 = PortfolioSnapshot(
+        exchange="binance_futures",
+        total_value_krw=350,
+        cash_balance_krw=200,
+        invested_value_krw=150,
+    )
+    session.add(snap1)
+    await session.flush()
+
+    # 시장 급등: invested만 커짐, cash 불변 → total 12% 변동
+    pos = Position(
+        exchange="binance_futures", symbol="BTC/USDT",
+        quantity=0.01, average_buy_price=95_000,
+        total_invested=150, is_paper=True,
+        direction="long", leverage=3,
+    )
+    session.add(pos)
+    session.add(Order(
+        exchange="binance_futures",
+        symbol="BTC/USDT", side="buy", order_type="market", status="filled",
+        requested_price=95_000, executed_price=95_000,
+        requested_quantity=0.01, executed_quantity=0.01,
+        fee=0.1, is_paper=True, strategy_name="rsi",
+    ))
+    await session.flush()
+
+    snap2 = await pm.take_snapshot(session)
+    # cash delta < 3% → 시장 변동으로 허용
+    assert snap2 is not None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_allowed_small_total_change(session):
+    """total 5% 변동(10% 미만) → 무조건 허용."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+    pm._peak_value = 300
+    pm._cash_balance = 300
+    pm._last_total_value = 300
+
+    snap1 = await pm.take_snapshot(session)
+    assert snap1 is not None
+
+    # 5% 변동 + cash도 변동 → 10% 미만이라 허용
+    pm._cash_balance = 315  # +5%
+    pm._last_total_value = 315
+
+    snap2 = await pm.take_snapshot(session)
+    assert snap2 is not None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_uses_median_baseline(session):
+    """3개 이전 스냅샷의 중앙값을 baseline으로 사용."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+    pm._peak_value = 310
+    pm._last_total_value = 310
+
+    # 3개 스냅샷: 300, 305, 310 → 중앙값=305
+    for total in [300, 305, 310]:
+        snap = PortfolioSnapshot(
+            exchange="binance_futures",
+            total_value_krw=total,
+            cash_balance_krw=total,
+            invested_value_krw=0,
+        )
+        session.add(snap)
+    await session.flush()
+
+    # baseline=305, total=345(+13.1%), cash_delta=13.1% → 차단
+    pm._cash_balance = 345
+    snap = await pm.take_snapshot(session)
+    assert snap is None
+
+
+# ── cleanup_spike_snapshots Tests ──
+
+
+@pytest.mark.asyncio
+async def test_cleanup_corrects_isolated_spike(session):
+    """고립 스파이크: 좌우 이웃 유사, 해당 포인트만 이탈 → 보정."""
+    # 10개 스냅샷: 정상-정상-정상-스파이크-정상-정상-정상-정상-정상-정상
+    normals = [100, 101, 102, 200, 103, 104, 101, 102, 103, 105]
+    for i, val in enumerate(normals):
+        snap = PortfolioSnapshot(
+            exchange="bithumb",
+            total_value_krw=val,
+            cash_balance_krw=val,
+            invested_value_krw=0,
+        )
+        session.add(snap)
+    await session.flush()
+
+    fixed = await PortfolioManager.cleanup_spike_snapshots(session, "bithumb")
+    assert fixed == 1  # 인덱스3(200)이 보정됨
+
+    # 보정된 값 확인
+    result = await session.execute(
+        select(PortfolioSnapshot)
+        .where(PortfolioSnapshot.exchange == "bithumb")
+        .order_by(PortfolioSnapshot.snapshot_at.asc())
+    )
+    snapshots = list(result.scalars().all())
+    # 인덱스3: left_med≈101, right_med≈103 → corrected≈102
+    assert abs(snapshots[3].total_value_krw - 102) < 5
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preserves_level_shift(session):
+    """레벨 시프트(출금): 좌우 이웃 수준이 다름 → 보정하지 않음."""
+    # 10개: 500-505-510-515-300-305-310-300-305-310 (출금으로 레벨 이동)
+    values = [500, 505, 510, 515, 300, 305, 310, 300, 305, 310]
+    for val in values:
+        snap = PortfolioSnapshot(
+            exchange="bithumb",
+            total_value_krw=val,
+            cash_balance_krw=val,
+            invested_value_krw=0,
+        )
+        session.add(snap)
+    await session.flush()
+
+    fixed = await PortfolioManager.cleanup_spike_snapshots(session, "bithumb")
+    assert fixed == 0  # 레벨 시프트 → 보정 없음
+
+
+@pytest.mark.asyncio
+async def test_cleanup_corrects_multiple_spikes(session):
+    """여러 개의 고립 스파이크 모두 보정."""
+    # 12개: 정상 흐름에 2개 스파이크 (인덱스3, 인덱스7)
+    values = [100, 101, 102, 250, 103, 104, 105, 50, 106, 107, 108, 109]
+    for val in values:
+        snap = PortfolioSnapshot(
+            exchange="bithumb",
+            total_value_krw=val,
+            cash_balance_krw=val,
+            invested_value_krw=0,
+        )
+        session.add(snap)
+    await session.flush()
+
+    fixed = await PortfolioManager.cleanup_spike_snapshots(session, "bithumb")
+    assert fixed == 2  # 2개 모두 보정
+
+
+@pytest.mark.asyncio
+async def test_cleanup_too_few_snapshots(session):
+    """스냅샷 7개 미만 → 보정하지 않음."""
+    for val in [100, 200, 100, 100, 100]:
+        snap = PortfolioSnapshot(
+            exchange="bithumb",
+            total_value_krw=val,
+            cash_balance_krw=val,
+            invested_value_krw=0,
+        )
+        session.add(snap)
+    await session.flush()
+
+    fixed = await PortfolioManager.cleanup_spike_snapshots(session, "bithumb")
+    assert fixed == 0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_no_spikes_no_changes(session):
+    """정상 데이터 → 보정 0건."""
+    for val in [100, 102, 104, 106, 108, 110, 112, 114]:
+        snap = PortfolioSnapshot(
+            exchange="bithumb",
+            total_value_krw=val,
+            cash_balance_krw=val,
+            invested_value_krw=0,
+        )
+        session.add(snap)
+    await session.flush()
+
+    fixed = await PortfolioManager.cleanup_spike_snapshots(session, "bithumb")
+    assert fixed == 0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_edge_first_last_three_untouched(session):
+    """처음/끝 3개 스냅샷은 이웃 부족으로 절대 수정하지 않음."""
+    # 첫 번째와 마지막이 스파이크여도 수정 안 됨
+    values = [999, 100, 101, 102, 103, 104, 105, 106, 107, 999]
+    for val in values:
+        snap = PortfolioSnapshot(
+            exchange="bithumb",
+            total_value_krw=val,
+            cash_balance_krw=val,
+            invested_value_krw=0,
+        )
+        session.add(snap)
+    await session.flush()
+
+    fixed = await PortfolioManager.cleanup_spike_snapshots(session, "bithumb")
+    assert fixed == 0  # 처음/끝 3개는 수정 불가
+
+
+@pytest.mark.asyncio
+async def test_cleanup_exchange_isolation(session):
+    """다른 거래소 스냅샷에 영향 없음."""
+    # bithumb: 스파이크 포함
+    for val in [100, 101, 102, 300, 103, 104, 105, 106, 107, 108]:
+        session.add(PortfolioSnapshot(
+            exchange="bithumb",
+            total_value_krw=val,
+            cash_balance_krw=val,
+            invested_value_krw=0,
+        ))
+    # binance_futures: 정상
+    for val in [200, 201, 202, 203, 204, 205, 206, 207, 208, 209]:
+        session.add(PortfolioSnapshot(
+            exchange="binance_futures",
+            total_value_krw=val,
+            cash_balance_krw=val,
+            invested_value_krw=0,
+        ))
+    await session.flush()
+
+    # bithumb만 보정
+    fixed_bithumb = await PortfolioManager.cleanup_spike_snapshots(session, "bithumb")
+    assert fixed_bithumb == 1
+
+    fixed_futures = await PortfolioManager.cleanup_spike_snapshots(session, "binance_futures")
+    assert fixed_futures == 0
+
+
+# ── Sync Margin Grace Period Tests ──
+
+
+@pytest.mark.asyncio
+async def test_sync_margin_grace_protects_recent_trade(session):
+    """최근 10분 이내 거래 포지션의 margin은 sync에서 덮어쓰지 않음."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"BTC/USDT": 100_000}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+
+    # DB 포지션: 2분 전 거래, margin=40
+    pos = Position(
+        exchange="binance_futures", symbol="BTC/USDT",
+        quantity=0.001, average_buy_price=95000,
+        total_invested=40, is_paper=False,
+        direction="long", leverage=3, margin_used=40,
+        last_trade_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+    )
+    session.add(pos)
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=250, used=50, total=310),
+        "BTC": Balance(currency="BTC", free=0.001, used=0, total=0.001),
+    })
+    adapter._exchange = AsyncMock()
+    # 거래소가 일시적으로 잘못된 margin(80) 반환
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[
+        {
+            "symbol": "BTC/USDT:USDT",
+            "contracts": 0.001,
+            "side": "long",
+            "initialMargin": 80,  # 실제=40, 거래소 임시 오류=80
+            "leverage": "3",
+            "entryPrice": 95000,
+            "liquidationPrice": 60000,
+            "notional": 240,
+            "unrealizedPnl": 5,
+        }
+    ])
+
+    await pm.sync_exchange_positions(session, adapter, ["BTC/USDT"])
+
+    await session.refresh(pos)
+    # grace period 보호: margin이 40으로 유지 (80으로 덮어쓰지 않음)
+    assert pos.total_invested == pytest.approx(40, abs=1)
+    assert pos.margin_used == pytest.approx(40, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_sync_margin_updates_old_trade(session):
+    """10분 이상 지난 포지션의 margin은 정상적으로 업데이트."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"BTC/USDT": 100_000}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+
+    # DB 포지션: 30분 전 거래 (grace period 밖)
+    pos = Position(
+        exchange="binance_futures", symbol="BTC/USDT",
+        quantity=0.001, average_buy_price=95000,
+        total_invested=40, is_paper=False,
+        direction="long", leverage=3, margin_used=40,
+        last_trade_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+    )
+    session.add(pos)
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=250, used=50, total=310),
+        "BTC": Balance(currency="BTC", free=0.001, used=0, total=0.001),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[
+        {
+            "symbol": "BTC/USDT:USDT",
+            "contracts": 0.001,
+            "side": "long",
+            "initialMargin": 50,  # 거래소 정상 값
+            "leverage": "3",
+            "entryPrice": 95000,
+            "liquidationPrice": 60000,
+            "notional": 150,
+            "unrealizedPnl": 5,
+        }
+    ])
+
+    await pm.sync_exchange_positions(session, adapter, ["BTC/USDT"])
+
+    await session.refresh(pos)
+    # grace period 밖: margin 정상 업데이트
+    assert pos.total_invested == pytest.approx(50, abs=1)
+    assert pos.margin_used == pytest.approx(50, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_sync_margin_grace_spot_no_effect(session):
+    """현물은 grace period 로직 무관 (is_futures=False)."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"BTC/KRW": 50_000_000}),
+        initial_balance_krw=500_000,
+        exchange_name="bithumb",
+    )
+
+    pos = Position(
+        exchange="bithumb", symbol="BTC/KRW",
+        quantity=0.001, average_buy_price=50_000_000,
+        total_invested=50_000, is_paper=False,
+        last_trade_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    session.add(pos)
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "KRW": Balance(currency="KRW", free=450_000, used=0, total=450_000),
+        "BTC": Balance(currency="BTC", free=0.002, used=0, total=0.002),
+    })
+
+    await pm.sync_exchange_positions(session, adapter, ["BTC/KRW"])
+
+    await session.refresh(pos)
+    # 현물: 수량 불일치 시 ratio 적용 (grace period 무관)
+    assert pos.quantity == pytest.approx(0.002)
+    # total_invested = 50_000 * (0.002/0.001) = 100_000
+    assert pos.total_invested == pytest.approx(100_000, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_sync_margin_grace_no_last_trade_at(session):
+    """last_trade_at이 None인 포지션은 grace period 보호 안 됨."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"ETH/USDT": 3500}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+
+    # last_trade_at = None (마이그레이션 전 포지션)
+    pos = Position(
+        exchange="binance_futures", symbol="ETH/USDT",
+        quantity=0.01, average_buy_price=3000,
+        total_invested=30, is_paper=False,
+        direction="long", leverage=3, margin_used=30,
+        last_trade_at=None,
+    )
+    session.add(pos)
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=250, used=50, total=310),
+        "ETH": Balance(currency="ETH", free=0.01, used=0, total=0.01),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[
+        {
+            "symbol": "ETH/USDT:USDT",
+            "contracts": 0.01,
+            "side": "long",
+            "initialMargin": 50,
+            "leverage": "3",
+            "entryPrice": 3000,
+            "liquidationPrice": 2000,
+            "notional": 150,
+            "unrealizedPnl": 5,
+        }
+    ])
+
+    await pm.sync_exchange_positions(session, adapter, ["ETH/USDT"])
+
+    await session.refresh(pos)
+    # last_trade_at=None → 보호 없음 → margin 업데이트됨
+    assert pos.total_invested == pytest.approx(50, abs=1)
+    assert pos.margin_used == pytest.approx(50, abs=1)
