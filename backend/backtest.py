@@ -865,7 +865,7 @@ class Backtester:
             if not signals:
                 continue
 
-            decision = self._combiner.combine(signals)
+            decision = self._combiner.combine(signals, market_state=current_market_state)
 
             # ── 글로벌 추세 필터: 하락장에서 매수 차단 ────────────
             if (self._trend_filter
@@ -1647,7 +1647,7 @@ class PortfolioBacktester:
                 if not signals:
                     continue
 
-                decision = self._combiner.combine(signals)
+                decision = self._combiner.combine(signals, market_state=current_market_state)
                 if decision.action != SignalType.BUY:
                     continue
 
@@ -2354,7 +2354,7 @@ class FuturesBacktester:
             if not signals:
                 continue
 
-            decision = self._combiner.combine(signals)
+            decision = self._combiner.combine(signals, market_state=current_market_state)
 
             # ── 포지션 없음: 롱/숏 진입 ────────────────────────
             if position is None:
@@ -2907,7 +2907,7 @@ class RotationBacktester:
         if not signals:
             return (False, 0.0) if self._strict_confirm else (True, 0.30)
 
-        decision = self._combiner.combine(signals)
+        decision = self._combiner.combine(signals, market_state=current_market_state)
         if decision.action == SignalType.SELL:
             return False, 0.0
         if decision.action == SignalType.BUY and decision.combined_confidence >= self._min_confidence:

@@ -335,14 +335,43 @@ coin/
 
 ### ⬜ Phase 6 — 남은 과제
 
-| 항목 | 우선순위 | 상태 |
+#### 🔴 높은 우선순위
+
+| 항목 | 상태 | 상세 |
 |---|---|---|
-| 바이낸스 현물 연동 (v0.22) | 중 | ✅ BinanceSpotAdapter + TradingEngine 재사용, 10 tests |
-| 시장 상태별 전략 on/off | 낮 | ⬜ 횡보 시 추세추종 완전 비활성 |
-| 멀티 심볼 백테스트 | 중 | ✅ `--portfolio` 모드 (PortfolioBacktester, 540일 지원, fetch_long_history.py) |
-| Alembic 마이그레이션 정리 | 낮 | ⬜ 초기 마이그레이션 + 수동 migrate.py 혼재 |
-| 로그 로테이션/모니터링 | 낮 | ⬜ systemd journal 기반, 별도 로그 관리 미설정 |
-| 프론트엔드 nginx 직접 서빙 | 낮 | ⬜ 현재 serve -s dist → nginx static 전환 가능 |
+| 현물 엔진 market_state 누락 | ⬜ | `trading_engine.py:910` combiner에 market_state 미전달 → 적응형 가중치 미작동 |
+| 백테스트 market_state 누락 | ⬜ | 4곳 combiner.combine()에 market_state 미전달 → 라이브/백테스트 괴리 |
+| XAG/XAU tracked_coins 제거 | ⬜ | TradFi-Perps 약정 미서명 → 5분마다 에러 로그 반복 |
+| 엔진 auto-start | ⬜ | 재부팅 후 수동 curl 필요 → systemd ExecStartPost 자동화 |
+
+#### 🟡 중간 우선순위
+
+| 항목 | 상태 | 상세 |
+|---|---|---|
+| 선물 멀티코인 포트폴리오 백테스트 | ⬜ | --futures --all-coins가 BTC만 테스트 → 멀티코인 동시 운용 시뮬레이션 |
+| 역추세 가드 단위 테스트 | ⬜ | bollinger_rsi/rsi 급락/SMA 가드 테스트 미작성 |
+| 선물 롱 승률 개선 | ⬜ | 현재 26.9% → 추가 필터 또는 진입 기준 강화 검토 |
+| 스냅샷 스파이크 자동 보정 | ⬜ | 매매 직후 스냅샷 이중계산 방지 로직 강화 |
+| 일일 리포트 개선 | ⬜ | Discord 요약에 전략별 PnL, 승률, 주요 매매 사유 추가 |
+
+#### 🟢 낮은 우선순위
+
+| 항목 | 상태 | 상세 |
+|---|---|---|
+| 시장 상태별 전략 on/off | ⬜ | 횡보 시 추세추종 완전 비활성 |
+| Alembic 마이그레이션 정리 | ⬜ | 초기 마이그레이션 + 수동 migrate.py 혼재 |
+| 로그 로테이션/모니터링 | ⬜ | systemd journal 기반, 별도 로그 관리 미설정 |
+| 프론트엔드 nginx 직접 서빙 | ⬜ | serve→nginx static, 메모리 170MB 절감 가능 |
+| 프론트엔드 포지션 상세 모달 | ⬜ | 진입 시그널, 전략 기여도, SL/TP 차트 오버레이 |
+
+#### ✅ 완료
+
+| 항목 | 상태 |
+|---|---|
+| 바이낸스 현물 연동 (v0.22) | ✅ BinanceSpotAdapter + TradingEngine 재사용, 10 tests |
+| 멀티 심볼 백테스트 | ✅ `--portfolio` 모드 (PortfolioBacktester, 540일 지원, fetch_long_history.py) |
+| 선물 역추세 매수 가드 (v0.24) | ✅ bollinger_rsi/rsi 급락 필터 (180d PF 1.10→1.22) |
+| WiFi 워치독 | ✅ 3분 cron ping 기반 자동 재접속 |
 
 ---
 

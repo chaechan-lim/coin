@@ -907,7 +907,7 @@ class TradingEngine:
 
         # ── 4. 결합 판단 + 실행 ──
         if signals:
-            decision = self._combiner.combine(signals, symbol=symbol)
+            decision = self._combiner.combine(signals, market_state=self._market_state, symbol=symbol)
 
             # 통합 시그널 이벤트 (BUY/SELL만, HOLD 제외)
             if decision.action != SignalType.HOLD:
@@ -1083,7 +1083,7 @@ class TradingEngine:
         if not signals:
             return False, 0.0
 
-        decision = self._combiner.combine(signals, symbol=symbol)
+        decision = self._combiner.combine(signals, market_state=self._market_state, symbol=symbol)
 
         # BUY 시그널이 있으면 즉시 확인
         if (decision.action == SignalType.BUY

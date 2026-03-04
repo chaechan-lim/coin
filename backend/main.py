@@ -608,6 +608,18 @@ async def lifespan(app: FastAPI):
     metadata = {"spot_coins": spot_coins, "futures_coins": futures_coins if config.binance.enabled else []}
     await emit_event("info", "system", "서버 시작", detail=startup_detail, metadata=metadata)
 
+    # ── 엔진 자동 시작 ────────────────────────────────────────
+    auto_start_engines = []
+    if _engine_instance and not _engine_instance.is_running:
+        auto_start_engines.append(("bithumb", _engine_instance))
+    if _binance_engine and not _binance_engine.is_running:
+        auto_start_engines.append(("binance_futures", _binance_engine))
+    if _binance_spot_engine and not _binance_spot_engine.is_running:
+        auto_start_engines.append(("binance_spot", _binance_spot_engine))
+    for name, eng in auto_start_engines:
+        asyncio.create_task(eng.start())
+        logger.info("engine_auto_started", exchange=name)
+
     yield  # ─── 앱 실행 중 ───
 
     # ── Shutdown ─────────────────────────────────────────────
