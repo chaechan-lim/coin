@@ -5,8 +5,8 @@ from datetime import timedelta
 from core.utils import utcnow
 
 from db.session import get_db
-from core.models import PortfolioSnapshot
-from core.schemas import PortfolioSummaryResponse, PortfolioHistoryPoint
+from core.models import PortfolioSnapshot, DailyPnL
+from core.schemas import PortfolioSummaryResponse, PortfolioHistoryPoint, DailyPnLResponse
 from api.dependencies import engine_registry
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
@@ -83,4 +83,42 @@ async def get_portfolio_history(
             drawdown_pct=s.drawdown_pct,
         )
         for s in reversed(list(snapshots))
+    ]
+
+
+@router.get("/daily-pnl", response_model=list[DailyPnLResponse])
+async def get_daily_pnl(
+    days: int = Query(30, ge=1, le=365),
+    exchange: str = Query("bithumb"),
+    session: AsyncSession = Depends(get_db),
+):
+    now = utcnow()
+    start_date = (now - timedelta(days=days)).date()
+
+    result = await session.execute(
+        select(DailyPnL)
+        .where(
+            DailyPnL.exchange == exchange,
+            DailyPnL.date >= start_date,
+        )
+        .order_by(DailyPnL.date.asc())
+    )
+    records = result.scalars().all()
+
+    return [
+        DailyPnLResponse(
+            date=r.date,
+            open_value=r.open_value or 0,
+            close_value=r.close_value or 0,
+            daily_pnl=r.daily_pnl or 0,
+            daily_pnl_pct=r.daily_pnl_pct or 0,
+            realized_pnl=r.realized_pnl or 0,
+            total_fees=r.total_fees or 0,
+            trade_count=r.trade_count or 0,
+            buy_count=r.buy_count or 0,
+            sell_count=r.sell_count or 0,
+            win_count=r.win_count or 0,
+            loss_count=r.loss_count or 0,
+        )
+        for r in records
     ]

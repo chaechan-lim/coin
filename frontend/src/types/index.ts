@@ -223,6 +223,22 @@ export interface CapitalSummary {
   transaction_count: number
 }
 
+// ── Daily PnL ───────────────────────────────────────────────
+export interface DailyPnL {
+  date: string
+  open_value: number
+  close_value: number
+  daily_pnl: number
+  daily_pnl_pct: number
+  realized_pnl: number
+  total_fees: number
+  trade_count: number
+  buy_count: number
+  sell_count: number
+  win_count: number
+  loss_count: number
+}
+
 // ── WebSocket Events ─────────────────────────────────────────
 export type WsEvent =
   | { event: 'portfolio_update'; data: PortfolioSummary }

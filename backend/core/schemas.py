@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional
 
 
@@ -213,6 +213,21 @@ class CapitalSummaryResponse(BaseModel):
     net_capital: float
     currency: str
     transaction_count: int
+
+
+class DailyPnLResponse(BaseModel):
+    date: date
+    open_value: float
+    close_value: float
+    daily_pnl: float
+    daily_pnl_pct: float
+    realized_pnl: float
+    total_fees: float
+    trade_count: int
+    buy_count: int
+    sell_count: int
+    win_count: int
+    loss_count: int
 
 
 class SurgeScoreItem(BaseModel):

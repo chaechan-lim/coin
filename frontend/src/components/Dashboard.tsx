@@ -8,6 +8,7 @@ import { AgentStatus } from './AgentStatus'
 import { OrderLog } from './OrderLog'
 import { EngineControl } from './EngineControl'
 import { RotationMonitor } from './RotationMonitor'
+import { DailyPnLStats } from './DailyPnLStats'
 import { SystemLog } from './SystemLog'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { getExchanges } from '../api/client'
@@ -19,6 +20,7 @@ const TABS = [
   { id: 'trades', label: '거래 이력' },
   { id: 'logs', label: '신호 로그' },
   { id: 'strategies', label: '전략 성과' },
+  { id: 'stats', label: '일일 통계' },
   { id: 'agents', label: '에이전트' },
   { id: 'rotation', label: '종목/로테이션' },
   { id: 'system', label: '시스템 로그' },
@@ -185,6 +187,7 @@ export function Dashboard() {
         {tab === 'trades' && <TradeHistory exchange={exchange} />}
         {tab === 'logs' && <OrderLog exchange={exchange} />}
         {tab === 'strategies' && <StrategyPerformance exchange={exchange} />}
+        {tab === 'stats' && <DailyPnLStats exchange={exchange} />}
         {tab === 'agents' && <AgentStatus exchange={exchange} />}
         {tab === 'rotation' && <RotationMonitor exchange={exchange} />}
         {tab === 'system' && <SystemLog realtimeEvents={realtimeServerEvents} />}

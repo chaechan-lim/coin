@@ -4,6 +4,7 @@ import type {
   ExchangeInfo,
   PortfolioSummary,
   PortfolioHistoryPoint,
+  DailyPnL,
   Order,
   TradeSummary,
   Strategy,
@@ -34,6 +35,9 @@ export const getPortfolioSummary = (exchange: ExchangeName = 'bithumb') =>
 
 export const getPortfolioHistory = (period = '7d', exchange: ExchangeName = 'bithumb') =>
   api.get<PortfolioHistoryPoint[]>('/portfolio/history', { params: { period, exchange } }).then((r) => r.data)
+
+export const getDailyPnl = (days = 30, exchange: ExchangeName = 'bithumb') =>
+  api.get<DailyPnL[]>('/portfolio/daily-pnl', { params: { days, exchange } }).then((r) => r.data)
 
 // ── Trades ───────────────────────────────────────────────────
 export const getTrades = (params?: {

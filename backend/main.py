@@ -537,6 +537,22 @@ async def lifespan(app: FastAPI):
             seconds=300,
         )
 
+    # ── 일일 손익 기록 스케줄러 ─────────────────────────────────
+    async def daily_pnl_job():
+        sf = get_session_factory()
+        for ex_name in engine_registry.available_exchanges:
+            try:
+                async with sf() as sess:
+                    await PortfolioManager.record_daily_pnl(sess, ex_name)
+                    await sess.commit()
+            except Exception as e:
+                logger.warning("daily_pnl_record_failed", exchange=ex_name, error=str(e))
+    _scheduler.add_job(
+        _wrap(daily_pnl_job),
+        name="daily_pnl_record",
+        seconds=86400,
+    )
+
     # ── 일일 요약 스케줄러 (Discord) ───────────────────────────
     if _discord_handler and discord_webhook:
         async def daily_summary_job():

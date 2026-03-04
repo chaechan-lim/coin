@@ -1,4 +1,5 @@
 import structlog
+from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, case
 from core.utils import utcnow
@@ -888,6 +889,158 @@ class PortfolioManager:
                 withdrawals=round(withdrawals, 2),
                 initial_balance=round(self._initial_balance, 2),
             )
+
+    @staticmethod
+    async def record_daily_pnl(
+        session: AsyncSession, exchange_name: str, target_date=None
+    ) -> "DailyPnL | None":
+        """해당 일자의 일일 손익을 PortfolioSnapshot + Orders에서 계산하여 DailyPnL에 upsert.
+
+        target_date: date 객체. None이면 어제(UTC) 기준.
+        """
+        from datetime import date, timedelta, time
+        from core.models import DailyPnL
+
+        if target_date is None:
+            target_date = (utcnow() - timedelta(days=1)).date()
+
+        day_start = datetime.combine(target_date, time.min, tzinfo=timezone.utc)
+        day_end = datetime.combine(target_date + timedelta(days=1), time.min, tzinfo=timezone.utc)
+
+        # 1) 해당 일자의 첫/마지막 스냅샷 → open_value / close_value
+        first_snap = await session.execute(
+            select(PortfolioSnapshot.total_value_krw)
+            .where(
+                PortfolioSnapshot.exchange == exchange_name,
+                PortfolioSnapshot.snapshot_at >= day_start,
+                PortfolioSnapshot.snapshot_at < day_end,
+            )
+            .order_by(PortfolioSnapshot.snapshot_at.asc())
+            .limit(1)
+        )
+        open_value = first_snap.scalar_one_or_none()
+
+        last_snap = await session.execute(
+            select(PortfolioSnapshot.total_value_krw)
+            .where(
+                PortfolioSnapshot.exchange == exchange_name,
+                PortfolioSnapshot.snapshot_at >= day_start,
+                PortfolioSnapshot.snapshot_at < day_end,
+            )
+            .order_by(PortfolioSnapshot.snapshot_at.desc())
+            .limit(1)
+        )
+        close_value = last_snap.scalar_one_or_none()
+
+        if open_value is None or close_value is None:
+            logger.info("daily_pnl_no_snapshots", exchange=exchange_name, date=str(target_date))
+            return None
+
+        daily_pnl_val = close_value - open_value
+        daily_pnl_pct = (daily_pnl_val / open_value * 100) if open_value > 0 else 0.0
+
+        # 2) 해당 일자 매매 집계
+        order_stats = await session.execute(
+            select(
+                func.count(Order.id),
+                func.coalesce(func.sum(case((Order.side == "buy", 1), else_=0)), 0),
+                func.coalesce(func.sum(case((Order.side == "sell", 1), else_=0)), 0),
+                func.coalesce(func.sum(Order.fee), 0),
+            ).where(
+                Order.exchange == exchange_name,
+                Order.status == "filled",
+                Order.created_at >= day_start,
+                Order.created_at < day_end,
+            )
+        )
+        trade_count, buy_count, sell_count, total_fees = order_stats.one()
+
+        # 3) 실현 손익 + 승/패 카운트 (매도 주문 기준)
+        sell_orders_result = await session.execute(
+            select(Order).where(
+                Order.exchange == exchange_name,
+                Order.side == "sell",
+                Order.status == "filled",
+                Order.created_at >= day_start,
+                Order.created_at < day_end,
+            )
+        )
+        sell_orders = list(sell_orders_result.scalars().all())
+
+        realized_pnl = 0.0
+        win_count = 0
+        loss_count = 0
+        for sell_order in sell_orders:
+            if sell_order.executed_price and sell_order.executed_quantity:
+                # 해당 심볼의 매수 평균가 조회
+                pos_result = await session.execute(
+                    select(Position.average_buy_price).where(
+                        Position.symbol == sell_order.symbol,
+                        Position.exchange == exchange_name,
+                    )
+                )
+                avg_buy = pos_result.scalar_one_or_none()
+                if avg_buy and avg_buy > 0:
+                    pnl = (sell_order.executed_price - avg_buy) * sell_order.executed_quantity
+                    # 선물 숏: 방향 반전
+                    if sell_order.direction == "short":
+                        pnl = -pnl
+                    pnl -= sell_order.fee or 0
+                    realized_pnl += pnl
+                    if pnl >= 0:
+                        win_count += 1
+                    else:
+                        loss_count += 1
+
+        # 4) Upsert
+        existing = await session.execute(
+            select(DailyPnL).where(
+                DailyPnL.exchange == exchange_name,
+                DailyPnL.date == target_date,
+            )
+        )
+        record = existing.scalar_one_or_none()
+
+        if record:
+            record.open_value = open_value
+            record.close_value = close_value
+            record.daily_pnl = round(daily_pnl_val, 4)
+            record.daily_pnl_pct = round(daily_pnl_pct, 4)
+            record.realized_pnl = round(realized_pnl, 4)
+            record.total_fees = round(float(total_fees), 4)
+            record.trade_count = int(trade_count)
+            record.buy_count = int(buy_count)
+            record.sell_count = int(sell_count)
+            record.win_count = win_count
+            record.loss_count = loss_count
+        else:
+            record = DailyPnL(
+                exchange=exchange_name,
+                date=target_date,
+                open_value=open_value,
+                close_value=close_value,
+                daily_pnl=round(daily_pnl_val, 4),
+                daily_pnl_pct=round(daily_pnl_pct, 4),
+                realized_pnl=round(realized_pnl, 4),
+                total_fees=round(float(total_fees), 4),
+                trade_count=int(trade_count),
+                buy_count=int(buy_count),
+                sell_count=int(sell_count),
+                win_count=win_count,
+                loss_count=loss_count,
+            )
+            session.add(record)
+
+        await session.flush()
+        logger.info(
+            "daily_pnl_recorded",
+            exchange=exchange_name,
+            date=str(target_date),
+            pnl=round(daily_pnl_val, 2),
+            pnl_pct=round(daily_pnl_pct, 2),
+            trades=int(trade_count),
+        )
+        return record
 
     @property
     def cash_balance(self) -> float:

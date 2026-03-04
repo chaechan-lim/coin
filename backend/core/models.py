@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     ForeignKey,
     Text,
+    Date,
     Index,
     UniqueConstraint,
 )
@@ -206,6 +207,30 @@ class CapitalTransaction(Base):
     source = Column(String(20), default="manual")        # "manual" / "auto_detected" / "seed"
     confirmed = Column(Boolean, default=True)
     exchange_tx_id = Column(String(100), nullable=True)  # 거래소 tx ID (자동 감지 시)
+    created_at = Column(DateTime, default=_utcnow)
+
+
+class DailyPnL(Base):
+    __tablename__ = "daily_pnl"
+    __table_args__ = (
+        UniqueConstraint("exchange", "date", name="uq_daily_pnl_exchange_date"),
+        Index("ix_daily_pnl_exchange_date", "exchange", "date"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    exchange = Column(String(20), nullable=False)
+    date = Column(Date, nullable=False)
+    open_value = Column(Float)
+    close_value = Column(Float)
+    daily_pnl = Column(Float, default=0.0)
+    daily_pnl_pct = Column(Float, default=0.0)
+    realized_pnl = Column(Float, default=0.0)
+    total_fees = Column(Float, default=0.0)
+    trade_count = Column(Integer, default=0)
+    buy_count = Column(Integer, default=0)
+    sell_count = Column(Integer, default=0)
+    win_count = Column(Integer, default=0)
+    loss_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=_utcnow)
 
 
