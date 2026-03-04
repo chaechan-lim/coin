@@ -363,8 +363,9 @@ class PortfolioManager:
     async def cleanup_spike_snapshots(session: AsyncSession, exchange_name: str) -> int:
         """기존 스파이크 스냅샷 자동 보정 (서버 시작 시 실행).
 
-        ±5개 윈도우에서 중앙값 기준 10% 이상 벗어나는 스냅샷의 total_value를
-        중앙값으로 보정하고, peak_value/drawdown_pct도 재계산.
+        고립된 이상값만 보정: 좌측 3개 + 우측 3개 이웃이 비슷한 수준인데
+        해당 포인트만 10% 이상 벗어나는 경우에만 보정.
+        출금/입금으로 인한 레벨 시프트는 건드리지 않음.
         """
         result = await session.execute(
             select(PortfolioSnapshot)
@@ -373,27 +374,38 @@ class PortfolioManager:
         )
         snapshots = list(result.scalars().all())
 
-        if len(snapshots) < 5:
+        if len(snapshots) < 7:
             return 0
 
         fixed_count = 0
         values = [s.total_value_krw for s in snapshots]
 
-        # Pass 1: 스파이크 감지 및 보정
-        for i in range(len(snapshots)):
-            start = max(0, i - 5)
-            end = min(len(values), i + 6)
-            window = [values[j] for j in range(start, end) if j != i and values[j] > 0]
-            if len(window) < 3:
-                continue
-            median = sorted(window)[len(window) // 2]
-            if median <= 0:
+        # Pass 1: 고립 스파이크 감지 및 보정
+        for i in range(3, len(snapshots) - 3):
+            left = [values[j] for j in range(i - 3, i) if values[j] > 0]
+            right = [values[j] for j in range(i + 1, i + 4) if values[j] > 0]
+
+            if len(left) < 2 or len(right) < 2:
                 continue
 
-            change_pct = abs(values[i] - median) / median * 100
-            if change_pct > 10:
+            left_med = sorted(left)[len(left) // 2]
+            right_med = sorted(right)[len(right) // 2]
+
+            if left_med <= 0 or right_med <= 0:
+                continue
+
+            # 좌우 이웃이 비슷한 수준인지 확인 (10% 이내)
+            sides_gap = abs(left_med - right_med) / max(left_med, right_med) * 100
+            if sides_gap > 10:
+                continue  # 레벨 시프트 — 건너뜀
+
+            # 좌우 모두에서 10% 이상 벗어나면 스파이크
+            dev_left = abs(values[i] - left_med) / left_med * 100
+            dev_right = abs(values[i] - right_med) / right_med * 100
+
+            if dev_left > 10 and dev_right > 10:
                 old_val = values[i]
-                corrected = round(median, 2)
+                corrected = round((left_med + right_med) / 2, 2)
                 snapshots[i].total_value_krw = corrected
                 values[i] = corrected
                 fixed_count += 1
@@ -403,19 +415,11 @@ class PortfolioManager:
                     snapshot_id=snapshots[i].id,
                     old_total=round(old_val, 2),
                     new_total=corrected,
-                    change_pct=round(change_pct, 1),
+                    dev_left=round(dev_left, 1),
+                    dev_right=round(dev_right, 1),
                 )
 
-        # Pass 2: peak_value & drawdown 재계산 (보정된 total 기준)
         if fixed_count > 0:
-            running_peak = values[0]
-            for i, snap in enumerate(snapshots):
-                if values[i] > running_peak:
-                    running_peak = values[i]
-                snap.peak_value = round(running_peak, 2)
-                snap.drawdown_pct = round(
-                    (running_peak - values[i]) / running_peak * 100, 2
-                ) if running_peak > 0 else 0
             await session.flush()
             logger.info("spike_cleanup_complete", exchange=exchange_name, fixed=fixed_count)
 
