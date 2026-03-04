@@ -107,7 +107,7 @@ export function DailyPnLStats({ exchange = 'bithumb' }: { exchange?: ExchangeNam
               />
               <SummaryCard
                 label="최대 일 손실"
-                value={formatValue(stats.maxLoss)}
+                value={stats.maxLoss >= 0 ? '없음' : formatValue(stats.maxLoss)}
                 positive={stats.maxLoss >= 0}
               />
             </div>
