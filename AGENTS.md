@@ -104,7 +104,7 @@ backend/
 │   └── websocket.py
 │
 ├── db/                        # SQLAlchemy async session (PostgreSQL / SQLite)
-└── tests/                     # 294 unit tests (pytest + 인메모리 SQLite)
+└── tests/                     # 338 unit tests (pytest + 인메모리 SQLite)
 ```
 
 ---
@@ -189,14 +189,15 @@ SignalCombiner (가중 투표, HOLD=기권)
 
 선물: 듀얼 타임프레임 (4h 장기 + 1h 단기 결합, 10분 갱신)
 
-### Trading Engine Cycle (5분)
+### Trading Engine Cycle (5분 전략 + 30초 SL/TP)
 1. `_maybe_update_market_state()` — BTC 기준 시장 상태 감지
 2. `_evaluate_coin()` per tracked coin:
    - SL/TP/trailing stop 체크 → 매도
    - 전략 시그널 수집 (현물 4 / 선물 6) → combiner → 매수/매도 결정
-   - 강제 청산: 연속 평가 실패 9회 → `_force_close_stuck_position` (쿨다운 면제)
+   - 강제 청산: 연속 평가 실패 3회 → `_force_close_stuck_position` (쿨다운 면제)
 3. 빗썸: `_scan_volume_surges()` → `_try_rotation()` (서지 코인 매수)
-4. 선물: WebSocket 실시간 가격 모니터 (~1초, 별도 루프)
+4. 선물: WebSocket 실시간 가격 + 잔고 + 포지션 모니터 (별도 루프)
+5. **현물 빠른 SL/TP 체크**: 30초 주기 가격 조회 + 손절/익절 판정 (asyncio.gather 병렬)
 
 ### BinanceFuturesEngine (선물 전용)
 - 롱/숏 양방향 (**전체 시장 숏 허용**)
@@ -206,6 +207,7 @@ SignalCombiner (가중 투표, HOLD=기권)
 - **min_confidence**: 0.55
 - 청산가 2% 이내 긴급 청산
 - WebSocket 실시간 가격 모니터 (ccxt.pro, ~1초)
+- **WebSocket 잔고+포지션 동기화**: watch_balance(PM cash 즉시 갱신) + watch_positions(DB 포지션 즉시 갱신)
 - 펀딩비 30분 주기 조회
 - 로테이션 비활성
 
@@ -276,7 +278,7 @@ curl -X POST "http://localhost:8000/api/v1/engine/start?exchange=binance_futures
 
 ### 테스트
 ```bash
-cd backend && .venv/bin/python -m pytest tests/ -v    # 294 tests
+cd backend && .venv/bin/python -m pytest tests/ -v    # 338 tests
 ```
 
 ---

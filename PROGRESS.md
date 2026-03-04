@@ -296,7 +296,7 @@ coin/
 | 원금 대비 수익 표시 | ✅ initial_balance_krw + total_pnl_pct 원금 기준 |
 | 전략 성과 P&L 수정 | ✅ Lot-based FIFO 원가 매칭, **진입 전략에 PnL 귀속** (기존: 청산 전략에 PnL 귀속 → 오계산) |
 | 모바일 반응형 UI | ✅ 탭 스크롤, 테이블→카드, 터치 타겟, 전 컴포넌트 |
-| 단위 테스트 | ✅ 253개 (pytest + 인메모리 SQLite) |
+| 단위 테스트 | ✅ 338개 (pytest + 인메모리 SQLite) |
 | 거래 기본 필터 | ✅ 체결(filled)만 기본 표시, status 파라미터 |
 | 시작 시 현금 보정 | ✅ reconcile_cash_from_db at startup (peak 오염 방지) |
 | 0% 승률 전략 제거 | ✅ volatility_breakout/supertrend 비활성 → 6전략 체제 |
@@ -311,6 +311,9 @@ coin/
 | 거래소 격리 테스트 | ✅ 5 tests + 선물 엔진 11 tests |
 | 바이낸스 선물 라이브 | ✅ 독립 모드 분리, 시장가 주문, 실제 USDT 잔고 조회 |
 | WebSocket 가격 모니터 | ✅ ccxt.pro 실시간 SL/TP/청산가 체크 (~1초), 5분 폴링 fallback |
+| **WebSocket 잔고+포지션 동기화** | ✅ 선물 watch_balance + watch_positions 실시간 (스파이크 방지, 포지션 즉시 갱신) |
+| **현물 빠른 SL/TP 체크** | ✅ 30초 주기 가격+손절 체크, asyncio.gather 병렬 실행 (5분→30초 반응) |
+| **position_sync 1분 주기** | ✅ 5분→1분 축소 (거래소 잔고 동기화 주기) |
 | **P1 최적화** | ✅ 4h 타임프레임, 동적 SL, 숏 전면 허용, PF 1.80 |
 | 가격 0원 fallback | ✅ fetch_ticker last=None → bid/ask 중간값 → orderbook fallback |
 | **자동 리밸런싱** | ✅ 비중 40% 초과 → 35%까지 자동 부분 매도 (현물+선물, 1시간 쿨다운) |
@@ -536,6 +539,8 @@ EngineRegistry (싱글턴)
 - 펀딩비 30분 주기 조회
 - 로테이션 비활성 (선물 전용)
 - **WebSocket 실시간 가격 모니터**: ccxt.pro → ~1초 SL/TP/청산가 체크 (5분 폴링 fallback 이중 체크)
+- **WebSocket 잔고+포지션 모니터**: watch_balance(PM cash 즉시 갱신) + watch_positions(DB 포지션 즉시 갱신)
+- **현물 빠른 SL/TP 체크**: 30초 주기 가격 조회 + 손절/익절 판정, asyncio.gather 병렬 실행
 - **듀얼 타임프레임 시장 감지**: 4h(장기) + 1h(단기) 결합, 10분 갱신
 
 ### DB 주문 테이블 핵심 컬럼 (전략 귀속)
@@ -811,5 +816,6 @@ docker compose restart backend
 | v0.22 | 2026-03-03 | **바이낸스 현물 연동 + 선물 알림 수정**: (1) BinanceSpotAdapter (ccxt.binance, 선물 메서드 없음), (2) BinanceSpotTradingConfig (env_prefix BINANCE_SPOT_TRADING_), (3) TradingEngine 재사용 (tracked_coins/eval_interval 파라미터화, 거래소별 min_order/fee_margin/fallback 프로퍼티), (4) PaperAdapter 통화 추상화 (base_currency KRW/USDT), (5) PortfolioManager 바이낸스 현물 USDT 지원, (6) 교차충돌 3거래소 체크 (base 심볼 기준), (7) 선물 emit_event "trade"→"futures_trade" 수정 (DOGE 등 소수점 가격 0 표시 해결), 231 tests |
 | v0.23 | 2026-03-03 | **현물 4전략 전환 + 프론트 현물/선물 구분**: (1) 4대 트레이더 전략 구현 — BNF이격도(평균회귀), CIS모멘텀(순수모멘텀), 래리윌리엄스(변동성돌파+%R), 돈치안채널(터틀트레이딩), (2) 현물 전략 전환 — 기존6 제거 + 신규4 적용 (540d PF 1.03→1.63, MDD 33.8%→15.4%), (3) 선물은 기존6전략 유지 (ETH PF 2.55 vs 신규 1.20), (4) 거래소별 전략 분기 — engine initialize() + combiner SPOT_WEIGHTS + 에이전트 SPOT/FUTURES_WEIGHT_PROFILES, (5) 프론트엔드 — 거래소 선택기 현물/선물 그룹 라벨, 바이낸스 현물 USDT 통화 수정 (7곳), 전략 한국어명/색상/필터 추가, (6) 백테스트 10전략 통합 (균등 가중치 fallback), 253 tests |
 | v0.25 | 2026-03-04 | **스파이크 방어 6-Layer 강화**: (1) 스냅샷 이중 방어 — cash 20%+/total 10%+cash 3% 스파이크 감지, (2) cleanup_spike_snapshots — 고립 이상값 자동 보정 (좌우 3개 이웃 비교), (3) sync margin grace period — 최근 10분 거래 포지션 margin 보호, (4) 연속 스킵 강제 기록 — 3회 스킵 후 실제 변화 판단 (포지션 청산 후 영구 블록 방지), (5) 재시작 시 `_last_total_value` 복원 — 첫 평가 peak 스파이크 방지, (6) freefall guard 유닛 테스트 9개, 스파이크 방어 테스트 18개 추가, **280 tests** |
-| v0.26 | 2026-03-04 | **일일 손익 + 매매 안정성 + 에러 가시성**: (1) DailyPnL DB 모델 + record_daily_pnl() + GET /daily-pnl API + 스케줄러 + DailyPnLStats 프론트엔드 (4카드, BarChart, AreaChart, 테이블), (2) entry_price=0 가드 + 강제 청산 쿨다운 면제 + 청산 포지션 쿨다운 복원 건너뜀, (3) **live 현물 reconcile 비활성화** — sync에서 설정한 거래소 실제 잔고 존중 (reconcile 공식 누적 오차로 잔고 뻥튀기 방지), (4) **매매 에러/차단 emit_event** — 코인 평가 실패·매수 차단을 프론트 시스템 로그 + Discord 노티로 전달, engine 카테고리 Embed 추가, (5) **DailyPnL 입출금 보정** — `(close - open) - net_inflow`, seed 입금 제외 (순수 매매 손익만 기록), **296 tests** |
+| v0.26 | 2026-03-04 | **일일 손익 + 매매 안정성 + 에러 가시성**: (1) DailyPnL DB 모델 + record_daily_pnl() + GET /daily-pnl API + 스케줄러 + DailyPnLStats 프론트엔드 (4카드, BarChart, AreaChart, 테이블), (2) entry_price=0 가드 + 강제 청산 쿨다운 면제 + 청산 포지션 쿨다운 복원 건너뜀, (3) **live 현물 reconcile 비활성화** — sync에서 설정한 거래소 실제 잔고 존중 (reconcile 공식 누적 오차로 잔고 뻥튀기 방지), (4) **매매 에러/차단 emit_event** — 코인 평가 실패·매수 차단을 프론트 시스템 로그 + Discord 노티로 전달, engine 카테고리 Embed 추가, (5) **DailyPnL 입출금 보정** — `(close - open) - net_inflow`, seed 입금 제외 (순수 매매 손익만 기록) |
+| v0.27 | 2026-03-04 | **실시간 동기화 강화**: (1) **선물 WebSocket 잔고 동기화** — watch_balance()로 PM cash_balance 즉시 갱신 (스파이크 방지), (2) **선물 WebSocket 포지션 동기화** — watch_positions()로 DB 포지션(margin, entry, qty, 청산가) 즉시 갱신, (3) **현물 빠른 SL/TP 체크 루프** — 30초 주기 가격 조회+손절/익절 판정 (기존 5분 → 30초 반응), asyncio.gather로 전략 루프와 병렬 실행, (4) **position_sync 간격 축소** — 5분→1분, (5) 실시간 동기화 42개 유닛 테스트 추가, **338 tests** |
 | v1.0 | 진행중 | **라즈베리파이 배포 완료**, 장기 운영 안정화 |
