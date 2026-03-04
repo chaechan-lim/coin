@@ -220,18 +220,61 @@ class TradingEngine:
         if restored:
             logger.info("trade_timestamps_restored", count=restored)
 
+    _FAST_SL_INTERVAL = 30  # 현물 빠른 SL/TP 체크 간격 (초)
+
     async def start(self) -> None:
         """Start the trading engine main loop."""
         self._is_running = True
         await self._restore_trade_timestamps()
         logger.info("engine_started")
         await emit_event("info", "engine", "엔진 시작", metadata={"mode": self._config.trading.mode})
+
+        # 전략 평가 루프 + 빠른 SL/TP 체크 루프 병렬 실행
+        await asyncio.gather(
+            self._strategy_loop(),
+            self._fast_stop_check_loop(),
+            return_exceptions=True,
+        )
+
+    async def _strategy_loop(self) -> None:
+        """기존 전략 평가 루프 (5분 주기)."""
         while self._is_running:
             try:
                 await self._evaluation_cycle()
             except Exception as e:
                 logger.error("engine_cycle_error", error=str(e), exc_info=True)
             await asyncio.sleep(self._eval_interval or self._config.trading.evaluation_interval_sec)
+
+    async def _fast_stop_check_loop(self) -> None:
+        """보유 포지션 SL/TP/trailing 빠른 체크 (30초 주기, 가격만 조회)."""
+        from db.session import get_session_factory
+        while self._is_running:
+            await asyncio.sleep(self._FAST_SL_INTERVAL)
+            try:
+                trackers = dict(self._position_trackers)
+                if not trackers:
+                    continue
+                session_factory = get_session_factory()
+                async with session_factory() as session:
+                    for symbol, tracker in trackers.items():
+                        try:
+                            price = await self._market_data.get_current_price(symbol)
+                            result = await session.execute(
+                                select(Position).where(
+                                    Position.symbol == symbol,
+                                    Position.quantity > 0,
+                                    Position.exchange == self._exchange_name,
+                                )
+                            )
+                            position = result.scalar_one_or_none()
+                            if not position:
+                                continue
+                            await self._check_stop_conditions(session, symbol, position, price)
+                            await session.commit()
+                        except Exception as e:
+                            logger.debug("fast_stop_check_error", symbol=symbol, error=str(e))
+            except Exception as e:
+                logger.warning("fast_stop_loop_error", error=str(e))
 
     async def stop(self) -> None:
         """Stop the trading engine gracefully."""
