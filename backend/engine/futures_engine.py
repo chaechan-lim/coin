@@ -117,15 +117,20 @@ class BinanceFuturesEngine(TradingEngine):
         await emit_event("info", "engine", "선물 엔진 시작",
                          metadata={"mode": self._config.binance_trading.mode})
 
-        # WebSocket 가격 모니터 초기화
+        # WebSocket 가격 모니터 + 잔고 모니터 초기화
         ws_enabled = self._config.binance_trading.ws_price_monitor
+        self._balance_task = None
         if ws_enabled:
             try:
                 await self._exchange.create_ws_exchange()
                 self._monitor_task = asyncio.create_task(
                     self._price_monitor_loop(), name="futures_price_monitor"
                 )
+                self._balance_task = asyncio.create_task(
+                    self._balance_monitor_loop(), name="futures_balance_monitor"
+                )
                 logger.info("price_monitor_started")
+                logger.info("balance_monitor_started")
             except Exception as e:
                 logger.warning("ws_init_failed_fallback_polling", error=str(e))
                 self._monitor_task = None
@@ -135,8 +140,8 @@ class BinanceFuturesEngine(TradingEngine):
             self._strategy_eval_loop(), name="futures_strategy_eval"
         )
 
-        # 두 태스크 중 하나라도 끝나면 대기
-        tasks = [t for t in (self._monitor_task, self._eval_task) if t]
+        # 모든 태스크 대기
+        tasks = [t for t in (self._monitor_task, self._eval_task, self._balance_task) if t]
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _strategy_eval_loop(self) -> None:
@@ -168,6 +173,30 @@ class BinanceFuturesEngine(TradingEngine):
             except Exception as e:
                 logger.warning("price_monitor_error", error=str(e))
                 await asyncio.sleep(3)
+
+    async def _balance_monitor_loop(self) -> None:
+        """WebSocket으로 선물 잔고 실시간 수신 → PM cash_balance 즉시 갱신."""
+        while self._is_running:
+            try:
+                balance = await self._exchange.watch_balance()
+                usdt = balance.get("USDT", {})
+                # ccxt.pro watch_balance: free, used, total
+                wallet_total = float(usdt.get("total", 0) or 0)
+                margin_used = float(usdt.get("used", 0) or 0)
+                cash = wallet_total - margin_used
+                if cash >= 0:
+                    old = self._portfolio_manager._cash_balance
+                    self._portfolio_manager._cash_balance = cash
+                    if abs(old - cash) > 0.5:
+                        logger.debug("ws_balance_updated",
+                                     old=round(old, 2), new=round(cash, 2),
+                                     wallet=round(wallet_total, 2),
+                                     margin=round(margin_used, 2))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("balance_monitor_error", error=str(e))
+                await asyncio.sleep(5)
 
     async def _realtime_stop_check(self, symbol: str, price: float) -> None:
         """경량 SL/TP/청산가 체크 (인메모리 트래커 기반, DB 조회 최소화)."""

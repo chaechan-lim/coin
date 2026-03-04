@@ -281,6 +281,12 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             raise ExchangeConnectionError("WebSocket exchange not initialized")
         return await self._ws_exchange.watch_tickers(symbols)
 
+    async def watch_balance(self) -> dict:
+        """실시간 잔고 수신 (blocking — 잔고 변동 시 반환)."""
+        if not self._ws_exchange:
+            raise ExchangeConnectionError("WebSocket exchange not initialized")
+        return await self._ws_exchange.watch_balance()
+
     async def close_ws(self) -> None:
         """WebSocket 연결 정리."""
         if self._ws_exchange:
