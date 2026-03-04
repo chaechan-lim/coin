@@ -824,6 +824,8 @@ class PortfolioManager:
         if snapshot:
             self._peak_value = snapshot.peak_value or self._peak_value
             self._realized_pnl = snapshot.realized_pnl or 0.0
+            # 스냅샷의 total_value로 _last_total_value 초기화 (재시작 첫 평가 스파이크 방지)
+            self._last_total_value = snapshot.total_value_krw
             # 스냅샷의 peak는 이미 출금 조정이 반영된 값 → 이중 조정 방지
             self._peak_already_adjusted = True
             logger.info(
@@ -831,6 +833,7 @@ class PortfolioManager:
                 exchange=self._exchange_name,
                 peak_value=round(self._peak_value, 2),
                 realized_pnl=round(self._realized_pnl, 2),
+                last_total_value=round(self._last_total_value, 2),
             )
         else:
             # 첫 실행: peak를 현재 실제 자산으로 설정 (config값보다 낮을 수 있음)
