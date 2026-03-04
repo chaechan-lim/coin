@@ -10,6 +10,12 @@ const STRATEGY_KR: Record<string, string> = {
   rsi: 'RSI',
   macd_crossover: 'MACD',
   bollinger_rsi: '볼린저+RSI',
+  stochastic_rsi: '스토캐스틱RSI',
+  obv_divergence: 'OBV 다이버전스',
+  bnf_deviation: 'BNF 이격도',
+  cis_momentum: 'CIS 모멘텀',
+  larry_williams: '래리 윌리엄스',
+  donchian_channel: '돈치안 채널',
   risk_management: '리스크 관리',
 }
 
@@ -17,7 +23,7 @@ const PERIODS = ['7d', '30d', '90d'] as const
 
 export function StrategyPerformance({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
   const [period, setPeriod] = useState<string>('30d')
-  const isUsdt = exchange === 'binance_futures'
+  const isUsdt = exchange.startsWith('binance')
   const { data, isLoading } = useQuery({
     queryKey: ['strategies', 'comparison', period, exchange],
     queryFn: () => compareStrategies(period, exchange),

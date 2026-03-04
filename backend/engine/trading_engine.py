@@ -155,14 +155,40 @@ class TradingEngine:
         import strategies.stochastic_rsi
         import strategies.obv_divergence
         import strategies.supertrend
+        import strategies.bnf_deviation
+        import strategies.cis_momentum
+        import strategies.larry_williams
+        import strategies.donchian_channel
 
         self._strategies = StrategyRegistry.create_all()
 
-        # 비활성 전략 제거:
-        # - Grid/DCA: 독립 관리형 (combiner 부적합)
-        # - volatility_breakout/supertrend: 백테스트 0% 승률 → 잡음만 유발
-        for excluded in ("grid_trading", "dca_momentum", "volatility_breakout", "supertrend"):
-            self._strategies.pop(excluded, None)
+        # 거래소 유형별 전략 분기:
+        # - 선물(binance_futures): 기존 6전략 유지 (검증 완료)
+        # - 현물(bithumb/binance_spot): 신규 3전략 (추세추종, 540일 PF 1.63)
+        is_futures = "futures" in self._exchange_name
+
+        # 항상 제거: Grid/DCA/volatility_breakout/supertrend
+        always_excluded = {"grid_trading", "dca_momentum", "volatility_breakout",
+                           "supertrend"}
+
+        if is_futures:
+            # 선물: 기존 6전략 유지, 신규 전략 제거
+            futures_excluded = always_excluded | {
+                "bnf_deviation", "cis_momentum", "larry_williams", "donchian_channel",
+            }
+            for excluded in futures_excluded:
+                self._strategies.pop(excluded, None)
+        else:
+            # 현물: 신규 4전략 사용, 기존 6전략 제거
+            spot_excluded = always_excluded | {
+                "ma_crossover", "rsi", "macd_crossover",
+                "bollinger_rsi", "stochastic_rsi", "obv_divergence",
+            }
+            for excluded in spot_excluded:
+                self._strategies.pop(excluded, None)
+            # 현물 combiner 가중치를 신규 3전략으로 교체
+            from strategies.combiner import SignalCombiner
+            self._combiner.weights = SignalCombiner.SPOT_WEIGHTS.copy()
 
         logger.info(
             "engine_initialized",

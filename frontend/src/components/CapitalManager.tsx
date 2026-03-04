@@ -26,7 +26,7 @@ export function CapitalManager({
   open: boolean
   onClose: () => void
 }) {
-  const isUsdt = exchange === 'binance_futures'
+  const isUsdt = exchange.startsWith('binance')
   const currency = isUsdt ? 'USDT' : 'KRW'
   const qc = useQueryClient()
 

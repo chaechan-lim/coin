@@ -17,9 +17,8 @@ class MarketAnalysis:
     indicators: dict
 
 
-# Strategy weight profiles per market state (6전략 — combiner ADAPTIVE_PROFILES와 동기화)
-# 정보 표시용 (가중치 변경은 엔진이 관리). vol_breakout/supertrend 제거.
-WEIGHT_PROFILES: dict[MarketState, dict[str, float]] = {
+# 선물용 가중치 프로필 (기존 6전략)
+FUTURES_WEIGHT_PROFILES: dict[MarketState, dict[str, float]] = {
     MarketState.STRONG_UPTREND: {
         "ma_crossover": 0.12, "rsi": 0.18, "macd_crossover": 0.18,
         "bollinger_rsi": 0.22, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
@@ -38,6 +37,25 @@ WEIGHT_PROFILES: dict[MarketState, dict[str, float]] = {
     },
 }
 
+# 현물용 가중치 프로필 (신규 4전략 — 추세추종 + BNF 평균회귀)
+SPOT_WEIGHT_PROFILES: dict[MarketState, dict[str, float]] = {
+    MarketState.STRONG_UPTREND: {
+        "bnf_deviation": 0.05, "cis_momentum": 0.35, "larry_williams": 0.35, "donchian_channel": 0.25,
+    },
+    MarketState.UPTREND: {
+        "bnf_deviation": 0.08, "cis_momentum": 0.33, "larry_williams": 0.33, "donchian_channel": 0.26,
+    },
+    MarketState.SIDEWAYS: {
+        "bnf_deviation": 0.15, "cis_momentum": 0.30, "larry_williams": 0.30, "donchian_channel": 0.25,
+    },
+    MarketState.DOWNTREND: {
+        "bnf_deviation": 0.20, "cis_momentum": 0.28, "larry_williams": 0.28, "donchian_channel": 0.24,
+    },
+}
+
+# 하위호환 기본값
+WEIGHT_PROFILES = FUTURES_WEIGHT_PROFILES
+
 
 class MarketAnalysisAgent:
     """
@@ -45,9 +63,11 @@ class MarketAnalysisAgent:
     Runs every 15 minutes.
     """
 
-    def __init__(self, market_data: MarketDataService, market_symbol: str = "BTC/KRW"):
+    def __init__(self, market_data: MarketDataService, market_symbol: str = "BTC/KRW", exchange_name: str = "bithumb"):
         self._market_data = market_data
         self._market_symbol = market_symbol
+        self._exchange_name = exchange_name
+        self._weight_profiles = FUTURES_WEIGHT_PROFILES if "futures" in exchange_name else SPOT_WEIGHT_PROFILES
         self._last_analysis: MarketAnalysis | None = None
 
     async def analyze(self) -> MarketAnalysis:
@@ -63,7 +83,7 @@ class MarketAnalysisAgent:
             )
 
             volatility = self._assess_volatility(df_1h)
-            weights = WEIGHT_PROFILES[state]
+            weights = self._weight_profiles.get(state, self._weight_profiles.get(MarketState.SIDEWAYS, {}))
 
             analysis = MarketAnalysis(
                 state=state,
@@ -92,7 +112,7 @@ class MarketAnalysisAgent:
                 state=MarketState.SIDEWAYS,
                 confidence=0.3,
                 volatility_level="medium",
-                recommended_weights=WEIGHT_PROFILES[MarketState.SIDEWAYS],
+                recommended_weights=self._weight_profiles.get(MarketState.SIDEWAYS, {}),
                 reasoning=f"Analysis failed ({e}), defaulting to sideways",
                 indicators={},
             )

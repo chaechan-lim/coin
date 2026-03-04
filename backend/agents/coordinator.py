@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.enums import MarketState, RiskLevel
 from core.models import AgentAnalysisLog
 from core.event_bus import emit_event
-from agents.market_analysis import MarketAnalysisAgent, MarketAnalysis, WEIGHT_PROFILES
+from agents.market_analysis import MarketAnalysisAgent, MarketAnalysis, SPOT_WEIGHT_PROFILES, FUTURES_WEIGHT_PROFILES
 from agents.risk_management import RiskManagementAgent, RiskAlert
 from agents.trade_review import TradeReviewAgent, TradeReview
 from strategies.combiner import SignalCombiner
@@ -35,6 +35,7 @@ class AgentCoordinator:
         self._trade_review_agent = trade_review_agent
         self._exchange_name = exchange_name
         self._engine = None  # Set after engine creation
+        self._weight_profiles = FUTURES_WEIGHT_PROFILES if "futures" in exchange_name else SPOT_WEIGHT_PROFILES
         self._last_market_analysis: MarketAnalysis | None = None
         self._last_risk_alerts: list[RiskAlert] = []
         self._last_trade_review: TradeReview | None = None
@@ -59,7 +60,7 @@ class AgentCoordinator:
                         engine_state=engine_state_str,
                     )
                     analysis.state = engine_state
-                    analysis.recommended_weights = WEIGHT_PROFILES.get(
+                    analysis.recommended_weights = self._weight_profiles.get(
                         engine_state, analysis.recommended_weights
                     )
             except ValueError:

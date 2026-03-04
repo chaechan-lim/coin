@@ -152,7 +152,7 @@ async def lifespan(app: FastAPI):
 
     # ── 4. 빗썸 AI 에이전트 ───────────────────────────────────
     from agents.trade_review import TradeReviewAgent
-    market_agent = MarketAnalysisAgent(market_data)
+    market_agent = MarketAnalysisAgent(market_data, exchange_name="bithumb")
     risk_agent = RiskManagementAgent(config.risk, market_data, exchange_name="bithumb")
     trade_review_agent = TradeReviewAgent(review_window_hours=24, exchange_name="bithumb")
     coordinator = AgentCoordinator(
@@ -229,7 +229,7 @@ async def lifespan(app: FastAPI):
                 exchange_name="binance_futures",
             )
 
-            binance_market_agent = MarketAnalysisAgent(binance_market_data, market_symbol="BTC/USDT")
+            binance_market_agent = MarketAnalysisAgent(binance_market_data, market_symbol="BTC/USDT", exchange_name="binance_futures")
             binance_risk_agent = RiskManagementAgent(config.risk, binance_market_data, exchange_name="binance_futures")
             binance_trade_review = TradeReviewAgent(review_window_hours=24, exchange_name="binance_futures")
             binance_coordinator = AgentCoordinator(
@@ -352,7 +352,7 @@ async def lifespan(app: FastAPI):
                 exchange_name="binance_spot",
             )
 
-            spot_market_agent = MarketAnalysisAgent(spot_market_data, market_symbol="BTC/USDT")
+            spot_market_agent = MarketAnalysisAgent(spot_market_data, market_symbol="BTC/USDT", exchange_name="binance_spot")
             spot_risk_agent = RiskManagementAgent(config.risk, spot_market_data, exchange_name="binance_spot")
             spot_trade_review = TradeReviewAgent(review_window_hours=24, exchange_name="binance_spot")
             spot_coordinator = AgentCoordinator(

@@ -49,11 +49,16 @@ export function OrderLog({ exchange = 'bithumb' }: { exchange?: ExchangeName }) 
               onChange={(e) => { setStrategy(e.target.value); setPage(1) }}
             >
               <option value="">전략</option>
-              <option value="volatility_breakout">변동성 돌파</option>
               <option value="ma_crossover">MA 크로스</option>
               <option value="rsi">RSI</option>
               <option value="macd_crossover">MACD</option>
               <option value="bollinger_rsi">볼린저+RSI</option>
+              <option value="stochastic_rsi">스토캐스틱RSI</option>
+              <option value="obv_divergence">OBV 다이버전스</option>
+              <option value="bnf_deviation">BNF 이격도</option>
+              <option value="cis_momentum">CIS 모멘텀</option>
+              <option value="larry_williams">래리 윌리엄스</option>
+              <option value="donchian_channel">돈치안 채널</option>
               <option value="risk_management">리스크 관리</option>
             </select>
           </div>

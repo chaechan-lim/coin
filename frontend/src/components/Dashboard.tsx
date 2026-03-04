@@ -27,9 +27,13 @@ const TABS = [
 type TabId = (typeof TABS)[number]['id']
 
 const EXCHANGE_LABELS: Record<ExchangeName, string> = {
-  bithumb: '빗썸 현물',
-  binance_futures: '바이낸스 선물',
+  bithumb: '빗썸',
+  binance_futures: '바이낸스',
+  binance_spot: '바이낸스',
 }
+
+const SPOT_EXCHANGES: ExchangeName[] = ['bithumb', 'binance_spot']
+const FUTURES_EXCHANGES: ExchangeName[] = ['binance_futures']
 
 export function Dashboard() {
   const [tab, setTab] = useState<TabId>('overview')
@@ -94,7 +98,7 @@ export function Dashboard() {
   const { connected } = useWebSocket(onMessage)
 
   // 통화 기호
-  const currencySymbol = exchange === 'binance_futures' ? 'USDT' : '₩'
+  const currencySymbol = exchange.startsWith('binance') ? 'USDT' : '₩'
 
   return (
     <div className="min-h-screen bg-gray-900 text-white">
@@ -102,7 +106,7 @@ export function Dashboard() {
       <header className="border-b border-gray-700 px-3 md:px-6 py-2.5 md:py-3 flex items-center justify-between">
         <div className="flex items-center gap-2 md:gap-3 min-w-0">
           <span className="text-base md:text-xl font-bold whitespace-nowrap">🪙 코인 자동 매매</span>
-          <span className="text-xs text-gray-500 hidden md:block">듀얼 엔진 트레이딩</span>
+          <span className="text-xs text-gray-500 hidden md:block">트리플 엔진 트레이딩</span>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
           <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
@@ -110,24 +114,42 @@ export function Dashboard() {
         </div>
       </header>
 
-      {/* Exchange selector */}
-      {exchanges.length > 1 && (
-        <div className="border-b border-gray-700 px-3 md:px-6 py-1.5 flex gap-2">
-          {exchanges.map((ex) => (
-            <button
-              key={ex}
-              onClick={() => setExchange(ex)}
-              className={`px-3 py-1 text-xs md:text-sm rounded-full font-medium transition-colors ${
-                exchange === ex
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white'
-              }`}
-            >
-              {EXCHANGE_LABELS[ex] ?? ex}
-            </button>
-          ))}
-        </div>
-      )}
+      {/* Exchange selector — grouped by spot / futures */}
+      {exchanges.length > 1 && (() => {
+        const spotExs = exchanges.filter((e) => SPOT_EXCHANGES.includes(e))
+        const futuresExs = exchanges.filter((e) => FUTURES_EXCHANGES.includes(e))
+        const ExBtn = ({ ex }: { ex: ExchangeName }) => (
+          <button
+            onClick={() => setExchange(ex)}
+            className={`px-3 py-1 text-xs md:text-sm rounded-full font-medium transition-colors ${
+              exchange === ex
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white'
+            }`}
+          >
+            {EXCHANGE_LABELS[ex] ?? ex}
+          </button>
+        )
+        return (
+          <div className="border-b border-gray-700 px-3 md:px-6 py-1.5 flex items-center gap-1.5 md:gap-2">
+            {spotExs.length > 0 && (
+              <>
+                <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">현물</span>
+                {spotExs.map((ex) => <ExBtn key={ex} ex={ex} />)}
+              </>
+            )}
+            {spotExs.length > 0 && futuresExs.length > 0 && (
+              <div className="w-px h-5 bg-gray-700 mx-1" />
+            )}
+            {futuresExs.length > 0 && (
+              <>
+                <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">선물</span>
+                {futuresExs.map((ex) => <ExBtn key={ex} ex={ex} />)}
+              </>
+            )}
+          </div>
+        )
+      })()}
 
       {/* Tabs - horizontal scroll on mobile */}
       <nav className="border-b border-gray-700 overflow-x-auto scrollbar-hide">

@@ -1126,3 +1126,97 @@ async def test_first_summary_initializes_last_total(session):
 
     await pm.get_portfolio_summary(session)
     assert pm._last_total_value == 500_000
+
+
+@pytest.mark.asyncio
+async def test_snapshot_skipped_on_cash_spike(session):
+    """직전 스냅샷 대비 cash가 >20% 급변 시 스냅샷 건너뜀 (sync 오염 방어)."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+    pm._peak_value = 300
+    pm._cash_balance = 300
+    pm._last_total_value = 300
+
+    # 정상 스냅샷 먼저 기록 (cash=300)
+    snap1 = await pm.take_snapshot(session)
+    assert snap1 is not None
+    assert snap1.cash_balance_krw == 300
+
+    # sync가 cash를 오염시킨 상황: cash 66% 급등
+    pm._cash_balance = 500
+    pm._last_total_value = 300  # peak guard용
+
+    snap2 = await pm.take_snapshot(session)
+    # cash 스파이크 → None 반환, DB에 기록되지 않음
+    assert snap2 is None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_recorded_on_normal_cash_change(session):
+    """cash 정상 변동(20% 이하)은 스냅샷 정상 기록."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+    pm._peak_value = 300
+    pm._cash_balance = 300
+    pm._last_total_value = 300
+
+    # 정상 스냅샷
+    snap1 = await pm.take_snapshot(session)
+    assert snap1 is not None
+
+    # 소폭 cash 변동 (5%) — 정상
+    pm._cash_balance = 315
+    pm._last_total_value = 315
+
+    snap2 = await pm.take_snapshot(session)
+    assert snap2 is not None
+    assert snap2.total_value_krw == 315
+
+
+@pytest.mark.asyncio
+async def test_snapshot_passes_on_market_surge(session):
+    """시장 급등(invested 증가)은 cash 불변이므로 정상 기록."""
+    prices = {"BTC/USDT": 100_000}
+    pm = PortfolioManager(
+        market_data=_make_market_data(prices),
+        initial_balance_krw=250,
+        exchange_name="binance_futures",
+    )
+    pm._peak_value = 300
+    pm._cash_balance = 250
+    pm._last_total_value = 300
+
+    # 정상 스냅샷 (cash=250, invested=포지션가치)
+    pos = Position(
+        exchange="binance_futures", symbol="BTC/USDT",
+        quantity=0.01, average_buy_price=95_000,
+        total_invested=50, is_paper=True,
+        direction="long", leverage=3,
+    )
+    session.add(pos)
+    session.add(Order(
+        exchange="binance_futures",
+        symbol="BTC/USDT", side="buy", order_type="market", status="filled",
+        requested_price=95_000, executed_price=95_000,
+        requested_quantity=0.01, executed_quantity=0.01,
+        fee=0.1, is_paper=True, strategy_name="rsi",
+    ))
+    await session.flush()
+
+    snap1 = await pm.take_snapshot(session)
+    assert snap1 is not None
+
+    # 시장 급등: BTC 가격 30% 상승 → invested 증가, cash 불변
+    pm._market_data = _make_market_data({"BTC/USDT": 130_000})
+    pm._last_total_value = snap1.total_value_krw
+
+    snap2 = await pm.take_snapshot(session)
+    # cash 변동 없음 → 정상 기록됨 (시장 급등은 차단하지 않음)
+    assert snap2 is not None
+    assert snap2.total_value_krw > snap1.total_value_krw

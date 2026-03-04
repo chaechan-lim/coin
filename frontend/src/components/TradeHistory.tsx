@@ -13,6 +13,12 @@ const STRATEGY_COLORS: Record<string, string> = {
   rsi: 'bg-purple-800 text-purple-200',
   macd_crossover: 'bg-cyan-800 text-cyan-200',
   bollinger_rsi: 'bg-pink-800 text-pink-200',
+  stochastic_rsi: 'bg-indigo-800 text-indigo-200',
+  obv_divergence: 'bg-teal-800 text-teal-200',
+  bnf_deviation: 'bg-amber-800 text-amber-200',
+  cis_momentum: 'bg-emerald-800 text-emerald-200',
+  larry_williams: 'bg-rose-800 text-rose-200',
+  donchian_channel: 'bg-sky-800 text-sky-200',
   risk_management: 'bg-yellow-800 text-yellow-200',
 }
 
@@ -184,7 +190,7 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
 }
 
 export function TradeHistory({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
-  const isUsdt = exchange === 'binance_futures'
+  const isUsdt = exchange.startsWith('binance')
   const [page, setPage] = useState(1)
   const [symbol, setSymbol] = useState('')
   const [strategy, setStrategy] = useState('')

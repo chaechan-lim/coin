@@ -44,7 +44,7 @@ function fmtPct(n: number) {
 }
 
 export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
-  const isUsdt = exchange === 'binance_futures'
+  const isUsdt = exchange.startsWith('binance')
   const fmt = isUsdt ? fmtUsdt : fmtKrw
   const { data, isLoading } = usePortfolioSummary(exchange)
   const [capitalOpen, setCapitalOpen] = useState(false)

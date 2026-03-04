@@ -932,42 +932,57 @@ INSIGHTS:
 RECOMMENDATIONS:
 - (3개 실행 가능한 추천, 각각 한 줄)"""
 
-        try:
-            response = await self._llm_client.messages.create(
-                model=self._llm_config.model,
-                max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}],
-            )
+        import asyncio
 
-            text = response.content[0].text
-            insights = []
-            recommendations = []
-            section = None
+        models = [self._llm_config.model]
+        if self._llm_config.fallback_model:
+            models.append(self._llm_config.fallback_model)
 
-            for line in text.split("\n"):
-                line = line.strip()
-                if "INSIGHTS:" in line.upper():
-                    section = "insights"
-                    continue
-                elif "RECOMMENDATIONS:" in line.upper():
-                    section = "recommendations"
-                    continue
+        for model in models:
+            for attempt in range(3):
+                try:
+                    response = await self._llm_client.messages.create(
+                        model=model,
+                        max_tokens=1024,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
 
-                if line.startswith("- ") or line.startswith("* "):
-                    item = line[2:].strip()
-                    if item:
-                        if section == "insights":
-                            insights.append(item)
-                        elif section == "recommendations":
-                            recommendations.append(item)
+                    text = response.content[0].text
+                    insights = []
+                    recommendations = []
+                    section = None
 
-            if insights or recommendations:
-                logger.info("llm_insights_generated",
-                            insights=len(insights), recommendations=len(recommendations))
-                return insights, recommendations
+                    for line in text.split("\n"):
+                        line = line.strip()
+                        if "INSIGHTS:" in line.upper():
+                            section = "insights"
+                            continue
+                        elif "RECOMMENDATIONS:" in line.upper():
+                            section = "recommendations"
+                            continue
 
-        except Exception as e:
-            logger.warning("llm_insights_failed", error=str(e))
+                        if line.startswith("- ") or line.startswith("* "):
+                            item = line[2:].strip()
+                            if item:
+                                if section == "insights":
+                                    insights.append(item)
+                                elif section == "recommendations":
+                                    recommendations.append(item)
+
+                    if insights or recommendations:
+                        logger.info("llm_insights_generated",
+                                    model=model, insights=len(insights), recommendations=len(recommendations))
+                        return insights, recommendations
+                    break  # 응답은 받았지만 파싱 실패 — 다음 모델 시도
+
+                except Exception as e:
+                    wait = 2 ** attempt * 3  # 3s, 6s, 12s
+                    logger.warning("llm_insights_failed", model=model, error=str(e),
+                                   attempt=attempt + 1, retry_in=wait)
+                    if attempt < 2:
+                        await asyncio.sleep(wait)
+            else:
+                logger.warning("llm_model_exhausted", model=model)
 
         return [], []
 

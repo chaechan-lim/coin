@@ -258,3 +258,313 @@ class TestBollingerRSIStrategy:
         signal = await strategy.analyze(df, _ticker())
         assert signal.signal_type == SignalType.HOLD
         assert signal.confidence == 0.0
+
+
+# ── BNF Deviation Strategy ──────────────────────────────────
+
+
+class TestBNFDeviationStrategy:
+    @pytest.fixture
+    def strategy(self):
+        from strategies.bnf_deviation import BNFDeviationStrategy
+        return BNFDeviationStrategy()
+
+    @pytest.mark.asyncio
+    async def test_deep_oversold_buy(self, strategy):
+        """이격도 -15% → BUY high confidence."""
+        df = _make_df(35, close_base=50_000_000)
+        sma_val = 50_000_000
+        df["sma_25"] = sma_val
+        price = sma_val * 0.85
+        df.iloc[-1, df.columns.get_loc("close")] = price
+        signal = await strategy.analyze(df, _ticker(price))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.65
+
+    @pytest.mark.asyncio
+    async def test_extreme_oversold_buy(self, strategy):
+        """이격도 -20% → BUY 최고 confidence."""
+        df = _make_df(35, close_base=50_000_000)
+        sma_val = 50_000_000
+        df["sma_25"] = sma_val
+        price = sma_val * 0.80
+        df.iloc[-1, df.columns.get_loc("close")] = price
+        signal = await strategy.analyze(df, _ticker(price))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.85
+
+    @pytest.mark.asyncio
+    async def test_rsi_boost(self, strategy):
+        """이격도 과매도 + RSI < 40 → confidence 보너스."""
+        df = _make_df(35, close_base=50_000_000)
+        sma_val = 50_000_000
+        df["sma_25"] = sma_val
+        price = sma_val * 0.88
+        df.iloc[-1, df.columns.get_loc("close")] = price
+        df["rsi_14"] = 35.0
+        signal = await strategy.analyze(df, _ticker(price))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.60
+
+    @pytest.mark.asyncio
+    async def test_overbought_sell(self, strategy):
+        """이격도 > +5% → SELL."""
+        df = _make_df(35, close_base=50_000_000)
+        sma_val = 50_000_000
+        df["sma_25"] = sma_val
+        price = sma_val * 1.08
+        df.iloc[-1, df.columns.get_loc("close")] = price
+        signal = await strategy.analyze(df, _ticker(price))
+        assert signal.signal_type == SignalType.SELL
+        assert signal.confidence >= 0.50
+
+    @pytest.mark.asyncio
+    async def test_neutral_hold(self, strategy):
+        """이격도 -3% → HOLD."""
+        df = _make_df(35, close_base=50_000_000)
+        sma_val = 50_000_000
+        df["sma_25"] = sma_val
+        price = sma_val * 0.97
+        df.iloc[-1, df.columns.get_loc("close")] = price
+        signal = await strategy.analyze(df, _ticker(price))
+        assert signal.signal_type == SignalType.HOLD
+
+    @pytest.mark.asyncio
+    async def test_insufficient_data_bnf(self, strategy):
+        df = _make_df(5)
+        signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.HOLD
+        assert signal.confidence == 0.0
+
+
+# ── CIS Momentum Strategy ───────────────────────────────────
+
+
+class TestCISMomentumStrategy:
+    @pytest.fixture
+    def strategy(self):
+        from strategies.cis_momentum import CISMomentumStrategy
+        return CISMomentumStrategy()
+
+    @pytest.mark.asyncio
+    async def test_strong_momentum_buy(self, strategy):
+        """ROC5>2%, ROC10>3%, Vol>1.2x → BUY."""
+        n = 30
+        prices = [50_000_000 * (1 + i * 0.005) for i in range(n)]
+        df = pd.DataFrame({
+            "open": [p * 0.999 for p in prices],
+            "high": [p * 1.01 for p in prices],
+            "low": [p * 0.99 for p in prices],
+            "close": prices,
+            "volume": [100.0] * n,
+        })
+        df.iloc[-1, df.columns.get_loc("close")] = df["close"].iloc[-6] * 1.03
+        df.iloc[-1, df.columns.get_loc("volume")] = 200.0
+        signal = await strategy.analyze(df, _ticker(df["close"].iloc[-1]))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.55
+
+    @pytest.mark.asyncio
+    async def test_momentum_reversal_sell(self, strategy):
+        """ROC5<-2%, ROC10<-3% → SELL."""
+        n = 30
+        prices = [50_000_000 * (1 - i * 0.005) for i in range(n)]
+        df = pd.DataFrame({
+            "open": [p * 1.001 for p in prices],
+            "high": [p * 1.01 for p in prices],
+            "low": [p * 0.99 for p in prices],
+            "close": prices,
+            "volume": [100.0] * n,
+        })
+        df.iloc[-1, df.columns.get_loc("close")] = df["close"].iloc[-6] * 0.96
+        signal = await strategy.analyze(df, _ticker(df["close"].iloc[-1]))
+        assert signal.signal_type == SignalType.SELL
+        assert signal.confidence >= 0.55
+
+    @pytest.mark.asyncio
+    async def test_weak_momentum_hold(self, strategy):
+        """ROC 미미 → HOLD."""
+        df = _make_df(30, close_base=50_000_000)
+        df["close"] = 50_000_000
+        signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.HOLD
+
+    @pytest.mark.asyncio
+    async def test_buy_blocked_by_low_volume(self, strategy):
+        """ROC 조건 충족이지만 거래량 부족 → HOLD."""
+        n = 30
+        prices = [50_000_000 * (1 + i * 0.005) for i in range(n)]
+        df = pd.DataFrame({
+            "open": [p * 0.999 for p in prices],
+            "high": [p * 1.01 for p in prices],
+            "low": [p * 0.99 for p in prices],
+            "close": prices,
+            "volume": [100.0] * n,
+        })
+        df.iloc[-1, df.columns.get_loc("close")] = df["close"].iloc[-6] * 1.03
+        df.iloc[-1, df.columns.get_loc("volume")] = 50.0
+        signal = await strategy.analyze(df, _ticker(df["close"].iloc[-1]))
+        assert signal.signal_type == SignalType.HOLD
+
+    @pytest.mark.asyncio
+    async def test_insufficient_data_cis(self, strategy):
+        df = _make_df(5)
+        signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.HOLD
+        assert signal.confidence == 0.0
+
+
+# ── Larry Williams Strategy ──────────────────────────────────
+
+
+class TestLarryWilliamsStrategy:
+    @pytest.fixture
+    def strategy(self):
+        from strategies.larry_williams import LarryWilliamsStrategy
+        return LarryWilliamsStrategy()
+
+    @pytest.mark.asyncio
+    async def test_breakout_buy(self, strategy):
+        """상향 돌파 + %R 과매도 탈출 → BUY."""
+        df = _make_df(25, close_base=50_000_000)
+        df.iloc[-2, df.columns.get_loc("high")] = 51_000_000
+        df.iloc[-2, df.columns.get_loc("low")] = 49_000_000
+        current_open = 50_000_000
+        df.iloc[-1, df.columns.get_loc("open")] = current_open
+        df.iloc[-1, df.columns.get_loc("close")] = 51_200_000
+        df.iloc[-1, df.columns.get_loc("high")] = 51_300_000
+        df["WILLR_14"] = -70.0
+        df.iloc[-2, df.columns.get_loc("WILLR_14")] = -85.0
+        df["sma_20"] = 49_500_000
+        signal = await strategy.analyze(df, _ticker(51_200_000))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.55
+
+    @pytest.mark.asyncio
+    async def test_breakdown_sell(self, strategy):
+        """하향 돌파 + %R 과매수 → SELL."""
+        df = _make_df(25, close_base=50_000_000)
+        df.iloc[-2, df.columns.get_loc("high")] = 51_000_000
+        df.iloc[-2, df.columns.get_loc("low")] = 49_000_000
+        current_open = 50_000_000
+        df.iloc[-1, df.columns.get_loc("open")] = current_open
+        df.iloc[-1, df.columns.get_loc("close")] = 48_800_000
+        df["WILLR_14"] = -15.0
+        signal = await strategy.analyze(df, _ticker(48_800_000))
+        assert signal.signal_type == SignalType.SELL
+        assert signal.confidence >= 0.55
+
+    @pytest.mark.asyncio
+    async def test_no_breakout_hold(self, strategy):
+        """돌파 없음 → HOLD."""
+        df = _make_df(25, close_base=50_000_000)
+        df.iloc[-2, df.columns.get_loc("high")] = 51_000_000
+        df.iloc[-2, df.columns.get_loc("low")] = 49_000_000
+        df.iloc[-1, df.columns.get_loc("open")] = 50_000_000
+        df.iloc[-1, df.columns.get_loc("close")] = 50_500_000
+        df["WILLR_14"] = -50.0
+        signal = await strategy.analyze(df, _ticker(50_500_000))
+        assert signal.signal_type == SignalType.HOLD
+
+    @pytest.mark.asyncio
+    async def test_confidence_scaling(self, strategy):
+        """돌파 강도에 따라 confidence 스케일링."""
+        df = _make_df(25, close_base=50_000_000)
+        df.iloc[-2, df.columns.get_loc("high")] = 51_000_000
+        df.iloc[-2, df.columns.get_loc("low")] = 49_000_000
+        df.iloc[-1, df.columns.get_loc("open")] = 50_000_000
+        df.iloc[-1, df.columns.get_loc("close")] = 53_000_000
+        df.iloc[-1, df.columns.get_loc("high")] = 53_100_000
+        df["WILLR_14"] = -65.0
+        df.iloc[-2, df.columns.get_loc("WILLR_14")] = -85.0
+        df["sma_20"] = 49_500_000
+        signal = await strategy.analyze(df, _ticker(53_000_000))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.70
+
+    @pytest.mark.asyncio
+    async def test_insufficient_data_larry(self, strategy):
+        df = _make_df(5)
+        signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.HOLD
+        assert signal.confidence == 0.0
+
+
+# ── Donchian Channel Strategy ────────────────────────────────
+
+
+class TestDonchianChannelStrategy:
+    @pytest.fixture
+    def strategy(self):
+        from strategies.donchian_channel import DonchianChannelStrategy
+        return DonchianChannelStrategy()
+
+    @pytest.mark.asyncio
+    async def test_upper_breakout_buy(self, strategy):
+        """20봉 최고가 돌파 → BUY."""
+        df = _make_df(30, close_base=50_000_000)
+        for i in range(-21, -1):
+            df.iloc[i, df.columns.get_loc("high")] = 51_000_000
+            df.iloc[i, df.columns.get_loc("low")] = 49_000_000
+        df.iloc[-1, df.columns.get_loc("close")] = 52_000_000
+        signal = await strategy.analyze(df, _ticker(52_000_000))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.55
+
+    @pytest.mark.asyncio
+    async def test_lower_breakout_sell(self, strategy):
+        """20봉 최저가 이탈 → SELL."""
+        df = _make_df(30, close_base=50_000_000)
+        for i in range(-21, -1):
+            df.iloc[i, df.columns.get_loc("high")] = 51_000_000
+            df.iloc[i, df.columns.get_loc("low")] = 49_000_000
+        df.iloc[-1, df.columns.get_loc("close")] = 48_000_000
+        signal = await strategy.analyze(df, _ticker(48_000_000))
+        assert signal.signal_type == SignalType.SELL
+        assert signal.confidence >= 0.60
+
+    @pytest.mark.asyncio
+    async def test_exit_signal_sell(self, strategy):
+        """10봉 최저 이탈 (터틀 청산) → SELL."""
+        df = _make_df(30, close_base=50_000_000)
+        for i in range(-21, -1):
+            df.iloc[i, df.columns.get_loc("high")] = 55_000_000
+            df.iloc[i, df.columns.get_loc("low")] = 45_000_000
+        for i in range(-11, -1):
+            df.iloc[i, df.columns.get_loc("low")] = 49_000_000
+        df.iloc[-1, df.columns.get_loc("close")] = 48_500_000
+        signal = await strategy.analyze(df, _ticker(48_500_000))
+        assert signal.signal_type == SignalType.SELL
+
+    @pytest.mark.asyncio
+    async def test_channel_inside_hold(self, strategy):
+        """채널 내부 → HOLD."""
+        df = _make_df(30, close_base=50_000_000)
+        for i in range(-21, -1):
+            df.iloc[i, df.columns.get_loc("high")] = 51_000_000
+            df.iloc[i, df.columns.get_loc("low")] = 49_000_000
+        df.iloc[-1, df.columns.get_loc("close")] = 50_000_000
+        signal = await strategy.analyze(df, _ticker(50_000_000))
+        assert signal.signal_type == SignalType.HOLD
+
+    @pytest.mark.asyncio
+    async def test_volume_adx_bonus(self, strategy):
+        """거래량+ADX 보너스 → confidence 증가."""
+        df = _make_df(30, close_base=50_000_000)
+        for i in range(-21, -1):
+            df.iloc[i, df.columns.get_loc("high")] = 51_000_000
+            df.iloc[i, df.columns.get_loc("low")] = 49_000_000
+        df.iloc[-1, df.columns.get_loc("close")] = 52_000_000
+        df["volume"] = 50.0
+        df.iloc[-1, df.columns.get_loc("volume")] = 200.0
+        df["ADX_14"] = 30.0
+        signal = await strategy.analyze(df, _ticker(52_000_000))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.75
+
+    @pytest.mark.asyncio
+    async def test_insufficient_data_donchian(self, strategy):
+        df = _make_df(5)
+        signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.HOLD
+        assert signal.confidence == 0.0

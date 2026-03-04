@@ -65,7 +65,7 @@ function fmtVal(n: number, isUsdt: boolean): string {
 }
 
 export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
-  const isUsdt = exchange === 'binance_futures'
+  const isUsdt = exchange.startsWith('binance')
   const fmt = (n: number) => fmtVal(n, isUsdt)
   const qc = useQueryClient()
 

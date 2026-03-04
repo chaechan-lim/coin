@@ -60,6 +60,10 @@ from strategies.bollinger_rsi import BollingerRSIStrategy
 from strategies.stochastic_rsi import StochasticRSIStrategy
 from strategies.obv_divergence import OBVDivergenceStrategy
 from strategies.supertrend import SupertrendStrategy
+from strategies.bnf_deviation import BNFDeviationStrategy
+from strategies.cis_momentum import CISMomentumStrategy
+from strategies.larry_williams import LarryWilliamsStrategy
+from strategies.donchian_channel import DonchianChannelStrategy
 from strategies.registry import StrategyRegistry
 from strategies.combiner import SignalCombiner
 from strategies.base import Signal
@@ -94,8 +98,15 @@ ALL_STRATEGIES_6 = [
     "bollinger_rsi", "stochastic_rsi", "obv_divergence",
 ]
 
+# 10전략 = 기존 6 + 신규 4 (4대 트레이더)
+ALL_STRATEGIES_10 = ALL_STRATEGIES_6 + [
+    "bnf_deviation", "cis_momentum", "larry_williams", "donchian_channel",
+]
+
 # 전체 사용 가능 전략 (CLI 유효성 검사용)
-ALL_STRATEGIES = ALL_STRATEGIES_8
+ALL_STRATEGIES = ALL_STRATEGIES_8 + [
+    "bnf_deviation", "cis_momentum", "larry_williams", "donchian_channel",
+]
 
 # 5전략 가중치 (기존)
 WEIGHTS_5 = {
@@ -588,8 +599,10 @@ class Backtester:
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
-        else:
+        elif set(strategy_names) <= set(WEIGHTS_8.keys()):
             base_weights = WEIGHTS_8
+        else:
+            base_weights = {name: 1.0 / len(strategy_names) for name in strategy_names}
         weights = {k: v for k, v in base_weights.items() if k in strategy_names}
         # 가중치 정규화
         total_w = sum(weights.values())
@@ -1346,8 +1359,10 @@ class PortfolioBacktester:
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
-        else:
+        elif set(strategy_names) <= set(WEIGHTS_8.keys()):
             base_weights = WEIGHTS_8
+        else:
+            base_weights = {name: 1.0 / len(strategy_names) for name in strategy_names}
         weights = {k: v for k, v in base_weights.items() if k in strategy_names}
         total_w = sum(weights.values())
         if total_w > 0:
@@ -1971,8 +1986,10 @@ class FuturesBacktester:
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
-        else:
+        elif set(strategy_names) <= set(WEIGHTS_8.keys()):
             base_weights = WEIGHTS_8
+        else:
+            base_weights = {name: 1.0 / len(strategy_names) for name in strategy_names}
         weights = {k: v for k, v in base_weights.items() if k in strategy_names}
         total_w = sum(weights.values())
         if total_w > 0:

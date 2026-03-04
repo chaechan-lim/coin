@@ -19,7 +19,7 @@ class CombinedDecision:
 class SignalCombiner:
     """Combines multiple strategy signals using weighted voting."""
 
-    # Default strategy weights — 6전략 (0% 승률 전략 제거: vol_breakout, supertrend)
+    # Default strategy weights — 6전략 (선물용, 기존 유지)
     DEFAULT_WEIGHTS = {
         "ma_crossover": 0.08,
         "rsi": 0.25,
@@ -27,6 +27,14 @@ class SignalCombiner:
         "bollinger_rsi": 0.31,
         "stochastic_rsi": 0.15,
         "obv_divergence": 0.13,
+    }
+
+    # 현물용 신규 4전략 가중치 (추세추종 3인방 + BNF 평균회귀)
+    SPOT_WEIGHTS = {
+        "bnf_deviation": 0.10,
+        "cis_momentum": 0.32,
+        "larry_williams": 0.32,
+        "donchian_channel": 0.26,
     }
 
     def __init__(
