@@ -906,6 +906,15 @@ class TradingEngine:
                             logger.error("evaluate_coin_error", symbol=symbol,
                                          error=str(coin_err), consecutive_errors=count,
                                          exc_info=True)
+                            # 프론트엔드 시스템 로그에 에러 표시
+                            level = "critical" if count >= self._MAX_EVAL_ERRORS else "warning"
+                            await emit_event(
+                                level, "engine",
+                                f"코인 평가 실패: {symbol} ({count}회 연속)",
+                                detail=str(coin_err),
+                                metadata={"symbol": symbol, "consecutive_errors": count,
+                                          "exchange": self._exchange_name},
+                            )
                             # 연속 N회 실패 + 보유 포지션 → 강제 매도
                             if count >= self._MAX_EVAL_ERRORS and symbol in held:
                                 await self._force_close_stuck_position(session, symbol, str(coin_err))
@@ -1026,6 +1035,14 @@ class TradingEngine:
                     symbol=symbol,
                     reason=buy_block_reason,
                     confidence=round(decision.combined_confidence, 2),
+                )
+                await emit_event(
+                    "warning", "engine",
+                    f"매수 차단: {symbol} (conf={decision.combined_confidence:.2f})",
+                    detail=f"차단 사유: {buy_block_reason}",
+                    metadata={"symbol": symbol, "reason": buy_block_reason,
+                              "confidence": round(decision.combined_confidence, 2),
+                              "exchange": self._exchange_name},
                 )
 
     # ── 거래량 급등 로테이션 ──────────────────────────────────────

@@ -107,6 +107,10 @@ class DiscordEventHandler:
         if category == "system":
             return self._format_system(title, detail)
 
+        # ── 엔진 에러/경고 (평가 실패, 매수 차단 등) ────
+        if category == "engine" and level in ("warning", "critical", "error"):
+            return self._format_engine_error(level, title, detail, meta)
+
         # ── 통합 시그널 ───────────────────────────────────
         if category == "signal":
             return self._format_signal(title, detail, meta)
@@ -227,6 +231,29 @@ class DiscordEventHandler:
             "title": f"⚙️ {title}",
             "description": detail,
             "color": COLOR_BLUE,
+        }
+
+    def _format_engine_error(self, level: str, title: str, detail: str | None, meta: dict) -> dict:
+        """엔진 에러/경고 embed (평가 실패, 매수 차단 등)."""
+        color = COLOR_RED if level == "critical" else COLOR_ORANGE
+        icon = "🚨" if level == "critical" else "⚠️"
+        fields = []
+        if meta.get("symbol"):
+            fields.append({"name": "심볼", "value": meta["symbol"], "inline": True})
+        if meta.get("exchange"):
+            fields.append({"name": "거래소", "value": meta["exchange"], "inline": True})
+        if meta.get("consecutive_errors"):
+            fields.append({"name": "연속 실패", "value": str(meta["consecutive_errors"]), "inline": True})
+        if meta.get("reason"):
+            fields.append({"name": "사유", "value": meta["reason"], "inline": False})
+        if meta.get("confidence"):
+            fields.append({"name": "신뢰도", "value": f"{meta['confidence']:.0%}", "inline": True})
+        desc = detail[:500] if detail else None
+        return {
+            "title": f"{icon} {title}",
+            "description": desc,
+            "color": color,
+            "fields": fields,
         }
 
     def _format_signal(self, title: str, detail: str | None, meta: dict) -> dict:
