@@ -207,10 +207,15 @@ class TradingEngine:
                 select(Position).where(Position.exchange == self._exchange_name)
             )
             for pos in result.scalars().all():
-                if pos.last_trade_at:
-                    self._last_trade_time[pos.symbol] = pos.last_trade_at
-                if pos.last_sell_at:
-                    self._last_sell_time[pos.symbol] = pos.last_sell_at
+                # 청산된 포지션(qty=0)의 쿨다운은 복원하지 않음
+                if pos.quantity and pos.quantity > 0:
+                    if pos.last_trade_at:
+                        self._last_trade_time[pos.symbol] = pos.last_trade_at
+                    if pos.last_sell_at:
+                        self._last_sell_time[pos.symbol] = pos.last_sell_at
+                elif pos.last_sell_at:
+                    logger.debug("skip_closed_position_cooldown",
+                                 symbol=pos.symbol, last_sell_at=pos.last_sell_at)
         restored = len(self._last_trade_time)
         if restored:
             logger.info("trade_timestamps_restored", count=restored)
@@ -576,7 +581,13 @@ class TradingEngine:
             tracker_changed = True
 
         entry = tracker.entry_price
-        pnl_pct = (price - entry) / entry * 100
+        if entry <= 0:
+            logger.warning("tracker_entry_price_zero", symbol=symbol,
+                           entry=entry, price=price, avg_buy=position.average_buy_price)
+            # fallback to position's average_buy_price or current price
+            entry = position.average_buy_price or price
+            tracker.entry_price = entry
+        pnl_pct = (price - entry) / entry * 100 if entry > 0 else 0.0
 
         sell_reason = None
 
@@ -670,6 +681,8 @@ class TradingEngine:
                 f"강제 매도: 연속 {count}회 평가 실패 ({last_error})",
             )
             self._eval_error_counts.pop(symbol, None)
+            # 강제 청산은 에러 기반이므로 매도 후 재매수 쿨다운 면제
+            self._last_sell_time.pop(symbol, None)
             return
         except Exception as close_err:
             logger.warning("force_close_market_failed", symbol=symbol, error=str(close_err))
@@ -682,6 +695,8 @@ class TradingEngine:
         await session.commit()
         self._position_trackers.pop(symbol, None)
         self._eval_error_counts.pop(symbol, None)
+        # 강제 청산은 에러 기반이므로 쿨다운 면제
+        self._last_sell_time.pop(symbol, None)
 
         logger.error(
             "force_close_db_cleanup",
@@ -889,7 +904,8 @@ class TradingEngine:
                             count = self._eval_error_counts.get(symbol, 0) + 1
                             self._eval_error_counts[symbol] = count
                             logger.error("evaluate_coin_error", symbol=symbol,
-                                         error=str(coin_err), consecutive_errors=count)
+                                         error=str(coin_err), consecutive_errors=count,
+                                         exc_info=True)
                             # 연속 N회 실패 + 보유 포지션 → 강제 매도
                             if count >= self._MAX_EVAL_ERRORS and symbol in held:
                                 await self._force_close_stuck_position(session, symbol, str(coin_err))
@@ -1004,6 +1020,13 @@ class TradingEngine:
             # can_buy=False → 매수만 차단, 매도는 항상 허용
             if can_buy or decision.action == SignalType.SELL:
                 await self._process_decision(session, symbol, decision)
+            elif decision.action == SignalType.BUY and not can_buy:
+                logger.warning(
+                    "buy_blocked_by_trade_limit",
+                    symbol=symbol,
+                    reason=buy_block_reason,
+                    confidence=round(decision.combined_confidence, 2),
+                )
 
     # ── 거래량 급등 로테이션 ──────────────────────────────────────
 

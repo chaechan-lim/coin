@@ -215,10 +215,18 @@ class BithumbV2Adapter(BithumbAdapter):
         """Market buy: ord_type=price, price = total KRW to spend."""
         ticker = await self.fetch_ticker(symbol)
         krw = int(amount * ticker.ask)
+        # 빗썸 최소 주문 금액: 5000 KRW
+        if krw < 5000:
+            raise ExchangeError(f"주문 금액 부족: {krw} KRW < 5000 KRW")
+        # 빗썸 시장가 매수: price는 1000원 단위로 절삭 (고가 코인 호가 단위)
+        krw = (krw // 1000) * 1000
+        if krw < 5000:
+            raise ExchangeError(f"주문 금액 부족 (1000원 절삭 후): {krw} KRW < 5000 KRW")
         p = {
             "market": self._to_market(symbol), "side": "bid",
             "price": str(krw), "order_type": "price",
         }
+        logger.info("v2_market_buy_attempt", symbol=symbol, amount=amount, krw=krw, params=p)
         d = await self._v2("POST", "/v2/orders", p)
         oid = d.get("uuid") or d.get("order_id", "")
         logger.info("v2_market_buy", symbol=symbol, amount=amount, krw=krw, oid=oid)

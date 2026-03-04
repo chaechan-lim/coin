@@ -123,7 +123,7 @@ coin/
 │   │   ├── test_api_strategies.py ✅ 완료 (7 tests)
 │   │   ├── test_api_trades.py   ✅ 완료 (5 tests)
 │   │   ├── test_api_portfolio.py ✅ 완료 (4 tests)
-│   │   ├── test_portfolio_manager.py ✅ 완료 (17 tests)
+│   │   ├── test_portfolio_manager.py ✅ 완료 (62 tests)
 │   │   ├── test_risk_management.py ✅ 완료 (5 tests)
 │   │   ├── test_exchange_filter.py ✅ 완료 (5 tests, 거래소 격리)
 │   │   ├── test_futures_engine.py ✅ 완료 (11 tests, 선물 엔진)
@@ -582,6 +582,7 @@ orders
 | GET | /exchanges | 사용 가능 거래소 목록 |
 | GET | /events | 서버 이벤트 로그 (페이징+필터) |
 | GET | /events/counts | 레벨별 이벤트 건수 |
+| GET | /portfolio/daily-pnl | 일별 손익 통계 (days, exchange 파라미터) |
 
 > **거래소 파라미터**: 모든 엔드포인트에 `?exchange=bithumb|binance_futures|binance_spot` 쿼리 파라미터 지원 (기본값: bithumb)
 
@@ -809,4 +810,6 @@ docker compose restart backend
 | v0.21 | 2026-03-02 | **스파이크 3겹 방어 + 현물 4h 전환**: (1) Sync Guard — eval 중 sync 차단 (매매 직후 API/DB 불일치 방지), (2) Spike Detection — 15%+ 변동 시 peak 업데이트 건너뜀, (3) Peak Fix Script — 스냅샷 스캔 후 스파이크 제외 peak 재계산, (4) 현물 타임프레임 1h→4h 전환 (포트폴리오 PF 1.70→2.34, +37%, 매매 -56%), (5) 리스크 에이전트 통화 수정 ("원" 하드코딩 → 선물 USDT/현물 "원" 자동 포맷), 218 tests |
 | v0.22 | 2026-03-03 | **바이낸스 현물 연동 + 선물 알림 수정**: (1) BinanceSpotAdapter (ccxt.binance, 선물 메서드 없음), (2) BinanceSpotTradingConfig (env_prefix BINANCE_SPOT_TRADING_), (3) TradingEngine 재사용 (tracked_coins/eval_interval 파라미터화, 거래소별 min_order/fee_margin/fallback 프로퍼티), (4) PaperAdapter 통화 추상화 (base_currency KRW/USDT), (5) PortfolioManager 바이낸스 현물 USDT 지원, (6) 교차충돌 3거래소 체크 (base 심볼 기준), (7) 선물 emit_event "trade"→"futures_trade" 수정 (DOGE 등 소수점 가격 0 표시 해결), 231 tests |
 | v0.23 | 2026-03-03 | **현물 4전략 전환 + 프론트 현물/선물 구분**: (1) 4대 트레이더 전략 구현 — BNF이격도(평균회귀), CIS모멘텀(순수모멘텀), 래리윌리엄스(변동성돌파+%R), 돈치안채널(터틀트레이딩), (2) 현물 전략 전환 — 기존6 제거 + 신규4 적용 (540d PF 1.03→1.63, MDD 33.8%→15.4%), (3) 선물은 기존6전략 유지 (ETH PF 2.55 vs 신규 1.20), (4) 거래소별 전략 분기 — engine initialize() + combiner SPOT_WEIGHTS + 에이전트 SPOT/FUTURES_WEIGHT_PROFILES, (5) 프론트엔드 — 거래소 선택기 현물/선물 그룹 라벨, 바이낸스 현물 USDT 통화 수정 (7곳), 전략 한국어명/색상/필터 추가, (6) 백테스트 10전략 통합 (균등 가중치 fallback), 253 tests |
+| v0.25 | 2026-03-04 | **스파이크 방어 6-Layer 강화**: (1) 스냅샷 이중 방어 — cash 20%+/total 10%+cash 3% 스파이크 감지, (2) cleanup_spike_snapshots — 고립 이상값 자동 보정 (좌우 3개 이웃 비교), (3) sync margin grace period — 최근 10분 거래 포지션 margin 보호, (4) 연속 스킵 강제 기록 — 3회 스킵 후 실제 변화 판단 (포지션 청산 후 영구 블록 방지), (5) 재시작 시 `_last_total_value` 복원 — 첫 평가 peak 스파이크 방지, (6) freefall guard 유닛 테스트 9개, 스파이크 방어 테스트 18개 추가, **280 tests** |
+| v0.26 | 2026-03-04 | **일일 손익 누적 기록 + 프론트엔드 통계 + 매매 안정성 수정**: (1) DailyPnL DB 모델 (exchange/date 유니크, open/close/pnl/pct/realized/fees/trades/win/loss), (2) PortfolioManager.record_daily_pnl() 스태틱 메서드 (스냅샷+주문 집계, upsert), (3) GET /portfolio/daily-pnl API + 86400초 스케줄러 잡, (4) 프론트엔드 DailyPnLStats 컴포넌트 (요약 4카드, 일별 BarChart, 누적 AreaChart, 데스크탑 테이블+모바일 카드) + Dashboard '일일 통계' 탭, (5) **BUG FIX**: entry_price=0 division by zero 가드 (avg_buy_price fallback), (6) **BUG FIX**: BUY 시그널 차단 시 로그 추가 (buy_blocked_by_trade_limit — 이유+신뢰도), (7) evaluate_coin_error에 exc_info=True 추가 (전체 트레이스백), (8) **강제 청산 쿨다운 면제** — 에러 기반 강제 매도 후 4시간 재매수 대기 적용 안 함, (9) _restore_trade_timestamps에서 청산 포지션(qty=0) 쿨다운 복원 건너뜀, **294 tests** |
 | v1.0 | 진행중 | **라즈베리파이 배포 완료**, 장기 운영 안정화 |
