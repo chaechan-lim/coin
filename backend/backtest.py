@@ -21,6 +21,11 @@
   python backtest.py --futures --symbol ETH/USDT --days 180 --leverage 5
   python backtest.py --futures --symbol BTC/USDT --days 180 --leverage 10 --dynamic-sl
 
+선물 포트폴리오 백테스트 (멀티코인 선물):
+  python backtest.py --futures --portfolio --days 180
+  python backtest.py --futures --portfolio --days 540 --leverage 3 --risk --trade-limits
+  python backtest.py --futures --portfolio --portfolio-coins BTC ETH SOL --max-positions 3
+
 포트폴리오 백테스트 (멀티코인):
   python backtest.py --portfolio --days 90
   python backtest.py --portfolio --days 540 --risk --trade-limits --asymmetric
@@ -2688,6 +2693,993 @@ def print_futures_result(r: FuturesBacktestResult):
     print(f"{'='*60}\n")
 
 
+# ── 선물 포트폴리오 백테스터 ──────────────────────────────────────────
+
+DEFAULT_FUTURES_PORTFOLIO_COINS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"]
+
+
+@dataclass
+class FuturesPortfolioPositionState:
+    """선물 포트폴리오의 코인별 포지션 상태."""
+    symbol: str
+    side: str              # "long" / "short"
+    entry_price: float
+    quantity: float        # 레버리지 반영 수량
+    leverage: int
+    margin: float          # 격리 마진 (실제 투입 현금)
+    peak_price: float      # 트레일링용
+    trailing_active: bool = False
+    entry_strategy: str = ""
+    entry_idx: int = 0
+
+
+@dataclass
+class FuturesPortfolioBacktestResult:
+    """선물 포트폴리오 백테스트 결과."""
+    symbols: list[str]
+    days: int
+    leverage: int
+    initial_balance: float
+    final_balance: float
+    total_pnl: float
+    total_pnl_pct: float
+    max_drawdown_pct: float
+    total_trades: int
+    long_trades: int
+    short_trades: int
+    long_wins: int
+    long_losses: int
+    short_wins: int
+    short_losses: int
+    win_rate: float
+    avg_win_pct: float = 0.0
+    avg_loss_pct: float = 0.0
+    profit_factor: float = 0.0
+    buy_hold_pnl_pct: float = 0.0
+    liquidations: int = 0
+    total_funding: float = 0.0
+    total_fees: float = 0.0
+    trades: list[BacktestTrade] = field(default_factory=list)
+    equity_curve: list[tuple] = field(default_factory=list)
+    strategy_stats: dict = field(default_factory=dict)
+    per_coin_stats: dict = field(default_factory=dict)
+    risk_events: list[RiskEvent] = field(default_factory=list)
+    risk_stats: dict = field(default_factory=dict)
+    trade_limit_stats: dict = field(default_factory=dict)
+
+
+class FuturesPortfolioBacktester:
+    """선물 멀티코인 포트폴리오 백테스터.
+
+    PortfolioBacktester의 멀티코인 관리 + FuturesBacktester의 선물 메카닉 통합.
+    - 멀티코인 동시 운용 (union timestamps)
+    - 롱/숏 양방향 + 레버리지
+    - 격리 마진 + 강제 청산
+    - 펀딩비 (8시간마다)
+    - 리스크 관리 + 매매 제한
+    """
+
+    SHORT_ALLOWED_STATES = {"downtrend", "crash"}
+
+    def __init__(
+        self,
+        exchange,
+        strategy_names: list[str],
+        symbols: list[str] | None = None,
+        initial_balance: float = 10_000,     # USDT
+        min_confidence: float = 0.50,
+        stop_loss_pct: float = 5.0,
+        take_profit_pct: float = 10.0,
+        trend_filter: bool = True,
+        trailing_activation: float = 3.0,
+        trailing_stop: float = 3.0,
+        adaptive_weights: bool = True,
+        dynamic_sl: bool = False,
+        agent_market: bool = True,
+        trade_cooldown: int = 6,
+        leverage: int = 3,
+        futures_fee: float = FUTURES_FEE,
+        funding_rate: float = FUNDING_RATE,
+        position_pct: float = 0.30,
+        short_all: bool = False,
+        short_sideways: bool = False,
+        dynamic_position: bool = False,
+        dual_timeframe: bool = False,
+        max_positions: int = 5,
+        # 리스크 관리
+        risk_enabled: bool = False,
+        risk_max_drawdown: float = 0.10,
+        risk_daily_loss: float = 0.03,
+        risk_max_concentration: float = 0.40,
+        # 매매 제한
+        trade_limit_enabled: bool = False,
+        trade_daily_buy_limit: int = 20,
+        trade_max_coin_buys: int = 3,
+    ):
+        self._exchange = exchange
+        self._initial_balance = initial_balance
+        self._min_confidence = min_confidence
+        self._stop_loss_pct = stop_loss_pct
+        self._take_profit_pct = take_profit_pct
+        self._trend_filter = trend_filter
+        self._trailing_activation = trailing_activation
+        self._trailing_stop = trailing_stop
+        self._adaptive_weights = adaptive_weights
+        self._dynamic_sl = dynamic_sl
+        self._agent_market = agent_market
+        self._trade_cooldown = trade_cooldown
+        self._leverage = leverage
+        self._futures_fee = futures_fee
+        self._funding_rate = funding_rate
+        self._short_all = short_all
+        self._short_sideways = short_sideways
+        self._dynamic_position = dynamic_position
+        self._dual_timeframe = dual_timeframe
+        self._max_positions = max_positions
+        self._base_position_pct = position_pct
+        self._symbols = symbols or DEFAULT_FUTURES_PORTFOLIO_COINS
+
+        # 레버리지 적응형 파라미터
+        import math
+        lev_sqrt = math.sqrt(leverage)
+        self._position_pct = position_pct / lev_sqrt
+        self._effective_sl = stop_loss_pct / lev_sqrt
+        self._effective_tp = take_profit_pct / lev_sqrt
+        self._effective_trail_act = trailing_activation / lev_sqrt if trailing_activation > 0 else 0
+        self._effective_trail_stop = trailing_stop / lev_sqrt if trailing_stop > 0 else 0
+
+        self._risk_manager = BacktestRiskManager(
+            max_drawdown_pct=risk_max_drawdown,
+            daily_loss_limit_pct=risk_daily_loss,
+            max_concentration_pct=risk_max_concentration,
+            enabled=risk_enabled,
+        ) if risk_enabled else None
+
+        self._trade_limiter = BacktestTradeLimiter(
+            daily_buy_limit=trade_daily_buy_limit,
+            max_coin_buys=trade_max_coin_buys,
+            enabled=trade_limit_enabled,
+        ) if trade_limit_enabled else None
+
+        # 전략 로드
+        all_strats = StrategyRegistry.create_all()
+        self._strategies = {
+            name: strat for name, strat in all_strats.items()
+            if name in strategy_names
+        }
+        if set(strategy_names) <= set(WEIGHTS_5.keys()):
+            base_weights = WEIGHTS_5
+        elif set(strategy_names) <= set(WEIGHTS_6.keys()):
+            base_weights = WEIGHTS_6
+        elif set(strategy_names) <= set(WEIGHTS_8.keys()):
+            base_weights = WEIGHTS_8
+        else:
+            base_weights = {name: 1.0 / len(strategy_names) for name in strategy_names}
+        weights = {k: v for k, v in base_weights.items() if k in strategy_names}
+        total_w = sum(weights.values())
+        if total_w > 0:
+            weights = {k: v / total_w for k, v in weights.items()}
+        self._combiner = SignalCombiner(
+            strategy_weights=weights,
+            min_confidence=min_confidence,
+        )
+
+    async def prefetch_all(
+        self, timeframe: str, days: int,
+    ) -> dict[str, pd.DataFrame]:
+        """전 코인 + BTC 레퍼런스 데이터 프리페치."""
+        all_data: dict[str, pd.DataFrame] = {}
+        all_syms = list(dict.fromkeys(["BTC/USDT"] + list(self._symbols)))
+        total = len(all_syms)
+        for idx, sym in enumerate(all_syms, 1):
+            try:
+                print(f"  [{idx}/{total}] {sym} 데이터 로딩...", end="", flush=True)
+                df = await fetch_history(self._exchange, sym, timeframe, days)
+                all_data[sym] = df
+                print(f" {len(df)}캔들")
+            except Exception as e:
+                print(f" 실패({e})")
+        return all_data
+
+    def _calc_liquidation_price(self, side: str, entry: float) -> float:
+        lev = self._leverage
+        fee = self._futures_fee
+        if side == "long":
+            return entry * (1 - 1 / lev + fee)
+        else:
+            return entry * (1 + 1 / lev - fee)
+
+    def _calc_unrealized_pnl(self, side: str, entry: float, current: float, qty: float) -> float:
+        if side == "long":
+            return (current - entry) * qty
+        else:
+            return (entry - current) * qty
+
+    def _execute_futures_close(
+        self, ts, pos: FuturesPortfolioPositionState, current_price: float,
+        side_label: str, strategy_name: str, confidence: float, reason: str,
+    ) -> tuple[float, float, float, BacktestTrade]:
+        """포지션 청산 → (net_pnl, fee, pnl_pct, trade)"""
+        pnl = self._calc_unrealized_pnl(pos.side, pos.entry_price, current_price, pos.quantity)
+        fee = abs(pos.quantity * current_price) * self._futures_fee
+        net_pnl = pnl - fee
+        pnl_pct = net_pnl / pos.margin * 100 if pos.margin > 0 else 0
+
+        t = BacktestTrade(
+            timestamp=ts, side=side_label, symbol=pos.symbol,
+            price=current_price, quantity=pos.quantity,
+            cost=pos.quantity * current_price, fee=fee,
+            strategy=strategy_name,
+            confidence=confidence,
+            reason=reason,
+            pnl=net_pnl, pnl_pct=round(pnl_pct, 2),
+        )
+        return net_pnl, fee, pnl_pct, t
+
+    async def run(self, timeframe: str = "4h", days: int = 180) -> FuturesPortfolioBacktestResult:
+        """선물 멀티코인 포트폴리오 백테스트 실행."""
+        import math
+
+        tf_hours = _tf_hours(timeframe)
+        candles_per_8h = max(1, int(8 / tf_hours))
+        candles_per_day = max(1, int(24 / tf_hours))
+        lev_sqrt = math.sqrt(self._leverage)
+
+        print(f"\n{'='*60}")
+        print(f"  선물 포트폴리오 백테스트 | {timeframe} | {days}일")
+        print(f"  코인: {', '.join(self._symbols)}")
+        print(f"  전략: {', '.join(self._strategies.keys())}")
+        print(f"  레버리지: {self._leverage}x | 수수료: {self._futures_fee*100:.2f}%")
+        dpos_str = f"동적(기본 {self._base_position_pct*100:.0f}%)" if self._dynamic_position else f"고정 {self._position_pct*100:.1f}%"
+        print(f"  펀딩비: {self._funding_rate*100:.3f}%/8h | 포지션: {dpos_str}")
+        sl_str = "동적(ATR+시장)" if self._dynamic_sl else (
+            f"고정 {self._effective_sl:.1f}%" if self._effective_sl > 0 else "OFF")
+        tp_str = f"{self._effective_tp:.1f}%" if self._effective_tp > 0 else "OFF"
+        trail_str = (f"활성 +{self._effective_trail_act:.1f}% / 스탑 -{self._effective_trail_stop:.1f}%"
+                     if self._effective_trail_act > 0 else "OFF")
+        short_str = "전체" if self._short_all else ("sideways+downtrend/crash" if self._short_sideways else "downtrend/crash만")
+        print(f"  최대 동시 포지션: {self._max_positions}")
+        print(f"  손절: {sl_str} | 익절: {tp_str} | 트레일링: {trail_str}")
+        print(f"  숏 허용: {short_str} | 쿨다운: {self._trade_cooldown}캔들")
+        risk_str = "ON" if self._risk_manager else "OFF"
+        limit_str = "ON" if self._trade_limiter else "OFF"
+        print(f"  리스크 관리: {risk_str} | 매매 제한: {limit_str}")
+        print(f"{'='*60}")
+
+        # 1. 데이터 프리페치
+        all_data = await self.prefetch_all(timeframe, days)
+        if not all_data:
+            raise ValueError("사용 가능한 코인 데이터 없음")
+        print(f"\n  {len(all_data)}개 코인 로딩 완료")
+
+        if self._trade_limiter:
+            self._trade_limiter.min_interval_candles = BacktestTradeLimiter.calc_min_interval(timeframe)
+
+        # 듀얼 타임프레임: 빠른 TF 데이터
+        all_data_fast: dict[str, pd.DataFrame] = {}
+        if self._dual_timeframe:
+            _FAST_TF_MAP = {"4h": "1h", "1d": "4h", "1h": "15m"}
+            fast_tf = _FAST_TF_MAP.get(timeframe)
+            if fast_tf:
+                print(f"  듀얼 TF: {timeframe}(장기) + {fast_tf}(단기) 로딩...")
+                for sym in ["BTC/USDT"]:
+                    if sym in all_data:
+                        try:
+                            df_fast = await fetch_history(self._exchange, sym, fast_tf, days)
+                            all_data_fast[sym] = df_fast
+                            print(f"    {sym} 단기: {len(df_fast)}캔들")
+                        except Exception:
+                            pass
+
+        portfolio_syms = [s for s in self._symbols if s in all_data]
+        btc_df = all_data.get("BTC/USDT")
+
+        # 2. 유니온 타임스탬프
+        all_timestamps = sorted(set().union(*(df.index for df in all_data.values())))
+        print(f"  타임라인: {len(all_timestamps)}개 캔들 ({all_timestamps[0].date()} ~ {all_timestamps[-1].date()})")
+
+        # 3. 초기화
+        cash = self._initial_balance
+        positions: dict[str, FuturesPortfolioPositionState] = {}
+        current_market_state = "sideways"
+        market_confidence = 0.5
+        dynamic_sl_pct: dict[str, float] = {}  # 코인별 동적 SL
+
+        trades: list[BacktestTrade] = []
+        equity_curve: list[tuple] = []
+        peak_equity = self._initial_balance
+        max_drawdown = 0.0
+        last_weight_eval_idx = -9999
+        last_trade_idx_per_coin: dict[str, int] = {}
+
+        strategy_wins: dict[str, int] = {name: 0 for name in self._strategies}
+        strategy_losses: dict[str, int] = {name: 0 for name in self._strategies}
+        strategy_trades: dict[str, int] = {name: 0 for name in self._strategies}
+
+        coin_stats: dict[str, dict] = {
+            sym: {"wins": 0, "losses": 0, "trades": 0, "pnl": 0.0,
+                  "long_wins": 0, "long_losses": 0, "short_wins": 0, "short_losses": 0}
+            for sym in portfolio_syms
+        }
+
+        long_wins = 0
+        long_losses = 0
+        short_wins = 0
+        short_losses = 0
+        total_win_pct = 0.0
+        total_loss_pct = 0.0
+        liquidations = 0
+        total_funding = 0.0
+        total_fees = 0.0
+
+        # 4. 캔들 루프
+        for candle_idx, ts in enumerate(all_timestamps):
+            # 4a. 에쿼티 계산
+            equity = cash
+            position_values: dict[str, float] = {}
+            for sym, pos in positions.items():
+                if sym in all_data and ts in all_data[sym].index:
+                    cur_price = float(all_data[sym].loc[ts, "close"])
+                    unrealized = self._calc_unrealized_pnl(pos.side, pos.entry_price, cur_price, pos.quantity)
+                    val = pos.margin + unrealized
+                else:
+                    val = pos.margin  # 가격 없으면 마진만
+                position_values[sym] = val
+                equity += val
+
+            # 4b. 에쿼티 곡선/낙폭
+            equity_curve.append((ts, equity))
+            if equity > peak_equity:
+                peak_equity = equity
+            drawdown = (peak_equity - equity) / peak_equity * 100
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+
+            if candle_idx < 60:
+                continue
+
+            if self._risk_manager:
+                self._risk_manager.update_equity(ts, candle_idx, equity, candles_per_day)
+            if self._trade_limiter:
+                self._trade_limiter.reset_day(candle_idx, candles_per_day)
+
+            # 4c. 펀딩비 (8시간마다)
+            if candle_idx % candles_per_8h == 0:
+                for sym, pos in positions.items():
+                    if sym in all_data and ts in all_data[sym].index:
+                        cur_price = float(all_data[sym].loc[ts, "close"])
+                        notional = pos.quantity * cur_price
+                        if pos.side == "long":
+                            funding_cost = notional * self._funding_rate
+                        else:
+                            funding_cost = -notional * self._funding_rate
+                        cash -= funding_cost
+                        total_funding += funding_cost
+
+            # 4d. 24캔들마다 시장 상태 재평가 (BTC 기준)
+            if candle_idx - last_weight_eval_idx >= 24:
+                if btc_df is not None and ts in btc_df.index:
+                    prev_state = current_market_state
+                    btc_iloc = btc_df.index.get_loc(ts)
+                    if isinstance(btc_iloc, slice):
+                        btc_iloc = btc_iloc.start
+
+                    state_4h, conf_4h = _detect_market_state(
+                        btc_df.loc[ts], btc_df, btc_iloc,
+                        use_agent_scoring=self._agent_market,
+                    )
+
+                    # 듀얼 타임프레임 결합
+                    if self._dual_timeframe and "BTC/USDT" in all_data_fast:
+                        df_fast = all_data_fast["BTC/USDT"]
+                        fast_idx = df_fast.index.searchsorted(ts, side="right") - 1
+                        if 0 <= fast_idx < len(df_fast):
+                            fast_row = df_fast.iloc[fast_idx]
+                            state_1h, conf_1h = _detect_market_state(
+                                fast_row, df_fast, fast_idx, use_agent_scoring=self._agent_market,
+                            )
+                            _STATE_RANK = {
+                                "crash": 0, "downtrend": 1, "sideways": 2,
+                                "uptrend": 3, "strong_uptrend": 4,
+                            }
+                            _RANK_STATE = {v: k for k, v in _STATE_RANK.items()}
+                            rank_4h = _STATE_RANK.get(state_4h, 2)
+                            rank_1h = _STATE_RANK.get(state_1h, 2)
+                            if rank_1h < rank_4h:
+                                final_rank = max(rank_4h - 1, rank_1h)
+                                current_market_state = _RANK_STATE.get(final_rank, state_4h)
+                                market_confidence = (conf_4h + conf_1h) / 2
+                            else:
+                                current_market_state = state_4h
+                                market_confidence = conf_4h
+                        else:
+                            current_market_state = state_4h
+                            market_confidence = conf_4h
+                    else:
+                        current_market_state = state_4h
+                        market_confidence = conf_4h
+
+                    if current_market_state != prev_state:
+                        print(f"  [{ts.strftime('%m/%d %H:%M')}] 시장: {current_market_state} (신뢰도 {market_confidence:.0%})")
+                    if self._adaptive_weights:
+                        new_weights = _get_adaptive_weights(current_market_state, list(self._strategies.keys()))
+                        self._combiner.update_weights(new_weights, source="backtest")
+                last_weight_eval_idx = candle_idx
+
+            # 4e. 보유 포지션: 청산/SL/TP/트레일링/강제청산 체크
+            to_close: list[str] = []
+            for sym, pos in positions.items():
+                if sym not in all_data or ts not in all_data[sym].index:
+                    continue
+                cur_price = float(all_data[sym].loc[ts, "close"])
+                high_price = float(all_data[sym].loc[ts, "high"])
+                low_price = float(all_data[sym].loc[ts, "low"])
+
+                # 강제 청산 체크
+                liq_price = self._calc_liquidation_price(pos.side, pos.entry_price)
+                liquidated = False
+                if pos.side == "long" and low_price <= liq_price:
+                    liquidated = True
+                elif pos.side == "short" and high_price >= liq_price:
+                    liquidated = True
+
+                if liquidated:
+                    lost_margin = pos.margin
+                    t = BacktestTrade(
+                        timestamp=ts, side=f"sell(liq-{pos.side})", symbol=sym,
+                        price=liq_price, quantity=pos.quantity,
+                        cost=pos.quantity * liq_price, fee=0,
+                        strategy="liquidation", confidence=0,
+                        reason=f"강제청산 ({pos.side}) liq={liq_price:,.2f}",
+                        pnl=-lost_margin, pnl_pct=-100.0,
+                    )
+                    trades.append(t)
+                    liquidations += 1
+                    if pos.side == "long":
+                        long_losses += 1
+                        coin_stats[sym]["long_losses"] += 1
+                    else:
+                        short_losses += 1
+                        coin_stats[sym]["short_losses"] += 1
+                    total_loss_pct += 100.0
+                    coin_stats[sym]["trades"] += 1
+                    coin_stats[sym]["losses"] += 1
+                    coin_stats[sym]["pnl"] -= lost_margin
+                    to_close.append(sym)
+                    last_trade_idx_per_coin[sym] = candle_idx
+                    continue
+
+                # 미실현 손익
+                unrealized_pnl = self._calc_unrealized_pnl(pos.side, pos.entry_price, cur_price, pos.quantity)
+                unrealized_pct = unrealized_pnl / pos.margin * 100 if pos.margin > 0 else 0
+
+                # 피크 추적
+                if pos.side == "long":
+                    if cur_price > pos.peak_price:
+                        pos.peak_price = cur_price
+                else:
+                    if cur_price < pos.peak_price:
+                        pos.peak_price = cur_price
+
+                # 트레일링 활성화
+                if (self._effective_trail_act > 0
+                        and not pos.trailing_active
+                        and unrealized_pct >= self._effective_trail_act):
+                    pos.trailing_active = True
+
+                sell_tag = None
+                sell_text = None
+
+                # 트레일링 스탑
+                if pos.trailing_active and self._effective_trail_stop > 0:
+                    if pos.side == "long":
+                        drop = (pos.peak_price - cur_price) / pos.peak_price * 100
+                    else:
+                        drop = (cur_price - pos.peak_price) / pos.peak_price * 100
+                    if drop >= self._effective_trail_stop:
+                        sell_tag = f"sell(trail-{pos.side})"
+                        sell_text = f"트레일링 ({pos.side}) 피크 대비 -{drop:.1f}% (수익 {unrealized_pct:+.1f}%)"
+
+                # 손절
+                eff_sl = dynamic_sl_pct.get(sym, self._effective_sl)
+                if not sell_tag and eff_sl > 0 and unrealized_pct <= -eff_sl:
+                    sell_tag = f"sell(sl-{pos.side})"
+                    sell_text = f"손절 ({pos.side}) {unrealized_pct:.1f}% (한도 -{eff_sl:.1f}%)"
+
+                # 익절 (트레일링 미활성 시)
+                if (not sell_tag and not pos.trailing_active
+                        and self._effective_tp > 0 and unrealized_pct >= self._effective_tp):
+                    sell_tag = f"sell(tp-{pos.side})"
+                    sell_text = f"익절 ({pos.side}) +{unrealized_pct:.1f}%"
+
+                if sell_tag:
+                    net_pnl, fee, pnl_pct, t = self._execute_futures_close(
+                        ts, pos, cur_price, sell_tag, pos.entry_strategy, 0, sell_text,
+                    )
+                    cash += pos.margin + net_pnl
+                    total_fees += fee
+                    trades.append(t)
+                    coin_stats[sym]["trades"] += 1
+                    coin_stats[sym]["pnl"] += net_pnl
+                    if net_pnl > 0:
+                        total_win_pct += abs(pnl_pct)
+                        coin_stats[sym]["wins"] += 1
+                        if pos.side == "long":
+                            long_wins += 1
+                            coin_stats[sym]["long_wins"] += 1
+                        else:
+                            short_wins += 1
+                            coin_stats[sym]["short_wins"] += 1
+                    else:
+                        total_loss_pct += abs(pnl_pct)
+                        coin_stats[sym]["losses"] += 1
+                        if pos.side == "long":
+                            long_losses += 1
+                            coin_stats[sym]["long_losses"] += 1
+                        else:
+                            short_losses += 1
+                            coin_stats[sym]["short_losses"] += 1
+                    to_close.append(sym)
+                    last_trade_idx_per_coin[sym] = candle_idx
+
+            for sym in to_close:
+                del positions[sym]
+                dynamic_sl_pct.pop(sym, None)
+
+            # 4f. 미보유 코인: 전략 시그널 → 롱/숏 후보 수집
+            entry_candidates: list[tuple[str, str, float, Signal, object]] = []
+            # (sym, side, confidence, best_signal, decision)
+
+            for sym in portfolio_syms:
+                if sym in positions:
+                    continue
+                if sym not in all_data or ts not in all_data[sym].index:
+                    continue
+                if len(positions) >= self._max_positions:
+                    break
+
+                # 코인별 쿨다운
+                last_idx = last_trade_idx_per_coin.get(sym, -9999)
+                if candle_idx - last_idx < self._trade_cooldown:
+                    continue
+
+                sym_df = all_data[sym]
+                sym_iloc = sym_df.index.get_loc(ts)
+                if isinstance(sym_iloc, slice):
+                    sym_iloc = sym_iloc.start
+
+                row = sym_df.iloc[sym_iloc]
+                cur_price = float(row["close"])
+
+                # 전략 신호 수집
+                slice_df = sym_df.iloc[max(0, sym_iloc - 200):sym_iloc + 1]
+                ticker = Ticker(
+                    symbol=sym, last=cur_price,
+                    bid=cur_price * 0.9999, ask=cur_price * 1.0001,
+                    high=float(row["high"]), low=float(row["low"]),
+                    volume=float(row.get("volume", 0)), timestamp=ts,
+                )
+
+                signals: list[Signal] = []
+                for name, strategy in self._strategies.items():
+                    try:
+                        sig = await strategy.analyze(slice_df.copy(), ticker)
+                        signals.append(sig)
+                    except Exception:
+                        pass
+
+                if not signals:
+                    continue
+
+                decision = self._combiner.combine(signals, market_state=current_market_state)
+
+                if decision.action == SignalType.BUY:
+                    buy_threshold = self._min_confidence
+                    if market_confidence < 0.35:
+                        buy_threshold = self._min_confidence + 0.10
+                    if decision.combined_confidence >= buy_threshold:
+                        buy_signals = [s for s in signals if s.signal_type == SignalType.BUY]
+                        best = max(buy_signals, key=lambda s: s.confidence) if buy_signals else signals[0]
+                        entry_candidates.append((sym, "long", float(decision.combined_confidence), best, decision))
+
+                elif decision.action == SignalType.SELL:
+                    # 숏 시장 게이팅
+                    if self._short_sideways:
+                        _allowed = {"sideways", "downtrend", "crash"}
+                    else:
+                        _allowed = self.SHORT_ALLOWED_STATES
+                    if not self._short_all and current_market_state not in _allowed:
+                        continue
+                    short_threshold = max(self._min_confidence, 0.55)
+                    if decision.combined_confidence >= short_threshold:
+                        sell_signals = [s for s in signals if s.signal_type == SignalType.SELL]
+                        best = max(sell_signals, key=lambda s: s.confidence) if sell_signals else signals[0]
+                        entry_candidates.append((sym, "short", float(decision.combined_confidence), best, decision))
+
+            # 신뢰도 내림차순 정렬 (현금 경쟁 시 강한 시그널 우선)
+            entry_candidates.sort(key=lambda x: x[2], reverse=True)
+
+            for sym, side, conf, best_signal, decision in entry_candidates:
+                if len(positions) >= self._max_positions:
+                    break
+
+                # 동적 포지션 사이징
+                if self._dynamic_position:
+                    _dyn_pos_mult = {
+                        "strong_uptrend": 1.6, "uptrend": 1.2, "sideways": 0.7,
+                        "downtrend": 1.2, "crash": 0.8,
+                    }
+                    dyn_mult = _dyn_pos_mult.get(current_market_state, 1.0)
+                    eff_position_pct = self._base_position_pct * dyn_mult / lev_sqrt
+                else:
+                    eff_position_pct = self._position_pct
+
+                # 리스크 관리자 체크
+                if self._risk_manager:
+                    cur_pos_values = {}
+                    for s, p in positions.items():
+                        if s in all_data and ts in all_data[s].index:
+                            cp = float(all_data[s].loc[ts, "close"])
+                            ur = self._calc_unrealized_pnl(p.side, p.entry_price, cp, p.quantity)
+                            cur_pos_values[s] = p.margin + ur
+                        else:
+                            cur_pos_values[s] = p.margin
+                    ok, _ = self._risk_manager.can_buy(ts, sym, cash * eff_position_pct, cur_pos_values, equity)
+                    if not ok:
+                        continue
+
+                if self._trade_limiter:
+                    ok, _ = self._trade_limiter.can_buy(sym, candle_idx)
+                    if not ok:
+                        continue
+
+                margin = cash * eff_position_pct
+                if margin < 1.0:
+                    continue
+
+                entry_fee = margin * self._leverage * self._futures_fee
+                effective_margin = margin - entry_fee
+                cur_price = float(all_data[sym].loc[ts, "close"])
+                qty = effective_margin * self._leverage / cur_price
+
+                cash -= margin
+                total_fees += entry_fee
+
+                positions[sym] = FuturesPortfolioPositionState(
+                    symbol=sym,
+                    side=side,
+                    entry_price=cur_price,
+                    quantity=qty,
+                    leverage=self._leverage,
+                    margin=margin,
+                    peak_price=cur_price,
+                    entry_strategy=best_signal.strategy_name,
+                    entry_idx=candle_idx,
+                )
+
+                # 동적 SL
+                row = all_data[sym].loc[ts]
+                if self._dynamic_sl:
+                    dynamic_sl_pct[sym] = _calc_dynamic_sl(row, cur_price, current_market_state) / lev_sqrt
+                else:
+                    dynamic_sl_pct[sym] = self._effective_sl
+
+                side_label = f"buy({side})"
+                t = BacktestTrade(
+                    timestamp=ts, side=side_label, symbol=sym,
+                    price=cur_price, quantity=qty, cost=margin, fee=entry_fee,
+                    strategy=best_signal.strategy_name,
+                    confidence=conf,
+                    reason=f"{side} 진입 {self._leverage}x | {best_signal.reason}",
+                )
+                trades.append(t)
+                strategy_trades[best_signal.strategy_name] = strategy_trades.get(best_signal.strategy_name, 0) + 1
+                last_trade_idx_per_coin[sym] = candle_idx
+
+                if self._trade_limiter:
+                    self._trade_limiter.record_buy(sym, candle_idx)
+
+            # 4g. 포지션 보유 중: 반대 신호로 청산
+            for sym, pos in list(positions.items()):
+                if sym not in all_data or ts not in all_data[sym].index:
+                    continue
+                if sym in to_close:
+                    continue  # 이미 SL/TP 등으로 청산됨
+
+                sym_df = all_data[sym]
+                sym_iloc = sym_df.index.get_loc(ts)
+                if isinstance(sym_iloc, slice):
+                    sym_iloc = sym_iloc.start
+
+                row = sym_df.iloc[sym_iloc]
+                cur_price = float(row["close"])
+
+                # 쿨다운
+                last_idx = last_trade_idx_per_coin.get(sym, -9999)
+                if candle_idx - last_idx < self._trade_cooldown:
+                    continue
+
+                slice_df = sym_df.iloc[max(0, sym_iloc - 200):sym_iloc + 1]
+                ticker = Ticker(
+                    symbol=sym, last=cur_price,
+                    bid=cur_price * 0.9999, ask=cur_price * 1.0001,
+                    high=float(row["high"]), low=float(row["low"]),
+                    volume=float(row.get("volume", 0)), timestamp=ts,
+                )
+
+                signals: list[Signal] = []
+                for name, strategy in self._strategies.items():
+                    try:
+                        sig = await strategy.analyze(slice_df.copy(), ticker)
+                        signals.append(sig)
+                    except Exception:
+                        pass
+
+                if not signals:
+                    continue
+
+                decision = self._combiner.combine(signals, market_state=current_market_state)
+
+                should_close = False
+                if pos.side == "long" and decision.action == SignalType.SELL:
+                    should_close = True
+                elif pos.side == "short" and decision.action == SignalType.BUY:
+                    should_close = True
+
+                if should_close:
+                    rel_signals = [s for s in signals if s.signal_type == decision.action]
+                    best_signal = max(rel_signals, key=lambda s: s.confidence) if rel_signals else signals[0]
+
+                    net_pnl, fee, pnl_pct, t = self._execute_futures_close(
+                        ts, pos, cur_price,
+                        f"sell(close-{pos.side})", best_signal.strategy_name,
+                        float(decision.combined_confidence),
+                        f"{pos.side} 청산 | {best_signal.reason}",
+                    )
+                    cash += pos.margin + net_pnl
+                    total_fees += fee
+                    trades.append(t)
+                    strategy_trades[best_signal.strategy_name] = strategy_trades.get(best_signal.strategy_name, 0) + 1
+                    coin_stats[sym]["trades"] += 1
+                    coin_stats[sym]["pnl"] += net_pnl
+
+                    if net_pnl > 0:
+                        total_win_pct += abs(pnl_pct)
+                        coin_stats[sym]["wins"] += 1
+                        strategy_wins[best_signal.strategy_name] = strategy_wins.get(best_signal.strategy_name, 0) + 1
+                        if pos.side == "long":
+                            long_wins += 1
+                            coin_stats[sym]["long_wins"] += 1
+                        else:
+                            short_wins += 1
+                            coin_stats[sym]["short_wins"] += 1
+                    else:
+                        total_loss_pct += abs(pnl_pct)
+                        coin_stats[sym]["losses"] += 1
+                        strategy_losses[best_signal.strategy_name] = strategy_losses.get(best_signal.strategy_name, 0) + 1
+                        if pos.side == "long":
+                            long_losses += 1
+                            coin_stats[sym]["long_losses"] += 1
+                        else:
+                            short_losses += 1
+                            coin_stats[sym]["short_losses"] += 1
+
+                    del positions[sym]
+                    dynamic_sl_pct.pop(sym, None)
+                    last_trade_idx_per_coin[sym] = candle_idx
+
+        # 5. 미청산 포지션 강제 청산
+        for sym, pos in list(positions.items()):
+            if sym in all_data:
+                last_price = float(all_data[sym].iloc[-1]["close"])
+            else:
+                last_price = pos.entry_price
+
+            net_pnl, fee, pnl_pct, t = self._execute_futures_close(
+                all_timestamps[-1], pos, last_price,
+                f"sell(close-{pos.side})", "forced_close", 0,
+                f"백테스트 종료 강제 청산 ({pos.side})",
+            )
+            cash += pos.margin + net_pnl
+            total_fees += fee
+            trades.append(t)
+            coin_stats[sym]["trades"] += 1
+            coin_stats[sym]["pnl"] += net_pnl
+            if net_pnl > 0:
+                total_win_pct += abs(pnl_pct)
+                coin_stats[sym]["wins"] += 1
+                if pos.side == "long":
+                    long_wins += 1
+                    coin_stats[sym]["long_wins"] += 1
+                else:
+                    short_wins += 1
+                    coin_stats[sym]["short_wins"] += 1
+            else:
+                total_loss_pct += abs(pnl_pct)
+                coin_stats[sym]["losses"] += 1
+                if pos.side == "long":
+                    long_losses += 1
+                    coin_stats[sym]["long_losses"] += 1
+                else:
+                    short_losses += 1
+                    coin_stats[sym]["short_losses"] += 1
+
+        # 6. 통계 집계
+        final_balance = cash
+        total_pnl = final_balance - self._initial_balance
+        total_pnl_pct = total_pnl / self._initial_balance * 100
+
+        win_count = long_wins + short_wins
+        loss_count = long_losses + short_losses
+        total_closes = win_count + loss_count
+        win_rate = win_count / total_closes * 100 if total_closes > 0 else 0
+
+        avg_win = total_win_pct / win_count if win_count > 0 else 0
+        avg_loss = total_loss_pct / loss_count if loss_count > 0 else 0
+        profit_factor = (total_win_pct / total_loss_pct) if total_loss_pct > 0 else float("inf") if total_win_pct > 0 else 0
+
+        # B&H 균등배분
+        bh_pnl_pct = 0.0
+        bh_count = 0
+        for sym in portfolio_syms:
+            if sym in all_data and len(all_data[sym]) > 1:
+                df = all_data[sym]
+                first_c = float(df.iloc[0]["close"])
+                last_c = float(df.iloc[-1]["close"])
+                bh_pnl_pct += (last_c - first_c) / first_c * 100
+                bh_count += 1
+        if bh_count > 0:
+            bh_pnl_pct /= bh_count
+
+        # 전략별 통계
+        strategy_stats = {}
+        for name in self._strategies:
+            n = strategy_trades.get(name, 0)
+            w = strategy_wins.get(name, 0)
+            l = strategy_losses.get(name, 0)
+            strategy_stats[name] = {
+                "trades": n, "wins": w, "losses": l,
+                "win_rate": round(w / (w + l) * 100, 1) if (w + l) > 0 else 0,
+            }
+
+        # 코인별 승률 계산
+        for sym in coin_stats:
+            cs = coin_stats[sym]
+            wl = cs["wins"] + cs["losses"]
+            cs["win_rate"] = round(cs["wins"] / wl * 100, 1) if wl > 0 else 0
+
+        long_total = long_wins + long_losses
+        short_total = short_wins + short_losses
+
+        return FuturesPortfolioBacktestResult(
+            symbols=portfolio_syms,
+            days=days,
+            leverage=self._leverage,
+            initial_balance=self._initial_balance,
+            final_balance=round(final_balance, 2),
+            total_pnl=round(total_pnl, 2),
+            total_pnl_pct=round(total_pnl_pct, 2),
+            max_drawdown_pct=round(max_drawdown, 2),
+            total_trades=total_closes,
+            long_trades=long_total,
+            short_trades=short_total,
+            long_wins=long_wins,
+            long_losses=long_losses,
+            short_wins=short_wins,
+            short_losses=short_losses,
+            win_rate=round(win_rate, 1),
+            avg_win_pct=round(avg_win, 2),
+            avg_loss_pct=round(avg_loss, 2),
+            profit_factor=round(profit_factor, 2),
+            buy_hold_pnl_pct=round(bh_pnl_pct, 2),
+            liquidations=liquidations,
+            total_funding=round(total_funding, 2),
+            total_fees=round(total_fees, 2),
+            trades=trades,
+            equity_curve=equity_curve,
+            strategy_stats=strategy_stats,
+            per_coin_stats=coin_stats,
+            risk_events=self._risk_manager.events if self._risk_manager else [],
+            risk_stats=self._risk_manager.stats if self._risk_manager else {},
+            trade_limit_stats=self._trade_limiter.stats if self._trade_limiter else {},
+        )
+
+
+def print_futures_portfolio_result(r: FuturesPortfolioBacktestResult):
+    """선물 포트폴리오 백테스트 결과 출력."""
+    pnl_sign = "+" if r.total_pnl >= 0 else ""
+    dd_warn = " !!!" if r.max_drawdown_pct > 15 else ""
+    bh_sign = "+" if r.buy_hold_pnl_pct >= 0 else ""
+    alpha = r.total_pnl_pct - r.buy_hold_pnl_pct
+    alpha_sign = "+" if alpha >= 0 else ""
+
+    print(f"\n{'='*60}")
+    print(f"  선물 포트폴리오 결과 ({r.days}일, {len(r.symbols)}코인, {r.leverage}x)")
+    print(f"{'='*60}")
+    print(f"  초기 자산    : {r.initial_balance:>12,.2f} USDT")
+    print(f"  최종 자산    : {r.final_balance:>12,.2f} USDT")
+    print(f"  총 수익      : {pnl_sign}{r.total_pnl:>10,.2f} USDT  ({pnl_sign}{r.total_pnl_pct:.2f}%)")
+    print(f"  최대 낙폭    : {r.max_drawdown_pct:.2f}%{dd_warn}")
+    print(f"{'─'*60}")
+    print(f"  균등배분 B&H : {bh_sign}{r.buy_hold_pnl_pct:.2f}%")
+    print(f"  초과 수익(α) : {alpha_sign}{alpha:.2f}%")
+    print(f"{'─'*60}")
+    print(f"  총 청산 횟수 : {r.total_trades}회")
+
+    long_wr = r.long_wins / r.long_trades * 100 if r.long_trades > 0 else 0
+    short_wr = r.short_wins / r.short_trades * 100 if r.short_trades > 0 else 0
+    print(f"  롱  거래     : {r.long_trades}회  ({r.long_wins}승/{r.long_losses}패, 승률 {long_wr:.1f}%)")
+    print(f"  숏  거래     : {r.short_trades}회  ({r.short_wins}승/{r.short_losses}패, 승률 {short_wr:.1f}%)")
+    print(f"  전체 승률    : {r.win_rate:.1f}%")
+    print(f"  평균 수익    : +{r.avg_win_pct:.2f}% | 평균 손실: -{r.avg_loss_pct:.2f}%")
+    print(f"  Profit Factor: {r.profit_factor:.2f}")
+    print(f"{'─'*60}")
+    print(f"  강제청산     : {r.liquidations}회")
+    print(f"  총 펀딩비    : {r.total_funding:>+10,.2f} USDT")
+    print(f"  총 수수료    : {r.total_fees:>10,.2f} USDT")
+    print(f"{'─'*60}")
+
+    # 코인별 분석
+    if r.per_coin_stats:
+        print(f"  코인별 분석:")
+        for sym, cs in r.per_coin_stats.items():
+            sym_short = sym.replace("/USDT", "").replace("/KRW", "")
+            pnl_sign = "+" if cs["pnl"] >= 0 else ""
+            lt = cs.get("long_wins", 0) + cs.get("long_losses", 0)
+            st = cs.get("short_wins", 0) + cs.get("short_losses", 0)
+            print(f"    {sym_short:<6}  {cs['trades']:>3}회  "
+                  f"(L:{cs.get('long_wins',0)}/{lt} S:{cs.get('short_wins',0)}/{st})  "
+                  f"PnL {pnl_sign}{cs['pnl']:>+10,.2f}")
+        print(f"{'─'*60}")
+
+    # 전략별 기여
+    if r.strategy_stats:
+        print(f"  전략별 기여:")
+        for name, stat in r.strategy_stats.items():
+            if stat["trades"] > 0:
+                print(f"    {name:<22}: {stat['trades']:>3}회  승률 {stat['win_rate']:>5.1f}%")
+        print(f"{'─'*60}")
+
+    # 리스크 관리 통계
+    if r.risk_stats:
+        rs = r.risk_stats
+        print(f"  리스크 관리:")
+        print(f"    낙폭 일시중지 : {rs.get('drawdown_pauses', 0)}회")
+        print(f"    일일손실 중지 : {rs.get('daily_loss_pauses', 0)}회")
+        print(f"    비중 초과 차단: {rs.get('concentration_blocks', 0)}회")
+        print(f"{'─'*60}")
+
+    # 매매 제한 통계
+    if r.trade_limit_stats:
+        tls = r.trade_limit_stats
+        print(f"  매매 제한:")
+        print(f"    총 차단 횟수: {tls.get('total_blocks', 0)}회")
+        reasons = tls.get("block_reasons", {})
+        for reason, count in reasons.items():
+            label = {"daily_limit": "일일 상한", "coin_limit": "코인별 상한", "cooldown": "쿨다운"}.get(reason, reason)
+            print(f"      {label}: {count}회")
+        print(f"{'─'*60}")
+
+    # 매매 내역
+    sell_trades = [t for t in r.trades if "sell" in t.side]
+    if sell_trades:
+        print(f"  매매 내역 (최근 15건):")
+        for t in sell_trades[-15:]:
+            sym_short = t.symbol.replace("/USDT", "").replace("/KRW", "")
+            side_info = t.side.replace("sell(", "").replace(")", "")
+            tag_map = {
+                "sl-long": "롱손절", "sl-short": "숏손절",
+                "tp-long": "롱익절", "tp-short": "숏익절",
+                "trail-long": "롱트레일", "trail-short": "숏트레일",
+                "close-long": "롱청산", "close-short": "숏청산",
+                "liq-long": "롱강청", "liq-short": "숏강청",
+            }
+            tag = tag_map.get(side_info, side_info)
+            print(f"    {t.timestamp.strftime('%m/%d %H:%M')}  {sym_short:>6}  "
+                  f"{t.pnl_pct:>+6.1f}%  [{tag}] {t.reason[:45]}")
+    print(f"{'='*60}\n")
+
+
 def print_result(r: BacktestResult):
     """백테스트 결과를 보기 좋게 출력."""
     pnl_sign = "+" if r.total_pnl >= 0 else ""
@@ -3381,6 +4373,8 @@ async def main():
   python backtest.py --portfolio --days 90
   python backtest.py --portfolio --days 540 --risk --trade-limits --asymmetric
   python backtest.py --futures --symbol BTC/USDT --days 180 --dual-timeframe
+  python backtest.py --futures --portfolio --days 180
+  python backtest.py --futures --portfolio --days 540 --leverage 3 --risk
         """,
     )
     parser.add_argument("--symbol",         default="BTC/KRW",  help="코인 심볼 (예: BTC/KRW)")
@@ -3533,6 +4527,57 @@ async def main():
         if fut_cooldown == 12:  # CLI 기본값 = 현물용
             fut_cooldown = 6
 
+        # ── 선물 + 포트폴리오 결합 모드 ──────────────────────
+        if args.portfolio:
+            portfolio_coins = args.portfolio_coins
+            if portfolio_coins:
+                portfolio_coins = [
+                    c if "/" in c else f"{c}/USDT"
+                    for c in portfolio_coins
+                ]
+                # KRW → USDT 자동 변환
+                portfolio_coins = [
+                    c.replace("/KRW", "/USDT") for c in portfolio_coins
+                ]
+
+            bt = FuturesPortfolioBacktester(
+                exchange=exchange,
+                strategy_names=args.strategies,
+                symbols=portfolio_coins,
+                initial_balance=fut_balance,
+                min_confidence=args.min_confidence,
+                stop_loss_pct=args.stop_loss,
+                take_profit_pct=args.take_profit,
+                trend_filter=args.trend_filter,
+                trailing_activation=args.trailing_activation,
+                trailing_stop=args.trailing_stop,
+                adaptive_weights=args.adaptive_weights,
+                dynamic_sl=args.dynamic_sl,
+                agent_market=args.agent_market,
+                trade_cooldown=fut_cooldown,
+                leverage=args.leverage,
+                futures_fee=args.futures_fee,
+                funding_rate=args.funding_rate,
+                position_pct=args.position_pct,
+                short_all=args.short_all,
+                short_sideways=args.short_sideways,
+                dynamic_position=args.dynamic_position,
+                dual_timeframe=args.dual_timeframe,
+                max_positions=args.max_positions,
+                risk_enabled=args.risk,
+                risk_max_drawdown=args.max_drawdown / 100,
+                risk_daily_loss=args.daily_loss_limit / 100,
+                risk_max_concentration=args.max_concentration / 100,
+                trade_limit_enabled=args.trade_limits,
+                trade_daily_buy_limit=args.daily_buy_limit,
+                trade_max_coin_buys=args.max_coin_buys,
+            )
+            result = await bt.run(args.timeframe, args.days)
+            print_futures_portfolio_result(result)
+            await exchange.close()
+            return
+
+        # ── 선물 단일 코인 모드 ──────────────────────────────
         bt = FuturesBacktester(
             exchange=exchange,
             strategy_names=args.strategies,
