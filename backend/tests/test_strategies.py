@@ -568,3 +568,140 @@ class TestDonchianChannelStrategy:
         signal = await strategy.analyze(df, _ticker())
         assert signal.signal_type == SignalType.HOLD
         assert signal.confidence == 0.0
+
+
+# ── Freefall Guard Tests ─────────────────────────────────────
+
+
+class TestBollingerRSIFreefallGuard:
+    """Bollinger+RSI 전략의 급락 방어 테스트."""
+
+    @pytest.fixture
+    def strategy(self):
+        from strategies.bollinger_rsi import BollingerRSIStrategy
+        return BollingerRSIStrategy()
+
+    @pytest.mark.asyncio
+    async def test_extreme_bandwidth_blocks_buy(self, strategy):
+        """밴드폭 > 50% → HOLD (극단적 변동성, POWER -89% 같은 케이스)."""
+        df = _make_df(30, close_base=100)
+        # 밴드폭 60%: upper=130, lower=70, middle=100
+        df["BBL_20_2.0"] = 70
+        df["BBM_20_2.0"] = 100
+        df["BBU_20_2.0"] = 130
+        df["rsi_14"] = 20.0  # oversold
+        signal = await strategy.analyze(df, _ticker(65))
+        assert signal.signal_type == SignalType.HOLD
+        assert "급락 방어" in signal.reason
+
+    @pytest.mark.asyncio
+    async def test_normal_bandwidth_allows_buy(self, strategy):
+        """밴드폭 < 50% → 정상 BUY 허용."""
+        df = _make_df(30, close_base=50_000_000)
+        df["BBL_20_2.0"] = 49_000_000
+        df["BBM_20_2.0"] = 50_000_000
+        df["BBU_20_2.0"] = 51_000_000  # 4% bandwidth
+        df["rsi_14"] = 25.0
+        signal = await strategy.analyze(df, _ticker(48_900_000))
+        assert signal.signal_type == SignalType.BUY
+
+    @pytest.mark.asyncio
+    async def test_downtrend_sma_gap_reduces_confidence(self, strategy):
+        """SMA20 < SMA50 갭 > 3% → BUY confidence × 0.5."""
+        df = _make_df(60, close_base=50_000_000)
+        df["BBL_20_2.0"] = 49_500_000
+        df["BBM_20_2.0"] = 50_000_000
+        df["BBU_20_2.0"] = 50_500_000
+        df["rsi_14"] = 25.0
+        # 5% gap: SMA20=47.5M, SMA50=50M
+        df["sma_20"] = 47_500_000
+        df["sma_50"] = 50_000_000
+        signal = await strategy.analyze(df, _ticker(49_400_000))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence <= 0.45  # 0.85 * 0.5 = 0.425
+        assert "역추세 할인" in signal.reason
+
+    @pytest.mark.asyncio
+    async def test_small_sma_gap_no_discount(self, strategy):
+        """SMA20 < SMA50 갭 < 3% → 할인 없음."""
+        df = _make_df(60, close_base=50_000_000)
+        df["BBL_20_2.0"] = 49_500_000
+        df["BBM_20_2.0"] = 50_000_000
+        df["BBU_20_2.0"] = 50_500_000
+        df["rsi_14"] = 25.0
+        # 1% gap
+        df["sma_20"] = 49_500_000
+        df["sma_50"] = 50_000_000
+        signal = await strategy.analyze(df, _ticker(49_400_000))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.70  # no discount
+
+
+class TestRSIFreefallGuard:
+    """RSI 전략의 급락 방어 테스트."""
+
+    @pytest.fixture
+    def strategy(self):
+        from strategies.rsi_strategy import RSIStrategy
+        return RSIStrategy()
+
+    @pytest.mark.asyncio
+    async def test_freefall_30pct_drop_blocks_buy(self, strategy):
+        """20캔들 고점 대비 30%+ 하락 + RSI 과매도 → HOLD."""
+        df = _make_df(30, close_base=100)
+        df["rsi_14"] = 25.0
+        df.iloc[-2, df.columns.get_loc("rsi_14")] = 24.0
+        # 고점 100, 현재가 65 → -35% 하락
+        df["high"] = 100
+        signal = await strategy.analyze(df, _ticker(65))
+        assert signal.signal_type == SignalType.HOLD
+        assert "급락 방어" in signal.reason
+
+    @pytest.mark.asyncio
+    async def test_moderate_drop_allows_buy(self, strategy):
+        """20캔들 고점 대비 20% 하락 → 정상 BUY 허용."""
+        df = _make_df(30, close_base=50_000_000)
+        df["rsi_14"] = 25.0
+        df.iloc[-2, df.columns.get_loc("rsi_14")] = 24.0
+        # 고점 50M, 현재가 40M → -20% (< 30% 임계값)
+        signal = await strategy.analyze(df, _ticker(40_000_000))
+        assert signal.signal_type == SignalType.BUY
+
+    @pytest.mark.asyncio
+    async def test_rsi_downtrend_sma_gap_reduces_oversold_confidence(self, strategy):
+        """RSI 과매도 + SMA 갭 > 3% → confidence × 0.5."""
+        df = _make_df(60, close_base=50_000_000)
+        df["rsi_14"] = 25.0
+        df.iloc[-2, df.columns.get_loc("rsi_14")] = 24.0
+        # 5% gap
+        df["sma_20"] = 47_500_000
+        df["sma_50"] = 50_000_000
+        signal = await strategy.analyze(df, _ticker(50_000_000))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence <= 0.45  # discounted
+        assert "역추세 할인" in signal.reason
+
+    @pytest.mark.asyncio
+    async def test_rsi_extreme_oversold_downtrend_reduces_confidence(self, strategy):
+        """RSI 극심한 과매도(< 20) + 하락 추세 → confidence 할인."""
+        df = _make_df(60, close_base=50_000_000)
+        df["rsi_14"] = 15.0
+        df.iloc[-2, df.columns.get_loc("rsi_14")] = 14.0
+        # 5% gap
+        df["sma_20"] = 47_500_000
+        df["sma_50"] = 50_000_000
+        signal = await strategy.analyze(df, _ticker(50_000_000))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence <= 0.50  # 0.85 * 0.5 = 0.425
+
+    @pytest.mark.asyncio
+    async def test_uptrend_no_discount(self, strategy):
+        """SMA20 > SMA50 → 할인 없음."""
+        df = _make_df(60, close_base=50_000_000)
+        df["rsi_14"] = 25.0
+        df.iloc[-2, df.columns.get_loc("rsi_14")] = 24.0
+        df["sma_20"] = 51_000_000
+        df["sma_50"] = 50_000_000
+        signal = await strategy.analyze(df, _ticker(50_000_000))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.55  # no discount
