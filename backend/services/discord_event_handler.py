@@ -249,18 +249,77 @@ class DiscordEventHandler:
         }
 
     def _format_daily_summary(self, title: str, detail: str | None, meta: dict) -> dict:
-        """일일 요약 embed."""
+        """일일 요약 embed (포트폴리오 + 전략별 성과 + 인사이트)."""
+        is_usdt = "binance" in meta.get("exchange", "")
+        currency = "USDT" if is_usdt else "₩"
+
+        def _fmt(n: float) -> str:
+            if is_usdt:
+                return f"{n:,.2f} USDT"
+            return f"{n:,.0f} ₩"
+
+        def _pct(n: float) -> str:
+            return f"{'+' if n >= 0 else ''}{n:.2f}%"
+
         fields = []
-        if meta.get("total_value"):
-            fields.append({"name": "총 자산", "value": f"{meta['total_value']:,.0f}", "inline": True})
-        if meta.get("daily_pnl_pct") is not None:
-            pnl = meta["daily_pnl_pct"]
-            sign = "+" if pnl >= 0 else ""
-            fields.append({"name": "일일 수익", "value": f"{sign}{pnl:.2f}%", "inline": True})
-        if meta.get("positions"):
-            fields.append({"name": "포지션", "value": str(meta["positions"]), "inline": True})
-        if meta.get("trades_today"):
-            fields.append({"name": "금일 거래", "value": str(meta["trades_today"]), "inline": True})
+
+        # ── 포트폴리오 핵심 지표 ──
+        if meta.get("total_value") is not None:
+            fields.append({"name": "총 자산", "value": _fmt(meta["total_value"]), "inline": True})
+        if meta.get("return_pct") is not None:
+            fields.append({"name": "원금 대비", "value": _pct(meta["return_pct"]), "inline": True})
+        if meta.get("drawdown_pct") is not None:
+            dd = meta["drawdown_pct"]
+            fields.append({"name": "고점 대비", "value": f"-{dd:.2f}%" if dd > 0 else "0%", "inline": True})
+        if meta.get("realized_pnl") is not None:
+            fields.append({"name": "실현 손익", "value": _fmt(meta["realized_pnl"]), "inline": True})
+        if meta.get("unrealized_pnl") is not None:
+            fields.append({"name": "미실현 손익", "value": _fmt(meta["unrealized_pnl"]), "inline": True})
+        if meta.get("total_fees") is not None:
+            fields.append({"name": "수수료", "value": _fmt(meta["total_fees"]), "inline": True})
+
+        # ── 매매 요약 ──
+        review = meta.get("review")
+        if review:
+            trade_line = f"{review['total_trades']}건 (매수 {review['buy_count']} / 매도 {review['sell_count']})"
+            fields.append({"name": "24h 거래", "value": trade_line, "inline": True})
+            if review.get("win_rate") is not None:
+                wr = review["win_rate"] * 100
+                fields.append({"name": "승률", "value": f"{wr:.0f}% ({review['win_count']}승 {review['loss_count']}패)", "inline": True})
+            if review.get("profit_factor") is not None:
+                pf = review["profit_factor"]
+                fields.append({"name": "Profit Factor", "value": f"{pf:.2f}x", "inline": True})
+
+            # ── 전략별 성과 ──
+            by_strat = review.get("by_strategy", {})
+            if by_strat:
+                lines = []
+                for name, stats in sorted(by_strat.items(), key=lambda x: x[1]["total_pnl"], reverse=True):
+                    pnl_str = _fmt(stats["total_pnl"])
+                    wr_str = f"{stats['win_rate'] * 100:.0f}%"
+                    lines.append(f"**{name.replace('_', ' ')}** {stats['trades']}건 {wr_str} {pnl_str}")
+                if lines:
+                    fields.append({"name": "전략별 성과", "value": "\n".join(lines[:6]), "inline": False})
+
+            # ── 핵심 인사이트 ──
+            insights = review.get("insights", [])
+            if insights:
+                # 최대 3개, 짧게
+                insight_text = "\n".join(f"• {s}" for s in insights[:3])
+                fields.append({"name": "인사이트", "value": insight_text, "inline": False})
+
+            # ── 추천 ──
+            recs = review.get("recommendations", [])
+            if recs:
+                rec_text = "\n".join(f"• {s}" for s in recs[:2])
+                fields.append({"name": "추천", "value": rec_text, "inline": False})
+        else:
+            # review 없으면 기본 정보만
+            if meta.get("positions"):
+                fields.append({"name": "포지션", "value": str(meta["positions"]), "inline": True})
+            if meta.get("trades_today"):
+                fields.append({"name": "금일 거래", "value": str(meta["trades_today"]), "inline": True})
+
         return {
             "title": f"📋 {title}",
             "description": detail,
@@ -291,8 +350,11 @@ async def send_daily_summary(
     webhook_url: str,
     engine_registry,
 ) -> None:
-    """일일 요약을 Discord로 전송하는 스케줄러 잡."""
+    """일일 요약을 Discord로 전송하는 스케줄러 잡 (포트폴리오 + 매매 회고)."""
     from core.event_bus import emit_event
+    from db.session import get_session_factory
+
+    session_factory = get_session_factory()
 
     for exchange_name in engine_registry.available_exchanges:
         pm = engine_registry.get_portfolio_manager(exchange_name)
@@ -301,29 +363,57 @@ async def send_daily_summary(
             continue
 
         try:
-            total_value = pm.cash_balance
-            positions = 0
-            # 포지션 가치 합산
-            for sym, pos in pm.positions.items():
-                if pos.get("quantity", 0) > 0:
-                    positions += 1
-                    total_value += pos.get("current_value", 0)
+            is_usdt = "binance" in exchange_name
+            currency = "USDT" if is_usdt else "KRW"
 
-            currency = "USDT" if "binance" in exchange_name else "KRW"
-            initial = pm.initial_balance
-            daily_pnl_pct = ((total_value - initial) / initial * 100) if initial > 0 else 0
+            # 포트폴리오 요약 (DB 세션 필요)
+            async with session_factory() as session:
+                summary = await pm.get_portfolio_summary(session)
+
+            total_value = summary.get("total_value_krw", 0)
+            initial = summary.get("initial_balance_krw", 0)
+            return_pct = ((total_value - initial) / initial * 100) if initial > 0 else 0
+
+            # 매매 회고 데이터 (coordinator에서 캐시된 결과)
+            review_data = None
+            coord = engine_registry.get_coordinator(exchange_name)
+            if coord and coord.last_trade_review:
+                r = coord.last_trade_review
+                review_data = {
+                    "total_trades": r.total_trades,
+                    "buy_count": r.buy_count,
+                    "sell_count": r.sell_count,
+                    "win_count": r.win_count,
+                    "loss_count": r.loss_count,
+                    "win_rate": r.win_rate,
+                    "profit_factor": r.profit_factor,
+                    "by_strategy": r.by_strategy,
+                    "insights": r.insights[:3] if r.insights else [],
+                    "recommendations": r.recommendations[:2] if r.recommendations else [],
+                }
+
+            detail_parts = [f"총 자산: {total_value:,.2f} {currency}" if is_usdt
+                            else f"총 자산: {total_value:,.0f} {currency}"]
+            if return_pct != 0:
+                sign = "+" if return_pct >= 0 else ""
+                detail_parts.append(f"원금 대비 {sign}{return_pct:.2f}%")
 
             await emit_event(
                 "info", "daily_summary",
                 f"일일 요약 [{exchange_name}]",
-                detail=f"총 자산: {total_value:,.0f} {currency}",
+                detail=" | ".join(detail_parts),
                 metadata={
                     "exchange": exchange_name,
-                    "total_value": round(total_value, 0),
-                    "daily_pnl_pct": round(daily_pnl_pct, 2),
-                    "positions": positions,
-                    "cash": round(pm.cash_balance, 0),
+                    "total_value": round(total_value, 4 if is_usdt else 0),
+                    "return_pct": round(return_pct, 2),
+                    "realized_pnl": round(summary.get("realized_pnl", 0), 4 if is_usdt else 0),
+                    "unrealized_pnl": round(summary.get("unrealized_pnl", 0), 4 if is_usdt else 0),
+                    "total_fees": round(summary.get("total_fees", 0), 4 if is_usdt else 0),
+                    "drawdown_pct": round(summary.get("drawdown_pct", 0), 2),
+                    "positions": len(summary.get("positions", [])),
+                    "cash": round(summary.get("cash_balance_krw", 0), 4 if is_usdt else 0),
                     "trades_today": getattr(eng, "_daily_trade_count", 0),
+                    "review": review_data,
                 },
             )
         except Exception as e:

@@ -216,16 +216,71 @@ def test_signal_embed():
 
 # ── 필터: 일일 요약 ────────────────────────────────────────────
 
-def test_daily_summary_embed():
+def test_daily_summary_embed_basic():
+    """review 없이 기본 포트폴리오 지표만 있는 일일 요약."""
     h = _make_handler()
     embed = h._format_event(
-        "info", "daily_summary", "일일 요약 [bithumb]", "총 자산: 520,000 KRW",
-        {"total_value": 520000, "daily_pnl_pct": 4.0, "positions": 3, "trades_today": 5},
+        "info", "daily_summary", "일일 요약 [bithumb]", "총 자산: 520,000 ₩",
+        {
+            "exchange": "bithumb",
+            "total_value": 520000,
+            "return_pct": 4.0,
+            "realized_pnl": 15000,
+            "unrealized_pnl": 5000,
+            "total_fees": 1200,
+            "drawdown_pct": 1.5,
+            "positions": 3,
+            "trades_today": 5,
+        },
     )
     assert embed is not None
     assert "📋" in embed["title"]
-    pnl = [f for f in embed["fields"] if f["name"] == "일일 수익"]
-    assert "+4.00%" in pnl[0]["value"]
+    ret = [f for f in embed["fields"] if f["name"] == "원금 대비"]
+    assert "+4.00%" in ret[0]["value"]
+    realized = [f for f in embed["fields"] if f["name"] == "실현 손익"]
+    assert "15,000" in realized[0]["value"]
+    dd = [f for f in embed["fields"] if f["name"] == "고점 대비"]
+    assert "-1.50%" in dd[0]["value"]
+
+
+def test_daily_summary_embed_with_review():
+    """review 포함 시 전략별 성과, 인사이트, 추천 표시."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "daily_summary", "일일 요약 [binance_futures]", "총 자산: 350.00 USDT",
+        {
+            "exchange": "binance_futures",
+            "total_value": 350.0,
+            "return_pct": -2.5,
+            "realized_pnl": -5.0,
+            "unrealized_pnl": 2.0,
+            "total_fees": 0.8,
+            "drawdown_pct": 3.0,
+            "positions": 1,
+            "review": {
+                "total_trades": 8,
+                "buy_count": 4,
+                "sell_count": 4,
+                "win_count": 3,
+                "loss_count": 1,
+                "win_rate": 0.75,
+                "profit_factor": 2.1,
+                "by_strategy": {
+                    "rsi": {"trades": 3, "wins": 2, "total_pnl": 5.0, "win_rate": 0.67},
+                    "macd_crossover": {"trades": 2, "wins": 1, "total_pnl": -2.0, "win_rate": 0.5},
+                },
+                "insights": ["승률 75%, 양호한 수준", "RSI 전략이 최고 성과"],
+                "recommendations": ["MACD 전략 파라미터 재검토 필요"],
+            },
+        },
+    )
+    assert embed is not None
+    fields_by_name = {f["name"]: f["value"] for f in embed["fields"]}
+    assert "75%" in fields_by_name["승률"]
+    assert "2.10x" in fields_by_name["Profit Factor"]
+    assert "rsi" in fields_by_name["전략별 성과"]
+    assert "인사이트" in fields_by_name
+    assert "추천" in fields_by_name
 
 
 # ── 필터: 무시되는 이벤트 (HOLD 등) ────────────────────────────
