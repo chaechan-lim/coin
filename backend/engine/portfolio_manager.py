@@ -939,7 +939,30 @@ class PortfolioManager:
             logger.info("daily_pnl_no_snapshots", exchange=exchange_name, date=str(target_date))
             return None
 
-        daily_pnl_val = close_value - open_value
+        # 입출금 보정: 당일 입출금은 손익이 아님
+        from core.models import CapitalTransaction
+        cap_result = await session.execute(
+            select(
+                func.coalesce(func.sum(case(
+                    (CapitalTransaction.tx_type == "deposit", CapitalTransaction.amount),
+                    else_=0,
+                )), 0),
+                func.coalesce(func.sum(case(
+                    (CapitalTransaction.tx_type == "withdrawal", CapitalTransaction.amount),
+                    else_=0,
+                )), 0),
+            ).where(
+                CapitalTransaction.exchange == exchange_name,
+                CapitalTransaction.confirmed == True,  # noqa: E712
+                CapitalTransaction.source != "seed",   # 시드 입금은 초기 잔고 → 이미 스냅샷에 반영
+                CapitalTransaction.created_at >= day_start,
+                CapitalTransaction.created_at < day_end,
+            )
+        )
+        deposits, withdrawals = cap_result.one()
+        net_inflow = float(deposits) - float(withdrawals)
+
+        daily_pnl_val = close_value - open_value - net_inflow
         daily_pnl_pct = (daily_pnl_val / open_value * 100) if open_value > 0 else 0.0
 
         # 2) 해당 일자 매매 집계

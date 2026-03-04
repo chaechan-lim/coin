@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta, date
 import pytest
 from sqlalchemy import select
 
-from core.models import PortfolioSnapshot, Order, Position, DailyPnL
+from core.models import PortfolioSnapshot, Order, Position, DailyPnL, CapitalTransaction
 from engine.portfolio_manager import PortfolioManager
 
 
@@ -193,3 +193,80 @@ async def test_record_daily_pnl_exchange_isolation(session):
     assert r_binance.daily_pnl == 100
     assert r_bithumb.open_value == 500_000
     assert r_binance.open_value == 1000
+
+
+@pytest.mark.asyncio
+async def test_record_daily_pnl_excludes_capital(session):
+    """Deposits/withdrawals should not count as PnL."""
+    target = date(2026, 3, 5)
+
+    # open=500K, close=700K (200K 증가)
+    session.add(PortfolioSnapshot(
+        exchange="bithumb",
+        total_value_krw=500_000,
+        cash_balance_krw=500_000,
+        invested_value_krw=0,
+        snapshot_at=_utc(2026, 3, 5, 0, 5),
+    ))
+    session.add(PortfolioSnapshot(
+        exchange="bithumb",
+        total_value_krw=700_000,
+        cash_balance_krw=700_000,
+        invested_value_krw=0,
+        snapshot_at=_utc(2026, 3, 5, 23, 55),
+    ))
+
+    # 150K 입금 → 순수 매매 수익은 200K - 150K = 50K
+    session.add(CapitalTransaction(
+        exchange="bithumb",
+        tx_type="deposit",
+        amount=150_000,
+        currency="KRW",
+        source="manual",
+        confirmed=True,
+        created_at=_utc(2026, 3, 5, 12, 0),
+    ))
+    await session.flush()
+
+    record = await PortfolioManager.record_daily_pnl(session, "bithumb", target)
+    assert record is not None
+    assert record.daily_pnl == 50_000
+    assert round(record.daily_pnl_pct, 2) == 10.0  # 50K / 500K * 100
+
+
+@pytest.mark.asyncio
+async def test_record_daily_pnl_withdrawal(session):
+    """Withdrawal should not count as loss."""
+    target = date(2026, 3, 6)
+
+    # open=500K, close=300K (200K 감소)
+    session.add(PortfolioSnapshot(
+        exchange="bithumb",
+        total_value_krw=500_000,
+        cash_balance_krw=500_000,
+        invested_value_krw=0,
+        snapshot_at=_utc(2026, 3, 6, 0, 5),
+    ))
+    session.add(PortfolioSnapshot(
+        exchange="bithumb",
+        total_value_krw=300_000,
+        cash_balance_krw=300_000,
+        invested_value_krw=0,
+        snapshot_at=_utc(2026, 3, 6, 23, 55),
+    ))
+
+    # 200K 출금 → 순수 매매 손익은 -200K - (-200K) = 0
+    session.add(CapitalTransaction(
+        exchange="bithumb",
+        tx_type="withdrawal",
+        amount=200_000,
+        currency="KRW",
+        source="manual",
+        confirmed=True,
+        created_at=_utc(2026, 3, 6, 10, 0),
+    ))
+    await session.flush()
+
+    record = await PortfolioManager.record_daily_pnl(session, "bithumb", target)
+    assert record is not None
+    assert record.daily_pnl == 0  # 출금 보정 → 손익 없음
