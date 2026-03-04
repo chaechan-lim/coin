@@ -6,26 +6,31 @@
 
 ## Project Overview
 
-빗썸(Bithumb) 현물 + 바이낸스(Binance) USDM 선물 **듀얼 엔진** 암호화폐 자동 매매 시스템. Python(FastAPI) 백엔드 + React(TypeScript) 프론트엔드.
+빗썸(Bithumb) 현물 + 바이낸스(Binance) 현물 + 바이낸스 USDM 선물 **트리플 엔진** 암호화폐 자동 매매 시스템. Python(FastAPI) 백엔드 + React(TypeScript) 프론트엔드.
 
 ### Core Concept
-1. 5분마다 **6개 전략**이 코인을 분석 → 각각 BUY/SELL/HOLD + confidence 리턴
-2. **SignalCombiner**가 가중 투표로 최종 결정 (HOLD=기권 방식)
+1. 5분마다 전략이 코인 분석 → BUY/SELL/HOLD + confidence 리턴 (현물 4전략, 선물 6전략)
+2. **SignalCombiner**가 가중 투표로 최종 결정 (HOLD=기권 방식, 거래소별 별도 가중치)
 3. **TradingEngine / BinanceFuturesEngine**이 SL/TP/trailing stop/시장 필터 적용 후 실행
 4. **AI Agents**가 시장 상태 분석 + 리스크 관리 + 거래 리뷰 + LLM 심층 회고
 
-### Dual Engine Architecture
+### Triple Engine Architecture
 ```
 EngineRegistry (싱글턴)
 ├── "bithumb"
-│   ├── TradingEngine (현물, KRW)
+│   ├── TradingEngine (현물, KRW, 4전략)
 │   ├── PortfolioManager (KRW)
-│   ├── SignalCombiner + AgentCoordinator
+│   ├── SignalCombiner (SPOT_WEIGHTS) + AgentCoordinator
 │   └── 서지 로테이션 활성
+├── "binance_spot"
+│   ├── TradingEngine (현물, USDT, 4전략)
+│   ├── PortfolioManager (USDT)
+│   ├── SignalCombiner (SPOT_WEIGHTS) + AgentCoordinator
+│   └── 로테이션 비활성
 └── "binance_futures"
-    ├── BinanceFuturesEngine (선물, USDT, 3x 레버리지)
+    ├── BinanceFuturesEngine (선물, USDT, 3x 레버리지, 6전략)
     ├── PortfolioManager (USDT)
-    ├── SignalCombiner + AgentCoordinator
+    ├── SignalCombiner (DEFAULT_WEIGHTS + ADAPTIVE_PROFILES) + AgentCoordinator
     └── 롱/숏 양방향, WebSocket 가격 모니터
 ```
 
@@ -41,7 +46,7 @@ backend/
 │
 ├── core/
 │   ├── enums.py         # SignalType, MarketState, OrderSide 등
-│   ├── models.py        # SQLAlchemy ORM (Position, Order, PortfolioSnapshot, CapitalTransaction 등)
+│   ├── models.py        # SQLAlchemy ORM (Position, Order, PortfolioSnapshot, CapitalTransaction, DailyPnL 등)
 │   ├── schemas.py       # Pydantic response schemas
 │   └── event_bus.py     # 서버 이벤트 DB 기록 + WS 브로드캐스트 + 재시도
 │
@@ -49,19 +54,25 @@ backend/
 │   ├── base.py              # ExchangeAdapter ABC (현물 + 선물 Optional 메서드)
 │   ├── bithumb_v2_adapter.py  # 빗썸 실거래 (ccxt public + JWT private)
 │   ├── binance_usdm_adapter.py  # 바이낸스 USDM 선물 (ccxt + ccxt.pro WebSocket)
-│   ├── paper_adapter.py       # 페이퍼 트레이딩
+│   ├── binance_spot_adapter.py  # 바이낸스 현물 (ccxt binance)
+│   ├── paper_adapter.py       # 페이퍼 트레이딩 (KRW/USDT 통화 추상화)
 │   └── data_models.py         # Candle, Ticker, Balance, FuturesPosition DTOs
 │
 ├── strategies/
 │   ├── base.py          # BaseStrategy ABC, Signal dataclass
 │   ├── registry.py      # StrategyRegistry (auto-register via decorator)
-│   ├── combiner.py      # SignalCombiner (가중 투표, HOLD=기권, 적응형 가중치)
-│   ├── ma_crossover.py       # 이동평균 크로스오버 (가중치 0.08)
-│   ├── rsi_strategy.py       # RSI (가중치 0.25)
-│   ├── macd_crossover.py     # MACD (가중치 0.12)
-│   ├── bollinger_rsi.py      # 볼린저+RSI (가중치 0.27, 최고)
-│   ├── stochastic_rsi.py     # Stochastic RSI (가중치 0.15)
-│   ├── obv_divergence.py     # OBV 다이버전스 (가중치 0.13)
+│   ├── combiner.py      # SignalCombiner (가중 투표, HOLD=기권, 적응형 가중치, SPOT_WEIGHTS/DEFAULT_WEIGHTS)
+│   │                    # — 현물: SPOT_WEIGHTS, 선물: DEFAULT_WEIGHTS + ADAPTIVE_PROFILES
+│   ├── bnf_deviation.py      # [현물] BNF 이격도 — 평균 회귀 (가중치 0.10)
+│   ├── cis_momentum.py       # [현물] CIS 모멘텀 — 순수 모멘텀 (가중치 0.32)
+│   ├── larry_williams.py     # [현물] 래리 윌리엄스 — 변동성 돌파+%R (가중치 0.32)
+│   ├── donchian_channel.py   # [현물] 돈치안 채널 — 터틀 트레이딩 (가중치 0.26)
+│   ├── ma_crossover.py       # [선물] 이동평균 크로스오버 (가중치 0.08)
+│   ├── rsi_strategy.py       # [선물] RSI (가중치 0.25)
+│   ├── macd_crossover.py     # [선물] MACD (가중치 0.08)
+│   ├── bollinger_rsi.py      # [선물] 볼린저+RSI (가중치 0.31, 최고)
+│   ├── stochastic_rsi.py     # [선물] Stochastic RSI (가중치 0.15)
+│   ├── obv_divergence.py     # [선물] OBV 다이버전스 (가중치 0.13)
 │   ├── volatility_breakout.py  # 비활성 (0% 승률)
 │   ├── supertrend.py           # 비활성 (0% 승률)
 │   ├── grid_trading.py         # 비활성 (독립 관리형)
@@ -83,7 +94,8 @@ backend/
 │
 ├── services/
 │   ├── market_data.py         # OHLCV + 기술 지표 계산
-│   └── notification.py        # 텔레그램 알림
+│   ├── notification.py        # 텔레그램 알림
+│   └── discord_event_handler.py # 이벤트 기반 Discord Embed 알림 (카테고리별 필터, 레이트 리밋)
 │
 ├── api/                       # FastAPI routes (모든 엔드포인트 exchange 파라미터)
 │   ├── router.py, dependencies.py (EngineRegistry), dashboard.py
@@ -92,7 +104,7 @@ backend/
 │   └── websocket.py
 │
 ├── db/                        # SQLAlchemy async session (PostgreSQL / SQLite)
-└── tests/                     # 125 unit tests (pytest + 인메모리 SQLite)
+└── tests/                     # 294 unit tests (pytest + 인메모리 SQLite)
 ```
 
 ---
@@ -119,7 +131,7 @@ class MyStrategy(BaseStrategy):
 
 ### Signal Combiner
 ```
-6전략 → Signal(type, confidence)
+전략 → Signal(type, confidence)
     ↓
 SignalCombiner (가중 투표, HOLD=기권)
   - BUY/SELL만 경쟁 — HOLD는 투표 미참여
@@ -127,17 +139,28 @@ SignalCombiner (가중 투표, HOLD=기권)
   - active_weight < 0.12 → 의견 부족 HOLD (crash 시 0.06)
   - min_confidence(0.50/0.55) 이상만 실행
     ↓
-시장 상태별 적응형 가중치 (5개 프로필) 자동 적용
+현물: SPOT_WEIGHTS (4전략 고정)
+선물: DEFAULT_WEIGHTS (6전략) + 시장 상태별 적응형 가중치 (ADAPTIVE_PROFILES, 5개 프로필)
 ```
 
-### 6 Active Strategies (가중치)
+### Active Strategies (거래소별 분리)
+
+**현물 4전략 (SPOT_WEIGHTS, v0.23)**
 | 전략 | 가중치 | 역할 |
 |------|--------|------|
-| bollinger_rsi | 0.27 | 볼린저밴드+RSI 이중 확인, 최고 가중치 |
+| cis_momentum | 0.32 | 순수 모멘텀 (ADX+RSI 추세 추종) |
+| larry_williams | 0.32 | 변동성 돌파 + 윌리엄스 %R |
+| donchian_channel | 0.26 | 터틀 트레이딩 (20/10 채널) |
+| bnf_deviation | 0.10 | BNF 이격도 — 평균 회귀 |
+
+**선물 6전략 (DEFAULT_WEIGHTS)**
+| 전략 | 가중치 | 역할 |
+|------|--------|------|
+| bollinger_rsi | 0.31 | 볼린저밴드+RSI 이중 확인, 최고 가중치 |
 | rsi | 0.25 | RSI 과매수/과매도 |
 | stochastic_rsi | 0.15 | K/D 크로스, 과매수/매도 구간 |
 | obv_divergence | 0.13 | 가격-OBV 다이버전스 |
-| macd_crossover | 0.12 | MACD 시그널 크로스 |
+| macd_crossover | 0.08 | MACD 시그널 크로스 |
 | ma_crossover | 0.08 | SMA20/50 교차, 최저 가중치 |
 
 ### Indicator Columns
@@ -170,7 +193,8 @@ SignalCombiner (가중 투표, HOLD=기권)
 1. `_maybe_update_market_state()` — BTC 기준 시장 상태 감지
 2. `_evaluate_coin()` per tracked coin:
    - SL/TP/trailing stop 체크 → 매도
-   - 6개 전략 시그널 수집 → combiner → 매수/매도 결정
+   - 전략 시그널 수집 (현물 4 / 선물 6) → combiner → 매수/매도 결정
+   - 강제 청산: 연속 평가 실패 9회 → `_force_close_stuck_position` (쿨다운 면제)
 3. 빗썸: `_scan_volume_surges()` → `_try_rotation()` (서지 코인 매수)
 4. 선물: WebSocket 실시간 가격 모니터 (~1초, 별도 루프)
 
@@ -192,6 +216,12 @@ SignalCombiner (가중 투표, HOLD=기권)
 - Symbol: `BTC/KRW` ↔ `KRW-BTC`
 - Market buy: `order_type=price` (KRW), Market sell: `order_type=market` (coin)
 - 수수료: 0.25%
+
+**바이낸스 현물**:
+- `BinanceSpotAdapter` (ccxt.binance), 선물 메서드 없음
+- `BinanceSpotTradingConfig` (`env_prefix = "BINANCE_SPOT_TRADING_"`)
+- API 키: 선물과 동일, 활성화: `BINANCE_SPOT_ENABLED=true`
+- 수수료: 0.1%
 
 **바이낸스 USDM 선물**:
 - ccxt binanceusdm + ccxt.pro WebSocket
@@ -246,7 +276,7 @@ curl -X POST "http://localhost:8000/api/v1/engine/start?exchange=binance_futures
 
 ### 테스트
 ```bash
-cd backend && .venv/bin/python -m pytest tests/ -v    # 212 tests
+cd backend && .venv/bin/python -m pytest tests/ -v    # 294 tests
 ```
 
 ---
@@ -258,6 +288,7 @@ cd backend && .venv/bin/python -m pytest tests/ -v    # 212 tests
 - **Trade**: symbol, exchange, side, price, quantity
 - **PortfolioSnapshot**: exchange, total_value_krw, peak_value, realized_pnl
 - **CapitalTransaction**: exchange, tx_type(deposit/withdrawal), amount, currency, source, confirmed
+- **DailyPnL**: exchange, date, open_value, close_value, daily_pnl, daily_pnl_pct, realized_pnl, total_fees, trade_count, buy_count, sell_count, win_count, loss_count (exchange+date 유니크)
 - **StrategyLog**: exchange, strategy_name, signal_type, confidence
 - **AgentAnalysisLog**: exchange, agent_type, analysis_result
 
@@ -278,5 +309,8 @@ cd backend && .venv/bin/python -m pytest tests/ -v    # 212 tests
 - **PositionTracker DB 영속화**: SL/TP/trailing 상태를 Position 테이블에 저장, 재시작 시 복원
 - **교차 거래소 안전장치**: 현물 롱 보유 시 선물 숏 차단, 선물 숏 보유 시 현물 매수 차단
 - **매도 후 재매수 대기**: `cooldown_after_sell_sec=14400` (4시간, 당일 왕복 방지)
+- **강제 청산 쿨다운 면제**: 에러 기반 강제 매도 후 재매수 쿨다운 적용 안 함
 - **스냅샷 정합성**: sync/eval 인터리빙 방지 — 스냅샷 직전 `reconcile_cash_from_db()` 호출 (현물만, 선물은 거래소 API sync 기준)
-- **매매 타임스탬프 영속화**: Position.last_trade_at/last_sell_at → 재시작 시 쿨다운/washout 복원
+- **매매 타임스탬프 영속화**: Position.last_trade_at/last_sell_at → 재시작 시 쿨다운/washout 복원 (청산 포지션 qty=0은 건너뜀)
+- **스파이크 방어 6-Layer**: Sync Guard, Peak Guard, Cash Spike, Total Spike, Startup Cleanup, Margin Grace
+- **DailyPnL 일일 손익 기록**: 매일 00:05 스냅샷 기반 open/close 집계, GET /portfolio/daily-pnl API

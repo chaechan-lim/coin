@@ -1,7 +1,7 @@
 # Coin Auto-Trading System
 
-Bithumb (spot) + Binance USDM (futures) dual-engine auto-trading bot.
-6 active strategies, weighted voting, dynamic SL/TP, volume surge rotation, AI agents, React dashboard. 212 tests.
+Bithumb (spot) + Binance Spot + Binance USDM (futures) **triple-engine** auto-trading bot.
+Spot 4 strategies + Futures 6 strategies, weighted voting, dynamic SL/TP, volume surge rotation, AI agents, React dashboard (8 tabs). 294 tests.
 
 ---
 
@@ -10,7 +10,7 @@ Bithumb (spot) + Binance USDM (futures) dual-engine auto-trading bot.
 ```
                     ┌──────────────┐
                     │  React UI    │ :3000
-                    │  Dashboard   │
+                    │  Dashboard   │ (8 tabs)
                     └──────┬───────┘
                            │ REST + WebSocket
                     ┌──────┴───────┐
@@ -21,32 +21,45 @@ Bithumb (spot) + Binance USDM (futures) dual-engine auto-trading bot.
           ┌────────────────┼────────────────┐
           │                │                │
    ┌──────┴──────┐ ┌──────┴──────┐ ┌───────┴──────┐
-   │  Strategies  │ │   Engines   │ │  AI Agents   │
-   │  (6 active)  │ │ Bithumb     │ │  Market/Risk │
-   └──────┬──────┘ │ + Binance   │ │  TradeReview │
-          │        └──────┬──────┘ └──────────────┘
+   │  Strategies  │ │  Engines×3  │ │  AI Agents   │
+   │  Spot 4 +   │ │ Bithumb     │ │  Market/Risk │
+   │  Futures 6  │ │ + BN Spot   │ │  TradeReview │
+   └──────┬──────┘ │ + BN Future │ └──────────────┘
+          │        └──────┬──────┘
    ┌──────┴──────┐        │
    │  Combiner   │ ┌──────┴──────┐
    │  (weighted) │ │  PostgreSQL │
    └─────────────┘ └─────────────┘
 ```
 
-### Dual Engine
+### Triple Engine
 
 | Engine | Exchange | Market | Features |
 |--------|----------|--------|----------|
 | TradingEngine | Bithumb V2 | Spot (KRW) | SL/TP/trailing, rotation, dynamic SL, asymmetric mode |
+| TradingEngine | Binance Spot | Spot (USDT) | Same as Bithumb, USDT base currency |
 | BinanceFuturesEngine | Binance USDM | Futures (USDT) | Long/short, 3x leverage, liquidation guard, WebSocket monitor |
 
-### Strategies (6 active)
+### Strategies
+
+**Spot (4 strategies — v0.23)**
 
 | Strategy | Weight | Description |
 |---|---|---|
-| Bollinger + RSI | 0.27 | Bollinger band + RSI composite |
+| CIS Momentum | 0.32 | Pure momentum (ADX+RSI trend-follow) |
+| Larry Williams | 0.32 | Volatility breakout + Williams %R |
+| Donchian Channel | 0.26 | Turtle trading (20/10 period channel) |
+| BNF Deviation | 0.10 | Mean reversion (Bollinger deviation) |
+
+**Futures (6 strategies)**
+
+| Strategy | Weight | Description |
+|---|---|---|
+| Bollinger + RSI | 0.31 | Bollinger band + RSI composite |
 | RSI | 0.25 | RSI oversold/overbought reversal |
 | Stochastic RSI | 0.15 | Stochastic RSI momentum |
 | OBV Divergence | 0.13 | On-balance volume divergence |
-| MACD Crossover | 0.12 | MACD/Signal crossover |
+| MACD Crossover | 0.08 | MACD/Signal crossover |
 | MA Crossover | 0.08 | Moving average crossover |
 
 ### Safety Features
@@ -119,6 +132,9 @@ curl -X POST http://localhost:8000/api/v1/engine/start
 # 바이낸스 선물 엔진 시작
 curl -X POST "http://localhost:8000/api/v1/engine/start?exchange=binance_futures"
 
+# 바이낸스 현물 엔진 시작
+curl -X POST "http://localhost:8000/api/v1/engine/start?exchange=binance_spot"
+
 # 선물 엔진 중지 (포지션 있으면 경고)
 curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures"
 # 강제 중지
@@ -137,7 +153,9 @@ curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures&
 |----------|-------------|---------|
 | `TRADING_MODE` | `paper` / `live` (Bithumb) | `paper` |
 | `BINANCE_ENABLED` | Enable Binance futures | `false` |
-| `BINANCE_TRADING_MODE` | `paper` / `live` (independent) | `paper` |
+| `BINANCE_TRADING_MODE` | `paper` / `live` (futures, independent) | `paper` |
+| `BINANCE_SPOT_ENABLED` | Enable Binance spot | `false` |
+| `BINANCE_SPOT_TRADING_MODE` | `paper` / `live` (spot, independent) | `paper` |
 | `DB_URL` | Database connection string | PostgreSQL |
 | `BINANCE_DEFAULT_LEVERAGE` | Futures leverage | `3` |
 
@@ -147,7 +165,7 @@ curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures&
 
 ```bash
 cd backend
-.venv/bin/python -m pytest tests/ -v   # 212 tests
+.venv/bin/python -m pytest tests/ -v   # 294 tests
 # Tests use in-memory SQLite (aiosqlite)
 ```
 
