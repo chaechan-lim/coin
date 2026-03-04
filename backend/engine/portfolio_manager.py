@@ -451,10 +451,13 @@ class PortfolioManager:
 
         공식: cash = initial_balance - total_invested + realized_pnl - total_fees
 
-        선물은 건너뜀: 공식에 펀딩비(8h마다 ±)가 포함되지 않아 누적 오차 발생.
-        선물 현금은 sync_exchange_positions(5분)에서 거래소 API 기준으로 정확히 설정됨.
+        선물/실거래 현물은 건너뜀: sync_exchange_positions(5분)에서 거래소 API 기준으로
+        정확한 잔고가 설정됨. 공식 계산은 수수료/슬리피지 누적 오차로 실제 잔고와 괴리.
+        paper 모드만 공식 기반 reconcile 적용.
         """
         if "futures" in self._exchange_name:
+            return
+        if not self._is_paper:
             return
 
         result = await session.execute(
