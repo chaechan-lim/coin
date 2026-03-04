@@ -88,6 +88,8 @@ class TradingEngine:
 
         # SL/TP/trailing stop tracking
         self._position_trackers: dict[str, PositionTracker] = {}
+        self._eval_error_counts: dict[str, int] = {}  # 연속 평가 오류 카운터
+        self._MAX_EVAL_ERRORS = 3  # 3회 연속 실패 → 강제 청산
         self._market_state: str = MarketState.SIDEWAYS.value
         self._market_confidence: float = 0.5
         self._market_state_updated: datetime | None = None
@@ -635,6 +637,65 @@ class TradingEngine:
 
         return False
 
+    async def _force_close_stuck_position(
+        self, session: AsyncSession, symbol: str, last_error: str,
+    ) -> None:
+        """연속 평가 실패 포지션 강제 매도. 가격 조회 불가 시 DB에서 직접 제거."""
+        result = await session.execute(
+            select(Position).where(
+                Position.symbol == symbol,
+                Position.quantity > 0,
+                Position.exchange == self._exchange_name,
+            )
+        )
+        position = result.scalar_one_or_none()
+        if not position:
+            self._eval_error_counts.pop(symbol, None)
+            return
+
+        count = self._eval_error_counts.get(symbol, 0)
+        logger.warning(
+            "force_close_stuck_position",
+            symbol=symbol,
+            quantity=float(position.quantity),
+            consecutive_errors=count,
+            last_error=last_error,
+        )
+
+        # 1차 시도: 시장가 매도
+        try:
+            price = await self._market_data.get_current_price(symbol)
+            await self._execute_stop_sell(
+                session, symbol, position, price,
+                f"강제 매도: 연속 {count}회 평가 실패 ({last_error})",
+            )
+            self._eval_error_counts.pop(symbol, None)
+            return
+        except Exception as close_err:
+            logger.warning("force_close_market_failed", symbol=symbol, error=str(close_err))
+
+        # 2차: 가격 조회 불가 → DB 포지션 0으로 리셋
+        entry = position.average_buy_price or 0
+        position.quantity = 0
+        position.current_price = entry
+        position.current_value = 0
+        await session.commit()
+        self._position_trackers.pop(symbol, None)
+        self._eval_error_counts.pop(symbol, None)
+
+        logger.error(
+            "force_close_db_cleanup",
+            symbol=symbol,
+            detail="거래소 매도 실패 → DB 포지션 강제 리셋",
+        )
+        await emit_event(
+            "critical", "engine",
+            f"강제 매도 (DB 리셋): {symbol}",
+            detail=f"연속 {count}회 평가 실패, 거래소 매도 불가 → DB 포지션 0으로 리셋. "
+                   f"수동으로 거래소에서 {symbol} 포지션을 확인하세요.",
+            metadata={"symbol": symbol, "consecutive_errors": count},
+        )
+
     async def _execute_stop_sell(
         self,
         session: AsyncSession,
@@ -823,8 +884,15 @@ class TradingEngine:
                     for symbol in all_coins:
                         try:
                             await self._evaluate_coin(session, symbol)
+                            self._eval_error_counts.pop(symbol, None)  # 성공 시 카운터 리셋
                         except Exception as coin_err:
-                            logger.error("evaluate_coin_error", symbol=symbol, error=str(coin_err))
+                            count = self._eval_error_counts.get(symbol, 0) + 1
+                            self._eval_error_counts[symbol] = count
+                            logger.error("evaluate_coin_error", symbol=symbol,
+                                         error=str(coin_err), consecutive_errors=count)
+                            # 연속 N회 실패 + 보유 포지션 → 강제 매도
+                            if count >= self._MAX_EVAL_ERRORS and symbol in held:
+                                await self._force_close_stuck_position(session, symbol, str(coin_err))
                             continue
 
                     # 거래량 급등 로테이션 모드

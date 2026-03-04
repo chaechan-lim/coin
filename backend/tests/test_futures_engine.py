@@ -2,10 +2,11 @@
 BinanceFuturesEngine 단위 테스트
 ================================
 """
+import asyncio
 import math
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 from datetime import datetime, timezone
 
 from core.models import Position
@@ -162,3 +163,110 @@ class TestFundingRates:
         await futures_engine._maybe_update_funding_rates()
         assert "BTC/USDT" in futures_engine._funding_rates
         assert futures_engine._funding_rates["BTC/USDT"] == 0.0001
+
+
+class TestEvalErrorCounter:
+    """연속 평가 오류 → 강제 청산 테스트."""
+
+    def test_error_counter_initialized(self, futures_engine):
+        assert futures_engine._eval_error_counts == {}
+        assert futures_engine._MAX_EVAL_ERRORS == 3
+
+    def test_error_count_increments(self, futures_engine):
+        """에러 카운터가 올바르게 증가하는지."""
+        futures_engine._eval_error_counts["POWER/USDT"] = 1
+        futures_engine._eval_error_counts["POWER/USDT"] += 1
+        assert futures_engine._eval_error_counts["POWER/USDT"] == 2
+
+    def test_error_count_resets_on_success(self, futures_engine):
+        """성공 시 카운터가 리셋되는지."""
+        futures_engine._eval_error_counts["BTC/USDT"] = 2
+        futures_engine._eval_error_counts.pop("BTC/USDT", None)
+        assert "BTC/USDT" not in futures_engine._eval_error_counts
+
+    def test_threshold_triggers_force_close(self, futures_engine):
+        """N회 연속 에러가 임계값에 도달하는지."""
+        symbol = "POWER/USDT"
+        for i in range(1, futures_engine._MAX_EVAL_ERRORS + 1):
+            futures_engine._eval_error_counts[symbol] = i
+        assert futures_engine._eval_error_counts[symbol] >= futures_engine._MAX_EVAL_ERRORS
+
+
+class TestForceCloseStuckPosition:
+    """_force_close_stuck_position 메서드 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_force_close_no_position(self, futures_engine):
+        """포지션이 없으면 카운터만 정리하고 리턴."""
+        session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(return_value=mock_result)
+
+        futures_engine._eval_error_counts["DEAD/USDT"] = 5
+
+        await futures_engine._force_close_stuck_position(
+            session, "DEAD/USDT", "API 404"
+        )
+        assert "DEAD/USDT" not in futures_engine._eval_error_counts
+
+    @pytest.mark.asyncio
+    async def test_force_close_with_price_available(self, futures_engine, mock_market_data):
+        """가격 조회 가능 → 시장가 청산 시도."""
+        position = MagicMock(spec=Position)
+        position.symbol = "POWER/USDT"
+        position.quantity = 500.0
+        position.average_buy_price = 0.18
+        position.direction = "long"
+        position.leverage = 3
+        position.margin_used = 30.0
+
+        session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = position
+        session.execute = AsyncMock(return_value=mock_result)
+        session.refresh = AsyncMock()
+
+        mock_market_data.get_current_price = AsyncMock(return_value=0.20)
+        futures_engine._eval_error_counts["POWER/USDT"] = 3
+        futures_engine._close_lock = asyncio.Lock()
+
+        with patch.object(futures_engine, '_close_position', new_callable=AsyncMock) as mock_close:
+            await futures_engine._force_close_stuck_position(
+                session, "POWER/USDT", "API 404"
+            )
+            mock_close.assert_called_once()
+            assert "POWER/USDT" not in futures_engine._eval_error_counts
+
+    @pytest.mark.asyncio
+    async def test_force_close_price_unavailable_resets_db(self, futures_engine, mock_market_data):
+        """가격 조회 실패 → DB 포지션 0으로 리셋."""
+        position = MagicMock(spec=Position)
+        position.symbol = "DEAD/USDT"
+        position.quantity = 100.0
+        position.average_buy_price = 1.5
+
+        session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = position
+        session.execute = AsyncMock(return_value=mock_result)
+
+        mock_market_data.get_current_price = AsyncMock(side_effect=Exception("404"))
+        futures_engine._eval_error_counts["DEAD/USDT"] = 5
+        futures_engine._close_lock = asyncio.Lock()
+
+        with patch("engine.futures_engine.emit_event", new_callable=AsyncMock):
+            await futures_engine._force_close_stuck_position(
+                session, "DEAD/USDT", "404 Not Found"
+            )
+            assert position.quantity == 0
+            assert position.current_value == 0
+            assert "DEAD/USDT" not in futures_engine._eval_error_counts
+            session.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_collect_signals_ticker_failure_returns_empty(self, futures_engine, mock_market_data):
+        """ticker 조회 실패 시 빈 시그널 반환 (예외 전파 안 함)."""
+        mock_market_data.get_ticker = AsyncMock(side_effect=Exception("404"))
+        signals = await futures_engine._collect_signals("DEAD/USDT")
+        assert signals == []
