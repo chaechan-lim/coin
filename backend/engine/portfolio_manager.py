@@ -29,6 +29,7 @@ class PortfolioManager:
         self._peak_already_adjusted = False
         self._sync_guard = False  # eval 중 sync 차단
         self._last_total_value: float | None = None  # 스파이크 감지용
+        self._snapshot_skip_count = 0  # 연속 스킵 → 실제 변화 강제 기록
 
     async def update_position_on_buy(
         self, session: AsyncSession, symbol: str, quantity: float, price: float, cost: float, fee: float,
@@ -307,42 +308,62 @@ class PortfolioManager:
         prev_rows = prev_result.all()
 
         if prev_rows:
+            is_spike = False
+
             # 1) Cash spike check (직전 1개)
             prev_cash = prev_rows[0][1]
             if prev_cash is not None and prev_cash > 0:
                 cash_change_pct = abs(new_cash - prev_cash) / prev_cash * 100
                 if cash_change_pct > 20:
+                    is_spike = True
                     logger.warning(
                         "snapshot_skipped_cash_spike",
                         exchange=self._exchange_name,
                         prev_cash=round(prev_cash, 2),
                         new_cash=round(new_cash, 2),
                         cash_change_pct=round(cash_change_pct, 1),
+                        skip_count=self._snapshot_skip_count + 1,
                     )
-                    return None
 
             # 2) Total value spike check (중앙값 기준 10% 이상 변동)
             #    시장 변동: cash 불변 + invested/total 변동 → 허용
             #    스파이크: cash 변동(매매) + total 비정상 급등 → 차단
-            prev_totals = [r[0] for r in prev_rows if r[0] and r[0] > 0]
-            if prev_totals:
-                baseline = sorted(prev_totals)[len(prev_totals) // 2]
-                if baseline > 0:
-                    total_change_pct = abs(new_total - baseline) / baseline * 100
-                    if total_change_pct > 10:
-                        prev_cash_val = prev_rows[0][1] or 0
-                        cash_delta_pct = abs(new_cash - prev_cash_val) / baseline * 100 if baseline > 0 else 0
-                        if cash_delta_pct > 3:
-                            # cash 변동 + total 급변 → 매매 직후 sync 오염 가능
-                            logger.warning(
-                                "snapshot_skipped_total_spike",
-                                exchange=self._exchange_name,
-                                baseline=round(baseline, 2),
-                                new_total=round(new_total, 2),
-                                total_change_pct=round(total_change_pct, 1),
-                                cash_delta_pct=round(cash_delta_pct, 1),
-                            )
-                            return None
+            if not is_spike:
+                prev_totals = [r[0] for r in prev_rows if r[0] and r[0] > 0]
+                if prev_totals:
+                    baseline = sorted(prev_totals)[len(prev_totals) // 2]
+                    if baseline > 0:
+                        total_change_pct = abs(new_total - baseline) / baseline * 100
+                        if total_change_pct > 10:
+                            prev_cash_val = prev_rows[0][1] or 0
+                            cash_delta_pct = abs(new_cash - prev_cash_val) / baseline * 100 if baseline > 0 else 0
+                            if cash_delta_pct > 3:
+                                is_spike = True
+                                logger.warning(
+                                    "snapshot_skipped_total_spike",
+                                    exchange=self._exchange_name,
+                                    baseline=round(baseline, 2),
+                                    new_total=round(new_total, 2),
+                                    total_change_pct=round(total_change_pct, 1),
+                                    cash_delta_pct=round(cash_delta_pct, 1),
+                                    skip_count=self._snapshot_skip_count + 1,
+                                )
+
+            if is_spike:
+                self._snapshot_skip_count += 1
+                if self._snapshot_skip_count < 3:
+                    return None
+                # 3회 연속 스킵 → 일시적 스파이크가 아닌 실제 변화 (포지션 청산 등)
+                logger.info(
+                    "snapshot_forced_after_consecutive_skips",
+                    exchange=self._exchange_name,
+                    skip_count=self._snapshot_skip_count,
+                    total=round(new_total, 2),
+                    cash=round(new_cash, 2),
+                )
+                self._snapshot_skip_count = 0
+            else:
+                self._snapshot_skip_count = 0
 
         snapshot = PortfolioSnapshot(
             exchange=self._exchange_name,

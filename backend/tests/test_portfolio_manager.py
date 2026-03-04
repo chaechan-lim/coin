@@ -1686,3 +1686,115 @@ async def test_sync_margin_grace_no_last_trade_at(session):
     # last_trade_at=None → 보호 없음 → margin 업데이트됨
     assert pos.total_invested == pytest.approx(50, abs=1)
     assert pos.margin_used == pytest.approx(50, abs=1)
+
+
+# ── Consecutive Skip Force-Record Tests ──
+
+
+@pytest.mark.asyncio
+async def test_snapshot_forced_after_3_consecutive_cash_skips(session):
+    """cash 20%+ 변동이 3회 연속 → 실제 변화로 판단, 스냅샷 강제 기록."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+    pm._peak_value = 300
+    pm._cash_balance = 300
+    pm._last_total_value = 300
+
+    # 정상 스냅샷 기록 (cash=300)
+    snap1 = await pm.take_snapshot(session)
+    assert snap1 is not None
+    assert pm._snapshot_skip_count == 0
+
+    # 포지션 청산으로 cash 25% 증가 (정상적 변화)
+    pm._cash_balance = 375
+    pm._last_total_value = 375
+
+    # 1회차: 스킵
+    snap2 = await pm.take_snapshot(session)
+    assert snap2 is None
+    assert pm._snapshot_skip_count == 1
+
+    # 2회차: 여전히 스킵
+    snap3 = await pm.take_snapshot(session)
+    assert snap3 is None
+    assert pm._snapshot_skip_count == 2
+
+    # 3회차: 강제 기록!
+    snap4 = await pm.take_snapshot(session)
+    assert snap4 is not None
+    assert snap4.total_value_krw == 375
+    assert pm._snapshot_skip_count == 0  # 리셋됨
+
+
+@pytest.mark.asyncio
+async def test_snapshot_skip_count_resets_on_normal(session):
+    """정상 스냅샷이 기록되면 skip_count가 0으로 리셋."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+    pm._peak_value = 300
+    pm._cash_balance = 300
+    pm._last_total_value = 300
+
+    snap1 = await pm.take_snapshot(session)
+    assert snap1 is not None
+
+    # 스파이크 1회 → 스킵
+    pm._cash_balance = 400
+    pm._last_total_value = 400
+    snap2 = await pm.take_snapshot(session)
+    assert snap2 is None
+    assert pm._snapshot_skip_count == 1
+
+    # cash가 정상으로 돌아옴
+    pm._cash_balance = 310
+    pm._last_total_value = 310
+    snap3 = await pm.take_snapshot(session)
+    assert snap3 is not None
+    assert pm._snapshot_skip_count == 0  # 리셋
+
+
+@pytest.mark.asyncio
+async def test_snapshot_total_spike_also_counts_skip(session):
+    """total spike도 연속 스킵에 카운트됨."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+    pm._peak_value = 300
+    pm._cash_balance = 300
+    pm._last_total_value = 300
+
+    # baseline 스냅샷 3개 (total=300)
+    for _ in range(3):
+        snap = PortfolioSnapshot(
+            exchange="binance_futures",
+            total_value_krw=300,
+            cash_balance_krw=300,
+            invested_value_krw=0,
+        )
+        session.add(snap)
+    await session.flush()
+
+    # total 20% 급등 + cash 15% 변동 → total spike
+    pm._cash_balance = 345
+    pm._last_total_value = 360
+
+    skip1 = await pm.take_snapshot(session)
+    assert skip1 is None
+    assert pm._snapshot_skip_count == 1
+
+    skip2 = await pm.take_snapshot(session)
+    assert skip2 is None
+    assert pm._snapshot_skip_count == 2
+
+    # 3회차 → 강제 기록
+    snap = await pm.take_snapshot(session)
+    assert snap is not None
+    assert pm._snapshot_skip_count == 0
