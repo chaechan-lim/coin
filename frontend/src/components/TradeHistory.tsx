@@ -33,7 +33,7 @@ function StrategyBadge({ name }: { name: string }) {
 
 function fmtPrice(n: number, isUsdt: boolean) {
   return isUsdt
-    ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDT'
+    ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + ' USDT'
     : n.toLocaleString() + ' ₩'
 }
 
@@ -74,7 +74,7 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
           </div>
           <div className="flex items-center gap-4 text-sm">
             {isFutures && order.margin_used != null && (
-              <span className="text-gray-400 text-xs">{order.margin_used.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT</span>
+              <span className="text-gray-400 text-xs">{order.margin_used.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} USDT</span>
             )}
             <span className="text-gray-300">{fmtPrice(price, isUsdt)}</span>
             <span className="text-gray-500 text-xs">
@@ -138,7 +138,7 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
                 <div>
                   <span className="text-gray-500">사용 마진</span>
                   <div className="text-white font-medium">
-                    {order.margin_used != null ? `${order.margin_used.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT` : '-'}
+                    {order.margin_used != null ? `${order.margin_used.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} USDT` : '-'}
                   </div>
                 </div>
               </>

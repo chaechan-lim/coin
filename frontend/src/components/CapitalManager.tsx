@@ -90,7 +90,7 @@ export function CapitalManager({
 
   const fmtAmt = (n: number) =>
     isUsdt
-      ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDT'
+      ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + ' USDT'
       : n.toLocaleString('ko-KR') + ' ₩'
 
   if (!open) return null

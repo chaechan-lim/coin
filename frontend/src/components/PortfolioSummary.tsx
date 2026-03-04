@@ -35,7 +35,7 @@ function fmtKrw(n: number) {
 }
 
 function fmtUsdt(n: number) {
-  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDT'
+  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + ' USDT'
 }
 
 function fmtPct(n: number) {
@@ -86,7 +86,7 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
           label="원금 대비 수익"
           value={fmtPct(returnFromInitial)}
           sub={`${returnFromInitial >= 0 ? '+' : ''}${isUsdt
-            ? (data.total_value_krw - data.initial_balance_krw).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDT'
+            ? (data.total_value_krw - data.initial_balance_krw).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + ' USDT'
             : (data.total_value_krw - data.initial_balance_krw).toLocaleString('ko-KR') + ' ₩'}`}
           color={returnColor}
         />
@@ -151,12 +151,12 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
                       <td className={`px-4 py-2 text-center font-semibold text-xs ${dirColor}`}>{dirLabel}</td>
                     )}
                     <td className="px-4 py-2 text-right text-gray-300">{pos.quantity.toFixed(6)}</td>
-                    <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.average_buy_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.average_buy_price.toLocaleString()}</td>
-                    <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.current_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_price.toLocaleString()}</td>
-                    <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.current_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_value.toLocaleString()}</td>
+                    <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.average_buy_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : pos.average_buy_price.toLocaleString()}</td>
+                    <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.current_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : pos.current_price.toLocaleString()}</td>
+                    <td className="px-4 py-2 text-right text-gray-300">{isUsdt ? pos.current_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : pos.current_value.toLocaleString()}</td>
                     {isUsdt && (
                       <td className="px-4 py-2 text-right text-red-400/80 text-xs">
-                        {pos.liquidation_price ? pos.liquidation_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-'}
+                        {pos.liquidation_price ? pos.liquidation_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '-'}
                       </td>
                     )}
                     <td className="px-4 py-2 text-right text-red-400/80 text-xs">
@@ -174,7 +174,7 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
                         : '-'}
                     </td>
                     <td className={`px-4 py-2 text-right font-semibold ${pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}`}>
-                      {pos.unrealized_pnl >= 0 ? '+' : ''}{isUsdt ? pos.unrealized_pnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.unrealized_pnl.toLocaleString()}
+                      {pos.unrealized_pnl >= 0 ? '+' : ''}{isUsdt ? pos.unrealized_pnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : pos.unrealized_pnl.toLocaleString()}
                       <span className="text-xs ml-1">({fmtPct(pos.unrealized_pnl_pct)})</span>
                     </td>
                   </tr>
@@ -214,26 +214,26 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
                   <div className="grid grid-cols-2 gap-x-4 text-xs">
                     <div className="flex justify-between">
                       <span className="text-gray-500">진입가</span>
-                      <span className="text-gray-300">{isUsdt ? pos.average_buy_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.average_buy_price.toLocaleString()}</span>
+                      <span className="text-gray-300">{isUsdt ? pos.average_buy_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : pos.average_buy_price.toLocaleString()}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-gray-500">현재가</span>
-                      <span className="text-gray-300">{isUsdt ? pos.current_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_price.toLocaleString()}</span>
+                      <span className="text-gray-300">{isUsdt ? pos.current_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : pos.current_price.toLocaleString()}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-gray-500">{isUsdt ? '마진' : '평가금액'}</span>
-                      <span className="text-gray-300">{isUsdt ? pos.current_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.current_value.toLocaleString()}</span>
+                      <span className="text-gray-300">{isUsdt ? pos.current_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : pos.current_value.toLocaleString()}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-gray-500">손익</span>
                       <span className={pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'}>
-                        {pos.unrealized_pnl >= 0 ? '+' : ''}{isUsdt ? pos.unrealized_pnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : pos.unrealized_pnl.toLocaleString()}
+                        {pos.unrealized_pnl >= 0 ? '+' : ''}{isUsdt ? pos.unrealized_pnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : pos.unrealized_pnl.toLocaleString()}
                       </span>
                     </div>
                     {isUsdt && pos.liquidation_price && (
                       <div className="flex justify-between col-span-2 mt-0.5 pt-1 border-t border-gray-700/30">
                         <span className="text-gray-500">청산가</span>
-                        <span className="text-red-400/80">{pos.liquidation_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        <span className="text-red-400/80">{pos.liquidation_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</span>
                       </div>
                     )}
                     {(pos.stop_loss_price || pos.take_profit_price) && (
