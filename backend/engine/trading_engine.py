@@ -906,6 +906,9 @@ class TradingEngine:
                             top_surges=[(s, round(sc, 1)) for s, sc in surges[:3]] if surges else [],
                         )
 
+                    # 매매 기록 먼저 커밋 (스냅샷 스킵과 무관하게 주문/포지션 영속화)
+                    await session.commit()
+
                     # 스냅샷 직전 현금 잔고 재보정 (eval 중 sync 인터리빙 방지)
                     await self._portfolio_manager.reconcile_cash_from_db(session)
                     snap = await self._portfolio_manager.take_snapshot(session)

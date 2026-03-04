@@ -452,6 +452,9 @@ class BinanceFuturesEngine(TradingEngine):
                     # 스냅샷 직전 현금 잔고 재보정 (eval 중 sync 인터리빙 방지)
                     await self._portfolio_manager.reconcile_cash_from_db(session)
 
+                    # 매매 기록 먼저 커밋 (스냅샷 스킵과 무관하게 주문/포지션 영속화)
+                    await session.commit()
+
                     # 스냅샷 (DB locked 재시도, 스파이크 시 자동 스킵)
                     for _attempt in range(3):
                         try:
