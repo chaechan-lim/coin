@@ -109,6 +109,33 @@ class BollingerRSIStrategy(BaseStrategy):
             "price_position": round((current_price - bb_lower) / (bb_upper - bb_lower) * 100, 1) if bb_upper != bb_lower else 50,
         }
 
+        # Freefall guard: 밴드폭이 극단적으로 넓으면 급락 중 — 매수 차단
+        if band_width > 0.50:  # 50% 이상이면 비정상 변동성
+            return Signal(
+                signal_type=SignalType.HOLD,
+                confidence=0.2,
+                strategy_name=self.name,
+                reason=f"급락 방어: 밴드폭 {band_width*100:.1f}% > 50% (극단적 변동성)",
+                indicators=indicators,
+            )
+
+        # Trend check: SMA20 vs SMA50 — 하락 추세에서 역추세 매수 신뢰도 할인
+        sma20_col = next((c for c in df.columns if c.lower() in ("sma_20", "sma20")), None)
+        sma50_col = next((c for c in df.columns if c.lower() in ("sma_50", "sma50")), None)
+        if sma20_col is None:
+            df["_sma20"] = ta.sma(df["close"], length=20)
+            sma20_col = "_sma20"
+        if sma50_col is None:
+            df["_sma50"] = ta.sma(df["close"], length=50)
+            sma50_col = "_sma50"
+        sma20_val = df[sma20_col].iloc[-1] if sma20_col in df.columns else None
+        sma50_val = df[sma50_col].iloc[-1] if sma50_col in df.columns else None
+        _in_downtrend = (
+            sma20_val is not None and sma50_val is not None
+            and not pd.isna(sma20_val) and not pd.isna(sma50_val)
+            and sma20_val < sma50_val
+        )
+
         # BUY: price at or below lower band AND RSI oversold
         price_near_lower = current_price <= bb_lower * 1.005  # within 0.5% of lower band
         rsi_oversold = current_rsi < self._rsi_oversold
@@ -119,13 +146,19 @@ class BollingerRSIStrategy(BaseStrategy):
             # Even stronger when RSI is very low
             if current_rsi < 25:
                 confidence += 0.1
+            # 하락 추세에서 역추세 매수: 신뢰도 할인 (SMA 갭 비례)
+            if _in_downtrend and sma50_val > 0:
+                sma_gap = (sma50_val - sma20_val) / sma50_val
+                if sma_gap > 0.03:  # 갭 3% 이상이면 강한 하락 추세
+                    confidence *= 0.5
             return Signal(
                 signal_type=SignalType.BUY,
                 confidence=round(min(confidence, 0.95), 2),
                 strategy_name=self.name,
                 reason=f"이중 확인 매수: 가격({current_price:,.0f}) ≤ 볼린저 하단({bb_lower:,.0f}) "
                 f"AND RSI({current_rsi:.1f}) < {self._rsi_oversold}. "
-                f"밴드폭: {band_width*100:.1f}%",
+                f"밴드폭: {band_width*100:.1f}%"
+                f"{' [역추세 할인]' if _in_downtrend else ''}",
                 suggested_price=current_price,
                 indicators=indicators,
             )

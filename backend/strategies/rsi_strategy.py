@@ -70,14 +70,51 @@ class RSIStrategy(BaseStrategy):
         # RSI divergence detection
         rsi_rising = current_rsi > prev_rsi if not pd.isna(prev_rsi) else False
 
+        # Freefall guard: 최근 20캔들 고점 대비 30%+ 하락 시 매수 차단
+        lookback = min(20, len(df))
+        recent_high = df["high"].iloc[-lookback:].max()
+        if recent_high > 0:
+            drop_from_high = (ticker.last - recent_high) / recent_high
+            if drop_from_high < -0.30 and current_rsi <= self._oversold:
+                return Signal(
+                    signal_type=SignalType.HOLD,
+                    confidence=0.2,
+                    strategy_name=self.name,
+                    reason=f"급락 방어: 고점 대비 {drop_from_high*100:.1f}% 하락 (RSI={current_rsi:.1f})",
+                    indicators=indicators,
+                )
+
+        # Trend check: SMA20 vs SMA50 — 하락 추세 여부
+        import pandas_ta as ta
+        sma20_col = next((c for c in df.columns if c.lower() in ("sma_20", "sma20")), None)
+        sma50_col = next((c for c in df.columns if c.lower() in ("sma_50", "sma50")), None)
+        if sma20_col is None:
+            df["_sma20"] = ta.sma(df["close"], length=20)
+            sma20_col = "_sma20"
+        if sma50_col is None:
+            df["_sma50"] = ta.sma(df["close"], length=50)
+            sma50_col = "_sma50"
+        sma20_val = df[sma20_col].iloc[-1] if sma20_col in df.columns else None
+        sma50_val = df[sma50_col].iloc[-1] if sma50_col in df.columns else None
+        _in_downtrend = (
+            sma20_val is not None and sma50_val is not None
+            and not pd.isna(sma20_val) and not pd.isna(sma50_val)
+            and sma20_val < sma50_val
+        )
+
         # Extreme oversold
         if current_rsi <= self._extreme_oversold:
+            confidence = 0.85
+            if _in_downtrend and sma50_val > 0:
+                sma_gap = (sma50_val - sma20_val) / sma50_val
+                if sma_gap > 0.03:  # 갭 3% 이상이면 강한 하락 추세
+                    confidence *= 0.5
             return Signal(
                 signal_type=SignalType.BUY,
-                confidence=0.85,
+                confidence=round(confidence, 2),
                 strategy_name=self.name,
                 reason=f"극심한 과매도: RSI={current_rsi:.1f} (임계값: {self._extreme_oversold}). "
-                f"반등 가능성 높음",
+                f"반등 가능성 높음{' [역추세 할인]' if _in_downtrend else ''}",
                 suggested_price=ticker.last,
                 indicators=indicators,
             )
@@ -87,12 +124,17 @@ class RSIStrategy(BaseStrategy):
             confidence = 0.5 + (self._oversold - current_rsi) / self._oversold * 0.3
             if rsi_rising:
                 confidence += 0.1  # RSI turning up from oversold is stronger signal
+            if _in_downtrend and sma50_val > 0:
+                sma_gap = (sma50_val - sma20_val) / sma50_val
+                if sma_gap > 0.03:  # 갭 3% 이상이면 강한 하락 추세
+                    confidence *= 0.5
             return Signal(
                 signal_type=SignalType.BUY,
                 confidence=round(min(confidence, 0.9), 2),
                 strategy_name=self.name,
                 reason=f"과매도 구간: RSI={current_rsi:.1f} < {self._oversold}. "
-                f"{'RSI 반등 시작' if rsi_rising else 'RSI 계속 하락 중'}",
+                f"{'RSI 반등 시작' if rsi_rising else 'RSI 계속 하락 중'}"
+                f"{' [역추세 할인]' if _in_downtrend else ''}",
                 suggested_price=ticker.last,
                 indicators=indicators,
             )

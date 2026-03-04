@@ -1,17 +1,17 @@
 # 코인 자동 매매 시스템 — 구현 진행 현황
 
-> 최종 업데이트: 2026-03-02
+> 최종 업데이트: 2026-03-04
 
 ---
 
 ## 개요
 
-빗썸(Bithumb) 현물 + 바이낸스(Binance) USDM 선물 **듀얼 엔진** 24시간 자동 암호화폐 트레이딩 시스템.
-6개 전략 가중 투표 (HOLD=기권 방식) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭, 거래소 전환) 포함.
-**현재 라이브 운영 중**: 빗썸 현물 (~308K KRW) + 바이낸스 선물 (~320 USDT, 3x 레버리지), **PostgreSQL 16** (docker compose), **라즈베리파이 배포 완료**, **HTTPS (nginx self-signed)**.
-**교차 거래소 안전장치**: 현물 롱↔선물 숏 동시 진입 차단, 매도 후 재매수 4시간 대기(washout), PositionTracker DB 영속화 (재시작 시 SL/TP/trailing 복원).
-**듀얼 엔진 아키텍처**: 빗썸 TradingEngine + 바이낸스 BinanceFuturesEngine 독립 병렬 실행, EngineRegistry 중앙 관리, exchange 컬럼 기반 데이터 격리.
-**바이낸스 선물 라이브**: 독립 모드 분리 (빗썸 paper/live + 바이낸스 paper/live 별도), 시장가 주문, 실제 USDT 잔고 조회.
+빗썸(Bithumb) 현물 + 바이낸스(Binance) 현물 + 바이낸스 USDM 선물 **트리플 엔진** 24시간 자동 암호화폐 트레이딩 시스템.
+가중 투표 (HOLD=기권 방식) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(7탭, 거래소 전환) 포함. **현물 4전략** (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + **선물 6전략** (MA, RSI, MACD, 볼린저RSI, 스토캐스틱RSI, OBV) 거래소별 독립 전략.
+**현재 라이브 운영 중**: 빗썸 현물 (~308K KRW) + 바이낸스 선물 (~320 USDT, 3x 레버리지) + 바이낸스 현물 (500 USDT, paper), **PostgreSQL 16** (docker compose), **라즈베리파이 배포 완료**, **HTTPS (nginx self-signed)**.
+**교차 거래소 안전장치**: 현물 롱↔선물 숏 동시 진입 차단 (3거래소 교차 체크), 매도 후 재매수 4시간 대기(washout), PositionTracker DB 영속화 (재시작 시 SL/TP/trailing 복원).
+**트리플 엔진 아키텍처**: 빗썸 TradingEngine + 바이낸스 BinanceFuturesEngine + 바이낸스 현물 TradingEngine 독립 병렬 실행, EngineRegistry 중앙 관리, exchange 컬럼 기반 데이터 격리.
+**바이낸스 선물 라이브**: 독립 모드 분리 (빗썸/바이낸스 현물/바이낸스 선물 각각 paper/live 별도), 시장가 주문, 실제 USDT 잔고 조회.
 **에이전트 심볼 분기**: MarketAnalysisAgent `market_symbol` 파라미터 — 빗썸 BTC/KRW, 바이낸스 BTC/USDT 자동 분기.
 **선물 Graceful Stop**: 포지션 보유 시 경고, `force=true`로 강제 중지.
 
@@ -25,7 +25,7 @@
 | 프론트엔드 | React 18, TypeScript, Vite, TailwindCSS, Recharts, lightweight-charts |
 | DB | **PostgreSQL 16** (docker compose) / SQLite (테스트 폴백) |
 | Cache / PubSub | Redis 7 (Docker, 선택) |
-| 거래소 연동 | Bithumb V2 (ccxt+JWT), Binance USDM 선물 (ccxt binanceusdm), 듀얼 엔진 EngineRegistry |
+| 거래소 연동 | Bithumb V2 (ccxt+JWT), Binance 현물 (ccxt binance), Binance USDM 선물 (ccxt binanceusdm), 트리플 엔진 EngineRegistry |
 | 기술적 지표 | pandas + pandas-ta |
 | 배포 | Docker Compose (restart: always → 24/7) |
 
@@ -65,7 +65,8 @@ coin/
 │   │   ├── bithumb_adapter.py   ✅ 완료 (V1, 미사용)
 │   │   ├── bithumb_v2_adapter.py ✅ 완료 (V2, 현재 라이브)
 │   │   ├── binance_usdm_adapter.py ✅ 완료 (USDM 선물)
-│   │   ├── paper_adapter.py     ✅ 완료
+│   │   ├── binance_spot_adapter.py ✅ 완료 (현물)
+│   │   ├── paper_adapter.py     ✅ 완료 (KRW/USDT 통화 추상화)
 │   │   └── data_models.py       ✅ 완료
 │   ├── services/
 │   │   ├── __init__.py          ✅
@@ -84,6 +85,10 @@ coin/
 │   │   ├── bollinger_rsi.py     ✅ 완료
 │   │   ├── stochastic_rsi.py   ✅ 완료
 │   │   ├── obv_divergence.py   ✅ 완료
+│   │   ├── bnf_deviation.py    ✅ 완료 (BNF 이격도 — 평균 회귀, 현물 전용)
+│   │   ├── cis_momentum.py     ✅ 완료 (CIS 모멘텀 — 순수 모멘텀, 현물 전용)
+│   │   ├── larry_williams.py   ✅ 완료 (래리 윌리엄스 — 변동성 돌파+%R, 현물 전용)
+│   │   ├── donchian_channel.py ✅ 완료 (돈치안 채널 — 터틀 트레이딩, 현물 전용)
 │   │   ├── supertrend.py       ✅ 완료
 │   │   ├── grid_trading.py      ✅ 완료 (독립 관리형, combiner 미사용)
 │   │   └── dca_momentum.py      ✅ 완료 (독립 관리형, combiner 미사용)
@@ -121,7 +126,8 @@ coin/
 │   │   ├── test_portfolio_manager.py ✅ 완료 (17 tests)
 │   │   ├── test_risk_management.py ✅ 완료 (5 tests)
 │   │   ├── test_exchange_filter.py ✅ 완료 (5 tests, 거래소 격리)
-│   │   └── test_futures_engine.py ✅ 완료 (11 tests, 선물 엔진)
+│   │   ├── test_futures_engine.py ✅ 완료 (11 tests, 선물 엔진)
+│   │   └── test_binance_spot.py ✅ 완료 (10 tests, 바이낸스 현물)
 │   └── pytest.ini               ✅ 완료
 └── frontend/
     ├── package.json             ✅ 완료
@@ -290,7 +296,7 @@ coin/
 | 원금 대비 수익 표시 | ✅ initial_balance_krw + total_pnl_pct 원금 기준 |
 | 전략 성과 P&L 수정 | ✅ Lot-based FIFO 원가 매칭, **진입 전략에 PnL 귀속** (기존: 청산 전략에 PnL 귀속 → 오계산) |
 | 모바일 반응형 UI | ✅ 탭 스크롤, 테이블→카드, 터치 타겟, 전 컴포넌트 |
-| 단위 테스트 | ✅ 212개 (pytest + 인메모리 SQLite) |
+| 단위 테스트 | ✅ 253개 (pytest + 인메모리 SQLite) |
 | 거래 기본 필터 | ✅ 체결(filled)만 기본 표시, status 파라미터 |
 | 시작 시 현금 보정 | ✅ reconcile_cash_from_db at startup (peak 오염 방지) |
 | 0% 승률 전략 제거 | ✅ volatility_breakout/supertrend 비활성 → 6전략 체제 |
@@ -308,7 +314,15 @@ coin/
 | **P1 최적화** | ✅ 4h 타임프레임, 동적 SL, 숏 전면 허용, PF 1.80 |
 | 가격 0원 fallback | ✅ fetch_ticker last=None → bid/ask 중간값 → orderbook fallback |
 | **자동 리밸런싱** | ✅ 비중 40% 초과 → 35%까지 자동 부분 매도 (현물+선물, 1시간 쿨다운) |
-| 바이낸스 현물 연동 | ⬜ BinanceSpotAdapter (ccxt binance), 현물 TradingEngine 추가 (계획) |
+| **바이낸스 현물 연동** | ✅ BinanceSpotAdapter (ccxt binance), TradingEngine 재사용, PaperAdapter 통화 추상화, 교차충돌 3거래소 체크 |
+| **현물 4h 타임프레임 전환** | ✅ 1h→4h 전환 (포트폴리오 PF 1.70→2.34, +37%), SL 선터짐 해소 |
+| **스파이크 3겹 방어** | ✅ Sync Guard + Spike Detection + Peak Fix Script |
+| **선물 알림 카테고리 수정** | ✅ emit_event "trade"→"futures_trade" (DOGE 등 소수점 가격 0 표시 수정) |
+| **현물 4전략 전환 (v0.23)** | ✅ BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널 → 현물 전용 (540d PF 1.03→1.63, +28.9%, MDD 15.4%) |
+| **거래소별 전략 분기** | ✅ engine `initialize()` + combiner SPOT_WEIGHTS + 에이전트 SPOT/FUTURES_WEIGHT_PROFILES |
+| **프론트엔드 현물/선물 그룹** | ✅ 거래소 선택기 현물/선물 그룹 라벨, 바이낸스 현물 USDT 통화 수정 (7곳) |
+| **선물 역추세 매수 가드 (v0.24)** | ✅ bollinger_rsi 밴드폭>50% 차단 + SMA갭>3% 신뢰도 0.5x, rsi 동일 가드 (180d PF 1.10→1.22) |
+| **WiFi 워치독** | ✅ 3분 간격 ping 기반 WiFi 자동 재접속 (공유기 재부팅 대응) |
 | 시장 상태별 전략 on/off | ⬜ 횡보 시 추세추종 완전 비활성 (향후) |
 | 라즈베리파이 배포 | ✅ 완료 (192.168.50.244, systemd) |
 | 매매 회고 선물 인식 | ✅ 방향/레버리지/마진/청산가, LLM 선물 컨텍스트, 통화 자동 전환 |
@@ -323,7 +337,7 @@ coin/
 
 | 항목 | 우선순위 | 상태 |
 |---|---|---|
-| 바이낸스 현물 연동 (v0.18) | 중 | ⬜ BinanceSpotAdapter, 현물 TradingEngine 추가 |
+| 바이낸스 현물 연동 (v0.22) | 중 | ✅ BinanceSpotAdapter + TradingEngine 재사용, 10 tests |
 | 시장 상태별 전략 on/off | 낮 | ⬜ 횡보 시 추세추종 완전 비활성 |
 | 멀티 심볼 백테스트 | 중 | ✅ `--portfolio` 모드 (PortfolioBacktester, 540일 지원, fetch_long_history.py) |
 | Alembic 마이그레이션 정리 | 낮 | ⬜ 초기 마이그레이션 + 수동 migrate.py 혼재 |
@@ -349,9 +363,9 @@ coin/
            crash=25% 사이징 / downtrend=50% / 나머지=100%
 ```
 
-### 시장 상태별 전략 가중치 프로필 (6전략)
+### 시장 상태별 전략 가중치 프로필
 
-> Grid/DCA는 독립 관리형, volatility_breakout/supertrend는 0% 승률로 비활성. 6개 활성 전략만 사용.
+#### 선물 (6전략) — FUTURES_WEIGHT_PROFILES
 
 | 시장 상태 | MA | RSI | MACD | Boll+RSI | StochRSI | OBV |
 |---|---|---|---|---|---|---|
@@ -360,6 +374,15 @@ coin/
 | 횡보장 (기본) | 0.08 | 0.25 | 0.08 | 0.31 | 0.15 | 0.13 |
 | 하락장 | 0.06 | 0.27 | 0.08 | 0.32 | 0.15 | 0.12 |
 | 폭락장 | 0.04 | 0.28 | 0.06 | 0.34 | 0.15 | 0.13 |
+
+#### 현물 (4전략) — SPOT_WEIGHT_PROFILES (v0.23)
+
+| 시장 상태 | BNF이격도 | CIS모멘텀 | 래리윌리엄스 | 돈치안채널 |
+|---|---|---|---|---|
+| 강한 상승장 | 0.05 | 0.35 | 0.35 | 0.25 |
+| 상승장 | 0.08 | 0.33 | 0.33 | 0.26 |
+| 횡보장 (기본) | 0.15 | 0.30 | 0.30 | 0.25 |
+| 하락장 | 0.20 | 0.28 | 0.28 | 0.24 |
 
 ### 5요소 시장 상태 감지 (Agent-style)
 
@@ -450,7 +473,7 @@ coin/
 - 백테스트 540일: -10.06% (B&H -35.44%, **알파 +25.38%**)
 - 기존 대비 손실 44% 감소 (-17.85% → -10.06%)
 
-### 듀얼 엔진 아키텍처 (v0.13)
+### 트리플 엔진 아키텍처 (v0.13 → v0.22)
 
 ```
 EngineRegistry (싱글턴)
@@ -459,11 +482,16 @@ EngineRegistry (싱글턴)
 │   ├── PortfolioManager (KRW)
 │   ├── SignalCombiner + AgentCoordinator
 │   └── 서지 로테이션 활성
-└── "binance_futures"
-    ├── BinanceFuturesEngine(TradingEngine) (선물, exchange_name="binance_futures")
+├── "binance_futures"
+│   ├── BinanceFuturesEngine(TradingEngine) (선물, exchange_name="binance_futures")
+│   ├── PortfolioManager (USDT)
+│   ├── SignalCombiner + AgentCoordinator
+│   └── 롱/숏 양방향, 레버리지, 청산가 감시
+└── "binance_spot"
+    ├── TradingEngine (현물, exchange_name="binance_spot")
     ├── PortfolioManager (USDT)
     ├── SignalCombiner + AgentCoordinator
-    └── 롱/숏 양방향, 레버리지, 청산가 감시
+    └── 선물과 동일 API키, 동일 tracked_coins, 수수료 0.1%
 ```
 
 **데이터 격리**: 6테이블(Order, Trade, Position, PortfolioSnapshot, StrategyLog, AgentAnalysisLog)에 `exchange` 컬럼 추가 (기본값 "bithumb"). Position은 (symbol, exchange) 복합 유니크.
@@ -526,7 +554,7 @@ orders
 | GET | /events | 서버 이벤트 로그 (페이징+필터) |
 | GET | /events/counts | 레벨별 이벤트 건수 |
 
-> **거래소 파라미터**: 모든 엔드포인트에 `?exchange=bithumb|binance_futures` 쿼리 파라미터 지원 (기본값: bithumb)
+> **거래소 파라미터**: 모든 엔드포인트에 `?exchange=bithumb|binance_futures|binance_spot` 쿼리 파라미터 지원 (기본값: bithumb)
 
 ### WebSocket
 
@@ -749,5 +777,7 @@ docker compose restart backend
 | v0.19 | 2026-03-02 | **PositionTracker DB 영속화 + 프론트 SL/TP**: Position 모델에 7 트래커 컬럼 추가 (stop_loss_pct, take_profit_pct, trailing_activation_pct, trailing_stop_pct, trailing_active, highest_price, max_hold_hours), 매수/진입 시 DB 저장 + 재시작 시 DB 복원, 프론트엔드 포지션에 손절가·익절가 표시 + TRAIL/SURGE 뱃지 (203 tests) |
 | v0.19.1 | 2026-03-02 | **가짜 스파이크 방지 + 에이전트 수정 + 전략 안전장치**: (1) sync/eval 인터리빙 스파이크 방지 (스냅샷 직전 reconcile), (2) trade_review PnL 매칭 수정 (윈도우 이전 진입 DB 조회), (3) PF 캡핑 inf→99, (4) 교차 거래소 충돌 차단 (현물 롱↔선물 숏 동시 진입 방지), (5) 매도 후 재매수 4시간 대기 washout (당일 왕복 방지), 209 tests |
 | v0.19.2 | 2026-03-02 | **선물 잔고 정합성 + 타임스탬프 영속화 + MACD 최적화**: (1) 선물 reconcile_cash_from_db 건너뜀 — 펀딩비 미포함 누적 오차 해소, 거래소 API sync가 진실의 원천, (2) Position.last_trade_at/last_sell_at DB 컬럼 추가 — 재시작 시 쿨다운/washout 복원, (3) MACD 가중치 0.12→0.08 (bollinger_rsi에 재분배, 백테스트 검증), (4) 프론트엔드 systemd ExecStartPre 빌드 자동화, 212 tests |
-| v0.20 | 예정 | 바이낸스 현물 연동 (BinanceSpotAdapter) |
+| v0.21 | 2026-03-02 | **스파이크 3겹 방어 + 현물 4h 전환**: (1) Sync Guard — eval 중 sync 차단 (매매 직후 API/DB 불일치 방지), (2) Spike Detection — 15%+ 변동 시 peak 업데이트 건너뜀, (3) Peak Fix Script — 스냅샷 스캔 후 스파이크 제외 peak 재계산, (4) 현물 타임프레임 1h→4h 전환 (포트폴리오 PF 1.70→2.34, +37%, 매매 -56%), (5) 리스크 에이전트 통화 수정 ("원" 하드코딩 → 선물 USDT/현물 "원" 자동 포맷), 218 tests |
+| v0.22 | 2026-03-03 | **바이낸스 현물 연동 + 선물 알림 수정**: (1) BinanceSpotAdapter (ccxt.binance, 선물 메서드 없음), (2) BinanceSpotTradingConfig (env_prefix BINANCE_SPOT_TRADING_), (3) TradingEngine 재사용 (tracked_coins/eval_interval 파라미터화, 거래소별 min_order/fee_margin/fallback 프로퍼티), (4) PaperAdapter 통화 추상화 (base_currency KRW/USDT), (5) PortfolioManager 바이낸스 현물 USDT 지원, (6) 교차충돌 3거래소 체크 (base 심볼 기준), (7) 선물 emit_event "trade"→"futures_trade" 수정 (DOGE 등 소수점 가격 0 표시 해결), 231 tests |
+| v0.23 | 2026-03-03 | **현물 4전략 전환 + 프론트 현물/선물 구분**: (1) 4대 트레이더 전략 구현 — BNF이격도(평균회귀), CIS모멘텀(순수모멘텀), 래리윌리엄스(변동성돌파+%R), 돈치안채널(터틀트레이딩), (2) 현물 전략 전환 — 기존6 제거 + 신규4 적용 (540d PF 1.03→1.63, MDD 33.8%→15.4%), (3) 선물은 기존6전략 유지 (ETH PF 2.55 vs 신규 1.20), (4) 거래소별 전략 분기 — engine initialize() + combiner SPOT_WEIGHTS + 에이전트 SPOT/FUTURES_WEIGHT_PROFILES, (5) 프론트엔드 — 거래소 선택기 현물/선물 그룹 라벨, 바이낸스 현물 USDT 통화 수정 (7곳), 전략 한국어명/색상/필터 추가, (6) 백테스트 10전략 통합 (균등 가중치 fallback), 253 tests |
 | v1.0 | 진행중 | **라즈베리파이 배포 완료**, 장기 운영 안정화 |
