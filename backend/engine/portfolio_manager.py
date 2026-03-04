@@ -321,27 +321,26 @@ class PortfolioManager:
                     )
                     return None
 
-            # 2) Total value spike check (중앙값 기준, invested 변동으로 설명 불가능한 경우만)
-            #    시장 급등/급락 시 invested가 변하지만, 스파이크는 cash 이상으로 total만 뜀
+            # 2) Total value spike check (중앙값 기준 10% 이상 변동)
+            #    시장 변동: cash 불변 + invested/total 변동 → 허용
+            #    스파이크: cash 변동(매매) + total 비정상 급등 → 차단
             prev_totals = [r[0] for r in prev_rows if r[0] and r[0] > 0]
             if prev_totals:
                 baseline = sorted(prev_totals)[len(prev_totals) // 2]
                 if baseline > 0:
                     total_change_pct = abs(new_total - baseline) / baseline * 100
-                    if total_change_pct > 15:
-                        # invested 변동이 total 변동의 50% 이상 설명 → 실제 시장 변동
-                        total_change = abs(new_total - baseline)
-                        prev_inv_vals = [r[2] for r in prev_rows if r[2] is not None]
-                        inv_baseline = sorted(prev_inv_vals)[len(prev_inv_vals) // 2] if prev_inv_vals else 0
-                        inv_change = abs(summary["invested_value_krw"] - inv_baseline)
-                        if total_change > 0 and inv_change / total_change < 0.5:
+                    if total_change_pct > 10:
+                        prev_cash_val = prev_rows[0][1] or 0
+                        cash_delta_pct = abs(new_cash - prev_cash_val) / baseline * 100 if baseline > 0 else 0
+                        if cash_delta_pct > 3:
+                            # cash 변동 + total 급변 → 매매 직후 sync 오염 가능
                             logger.warning(
                                 "snapshot_skipped_total_spike",
                                 exchange=self._exchange_name,
                                 baseline=round(baseline, 2),
                                 new_total=round(new_total, 2),
                                 total_change_pct=round(total_change_pct, 1),
-                                inv_change=round(inv_change, 2),
+                                cash_delta_pct=round(cash_delta_pct, 1),
                             )
                             return None
 
@@ -523,6 +522,18 @@ class PortfolioManager:
             except Exception as e:
                 logger.warning("fetch_futures_positions_failed", error=str(e))
 
+        # 선물: 최근 거래된 포지션의 margin 오버라이트 보호 (grace period 10분)
+        # sync가 거래 직후 exchange API에서 일시적으로 틀린 initialMargin을 읽어서
+        # total_invested를 오염시키는 것을 방지
+        from datetime import datetime, timezone, timedelta
+        _margin_grace = timedelta(minutes=10)
+        _now_utc = datetime.now(timezone.utc)
+        _protected_syms: set[str] = set()
+        if is_futures:
+            for db_sym, db_pos in db_positions.items():
+                if db_pos.last_trade_at and (_now_utc - db_pos.last_trade_at) < _margin_grace:
+                    _protected_syms.add(db_sym)
+
         for symbol, bal in balances.items():
             if symbol == cash_symbol or bal.total <= 0:
                 continue
@@ -598,11 +609,12 @@ class PortfolioManager:
                 old_qty = db_pos.quantity
                 db_pos.quantity = bal.total
                 if is_futures and fp_data:
-                    db_pos.total_invested = margin
+                    if pair not in _protected_syms:
+                        db_pos.total_invested = margin
+                        db_pos.margin_used = margin
                     db_pos.direction = direction
                     db_pos.leverage = leverage
                     db_pos.liquidation_price = liq_price
-                    db_pos.margin_used = margin
                 elif old_qty > 0:
                     ratio = bal.total / old_qty
                     db_pos.total_invested *= ratio
@@ -622,9 +634,10 @@ class PortfolioManager:
                         db_pos.direction = direction
                         changed = True
                     if margin > 0 and abs(getattr(db_pos, "margin_used", 0) - margin) > 0.01:
-                        db_pos.total_invested = margin
-                        db_pos.margin_used = margin
-                        changed = True
+                        if pair not in _protected_syms:
+                            db_pos.total_invested = margin
+                            db_pos.margin_used = margin
+                            changed = True
                     if liq_price and getattr(db_pos, "liquidation_price", None) != liq_price:
                         db_pos.liquidation_price = liq_price
                         changed = True
@@ -670,9 +683,10 @@ class PortfolioManager:
                         db_pos.direction = fp_direction
                         changed = True
                     if fp_margin > 0 and abs(getattr(db_pos, "margin_used", 0) - fp_margin) > 0.01:
-                        db_pos.total_invested = fp_margin
-                        db_pos.margin_used = fp_margin
-                        changed = True
+                        if pair not in _protected_syms:
+                            db_pos.total_invested = fp_margin
+                            db_pos.margin_used = fp_margin
+                            changed = True
                     if fp_liq and getattr(db_pos, "liquidation_price", None) != fp_liq:
                         db_pos.liquidation_price = fp_liq
                         changed = True
