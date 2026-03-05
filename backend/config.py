@@ -134,7 +134,7 @@ class LLMConfig(BaseSettings):
     enabled: bool = False
     api_key: str = ""
     model: str = "claude-haiku-4-5-20251001"
-    fallback_model: str = "claude-sonnet-4-6-20250217"
+    fallback_model: str = "claude-sonnet-4-6"
     daily_review_enabled: bool = True
 
     model_config = {"env_prefix": "LLM_"}
