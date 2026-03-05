@@ -40,9 +40,6 @@ from agents.coordinator import AgentCoordinator
 
 from api.router import create_api_router, get_ws_router
 from api.websocket import ws_manager
-from api.portfolio import set_portfolio_manager
-from api.strategies import set_engine_and_combiner
-from api.dashboard import set_dashboard_deps
 from api.dependencies import engine_registry
 from core.event_bus import set_broadcast as set_event_broadcast, set_notification as set_event_notification, emit_event
 from services.discord_event_handler import DiscordEventHandler, send_daily_summary
@@ -188,11 +185,6 @@ async def lifespan(app: FastAPI):
         _discord_handler = DiscordEventHandler(discord_webhook)
         set_event_notification(_discord_handler.handle_event)
         logger.info("discord_event_handler_registered")
-
-    # ── 6. API 의존성 주입 (레거시 + 레지스트리) ────────────────
-    set_portfolio_manager(portfolio_mgr)
-    set_engine_and_combiner(trading_engine, combiner)
-    set_dashboard_deps(trading_engine, coordinator, config)
 
     # Self-healing: RecoveryManager + DiagnosticAgent 주입 (빗썸)
     from engine.recovery import RecoveryManager

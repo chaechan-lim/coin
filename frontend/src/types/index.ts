@@ -194,7 +194,7 @@ export interface RotationStatus {
 export interface ServerEvent {
   id: number
   level: 'info' | 'warning' | 'error' | 'critical'
-  category: 'engine' | 'trade' | 'risk' | 'rotation' | 'strategy' | 'system'
+  category: 'engine' | 'trade' | 'futures_trade' | 'risk' | 'rotation' | 'strategy' | 'signal' | 'health' | 'recovery' | 'system'
   title: string
   detail: string | null
   metadata: Record<string, unknown> | null

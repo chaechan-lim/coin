@@ -11,20 +11,9 @@ from api.dependencies import engine_registry
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
-# Legacy setter for backward compatibility
-_portfolio_manager = None
-
-
-def set_portfolio_manager(pm):
-    global _portfolio_manager
-    _portfolio_manager = pm
-
 
 def _get_pm(exchange: str):
-    pm = engine_registry.get_portfolio_manager(exchange)
-    if pm:
-        return pm
-    return _portfolio_manager
+    return engine_registry.get_portfolio_manager(exchange)
 
 
 @router.get("/summary", response_model=PortfolioSummaryResponse)

@@ -19,31 +19,13 @@ from api.dependencies import engine_registry
 
 router = APIRouter(tags=["dashboard"])
 
-# Legacy setters for backward compatibility
-_engine = None
-_coordinator = None
-_config = None
-
-
-def set_dashboard_deps(engine, coordinator, config):
-    global _engine, _coordinator, _config
-    _engine = engine
-    _coordinator = coordinator
-    _config = config
-
 
 def _get_engine(exchange: str):
-    eng = engine_registry.get_engine(exchange)
-    if eng:
-        return eng
-    return _engine
+    return engine_registry.get_engine(exchange)
 
 
 def _get_coordinator(exchange: str):
-    coord = engine_registry.get_coordinator(exchange)
-    if coord:
-        return coord
-    return _coordinator
+    return engine_registry.get_coordinator(exchange)
 
 
 @router.get("/exchanges")
@@ -193,7 +175,7 @@ async def get_latest_market_analysis(
 
 @router.get("/agents/market-analysis/history", response_model=list[AgentLogResponse])
 async def get_market_analysis_history(
-    limit: int = 100,
+    limit: int = Query(100, ge=1, le=500),
     exchange: str = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
@@ -268,7 +250,7 @@ async def trigger_trade_review(exchange: str = Query("bithumb")):
 
 @router.get("/agents/trade-review/history", response_model=list[AgentLogResponse])
 async def get_trade_review_history(
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
     exchange: str = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
@@ -307,7 +289,7 @@ async def get_risk_alerts(exchange: str = Query("bithumb")):
 
 @router.get("/agents/risk/history", response_model=list[AgentLogResponse])
 async def get_risk_history(
-    limit: int = 100,
+    limit: int = Query(100, ge=1, le=500),
     exchange: str = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):

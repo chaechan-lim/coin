@@ -452,11 +452,16 @@ class DiscordEventHandler:
         try:
             resp = await self._client.post(self._webhook_url, json=payload)
             if resp.status_code == 429:
-                # Rate limited by Discord — back off
-                retry_after = resp.json().get("retry_after", 5)
+                try:
+                    retry_after = resp.json().get("retry_after", 5)
+                except Exception:
+                    retry_after = 5
                 logger.warning("discord_rate_limited_429", retry_after=retry_after)
                 await asyncio.sleep(retry_after)
-                await self._client.post(self._webhook_url, json=payload)
+                try:
+                    await self._client.post(self._webhook_url, json=payload)
+                except Exception as e2:
+                    logger.warning("discord_retry_failed", error=str(e2))
             elif resp.status_code not in (200, 204):
                 logger.warning("discord_webhook_failed", status=resp.status_code)
         except Exception as e:

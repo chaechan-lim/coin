@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getTrades } from '../api/client'
 import { formatTs } from '../utils/date'
+import { fmtPrice } from '../utils/format'
 import type { Order, ExchangeName } from '../types'
 
 const STRATEGY_COLORS: Record<string, string> = {
@@ -26,12 +27,6 @@ function StrategyBadge({ name }: { name: string }) {
       {name.replace(/_/g, ' ')}
     </span>
   )
-}
-
-function fmtPrice(n: number, isUsdt: boolean) {
-  return isUsdt
-    ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + ' USDT'
-    : n.toLocaleString() + ' ₩'
 }
 
 function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean }) {

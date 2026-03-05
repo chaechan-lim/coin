@@ -1003,15 +1003,16 @@ async def test_sync_guard_skips_during_eval(session):
         exchange_name="binance_futures",
     )
     pm._cash_balance = 260.0
-    pm._sync_guard = True
 
     adapter = AsyncMock()
     adapter.fetch_balance = AsyncMock(return_value={
         "USDT": Balance(currency="USDT", free=999, used=0, total=999),
     })
 
-    await pm.sync_exchange_positions(session, adapter, [])
-    # fetch_balance가 호출되지 않아야 함 (guard에서 return)
+    # sync_lock이 잠겨 있으면 sync를 스킵해야 함
+    async with pm._sync_lock:
+        await pm.sync_exchange_positions(session, adapter, [])
+    # fetch_balance가 호출되지 않아야 함 (lock에서 return)
     adapter.fetch_balance.assert_not_called()
     assert pm.cash_balance == 260.0  # 불변
 
@@ -1026,8 +1027,6 @@ async def test_sync_guard_allows_normal(session):
         initial_balance_krw=300,
         exchange_name="binance_futures",
     )
-    pm._sync_guard = False
-
     adapter = AsyncMock()
     adapter.fetch_balance = AsyncMock(return_value={
         "USDT": Balance(currency="USDT", free=300, used=0, total=300),

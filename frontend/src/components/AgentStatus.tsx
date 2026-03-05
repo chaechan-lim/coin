@@ -1,6 +1,20 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getMarketAnalysis, getRiskAlerts, getTradeReview, triggerTradeReview } from '../api/client'
 import type { RiskAlert, ExchangeName } from '../types'
+import { fmtPrice } from '../utils/format'
+
+interface StrategyStats {
+  trades: number
+  win_rate: number
+  total_pnl: number
+}
+
+interface OpenPosition {
+  symbol: string
+  invested: number
+  unrealized_pnl: number
+  unrealized_pnl_pct?: number
+}
 
 /** **bold** 및 `code` 마크다운을 React 엘리먼트로 변환 */
 function renderMd(text: string) {
@@ -58,15 +72,9 @@ function AlertBadge({ alert }: { alert: RiskAlert }) {
   )
 }
 
-function fmtVal(n: number, isUsdt: boolean): string {
-  return isUsdt
-    ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + ' USDT'
-    : n.toLocaleString('ko-KR', { maximumFractionDigits: 0 }) + ' ₩'
-}
-
 export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
   const isUsdt = exchange.startsWith('binance')
-  const fmt = (n: number) => fmtVal(n, isUsdt)
+  const fmt = (n: number) => fmtPrice(n, isUsdt)
   const qc = useQueryClient()
 
   const { data: analysis } = useQuery({
@@ -252,8 +260,10 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
                 <div className="text-gray-400 text-xs mb-2">전략별 성과</div>
                 <div className="space-y-1">
                   {Object.entries(review.by_strategy)
-                    .sort(([, a]: any, [, b]: any) => b.total_pnl - a.total_pnl)
-                    .map(([name, stats]: [string, any]) => (
+                    .sort(([, a], [, b]) => (b as StrategyStats).total_pnl - (a as StrategyStats).total_pnl)
+                    .map(([name, _stats]) => {
+                      const stats = _stats as StrategyStats
+                      return (
                       <div key={name} className="flex items-center gap-2 text-xs flex-wrap">
                         <span className="text-gray-400 w-20 sm:w-28 truncate">{name.replace(/_/g, ' ')}</span>
                         <span className="text-gray-300">{stats.trades}건</span>
@@ -264,7 +274,7 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
                           {stats.total_pnl >= 0 ? '+' : ''}{fmt(stats.total_pnl)}
                         </span>
                       </div>
-                    ))}
+                    )})}
                 </div>
               </div>
             )}
@@ -274,7 +284,7 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
               <div>
                 <div className="text-gray-400 text-xs mb-2">보유 포지션</div>
                 <div className="space-y-1">
-                  {review.open_positions.map((pos: any) => (
+                  {review.open_positions.map((pos: OpenPosition) => (
                     <div key={pos.symbol} className="flex items-center gap-2 text-xs bg-gray-900 rounded p-2">
                       <span className="text-white font-medium w-20">{pos.symbol.replace(/\/(KRW|USDT)/, '')}</span>
                       <span className="text-gray-400">투자 {fmt(pos.invested)}</span>

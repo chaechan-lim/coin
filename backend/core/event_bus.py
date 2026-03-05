@@ -75,8 +75,8 @@ async def emit_event(
                         asyncio.create_task(
                             _notification_fn(level, category, title, detail, metadata)
                         )
-                    except Exception:
-                        pass  # 알림 실패가 엔진을 크래시시키면 안 됨
+                    except (TypeError, RuntimeError) as e:
+                        logger.debug("notification_dispatch_error", error=str(e))
                 return
         except Exception as e:
             if attempt < 2 and "database is locked" in str(e):

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { usePortfolioSummary } from '../hooks/usePortfolio'
 import { CapitalManager } from './CapitalManager'
 import type { ExchangeName } from '../types'
+import { fmtPrice } from '../utils/format'
 
 function StatCard({
   label,
@@ -30,14 +31,6 @@ function StatCard({
   )
 }
 
-function fmtKrw(n: number) {
-  return n.toLocaleString('ko-KR') + ' ₩'
-}
-
-function fmtUsdt(n: number) {
-  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + ' USDT'
-}
-
 function fmtPct(n: number) {
   const sign = n >= 0 ? '+' : ''
   return `${sign}${n.toFixed(2)}%`
@@ -45,7 +38,7 @@ function fmtPct(n: number) {
 
 export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
   const isUsdt = exchange.startsWith('binance')
-  const fmt = isUsdt ? fmtUsdt : fmtKrw
+  const fmt = (n: number) => fmtPrice(n, isUsdt)
   const { data, isLoading } = usePortfolioSummary(exchange)
   const [capitalOpen, setCapitalOpen] = useState(false)
 
@@ -85,9 +78,7 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
         <StatCard
           label="원금 대비 수익"
           value={fmtPct(returnFromInitial)}
-          sub={`${returnFromInitial >= 0 ? '+' : ''}${isUsdt
-            ? (data.total_value_krw - data.initial_balance_krw).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + ' USDT'
-            : (data.total_value_krw - data.initial_balance_krw).toLocaleString('ko-KR') + ' ₩'}`}
+          sub={`${returnFromInitial >= 0 ? '+' : ''}${fmt(data.total_value_krw - data.initial_balance_krw)}`}
           color={returnColor}
         />
         <StatCard label="현금 잔액" value={fmt(data.cash_balance_krw)} />

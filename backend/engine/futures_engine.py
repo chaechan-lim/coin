@@ -254,8 +254,8 @@ class BinanceFuturesEngine(TradingEngine):
                 margin_used = float(usdt.get("used", 0) or 0)
                 cash = wallet_total - margin_used
                 if cash >= 0:
-                    old = self._portfolio_manager._cash_balance
-                    self._portfolio_manager._cash_balance = cash
+                    old = self._portfolio_manager.cash_balance
+                    self._portfolio_manager.cash_balance = cash
                     if abs(old - cash) > 0.5:
                         logger.debug("ws_balance_updated",
                                      old=round(old, 2), new=round(cash, 2),
@@ -545,8 +545,8 @@ class BinanceFuturesEngine(TradingEngine):
                 if sym not in old_set and sym not in self._config.binance.tracked_coins:
                     try:
                         await self._exchange.set_leverage(sym, self._leverage)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("leverage_set_failed", symbol=sym, error=str(e))
 
             self._dynamic_coins = new_coins
             self._last_coin_refresh = now
@@ -564,8 +564,7 @@ class BinanceFuturesEngine(TradingEngine):
 
         self._reset_daily_counter()
 
-        self._portfolio_manager._sync_guard = True
-        try:
+        async with self._portfolio_manager._sync_lock:
             session_factory = get_session_factory()
             async with session_factory() as session:
                 try:
@@ -647,8 +646,6 @@ class BinanceFuturesEngine(TradingEngine):
                 except Exception as e:
                     logger.error("futures_cycle_error", error=str(e), exc_info=True)
                     await session.rollback()
-        finally:
-            self._portfolio_manager._sync_guard = False
 
     async def _evaluate_futures_coin(self, session: AsyncSession, symbol: str) -> None:
         """선물 코인 평가: SL/TP + 청산가 체크 + 양방향 매매."""

@@ -97,7 +97,7 @@ def mock_order_mgr():
 def mock_pm():
     pm = MagicMock()
     pm.cash_balance = 500000  # 50만원 현금
-    pm._sync_guard = False
+    pm._sync_lock = asyncio.Lock()
     pm._is_paper = False
     pm._exchange_name = "bithumb"
     pm.update_position_on_buy = AsyncMock()

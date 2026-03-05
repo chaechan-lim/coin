@@ -9,6 +9,7 @@ import {
 } from '../api/client'
 import type { ExchangeName } from '../types'
 import { formatTs } from '../utils/date'
+import { fmtPrice } from '../utils/format'
 
 const TX_TYPE_LABEL = { deposit: '입금', withdrawal: '출금' } as const
 const SOURCE_LABEL = {
@@ -88,10 +89,7 @@ export function CapitalManager({
     })
   }
 
-  const fmtAmt = (n: number) =>
-    isUsdt
-      ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + ' USDT'
-      : n.toLocaleString('ko-KR') + ' ₩'
+  const fmtAmt = (n: number) => fmtPrice(n, isUsdt)
 
   if (!open) return null
 

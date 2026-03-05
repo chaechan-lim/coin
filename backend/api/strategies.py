@@ -18,29 +18,13 @@ from api.dependencies import engine_registry
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
-# Legacy setters for backward compatibility
-_engine = None
-_combiner = None
-
-
-def set_engine_and_combiner(engine, combiner):
-    global _engine, _combiner
-    _engine = engine
-    _combiner = combiner
-
 
 def _get_engine(exchange: str):
-    eng = engine_registry.get_engine(exchange)
-    if eng:
-        return eng
-    return _engine
+    return engine_registry.get_engine(exchange)
 
 
 def _get_combiner(exchange: str):
-    comb = engine_registry.get_combiner(exchange)
-    if comb:
-        return comb
-    return _combiner
+    return engine_registry.get_combiner(exchange)
 
 
 @router.get("", response_model=list[StrategyResponse])

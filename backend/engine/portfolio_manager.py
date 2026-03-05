@@ -1,3 +1,4 @@
+import asyncio
 import structlog
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,9 +29,17 @@ class PortfolioManager:
         self._peak_value = initial_balance_krw
         self._realized_pnl = 0.0
         self._peak_already_adjusted = False
-        self._sync_guard = False  # eval 중 sync 차단
+        self._sync_lock = asyncio.Lock()  # eval 중 sync 차단
         self._last_total_value: float | None = None  # 스파이크 감지용
         self._snapshot_skip_count = 0  # 연속 스킵 → 실제 변화 강제 기록
+
+    @property
+    def cash_balance(self) -> float:
+        return self._cash_balance
+
+    @cash_balance.setter
+    def cash_balance(self, value: float) -> None:
+        self._cash_balance = value
 
     async def update_position_on_buy(
         self, session: AsyncSession, symbol: str, quantity: float, price: float, cost: float, fee: float,
@@ -503,7 +512,7 @@ class PortfolioManager:
         - DB 포지션 수량 vs 거래소 실제 수량 불일치 → 거래소 기준으로 보정
         - 실제 현금 잔고로 cash_balance 갱신
         """
-        if self._sync_guard:
+        if self._sync_lock.locked():
             logger.info("sync_skipped_during_eval", exchange=self._exchange_name)
             return
 

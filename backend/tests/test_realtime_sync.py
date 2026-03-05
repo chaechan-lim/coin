@@ -242,13 +242,13 @@ class TestWebSocketBalanceSync:
         await futures_engine._ws_balance_loop()
 
         # cash = total - used = 500 - 100 = 400
-        assert futures_engine._portfolio_manager._cash_balance == 400.0
+        assert futures_engine._portfolio_manager.cash_balance == 400.0
 
     @pytest.mark.asyncio
     async def test_ws_balance_negative_cash_ignored(self, futures_engine, mock_exchange):
         """음수 현금은 무시."""
         futures_engine._is_running = True
-        old_cash = futures_engine._portfolio_manager._cash_balance
+        old_cash = futures_engine._portfolio_manager.cash_balance
 
         call_count = 0
 
@@ -265,7 +265,7 @@ class TestWebSocketBalanceSync:
         await futures_engine._ws_balance_loop()
 
         # cash = 50 - 100 = -50 → 무시 (조건: cash >= 0)
-        assert futures_engine._portfolio_manager._cash_balance == old_cash
+        assert futures_engine._portfolio_manager.cash_balance == old_cash
 
     @pytest.mark.asyncio
     async def test_ws_balance_handles_error(self, futures_engine, mock_exchange):

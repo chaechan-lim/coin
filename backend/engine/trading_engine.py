@@ -986,8 +986,7 @@ class TradingEngine:
         # 시장 상태 업데이트
         await self._maybe_update_market_state()
 
-        self._portfolio_manager._sync_guard = True
-        try:
+        async with self._portfolio_manager._sync_lock:
             session_factory = get_session_factory()
             async with session_factory() as session:
                 try:
@@ -1061,8 +1060,6 @@ class TradingEngine:
                     await session.rollback()
                     logger.error("evaluation_cycle_error", error=str(e), exc_info=True)
                     await emit_event("error", "engine", "평가 사이클 오류", detail=str(e))
-        finally:
-            self._portfolio_manager._sync_guard = False
 
     async def _evaluate_coin(self, session: AsyncSession, symbol: str) -> None:
         """Evaluate a single coin: SL/TP first, then strategy signals."""

@@ -6,6 +6,7 @@ import {
 } from 'recharts'
 import { getDailyPnl } from '../api/client'
 import type { ExchangeName } from '../types'
+import { fmtSignedPrice } from '../utils/format'
 
 const PERIODS = [
   { label: '7일', days: 7 },
@@ -56,10 +57,7 @@ export function DailyPnLStats({ exchange = 'bithumb' }: { exchange?: ExchangeNam
     })
   }, [records, isUsdt])
 
-  const formatValue = (v: number) => {
-    if (isUsdt) return `${v >= 0 ? '+' : ''}${v.toFixed(2)} USDT`
-    return `${v >= 0 ? '+' : ''}${v.toLocaleString()} ${currency}`
-  }
+  const formatValue = (v: number) => fmtSignedPrice(v, isUsdt)
 
   return (
     <div className="space-y-3">
