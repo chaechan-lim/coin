@@ -1078,9 +1078,5 @@ class PortfolioManager:
         return record
 
     @property
-    def cash_balance(self) -> float:
-        return self._cash_balance
-
-    @property
     def realized_pnl(self) -> float:
         return self._realized_pnl
