@@ -2,9 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getServerEvents } from '../api/client'
 import type { ServerEvent } from '../types'
-import { format } from 'date-fns'
-
-const utcToLocal = (ts: string) => new Date(ts.endsWith('Z') ? ts : ts + 'Z')
+import { formatTs } from '../utils/date'
 
 const LEVEL_STYLES: Record<string, { bg: string; text: string }> = {
   info: { bg: 'bg-blue-900/40', text: 'text-blue-400' },
@@ -16,14 +14,18 @@ const LEVEL_STYLES: Record<string, { bg: string; text: string }> = {
 const CATEGORY_STYLES: Record<string, string> = {
   engine: 'bg-purple-800/50 text-purple-300',
   trade: 'bg-green-800/50 text-green-300',
+  futures_trade: 'bg-emerald-800/50 text-emerald-300',
   risk: 'bg-orange-800/50 text-orange-300',
   rotation: 'bg-cyan-800/50 text-cyan-300',
   strategy: 'bg-indigo-800/50 text-indigo-300',
+  signal: 'bg-blue-800/50 text-blue-300',
+  health: 'bg-teal-800/50 text-teal-300',
+  recovery: 'bg-amber-800/50 text-amber-300',
   system: 'bg-gray-700/50 text-gray-300',
 }
 
 const LEVELS = ['all', 'info', 'warning', 'error', 'critical'] as const
-const CATEGORIES = ['all', 'engine', 'trade', 'risk', 'rotation', 'strategy', 'system'] as const
+const CATEGORIES = ['all', 'engine', 'trade', 'futures_trade', 'risk', 'rotation', 'strategy', 'signal', 'health', 'recovery', 'system'] as const
 
 interface SystemLogProps {
   realtimeEvents?: ServerEvent[]
@@ -154,7 +156,7 @@ function EventRow({
           </span>
           <span className="flex-1 text-sm">{ev.title}</span>
           <span className="text-xs text-gray-500 whitespace-nowrap">
-            {format(utcToLocal(ev.created_at), 'MM/dd HH:mm:ss')}
+            {formatTs(ev.created_at, 'MM/dd HH:mm:ss')}
           </span>
           {hasExtra && (
             <span className="text-gray-500 text-xs">{expanded ? '▼' : '▶'}</span>
@@ -170,7 +172,7 @@ function EventRow({
               {ev.category}
             </span>
             <span className="ml-auto text-xs text-gray-500">
-              {format(utcToLocal(ev.created_at), 'HH:mm:ss')}
+              {formatTs(ev.created_at, 'HH:mm:ss')}
             </span>
             {hasExtra && (
               <span className="text-gray-500 text-xs">{expanded ? '▼' : '▶'}</span>

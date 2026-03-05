@@ -1,10 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { format } from 'date-fns'
 import { getTrades } from '../api/client'
-
-/** API 타임스탬프(UTC, timezone 미표기)를 로컬 Date로 변환 */
-const utcToLocal = (ts: string) => new Date(ts.endsWith('Z') ? ts : ts + 'Z')
+import { formatTs } from '../utils/date'
 import type { Order, ExchangeName } from '../types'
 
 const STRATEGY_COLORS: Record<string, string> = {
@@ -78,7 +75,7 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
             )}
             <span className="text-gray-300">{fmtPrice(price, isUsdt)}</span>
             <span className="text-gray-500 text-xs">
-              {format(utcToLocal(order.created_at), 'MM/dd HH:mm')}
+              {formatTs(order.created_at, 'MM/dd HH:mm')}
             </span>
             <span className="text-gray-600">{expanded ? '▲' : '▼'}</span>
           </div>
@@ -102,7 +99,7 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
               )}
             </div>
             <span className="text-gray-500 text-xs">
-              {format(utcToLocal(order.created_at), 'MM/dd HH:mm')}
+              {formatTs(order.created_at, 'MM/dd HH:mm')}
             </span>
           </div>
           <div className="flex items-center justify-between">
@@ -228,12 +225,20 @@ export function TradeHistory({ exchange = 'bithumb' }: { exchange?: ExchangeName
               onChange={(e) => { setStrategy(e.target.value); setPage(1) }}
             >
               <option value="">전략</option>
-              <option value="volatility_breakout">변동성 돌파</option>
+              <option value="bnf_deviation">BNF 이격도</option>
+              <option value="cis_momentum">CIS 모멘텀</option>
+              <option value="larry_williams">래리 윌리엄스</option>
+              <option value="donchian_channel">돈치안 채널</option>
               <option value="ma_crossover">MA 크로스</option>
               <option value="rsi">RSI</option>
               <option value="macd_crossover">MACD</option>
               <option value="bollinger_rsi">볼린저+RSI</option>
+              <option value="stochastic_rsi">스토캐스틱RSI</option>
+              <option value="obv_divergence">OBV 다이버전스</option>
               <option value="risk_management">리스크 관리</option>
+              <option value="futures_stop">선물 스탑</option>
+              <option value="rotation_surge">로테이션</option>
+              <option value="rebalancing">리밸런싱</option>
             </select>
             <select
               className="bg-gray-700 text-white text-xs px-2 py-1.5 rounded border border-gray-600"

@@ -273,7 +273,7 @@ class TradingEngine:
                             position = result.scalar_one_or_none()
                             if not position:
                                 continue
-                            await self._check_stop_conditions(session, symbol, position, price)
+                            await self._check_stop_conditions(session, symbol, position)
                             await session.commit()
                         except Exception as e:
                             logger.debug("fast_stop_check_error", symbol=symbol, error=str(e))
@@ -546,7 +546,8 @@ class TradingEngine:
             return
 
         try:
-            df = await self._market_data.get_candles("BTC/KRW", "4h", 200)
+            btc_symbol = "BTC/USDT" if "binance" in self._exchange_name else "BTC/KRW"
+            df = await self._market_data.get_candles(btc_symbol, "4h", 200)
             new_state, new_confidence = self._detect_market_state(df)
             self._market_confidence = new_confidence
 
