@@ -8,7 +8,7 @@ import {
   deleteCapitalTransaction,
 } from '../api/client'
 import type { ExchangeName } from '../types'
-import { format } from 'date-fns'
+import { formatTs } from '../utils/date'
 
 const TX_TYPE_LABEL = { deposit: '입금', withdrawal: '출금' } as const
 const SOURCE_LABEL = {
@@ -193,6 +193,9 @@ export function CapitalManager({
                 {createMutation.isPending ? '처리 중...' : '저장'}
               </button>
             </div>
+            {createMutation.isError && (
+              <div className="text-red-400 text-xs">저장 실패: {(createMutation.error as Error)?.message ?? '알 수 없는 오류'}</div>
+            )}
           </form>
         )}
 
@@ -227,7 +230,7 @@ export function CapitalManager({
                       )}
                     </div>
                     <div className="text-xs text-gray-500 truncate">
-                      {format(new Date(tx.created_at), 'yyyy-MM-dd HH:mm')}
+                      {formatTs(tx.created_at, 'yyyy-MM-dd HH:mm')}
                       {tx.note && ` — ${tx.note}`}
                     </div>
                   </div>
