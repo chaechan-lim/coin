@@ -1,6 +1,6 @@
 # 코인 자동 매매 시스템 — 구현 진행 현황
 
-> 최종 업데이트: 2026-03-04
+> 최종 업데이트: 2026-03-05
 
 ---
 
@@ -820,4 +820,5 @@ docker compose restart backend
 | v0.27 | 2026-03-04 | **실시간 동기화 강화**: (1) **선물 WebSocket 잔고 동기화** — watch_balance()로 PM cash_balance 즉시 갱신 (스파이크 방지), (2) **선물 WebSocket 포지션 동기화** — watch_positions()로 DB 포지션(margin, entry, qty, 청산가) 즉시 갱신, (3) **현물 빠른 SL/TP 체크 루프** — 30초 주기 가격 조회+손절/익절 판정 (기존 5분 → 30초 반응), asyncio.gather로 전략 루프와 병렬 실행, (4) **position_sync 간격 축소** — 5분→1분, (5) 실시간 동기화 42개 유닛 테스트 추가, **338 tests** |
 | v0.28 | 2026-03-04 | **매수 실행 안정성 수정 + 프론트 타임스탬프 안전**: (1) **빗썸 최소 주문금액 500→5000 KRW 수정** — 거래소 실제 최소금액 불일치로 매수 실패, (2) **매수 전 cash 사전 검증** — cash < min_order_amount 시 조기 리턴 (order_too_small 도달 전 차단), (3) **create_order try-except 추가** — 거래소 ExchangeError 격리 (평가 사이클 전체 크래시 방지), (4) **order_too_small 로그 debug→info** — 매수 차단 사유 가시성 확보, (5) **프론트 formatTs 유틸** — null/undefined/빈 타임스탬프 safe 처리 (6개 컴포넌트 일괄 적용, invalid timestamp 렌더링 에러 수정), (6) 매수 실행 플로우 35개 테스트 추가, **373 tests** |
 | v0.29 | 2026-03-05 | **자기 치유(Self-Healing) 엔진**: (1) **에러 분류 시스템** — ErrorCategory(TRANSIENT/RESOURCE/STATE/PERMANENT) + classify_error() (core/exceptions.py 계층 활용, 메시지 패턴 매칭), (2) **RecoveryManager** — 분류 기반 자동 복구 (TRANSIENT→백오프, RESOURCE→reconcile+sync, STATE→sync_positions, PERMANENT→코인 억제), 일일 10회 쓰로틀, (3) **LLM DiagnosticAgent** — 규칙 기반 복구 실패 시 Claude API 에스컬레이션 (에러 컨텍스트+포트폴리오 상태 분석→허용 액션만 실행, 일일 20회 제한), (4) **HealthMonitor** — 2분 주기 5가지 프로액티브 건강 검진 (cash 정합성, 포지션 정합성, API 건강, 에러 추세, 멈춘 포지션), API 3회 연속 실패→매수 일시중지+자동 복구 재개, (5) **_execute_with_retry()** — 주문 실행 분류 기반 재시도 (매수/매도 양쪽), (6) **_process_decision 잔고 복구** — cash=0 시 reconcile→sync 자동 시도 후 재판정, (7) Discord health🏥/recovery🔧 카테고리 추가, (8) LLM fallback_model claude-3-haiku→claude-sonnet-4-6 업그레이드, **444 tests** |
+| v0.30 | 2026-03-05 | **크리티컬 버그 수정 + 코드 리뷰**: (1) **현물 Fast SL 완전 무력화 수정** — `_check_stop_conditions` 4인자 호출 TypeError → bare except 삼킴 → 30초 빠른 SL/TP 체크 전체 무력화, 올바른 3인자 호출로 수정, (2) **바이낸스 현물 시장 상태 감지 실패 수정** — `_maybe_update_market_state`에 BTC/KRW 하드코딩 → 바이낸스 현물 엔진 시장 상태 항상 sideways, exchange_name 기반 BTC/USDT 자동 분기, (3) **프론트 SystemLog 누락 카테고리 추가** — futures_trade/signal/health/recovery 스타일+필터, (4) **프론트 TradeHistory 전략 필터 보완** — 전 활성 전략 + 시스템 전략 드롭다운 추가, (5) **WebSocket 메모리 누수 수정** — pingInterval useRef 전환 + stale closure 방지, (6) **프론트 날짜 유틸 통일** — utcToLocal 중복 제거 → formatTs 유틸 통합, (7) 크리티컬 버그 회귀 테스트 추가 (fast SL 시그니처, 시장 상태 심볼 분기), **449 tests** |
 | v1.0 | 진행중 | **라즈베리파이 배포 완료**, 장기 운영 안정화 |
