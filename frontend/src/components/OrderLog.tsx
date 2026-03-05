@@ -1,10 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { format } from 'date-fns'
 import { getStrategyLogs } from '../api/client'
-
-/** API 타임스탬프(UTC, timezone 미표기)를 로컬 Date로 변환 */
-const utcToLocal = (ts: string) => new Date(ts.endsWith('Z') ? ts : ts + 'Z')
+import { formatTs } from '../utils/date'
 import type { StrategyLog, ExchangeName } from '../types'
 
 const SIGNAL_STYLE: Record<string, string> = {
@@ -87,7 +84,7 @@ export function OrderLog({ exchange = 'bithumb' }: { exchange?: ExchangeName }) 
                       <span className="text-green-400 text-xs">✓</span>
                     )}
                     <span className="ml-auto text-gray-500 text-xs">
-                      {format(utcToLocal(log.logged_at), 'MM/dd HH:mm')}
+                      {formatTs(log.logged_at, 'MM/dd HH:mm')}
                     </span>
                   </div>
 

@@ -921,3 +921,103 @@ class TestEngineProperties:
 
     def test_binance_min_fallback(self, futures_engine):
         assert futures_engine._min_fallback_amount == 10.0
+
+
+# ── Critical Bug Regression Tests ───────────────────────────────
+
+class TestFastStopCheckSignature:
+    """현물 _fast_stop_check_loop에서 _check_stop_conditions 호출 시그니처 검증.
+
+    이전 버그: price를 4번째 인자로 전달 → TypeError → 30초 빠른 SL 완전 무력화
+    수정: _check_stop_conditions(session, symbol, position) 3인자 호출
+    """
+
+    @pytest.mark.asyncio
+    async def test_fast_stop_calls_check_stop_with_correct_args(self, spot_engine, mock_market_data):
+        """_fast_stop_check_loop가 _check_stop_conditions를 올바른 인자로 호출."""
+        spot_engine._position_trackers = {
+            "BTC/KRW": PositionTracker(entry_price=50_000_000, highest_price=51_000_000),
+        }
+        spot_engine._is_running = True
+
+        # position mock
+        mock_position = MagicMock()
+        mock_position.quantity = 0.1
+        mock_position.stop_loss_pct = 5.0
+        mock_position.average_buy_price = 50_000_000
+        mock_position.highest_price = 51_000_000
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_position
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.commit = AsyncMock()
+        mock_session_factory = MagicMock()
+        mock_session_factory.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        # _check_stop_conditions를 mock해서 호출 인자 검증
+        spot_engine._check_stop_conditions = AsyncMock(return_value=False)
+
+        call_count = 0
+        original_sleep = asyncio.sleep
+
+        async def mock_sleep(sec):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 1:
+                spot_engine._is_running = False
+            await original_sleep(0)
+
+        with patch("asyncio.sleep", mock_sleep), \
+             patch("db.session.get_session_factory", return_value=mock_session_factory):
+            await spot_engine._fast_stop_check_loop()
+
+        # _check_stop_conditions가 3인자로 호출되었는지 검증 (session, symbol, position)
+        spot_engine._check_stop_conditions.assert_called_once()
+        args = spot_engine._check_stop_conditions.call_args[0]
+        assert len(args) == 3, f"Expected 3 args (session, symbol, position), got {len(args)}"
+        assert args[1] == "BTC/KRW"  # symbol
+        assert args[2] is mock_position  # position
+
+
+class TestMarketStateSymbol:
+    """_maybe_update_market_state의 BTC 심볼 분기 검증.
+
+    이전 버그: BTC/KRW 하드코딩 → 바이낸스 현물 엔진에서 시장 상태 감지 실패
+    수정: exchange_name에 따라 BTC/USDT 또는 BTC/KRW 자동 분기
+    """
+
+    @pytest.mark.asyncio
+    async def test_bithumb_uses_btc_krw(self, spot_engine, mock_market_data):
+        """빗썸 엔진은 BTC/KRW로 시장 상태 감지."""
+        spot_engine._market_state_updated = None
+        await spot_engine._maybe_update_market_state()
+        mock_market_data.get_candles.assert_any_call("BTC/KRW", "4h", 200)
+
+    @pytest.mark.asyncio
+    async def test_binance_spot_uses_btc_usdt(self, mock_config, mock_exchange, mock_market_data):
+        """바이낸스 현물 엔진은 BTC/USDT로 시장 상태 감지."""
+        engine = TradingEngine(
+            config=mock_config,
+            exchange=mock_exchange,
+            market_data=mock_market_data,
+            order_manager=MagicMock(),
+            portfolio_manager=MagicMock(),
+            combiner=MagicMock(),
+            exchange_name="binance_spot",
+        )
+        engine._market_state_updated = None
+        await engine._maybe_update_market_state()
+        mock_market_data.get_candles.assert_any_call("BTC/USDT", "4h", 200)
+
+    @pytest.mark.asyncio
+    async def test_binance_futures_overrides_market_state(self, futures_engine, mock_market_data):
+        """선물 엔진은 자체 _maybe_update_market_state를 오버라이드 (BTC/USDT 듀얼TF)."""
+        # BinanceFuturesEngine._maybe_update_market_state는 session 인자를 받음
+        assert hasattr(futures_engine, '_maybe_update_market_state')
+        # 선물은 session을 받는 오버라이드 메서드 사용
+        import inspect
+        sig = inspect.signature(futures_engine._maybe_update_market_state)
+        params = list(sig.parameters.keys())
+        assert "session" in params, "선물 엔진은 session 인자를 받는 오버라이드 사용"

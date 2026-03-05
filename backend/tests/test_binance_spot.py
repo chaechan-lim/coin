@@ -74,7 +74,7 @@ def test_engine_min_order_bithumb():
         combiner=AsyncMock(),
         exchange_name="bithumb",
     )
-    assert engine._min_order_amount == 500
+    assert engine._min_order_amount == 5000
     assert engine._fee_margin == 1.003
     assert engine._min_fallback_amount == 5000
 

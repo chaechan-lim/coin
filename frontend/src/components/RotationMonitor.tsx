@@ -1,9 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRotationStatus, getMarketAnalysis } from '../api/client'
-import { format } from 'date-fns'
 import type { RotationStatus, ExchangeName } from '../types'
-
-const utcToLocal = (ts: string) => new Date(ts.endsWith('Z') ? ts : ts + 'Z')
+import { formatTs } from '../utils/date'
 
 const MARKET_STATE_LABELS: Record<string, { label: string; color: string }> = {
   strong_uptrend: { label: '강한 상승', color: 'text-green-400' },
@@ -80,7 +78,7 @@ export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeN
         <Card label="마지막 스캔">
           <span className="text-sm font-medium text-gray-300">
             {data.last_scan_time
-              ? format(utcToLocal(data.last_scan_time), 'HH:mm:ss')
+              ? formatTs(data.last_scan_time, 'HH:mm:ss', '대기 중')
               : '대기 중'}
           </span>
         </Card>
