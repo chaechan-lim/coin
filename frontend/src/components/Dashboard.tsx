@@ -29,8 +29,8 @@ const TABS = [
 type TabId = (typeof TABS)[number]['id']
 
 const EXCHANGE_LABELS: Partial<Record<ExchangeName, string>> = {
-  binance_futures: '선물',
-  binance_spot: '현물',
+  binance_futures: 'Binance',
+  binance_spot: 'Binance',
 }
 
 const SPOT_EXCHANGES: ExchangeName[] = ['binance_spot']
