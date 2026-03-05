@@ -91,6 +91,7 @@ class TradingEngine:
         self._position_trackers: dict[str, PositionTracker] = {}
         self._eval_error_counts: dict[str, int] = {}  # 연속 평가 오류 카운터
         self._MAX_EVAL_ERRORS = 3  # 3회 연속 실패 → 강제 청산
+        self._last_stop_event_time: dict[str, datetime] = {}  # SL/TP/trailing 이벤트 스팸 방지
         self._market_state: str = MarketState.SIDEWAYS.value
         self._market_confidence: float = 0.5
         self._market_state_updated: datetime | None = None
@@ -741,20 +742,31 @@ class TradingEngine:
             await self._save_tracker_to_db(session, symbol, tracker)
 
         if sell_reason:
-            logger.info(
-                "stop_condition_triggered",
-                symbol=symbol,
-                reason=sell_reason,
-                price=price,
-                entry=entry,
-                pnl_pct=round(pnl_pct, 2),
-            )
-            await emit_event(
-                "warning", "trade", sell_reason,
-                metadata={"symbol": symbol, "pnl_pct": round(pnl_pct, 2), "price": price, "entry_price": entry},
-            )
-            await self._execute_stop_sell(session, symbol, position, price, sell_reason)
-            return True
+            # 코인 이름 포함 + 이벤트 스팸 방지 (5분 쿨다운)
+            coin_label = symbol.split("/")[0]
+            now = datetime.now(timezone.utc)
+            last_event = self._last_stop_event_time.get(symbol)
+            if not last_event or (now - last_event).total_seconds() >= 300:
+                logger.info(
+                    "stop_condition_triggered",
+                    symbol=symbol,
+                    reason=sell_reason,
+                    price=price,
+                    entry=entry,
+                    pnl_pct=round(pnl_pct, 2),
+                )
+                await emit_event(
+                    "warning", "trade", f"[{coin_label}] {sell_reason}",
+                    metadata={"symbol": symbol, "pnl_pct": round(pnl_pct, 2), "price": price, "entry_price": entry},
+                )
+                self._last_stop_event_time[symbol] = now
+            try:
+                await self._execute_stop_sell(session, symbol, position, price, sell_reason)
+                self._last_stop_event_time.pop(symbol, None)
+                return True
+            except Exception as e:
+                logger.warning("stop_sell_failed", symbol=symbol, reason=sell_reason, error=str(e))
+                return False
 
         return False
 
