@@ -44,6 +44,10 @@ _DYNAMIC_SL_PROFILES = {
 }
 _FUTURES_TIMEFRAME = "4h"  # 전략 평가 타임프레임
 
+# 초고변동성 필터: ATR% 초과 시 진입 차단 / 포지션 축소
+_MAX_ATR_PCT_ENTRY = 15.0     # ATR% > 15% → 진입 차단
+_HIGH_ATR_PCT_REDUCE = 8.0    # ATR% > 8% → 포지션 50% 축소
+
 
 class BinanceFuturesEngine(TradingEngine):
     """Binance USDM 선물 전용 엔진 (TradingEngine 서브클래스)."""
@@ -109,6 +113,8 @@ class BinanceFuturesEngine(TradingEngine):
 
     # ── 듀얼 루프 시작/중지 ─────────────────────────────────────
 
+    _FAST_SL_INTERVAL = 30  # 선물 빠른 SL 체크 간격 (초) — WS 실패 시 폴백
+
     async def start(self) -> None:
         """Start futures engine: WebSocket price monitor + strategy eval loop."""
         self._is_running = True
@@ -120,6 +126,7 @@ class BinanceFuturesEngine(TradingEngine):
         # WebSocket 가격 모니터 + 잔고 모니터 초기화
         ws_enabled = self._config.binance_trading.ws_price_monitor
         self._balance_task = None
+        self._fast_sl_task = None
         if ws_enabled:
             try:
                 await self._exchange.create_ws_exchange()
@@ -135,13 +142,21 @@ class BinanceFuturesEngine(TradingEngine):
                 logger.warning("ws_init_failed_fallback_polling", error=str(e))
                 self._monitor_task = None
 
+        # WebSocket 미사용 또는 실패 시 → 30초 빠른 SL 폴백 루프
+        if not self._monitor_task:
+            self._fast_sl_task = asyncio.create_task(
+                self._fast_stop_check_loop(), name="futures_fast_sl"
+            )
+            logger.info("futures_fast_sl_fallback_started")
+
         # 전략 평가 루프 (기존 5분 폴링)
         self._eval_task = asyncio.create_task(
             self._strategy_eval_loop(), name="futures_strategy_eval"
         )
 
         # 모든 태스크 대기
-        tasks = [t for t in (self._monitor_task, self._eval_task, self._balance_task) if t]
+        tasks = [t for t in (self._monitor_task, self._eval_task,
+                             self._balance_task, self._fast_sl_task) if t]
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _strategy_eval_loop(self) -> None:
@@ -172,7 +187,46 @@ class BinanceFuturesEngine(TradingEngine):
                 break
             except Exception as e:
                 logger.warning("price_monitor_error", error=str(e))
+                # WS 연속 실패 시 빠른 SL 폴백 자동 시작
+                if not getattr(self, '_fast_sl_task', None):
+                    self._fast_sl_task = asyncio.create_task(
+                        self._fast_stop_check_loop(), name="futures_fast_sl"
+                    )
+                    logger.warning("futures_fast_sl_auto_started",
+                                   reason="ws_error")
                 await asyncio.sleep(3)
+
+    async def _fast_stop_check_loop(self) -> None:
+        """선물 빠른 SL/TP 체크 (30초 주기) — WebSocket 실패 시 폴백."""
+        from db.session import get_session_factory
+        while self._is_running:
+            await asyncio.sleep(self._FAST_SL_INTERVAL)
+            try:
+                trackers = dict(self._position_trackers)
+                if not trackers:
+                    continue
+                session_factory = get_session_factory()
+                async with session_factory() as session:
+                    for symbol in list(trackers.keys()):
+                        try:
+                            result = await session.execute(
+                                select(Position).where(
+                                    Position.symbol == symbol,
+                                    Position.quantity > 0,
+                                    Position.exchange == self._exchange_name,
+                                )
+                            )
+                            position = result.scalar_one_or_none()
+                            if not position:
+                                continue
+                            await self._check_futures_stop_conditions(
+                                session, symbol, position)
+                            await session.commit()
+                        except Exception as e:
+                            logger.debug("fast_stop_check_error",
+                                         symbol=symbol, error=str(e))
+            except Exception as e:
+                logger.warning("futures_fast_stop_loop_error", error=str(e))
 
     async def _balance_monitor_loop(self) -> None:
         """WebSocket으로 선물 잔고+포지션 실시간 수신."""
@@ -365,7 +419,8 @@ class BinanceFuturesEngine(TradingEngine):
     async def stop(self) -> None:
         """Graceful stop — 모니터/평가 태스크 종료 + WebSocket 정리."""
         # 모니터/평가 태스크 취소
-        for task in (self._monitor_task, self._eval_task):
+        for task in (self._monitor_task, self._eval_task,
+                     getattr(self, '_fast_sl_task', None)):
             if task and not task.done():
                 task.cancel()
                 try:
@@ -374,6 +429,7 @@ class BinanceFuturesEngine(TradingEngine):
                     pass
         self._monitor_task = None
         self._eval_task = None
+        self._fast_sl_task = None
 
         # WebSocket 정리
         try:
@@ -461,8 +517,15 @@ class BinanceFuturesEngine(TradingEngine):
                 if any(c.isdigit() for c in base[-2:]):  # BTC2X 등
                     continue
                 quote_vol = float(data.get("quoteVolume", 0) or 0)
-                if quote_vol >= self._MIN_QUOTE_VOLUME:
-                    candidates.append((clean_sym, quote_vol))
+                if quote_vol < self._MIN_QUOTE_VOLUME:
+                    continue
+                # 24h 변동률 > 30% 코인 제외 (POWER 사례 방지)
+                pct_change = abs(float(data.get("percentage", 0) or 0))
+                if pct_change > 30:
+                    logger.info("dynamic_coin_excluded_high_volatility",
+                                symbol=clean_sym, pct_24h=round(pct_change, 1))
+                    continue
+                candidates.append((clean_sym, quote_vol))
 
             # 거래대금 상위 N개
             candidates.sort(key=lambda x: x[1], reverse=True)
@@ -999,11 +1062,37 @@ class BinanceFuturesEngine(TradingEngine):
         except Exception:
             return amount
 
+    def _get_atr_pct(self, symbol: str) -> float | None:
+        """캐시된 4h 캔들에서 ATR% 계산. 없으면 None."""
+        try:
+            key = f"{symbol}:4h"
+            if key in self._market_data._ohlcv_cache:
+                _, df = self._market_data._ohlcv_cache[key]
+                if "atr_14" in df.columns and len(df) > 0:
+                    atr = df["atr_14"].iloc[-1]
+                    close = df["close"].iloc[-1]
+                    if atr > 0 and close > 0:
+                        return (atr / close) * 100
+        except Exception:
+            pass
+        return None
+
     async def _open_long(
         self, session: AsyncSession, symbol: str, price: float,
         signal: Signal, decision: CombinedDecision,
     ) -> None:
         """롱 포지션 진입."""
+        # 초고변동성 필터: ATR% > 15% → 진입 차단
+        atr_pct = self._get_atr_pct(symbol)
+        if atr_pct is not None and atr_pct > _MAX_ATR_PCT_ENTRY:
+            logger.warning("futures_entry_blocked_high_atr",
+                           symbol=symbol, atr_pct=round(atr_pct, 1),
+                           threshold=_MAX_ATR_PCT_ENTRY)
+            await emit_event("warning", "risk",
+                             f"초고변동성 진입 차단: {symbol} (ATR {atr_pct:.1f}%)",
+                             metadata={"symbol": symbol, "atr_pct": round(atr_pct, 1)})
+            return
+
         cash = self._portfolio_manager.cash_balance
         bt = self._config.binance_trading
         size_pct = bt.max_trade_size_pct
@@ -1013,6 +1102,12 @@ class BinanceFuturesEngine(TradingEngine):
             size_pct *= 0.25
         elif self._market_state == MarketState.DOWNTREND.value:
             size_pct *= 0.5
+
+        # 고변동성 축소: ATR% > 8% → 포지션 50% 축소
+        if atr_pct is not None and atr_pct > _HIGH_ATR_PCT_REDUCE:
+            size_pct *= 0.5
+            logger.info("futures_position_reduced_high_atr",
+                        symbol=symbol, atr_pct=round(atr_pct, 1))
 
         margin = cash * size_pct
         notional = margin * self._leverage
@@ -1140,9 +1235,26 @@ class BinanceFuturesEngine(TradingEngine):
             )
             return
 
+        # 초고변동성 필터: ATR% > 15% → 진입 차단
+        atr_pct = self._get_atr_pct(symbol)
+        if atr_pct is not None and atr_pct > _MAX_ATR_PCT_ENTRY:
+            logger.warning("futures_entry_blocked_high_atr",
+                           symbol=symbol, atr_pct=round(atr_pct, 1),
+                           threshold=_MAX_ATR_PCT_ENTRY, direction="short")
+            await emit_event("warning", "risk",
+                             f"초고변동성 진입 차단: {symbol} 숏 (ATR {atr_pct:.1f}%)",
+                             metadata={"symbol": symbol, "atr_pct": round(atr_pct, 1)})
+            return
+
         cash = self._portfolio_manager.cash_balance
         bt = self._config.binance_trading
         size_pct = bt.max_trade_size_pct
+
+        # 고변동성 축소: ATR% > 8% → 포지션 50% 축소
+        if atr_pct is not None and atr_pct > _HIGH_ATR_PCT_REDUCE:
+            size_pct *= 0.5
+            logger.info("futures_position_reduced_high_atr",
+                        symbol=symbol, atr_pct=round(atr_pct, 1), direction="short")
 
         margin = cash * size_pct
         notional = margin * self._leverage

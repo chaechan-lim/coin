@@ -676,16 +676,18 @@ class TestFuturesStartOverride:
 
     @pytest.mark.asyncio
     async def test_futures_start_fallback_on_ws_failure(self, futures_engine, mock_exchange):
-        """WS 초기화 실패 시 폴링 폴백."""
+        """WS 초기화 실패 시 폴링 폴백 + 빠른 SL 루프 자동 시작."""
         mock_exchange.create_ws_exchange = AsyncMock(side_effect=Exception("WS error"))
 
         with patch.object(futures_engine, '_restore_trade_timestamps', new_callable=AsyncMock), \
              patch.object(futures_engine, '_strategy_eval_loop', new_callable=AsyncMock), \
+             patch.object(futures_engine, '_fast_stop_check_loop', new_callable=AsyncMock), \
              patch("engine.futures_engine.emit_event", new_callable=AsyncMock):
             await futures_engine.start()
 
-        # WS 실패 시 monitor_task는 None
+        # WS 실패 시 monitor_task는 None, fast_sl_task는 활성
         assert futures_engine._monitor_task is None
+        assert futures_engine._fast_sl_task is not None
 
 
 # ── Error Emit Event Tests ────────────────────────────────────
@@ -903,7 +905,7 @@ class TestEngineProperties:
     """거래소별 엔진 프로퍼티 테스트."""
 
     def test_bithumb_min_order_amount(self, spot_engine):
-        assert spot_engine._min_order_amount == 500
+        assert spot_engine._min_order_amount == 5000
 
     def test_bithumb_fee_margin(self, spot_engine):
         assert spot_engine._fee_margin == 1.003

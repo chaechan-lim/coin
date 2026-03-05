@@ -2293,12 +2293,34 @@ class FuturesBacktester:
                         last_trade_idx = i
                         continue
 
-                # 손절
-                if dynamic_sl_pct > 0 and unrealized_pct <= -dynamic_sl_pct:
+                # 손절 — high/low 기반 intra-candle SL 체크
+                sl_triggered = False
+                sl_close_price = current_price
+                if dynamic_sl_pct > 0:
+                    if position.side == "long":
+                        sl_price_level = position.entry_price * (1 - dynamic_sl_pct / 100)
+                        if low_price <= sl_price_level:
+                            sl_triggered = True
+                            sl_close_price = sl_price_level  # SL 가격에 체결 가정
+                    else:  # short
+                        sl_price_level = position.entry_price * (1 + dynamic_sl_pct / 100)
+                        if high_price >= sl_price_level:
+                            sl_triggered = True
+                            sl_close_price = sl_price_level
+                    # close 기준 체크도 유지 (기존 호환)
+                    if not sl_triggered and unrealized_pct <= -dynamic_sl_pct:
+                        sl_triggered = True
+                        sl_close_price = current_price
+
+                if sl_triggered:
+                    sl_unrealized = self._calc_unrealized_pnl(
+                        position.side, position.entry_price, sl_close_price, position.quantity
+                    )
+                    sl_pct_actual = sl_unrealized / position.margin * 100 if position.margin > 0 else 0
                     net_pnl, fee, pnl_pct, t = self._execute_futures_close(
-                        ts, position, current_price,
+                        ts, position, sl_close_price,
                         f"sell(sl-{position.side})", "stop_loss", 0,
-                        f"손절 ({position.side}) {unrealized_pct:.1f}% (한도 -{dynamic_sl_pct:.1f}%)",
+                        f"손절 ({position.side}) {sl_pct_actual:.1f}% (한도 -{dynamic_sl_pct:.1f}%)",
                     )
                     t.symbol = symbol
                     cash += position.margin + net_pnl
@@ -2378,7 +2400,15 @@ class FuturesBacktester:
                 else:
                     eff_position_pct = self._position_pct
 
+                # ATR 변동성 필터 (진입 전)
+                _atr_val = row.get("ATRr_14")
+                _atr_pct = (float(_atr_val) / current_price * 100) if (_atr_val and not pd.isna(_atr_val) and current_price > 0) else None
+
                 if decision.action == SignalType.BUY:
+                    # 초고변동성 차단: ATR% > 15%
+                    if _atr_pct is not None and _atr_pct > 15.0:
+                        continue
+
                     buy_threshold = self._min_confidence
                     if market_confidence < 0.35:
                         buy_threshold = self._min_confidence + 0.10
@@ -2394,7 +2424,9 @@ class FuturesBacktester:
                         if not ok:
                             continue
 
-                    margin = cash * eff_position_pct
+                    # 고변동성 포지션 축소: ATR% > 8% → 50%
+                    _vol_adj = 0.5 if (_atr_pct is not None and _atr_pct > 8.0) else 1.0
+                    margin = cash * eff_position_pct * _vol_adj
                     if margin < 1.0:  # 최소 1 USDT
                         continue
 
@@ -2436,6 +2468,10 @@ class FuturesBacktester:
                         self._trade_limiter.record_buy(symbol, i)
 
                 elif decision.action == SignalType.SELL:
+                    # 초고변동성 차단: ATR% > 15%
+                    if _atr_pct is not None and _atr_pct > 15.0:
+                        continue
+
                     # 숏 진입 — 시장 상태 게이팅
                     if self._short_sideways:
                         _allowed = {"sideways", "downtrend", "crash"}
@@ -2458,7 +2494,9 @@ class FuturesBacktester:
                         if not ok:
                             continue
 
-                    margin = cash * eff_position_pct
+                    # 고변동성 포지션 축소: ATR% > 8% → 50%
+                    _vol_adj_s = 0.5 if (_atr_pct is not None and _atr_pct > 8.0) else 1.0
+                    margin = cash * eff_position_pct * _vol_adj_s
                     if margin < 1.0:
                         continue
 
