@@ -33,8 +33,9 @@ async def list_exchanges():
     """사용 가능한 거래소 목록."""
     exchanges = engine_registry.available_exchanges
     if not exchanges:
-        exchanges = ["bithumb"]
-    return {"exchanges": exchanges, "default": "bithumb"}
+        exchanges = ["binance_spot"]
+    default = "binance_spot" if "binance_spot" in exchanges else exchanges[0]
+    return {"exchanges": exchanges, "default": default}
 
 
 @router.get("/engine/status", response_model=EngineStatusResponse)

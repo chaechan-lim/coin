@@ -1,5 +1,5 @@
 // ── Exchange ─────────────────────────────────────────────────
-export type ExchangeName = 'bithumb' | 'binance_futures' | 'binance_spot'
+export type ExchangeName = 'binance_futures' | 'binance_spot' | 'bithumb'
 
 export interface ExchangeInfo {
   exchanges: ExchangeName[]

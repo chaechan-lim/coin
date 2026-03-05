@@ -734,7 +734,8 @@ async def lifespan(app: FastAPI):
 
     # ── 엔진 자동 시작 ────────────────────────────────────────
     auto_start_engines = []
-    if _engine_instance and not _engine_instance.is_running:
+    # 빗썸: paper 모드면 자동 시작 안 함 (자산 이전 완료)
+    if _engine_instance and not _engine_instance.is_running and config.trading.mode == "live":
         auto_start_engines.append(("bithumb", _engine_instance))
     if _binance_engine and not _binance_engine.is_running:
         auto_start_engines.append(("binance_futures", _binance_engine))

@@ -28,18 +28,17 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]['id']
 
-const EXCHANGE_LABELS: Record<ExchangeName, string> = {
-  bithumb: '빗썸',
-  binance_futures: '바이낸스',
-  binance_spot: '바이낸스',
+const EXCHANGE_LABELS: Partial<Record<ExchangeName, string>> = {
+  binance_futures: '선물',
+  binance_spot: '현물',
 }
 
-const SPOT_EXCHANGES: ExchangeName[] = ['bithumb', 'binance_spot']
+const SPOT_EXCHANGES: ExchangeName[] = ['binance_spot']
 const FUTURES_EXCHANGES: ExchangeName[] = ['binance_futures']
 
 export function Dashboard() {
   const [tab, setTab] = useState<TabId>('overview')
-  const [exchange, setExchange] = useState<ExchangeName>('bithumb')
+  const [exchange, setExchange] = useState<ExchangeName>('binance_spot')
   const [liveEvents, setLiveEvents] = useState<string[]>([])
   const [realtimeServerEvents, setRealtimeServerEvents] = useState<ServerEvent[]>([])
   const qc = useQueryClient()
@@ -52,7 +51,7 @@ export function Dashboard() {
     staleTime: 60_000,
   })
 
-  const exchanges = exchangeInfo?.exchanges ?? ['bithumb']
+  const exchanges = exchangeInfo?.exchanges?.filter((e: ExchangeName) => e !== 'bithumb') ?? ['binance_spot']
 
   const onMessage = useCallback(
     (event: WsEvent) => {
