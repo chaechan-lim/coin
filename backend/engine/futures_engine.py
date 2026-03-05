@@ -44,9 +44,14 @@ _DYNAMIC_SL_PROFILES = {
 }
 _FUTURES_TIMEFRAME = "4h"  # 전략 평가 타임프레임
 
-# 초고변동성 필터: ATR% 초과 시 진입 차단 / 포지션 축소
-_MAX_ATR_PCT_ENTRY = 15.0     # ATR% > 15% → 진입 차단
-_HIGH_ATR_PCT_REDUCE = 8.0    # ATR% > 8% → 포지션 50% 축소
+# ATR 적응형 리스크 조절: 차단 대신 레버리지/마진 축소
+# ATR% 구간별: ~5% 기본, 5~10% 마진축소, 10~20% 레버리지↓, 20%+ 레버리지1x+마진축소
+_ATR_RISK_TIERS = (
+    (5.0,  1.0, None),   # ATR ≤ 5%: 기본 (마진 100%, 레버리지 유지)
+    (10.0, 0.7, None),   # ATR 5~10%: 마진 70%, 레버리지 유지
+    (20.0, 0.5, 2),      # ATR 10~20%: 마진 50%, 레버리지 2x
+    (999,  0.3, 1),      # ATR 20%+: 마진 30%, 레버리지 1x (현물급)
+)
 
 
 class BinanceFuturesEngine(TradingEngine):
@@ -1077,25 +1082,35 @@ class BinanceFuturesEngine(TradingEngine):
             pass
         return None
 
+    def _atr_risk_adjust(self, symbol: str, atr_pct: float | None
+                         ) -> tuple[float, int | None]:
+        """ATR%에 따른 (마진 배수, 레버리지 오버라이드) 반환.
+        레버리지 None이면 기본값 사용."""
+        if atr_pct is None:
+            return 1.0, None
+        for threshold, margin_mult, lev_override in _ATR_RISK_TIERS:
+            if atr_pct <= threshold:
+                if margin_mult < 1.0 or lev_override is not None:
+                    logger.info("atr_risk_adjusted", symbol=symbol,
+                                atr_pct=round(atr_pct, 1),
+                                margin_mult=margin_mult,
+                                leverage_override=lev_override)
+                return margin_mult, lev_override
+        return 0.3, 1  # 극단 폴백
+
     async def _open_long(
         self, session: AsyncSession, symbol: str, price: float,
         signal: Signal, decision: CombinedDecision,
     ) -> None:
         """롱 포지션 진입."""
-        # 초고변동성 필터: ATR% > 15% → 진입 차단
+        # ATR 적응형 리스크 조절
         atr_pct = self._get_atr_pct(symbol)
-        if atr_pct is not None and atr_pct > _MAX_ATR_PCT_ENTRY:
-            logger.warning("futures_entry_blocked_high_atr",
-                           symbol=symbol, atr_pct=round(atr_pct, 1),
-                           threshold=_MAX_ATR_PCT_ENTRY)
-            await emit_event("warning", "risk",
-                             f"초고변동성 진입 차단: {symbol} (ATR {atr_pct:.1f}%)",
-                             metadata={"symbol": symbol, "atr_pct": round(atr_pct, 1)})
-            return
+        margin_mult, lev_override = self._atr_risk_adjust(symbol, atr_pct)
+        effective_lev = lev_override if lev_override is not None else self._leverage
 
         cash = self._portfolio_manager.cash_balance
         bt = self._config.binance_trading
-        size_pct = bt.max_trade_size_pct
+        size_pct = bt.max_trade_size_pct * margin_mult  # ATR에 따른 마진 축소
 
         # 시장 상태별 사이징
         if self._market_state == MarketState.CRASH.value:
@@ -1103,15 +1118,16 @@ class BinanceFuturesEngine(TradingEngine):
         elif self._market_state == MarketState.DOWNTREND.value:
             size_pct *= 0.5
 
-        # 고변동성 축소: ATR% > 8% → 포지션 50% 축소
-        if atr_pct is not None and atr_pct > _HIGH_ATR_PCT_REDUCE:
-            size_pct *= 0.5
-            logger.info("futures_position_reduced_high_atr",
-                        symbol=symbol, atr_pct=round(atr_pct, 1))
-
         margin = cash * size_pct
-        notional = margin * self._leverage
+        notional = margin * effective_lev
         amount = notional / price
+
+        # 레버리지 오버라이드 시 거래소에 설정
+        if lev_override is not None and lev_override != self._leverage:
+            try:
+                await self._exchange.set_leverage(symbol, effective_lev)
+            except Exception:
+                pass
 
         # 거래소 최소 수량 보정
         amount = self._adjust_amount(symbol, amount)
@@ -1136,7 +1152,7 @@ class BinanceFuturesEngine(TradingEngine):
             order = await self._order_manager.create_order(
                 session, symbol, "buy", amount, price, signal, decision,
                 order_type="market",
-                direction="long", leverage=self._leverage, margin_used=margin,
+                direction="long", leverage=effective_lev, margin_used=margin,
             )
         except Exception as e:
             logger.error("futures_long_order_failed", symbol=symbol, error=str(e))
@@ -1166,12 +1182,12 @@ class BinanceFuturesEngine(TradingEngine):
         pos = result.scalar_one_or_none()
         if pos:
             pos.direction = "long"
-            pos.leverage = self._leverage
-            pos.liquidation_price = price * (1 - 1 / self._leverage + self._futures_fee)
+            pos.leverage = effective_lev
+            pos.liquidation_price = price * (1 - 1 / effective_lev + self._futures_fee)
             pos.margin_used = margin
 
         # SL/TP 트래커 — 레버리지 축소 + 동적 SL
-        sqrt_lev = math.sqrt(self._leverage)
+        sqrt_lev = math.sqrt(effective_lev)
         sl_pct = self._compute_dynamic_sl(symbol, _FUTURES_DEFAULT_SL_PCT)
         self._position_trackers[symbol] = PositionTracker(
             entry_price=price,
@@ -1188,14 +1204,15 @@ class BinanceFuturesEngine(TradingEngine):
 
         logger.info(
             "futures_long_opened", symbol=symbol, price=price,
-            leverage=self._leverage, margin=round(margin, 2),
+            leverage=effective_lev, margin=round(margin, 2),
             sl_pct=round(sl_pct / sqrt_lev, 2),
+            atr_pct=round(atr_pct, 1) if atr_pct else None,
         )
         tracker = self._position_trackers[symbol]
         sl_price = round(price * (1 - tracker.stop_loss_pct / 100), 4)
         tp_price = round(price * (1 + tracker.take_profit_pct / 100), 4)
         await emit_event("info", "futures_trade", f"선물 롱: {symbol}", metadata={
-            "price": price, "leverage": self._leverage,
+            "price": price, "leverage": effective_lev,
             "margin": round(margin, 2),
             "strategy": signal.strategy_name,
             "confidence": round(decision.combined_confidence, 2),
@@ -1235,30 +1252,25 @@ class BinanceFuturesEngine(TradingEngine):
             )
             return
 
-        # 초고변동성 필터: ATR% > 15% → 진입 차단
+        # ATR 적응형 리스크 조절
         atr_pct = self._get_atr_pct(symbol)
-        if atr_pct is not None and atr_pct > _MAX_ATR_PCT_ENTRY:
-            logger.warning("futures_entry_blocked_high_atr",
-                           symbol=symbol, atr_pct=round(atr_pct, 1),
-                           threshold=_MAX_ATR_PCT_ENTRY, direction="short")
-            await emit_event("warning", "risk",
-                             f"초고변동성 진입 차단: {symbol} 숏 (ATR {atr_pct:.1f}%)",
-                             metadata={"symbol": symbol, "atr_pct": round(atr_pct, 1)})
-            return
+        margin_mult, lev_override = self._atr_risk_adjust(symbol, atr_pct)
+        effective_lev = lev_override if lev_override is not None else self._leverage
 
         cash = self._portfolio_manager.cash_balance
         bt = self._config.binance_trading
-        size_pct = bt.max_trade_size_pct
-
-        # 고변동성 축소: ATR% > 8% → 포지션 50% 축소
-        if atr_pct is not None and atr_pct > _HIGH_ATR_PCT_REDUCE:
-            size_pct *= 0.5
-            logger.info("futures_position_reduced_high_atr",
-                        symbol=symbol, atr_pct=round(atr_pct, 1), direction="short")
+        size_pct = bt.max_trade_size_pct * margin_mult  # ATR에 따른 마진 축소
 
         margin = cash * size_pct
-        notional = margin * self._leverage
+        notional = margin * effective_lev
         amount = notional / price
+
+        # 레버리지 오버라이드 시 거래소에 설정
+        if lev_override is not None and lev_override != self._leverage:
+            try:
+                await self._exchange.set_leverage(symbol, effective_lev)
+            except Exception:
+                pass
 
         # 거래소 최소 수량 보정
         amount = self._adjust_amount(symbol, amount)
@@ -1282,7 +1294,7 @@ class BinanceFuturesEngine(TradingEngine):
             order = await self._order_manager.create_order(
                 session, symbol, "sell", amount, price, signal, decision,
                 order_type="market",
-                direction="short", leverage=self._leverage, margin_used=margin,
+                direction="short", leverage=effective_lev, margin_used=margin,
             )
         except Exception as e:
             logger.error("futures_short_order_failed", symbol=symbol, error=str(e))
@@ -1312,12 +1324,12 @@ class BinanceFuturesEngine(TradingEngine):
         pos = result.scalar_one_or_none()
         if pos:
             pos.direction = "short"
-            pos.leverage = self._leverage
-            pos.liquidation_price = price * (1 + 1 / self._leverage - self._futures_fee)
+            pos.leverage = effective_lev
+            pos.liquidation_price = price * (1 + 1 / effective_lev - self._futures_fee)
             pos.margin_used = margin
 
         # 숏 트래커 — highest_price를 lowest로 사용 + 동적 SL
-        sqrt_lev = math.sqrt(self._leverage)
+        sqrt_lev = math.sqrt(effective_lev)
         sl_pct = self._compute_dynamic_sl(symbol, _FUTURES_DEFAULT_SL_PCT)
         self._position_trackers[symbol] = PositionTracker(
             entry_price=price,
@@ -1334,14 +1346,15 @@ class BinanceFuturesEngine(TradingEngine):
 
         logger.info(
             "futures_short_opened", symbol=symbol, price=price,
-            leverage=self._leverage, margin=round(margin, 2),
+            leverage=effective_lev, margin=round(margin, 2),
             sl_pct=round(sl_pct / sqrt_lev, 2),
+            atr_pct=round(atr_pct, 1) if atr_pct else None,
         )
         tracker = self._position_trackers[symbol]
         sl_price = round(price * (1 + tracker.stop_loss_pct / 100), 4)
         tp_price = round(price * (1 - tracker.take_profit_pct / 100), 4)
         await emit_event("info", "futures_trade", f"선물 숏: {symbol}", metadata={
-            "price": price, "leverage": self._leverage,
+            "price": price, "leverage": effective_lev,
             "margin": round(margin, 2),
             "strategy": signal.strategy_name,
             "confidence": round(decision.combined_confidence, 2),

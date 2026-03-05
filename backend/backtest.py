@@ -2400,15 +2400,22 @@ class FuturesBacktester:
                 else:
                     eff_position_pct = self._position_pct
 
-                # ATR 변동성 필터 (진입 전)
+                # ATR 적응형 리스크: 마진/레버리지 축소 (차단 대신)
                 _atr_val = row.get("ATRr_14")
                 _atr_pct = (float(_atr_val) / current_price * 100) if (_atr_val and not pd.isna(_atr_val) and current_price > 0) else None
+                # ATR 티어: (threshold, margin_mult, lev_override)
+                _atr_margin_mult = 1.0
+                _atr_lev = self._leverage
+                if _atr_pct is not None:
+                    for _thr, _mm, _lo in ((5.0, 1.0, None), (10.0, 0.7, None),
+                                           (20.0, 0.5, 2), (999, 0.3, 1)):
+                        if _atr_pct <= _thr:
+                            _atr_margin_mult = _mm
+                            if _lo is not None:
+                                _atr_lev = _lo
+                            break
 
                 if decision.action == SignalType.BUY:
-                    # 초고변동성 차단: ATR% > 15%
-                    if _atr_pct is not None and _atr_pct > 15.0:
-                        continue
-
                     buy_threshold = self._min_confidence
                     if market_confidence < 0.35:
                         buy_threshold = self._min_confidence + 0.10
@@ -2424,15 +2431,13 @@ class FuturesBacktester:
                         if not ok:
                             continue
 
-                    # 고변동성 포지션 축소: ATR% > 8% → 50%
-                    _vol_adj = 0.5 if (_atr_pct is not None and _atr_pct > 8.0) else 1.0
-                    margin = cash * eff_position_pct * _vol_adj
+                    margin = cash * eff_position_pct * _atr_margin_mult
                     if margin < 1.0:  # 최소 1 USDT
                         continue
 
-                    entry_fee = margin * self._leverage * self._futures_fee
+                    entry_fee = margin * _atr_lev * self._futures_fee
                     effective_margin = margin - entry_fee
-                    qty = effective_margin * self._leverage / current_price
+                    qty = effective_margin * _atr_lev / current_price
 
                     cash -= margin
                     total_fees += entry_fee
@@ -2440,14 +2445,14 @@ class FuturesBacktester:
                         side="long",
                         entry_price=current_price,
                         quantity=qty,
-                        leverage=self._leverage,
+                        leverage=_atr_lev,
                         margin=margin,
                         peak_price=current_price,
                     )
 
                     if self._dynamic_sl:
                         import math
-                        dynamic_sl_pct = _calc_dynamic_sl(row, current_price, current_market_state) / math.sqrt(self._leverage)
+                        dynamic_sl_pct = _calc_dynamic_sl(row, current_price, current_market_state) / math.sqrt(_atr_lev)
                     else:
                         dynamic_sl_pct = self._effective_sl
 
@@ -2468,10 +2473,6 @@ class FuturesBacktester:
                         self._trade_limiter.record_buy(symbol, i)
 
                 elif decision.action == SignalType.SELL:
-                    # 초고변동성 차단: ATR% > 15%
-                    if _atr_pct is not None and _atr_pct > 15.0:
-                        continue
-
                     # 숏 진입 — 시장 상태 게이팅
                     if self._short_sideways:
                         _allowed = {"sideways", "downtrend", "crash"}
@@ -2494,15 +2495,13 @@ class FuturesBacktester:
                         if not ok:
                             continue
 
-                    # 고변동성 포지션 축소: ATR% > 8% → 50%
-                    _vol_adj_s = 0.5 if (_atr_pct is not None and _atr_pct > 8.0) else 1.0
-                    margin = cash * eff_position_pct * _vol_adj_s
+                    margin = cash * eff_position_pct * _atr_margin_mult
                     if margin < 1.0:
                         continue
 
-                    entry_fee = margin * self._leverage * self._futures_fee
+                    entry_fee = margin * _atr_lev * self._futures_fee
                     effective_margin = margin - entry_fee
-                    qty = effective_margin * self._leverage / current_price
+                    qty = effective_margin * _atr_lev / current_price
 
                     cash -= margin
                     total_fees += entry_fee
@@ -2510,14 +2509,14 @@ class FuturesBacktester:
                         side="short",
                         entry_price=current_price,
                         quantity=qty,
-                        leverage=self._leverage,
+                        leverage=_atr_lev,
                         margin=margin,
                         peak_price=current_price,  # 숏은 최저가 추적
                     )
 
                     if self._dynamic_sl:
                         import math
-                        dynamic_sl_pct = _calc_dynamic_sl(row, current_price, current_market_state) / math.sqrt(self._leverage)
+                        dynamic_sl_pct = _calc_dynamic_sl(row, current_price, current_market_state) / math.sqrt(_atr_lev)
                     else:
                         dynamic_sl_pct = self._effective_sl
 
