@@ -215,11 +215,13 @@ class PaperAdapter(ExchangeAdapter):
 
     async def create_market_buy(self, symbol: str, amount: float) -> OrderResult:
         ticker = await self.fetch_ticker(symbol)
-        return await self.create_limit_buy(symbol, amount, ticker.ask)
+        price = ticker.ask or ticker.last
+        return await self.create_limit_buy(symbol, amount, price)
 
     async def create_market_sell(self, symbol: str, amount: float) -> OrderResult:
         ticker = await self.fetch_ticker(symbol)
-        return await self.create_limit_sell(symbol, amount, ticker.bid)
+        price = ticker.bid or ticker.last
+        return await self.create_limit_sell(symbol, amount, price)
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
         async with self._lock:

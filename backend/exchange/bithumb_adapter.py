@@ -78,6 +78,11 @@ class BithumbAdapter(ExchangeAdapter):
         if last == 0 and bid > 0 and ask > 0:
             last = (bid + ask) / 2
             logger.debug("ticker_last_fallback_midprice", symbol=symbol, mid=last)
+        # 빗썸 ccxt: bid/ask가 None → 0이 됨. last로 폴백 (시장가 주문 실패 방지)
+        if ask == 0 and last > 0:
+            ask = last
+        if bid == 0 and last > 0:
+            bid = last
         return Ticker(
             symbol=symbol,
             last=last,

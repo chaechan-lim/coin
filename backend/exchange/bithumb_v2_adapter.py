@@ -214,7 +214,11 @@ class BithumbV2Adapter(BithumbAdapter):
     async def create_market_buy(self, symbol: str, amount: float) -> OrderResult:
         """Market buy: ord_type=price, price = total KRW to spend."""
         ticker = await self.fetch_ticker(symbol)
-        krw = int(amount * ticker.ask)
+        # bid/ask가 None(빗썸 ccxt)일 수 있으므로 last로 폴백
+        ref_price = ticker.ask or ticker.last
+        if ref_price <= 0:
+            raise ExchangeError(f"유효한 가격 없음: {symbol} ask={ticker.ask}, last={ticker.last}")
+        krw = int(amount * ref_price)
         # 빗썸 최소 주문 금액: 5000 KRW
         if krw < 5000:
             raise ExchangeError(f"주문 금액 부족: {krw} KRW < 5000 KRW")
