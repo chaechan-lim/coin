@@ -21,6 +21,8 @@ COLOR_ORANGE = 0xF39C12  # 경고
 COLOR_BLUE = 0x3498DB    # 시스템
 COLOR_PURPLE = 0x9B59B6  # 시그널
 COLOR_GOLD = 0xF1C40F    # 일일 요약
+COLOR_TEAL = 0x1ABC9C    # 헬스체크
+COLOR_CYAN = 0x00BCD4    # 복구
 
 # 레이트 리밋: 5건/5초 (Discord 429 방지)
 RATE_LIMIT_WINDOW = 5.0
@@ -118,6 +120,14 @@ class DiscordEventHandler:
         # ── 일일 요약 ────────────────────────────────────
         if category == "daily_summary":
             return self._format_daily_summary(title, detail, meta)
+
+        # ── 헬스체크 ────────────────────────────────────
+        if category == "health":
+            return self._format_health(level, title, detail, meta)
+
+        # ── 복구 ────────────────────────────────────────
+        if category == "recovery":
+            return self._format_recovery(title, detail, meta)
 
         # 그 외 무시
         return None
@@ -351,6 +361,46 @@ class DiscordEventHandler:
             "title": f"📋 {title}",
             "description": detail,
             "color": COLOR_GOLD,
+            "fields": fields,
+        }
+
+    def _format_health(self, level: str, title: str, detail: str | None, meta: dict) -> dict:
+        """헬스체크 embed (🏥 TEAL/RED)."""
+        color = COLOR_RED if level == "critical" else COLOR_TEAL
+        icon = "🚨" if level == "critical" else "🏥"
+        fields = []
+        if meta.get("exchange"):
+            fields.append({"name": "거래소", "value": meta["exchange"], "inline": True})
+        if meta.get("issues"):
+            fields.append({"name": "이상 항목", "value": ", ".join(meta["issues"]), "inline": False})
+        if meta.get("auto_fixed"):
+            fields.append({"name": "자동 수정", "value": ", ".join(meta["auto_fixed"]), "inline": False})
+        if meta.get("fail_streak"):
+            fields.append({"name": "연속 실패", "value": str(meta["fail_streak"]), "inline": True})
+        desc = detail[:500] if detail else None
+        return {
+            "title": f"{icon} {title}",
+            "description": desc,
+            "color": color,
+            "fields": fields,
+        }
+
+    def _format_recovery(self, title: str, detail: str | None, meta: dict) -> dict:
+        """복구 액션 embed (🔧 CYAN)."""
+        fields = []
+        if meta.get("exchange"):
+            fields.append({"name": "거래소", "value": meta["exchange"], "inline": True})
+        if meta.get("action"):
+            fields.append({"name": "액션", "value": meta["action"], "inline": True})
+        if meta.get("symbol"):
+            fields.append({"name": "심볼", "value": meta["symbol"], "inline": True})
+        if meta.get("old_cash") is not None and meta.get("new_cash") is not None:
+            fields.append({"name": "잔고 변화", "value": f"{meta['old_cash']:.2f} → {meta['new_cash']:.2f}", "inline": True})
+        desc = detail[:500] if detail else None
+        return {
+            "title": f"🔧 {title}",
+            "description": desc,
+            "color": COLOR_CYAN,
             "fields": fields,
         }
 

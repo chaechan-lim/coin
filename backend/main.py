@@ -194,6 +194,37 @@ async def lifespan(app: FastAPI):
     set_engine_and_combiner(trading_engine, combiner)
     set_dashboard_deps(trading_engine, coordinator, config)
 
+    # Self-healing: RecoveryManager + DiagnosticAgent 주입 (빗썸)
+    from engine.recovery import RecoveryManager
+    from engine.health_monitor import HealthMonitor
+    from agents.diagnostic_agent import DiagnosticAgent
+
+    bithumb_recovery = RecoveryManager(
+        engine=trading_engine,
+        portfolio_manager=portfolio_mgr,
+        exchange_adapter=exchange,
+        exchange_name="bithumb",
+        tracked_coins=config.trading.tracked_coins,
+    )
+    bithumb_diagnostic = DiagnosticAgent(
+        engine=trading_engine,
+        portfolio_manager=portfolio_mgr,
+        exchange_adapter=exchange,
+        exchange_name="bithumb",
+        tracked_coins=config.trading.tracked_coins,
+    )
+    bithumb_recovery.set_diagnostic_agent(bithumb_diagnostic)
+    trading_engine.set_recovery_manager(bithumb_recovery)
+
+    bithumb_health = HealthMonitor(
+        engine=trading_engine,
+        portfolio_manager=portfolio_mgr,
+        exchange_adapter=exchange,
+        market_data=market_data,
+        exchange_name="bithumb",
+        tracked_coins=config.trading.tracked_coins,
+    )
+
     # EngineRegistry 등록 (빗썸)
     engine_registry.register("bithumb", trading_engine, portfolio_mgr, combiner, coordinator)
 
@@ -303,6 +334,33 @@ async def lifespan(app: FastAPI):
             engine_registry.register(
                 "binance_futures", binance_engine, binance_portfolio_mgr,
                 binance_combiner, binance_coordinator,
+            )
+
+            # Self-healing: RecoveryManager + DiagnosticAgent + HealthMonitor (선물)
+            futures_recovery = RecoveryManager(
+                engine=binance_engine,
+                portfolio_manager=binance_portfolio_mgr,
+                exchange_adapter=binance_adapter,
+                exchange_name="binance_futures",
+                tracked_coins=config.binance.tracked_coins,
+            )
+            futures_diagnostic = DiagnosticAgent(
+                engine=binance_engine,
+                portfolio_manager=binance_portfolio_mgr,
+                exchange_adapter=binance_adapter,
+                exchange_name="binance_futures",
+                tracked_coins=config.binance.tracked_coins,
+            )
+            futures_recovery.set_diagnostic_agent(futures_diagnostic)
+            binance_engine.set_recovery_manager(futures_recovery)
+
+            futures_health = HealthMonitor(
+                engine=binance_engine,
+                portfolio_manager=binance_portfolio_mgr,
+                exchange_adapter=binance_adapter,
+                market_data=binance_market_data,
+                exchange_name="binance_futures",
+                tracked_coins=config.binance.tracked_coins,
             )
 
             logger.info("binance_futures_engine_ready",
@@ -431,6 +489,33 @@ async def lifespan(app: FastAPI):
             engine_registry.register(
                 "binance_spot", spot_engine, spot_portfolio_mgr,
                 spot_combiner, spot_coordinator,
+            )
+
+            # Self-healing: RecoveryManager + DiagnosticAgent + HealthMonitor (현물)
+            spot_recovery = RecoveryManager(
+                engine=spot_engine,
+                portfolio_manager=spot_portfolio_mgr,
+                exchange_adapter=spot_exchange,
+                exchange_name="binance_spot",
+                tracked_coins=config.binance.tracked_coins,
+            )
+            spot_diagnostic = DiagnosticAgent(
+                engine=spot_engine,
+                portfolio_manager=spot_portfolio_mgr,
+                exchange_adapter=spot_exchange,
+                exchange_name="binance_spot",
+                tracked_coins=config.binance.tracked_coins,
+            )
+            spot_recovery.set_diagnostic_agent(spot_diagnostic)
+            spot_engine.set_recovery_manager(spot_recovery)
+
+            spot_health = HealthMonitor(
+                engine=spot_engine,
+                portfolio_manager=spot_portfolio_mgr,
+                exchange_adapter=spot_exchange,
+                market_data=spot_market_data,
+                exchange_name="binance_spot",
+                tracked_coins=config.binance.tracked_coins,
             )
 
             logger.info("binance_spot_engine_ready",
@@ -585,6 +670,25 @@ async def lifespan(app: FastAPI):
         name="position_sync",
         seconds=60,
     )
+
+    # ── 헬스체크 스케줄러 (120초) ─────────────────────────────
+    _scheduler.add_job(
+        _wrap(bithumb_health.run_health_checks),
+        name="bithumb_health_check",
+        seconds=120,
+    )
+    if config.binance.enabled and _binance_engine:
+        _scheduler.add_job(
+            _wrap(futures_health.run_health_checks),
+            name="futures_health_check",
+            seconds=120,
+        )
+    if config.binance.spot_enabled and _binance_spot_engine:
+        _scheduler.add_job(
+            _wrap(spot_health.run_health_checks),
+            name="spot_health_check",
+            seconds=120,
+        )
 
     _scheduler.start()
 

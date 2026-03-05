@@ -18,6 +18,7 @@ from engine.order_manager import OrderManager
 from engine.portfolio_manager import PortfolioManager
 from db.session import get_session_factory
 from core.event_bus import emit_event
+from core.error_classifier import classify_error, ClassifiedError, ErrorCategory
 
 logger = structlog.get_logger(__name__)
 
@@ -110,10 +111,13 @@ class TradingEngine:
         # WebSocket broadcast callback
         self._broadcast_callback = None
 
+        # Self-healing recovery manager (main.py에서 set_recovery_manager()로 주입)
+        self._recovery_manager = None
+
     @property
     def _min_order_amount(self) -> float:
-        """최소 주문금액: 바이낸스 5 USDT, 빗썸 500 KRW."""
-        return 5.0 if "binance" in self._exchange_name else 500
+        """최소 주문금액: 바이낸스 5 USDT, 빗썸 5000 KRW."""
+        return 5.0 if "binance" in self._exchange_name else 5000
 
     @property
     def _fee_margin(self) -> float:
@@ -298,6 +302,65 @@ class TradingEngine:
             self._paused_coins.clear()
             self._suppressed_coins.clear()
 
+    def set_recovery_manager(self, recovery_manager) -> None:
+        """RecoveryManager 주입 (main.py lifespan에서 호출)."""
+        self._recovery_manager = recovery_manager
+
+    async def _execute_with_retry(self, operation, context: str, symbol: str):
+        """분류 기반 재시도: transient→백오프, resource→잔고복구, permanent→억제.
+
+        Returns
+        -------
+        결과 또는 None (최종 실패 시).
+        """
+        last_error = None
+        for attempt in range(3):
+            try:
+                return await operation()
+            except Exception as e:
+                last_error = e
+                classified = classify_error(e, context, symbol)
+
+                if not classified.retryable or attempt >= classified.max_retries:
+                    await emit_event(
+                        "error", "engine",
+                        f"주문 실패 (최종): {symbol}",
+                        detail=f"{context}: {e}",
+                        metadata={
+                            "symbol": symbol, "context": context,
+                            "category": classified.category.value,
+                            "attempts": attempt + 1,
+                            "exchange": self._exchange_name,
+                        },
+                    )
+                    return None
+
+                # 복구 시도
+                if self._recovery_manager:
+                    recovery = await self._recovery_manager.attempt_recovery(classified)
+                    logger.warning(
+                        f"{context}_retry",
+                        symbol=symbol,
+                        attempt=attempt + 1,
+                        category=classified.category.value,
+                        recovery=recovery.action_taken,
+                        exchange=self._exchange_name,
+                    )
+                else:
+                    logger.warning(
+                        f"{context}_retry_no_recovery",
+                        symbol=symbol,
+                        attempt=attempt + 1,
+                        exchange=self._exchange_name,
+                    )
+
+                # 백오프 대기
+                if classified.backoff_base > 0:
+                    wait = classified.backoff_base * (2 ** attempt)
+                    await asyncio.sleep(wait)
+
+        return None
+
     def _reset_daily_counter(self) -> None:
         today = datetime.now(timezone.utc).date()
         if today != self._daily_reset_date:
@@ -305,6 +368,9 @@ class TradingEngine:
             self._daily_coin_buy_count.clear()
             self._daily_trade_count = 0
             self._daily_reset_date = today
+            # 복구 카운터도 리셋
+            if self._recovery_manager:
+                self._recovery_manager.reset_daily()
 
     def _can_trade(self, symbol: str, side: str = "buy") -> tuple[bool, str]:
         """Check anti-overtrading constraints.
@@ -1481,8 +1547,29 @@ class TradingEngine:
                 )
                 return
 
-            # 포지션 사이징
+            # 포지션 사이징 (잔고 부족 시 복구 시도)
             cash = self._portfolio_manager.cash_balance
+            if cash < self._min_order_amount:
+                if self._recovery_manager:
+                    from core.exceptions import InsufficientBalanceError
+                    recovery = await self._recovery_manager.attempt_recovery(
+                        ClassifiedError(
+                            category=ErrorCategory.RESOURCE,
+                            original=InsufficientBalanceError(f"cash={cash}"),
+                            symbol=symbol,
+                            context="buy_sizing",
+                            retryable=True,
+                            max_retries=1,
+                            backoff_base=1.0,
+                            recovery_action="reconcile_cash",
+                        ))
+                    if recovery.resolved:
+                        cash = self._portfolio_manager.cash_balance
+                if cash < self._min_order_amount:
+                    logger.warning("buy_skip_no_cash_after_recovery", symbol=symbol,
+                                   cash=round(cash, 2), min_order=self._min_order_amount)
+                    return
+
             if self._config.trading.asymmetric_mode:
                 # 비대칭 사이징: 상승장 공격적, 횡보장 보수적
                 _asym_size = {
@@ -1509,15 +1596,37 @@ class TradingEngine:
             amount_krw = amount_krw / self._fee_margin
 
             if amount_krw < self._min_order_amount:
-                logger.debug("order_too_small", symbol=symbol, amount_krw=amount_krw)
+                logger.info("order_too_small", symbol=symbol,
+                            amount_krw=round(amount_krw, 2), cash=round(cash, 2),
+                            min_order=self._min_order_amount)
                 return
 
             amount = amount_krw / price
 
-            order = await self._order_manager.create_order(
-                session, symbol, "buy", amount, price, primary_signal, decision,
-                order_type="market",
-            )
+            if self._recovery_manager:
+                order = await self._execute_with_retry(
+                    lambda: self._order_manager.create_order(
+                        session, symbol, "buy", amount, price, primary_signal, decision,
+                        order_type="market",
+                    ),
+                    context="buy_order", symbol=symbol,
+                )
+                if order is None:
+                    return
+            else:
+                try:
+                    order = await self._order_manager.create_order(
+                        session, symbol, "buy", amount, price, primary_signal, decision,
+                        order_type="market",
+                    )
+                except Exception as e:
+                    logger.error("buy_order_failed", symbol=symbol, error=str(e),
+                                 amount=round(amount, 8), amount_krw=round(amount_krw, 2))
+                    await emit_event("error", "trade",
+                                     f"매수 주문 실패: {symbol}",
+                                     detail=str(e),
+                                     metadata={"symbol": symbol, "amount_krw": round(amount_krw, 2)})
+                    return
 
             # 미체결 주문은 거래소 취소 + 포트폴리오 건드리지 않음
             if order.status != "filled":
@@ -1574,10 +1683,26 @@ class TradingEngine:
             if not position or position.quantity <= 0:
                 return
 
-            order = await self._order_manager.create_order(
-                session, symbol, "sell", position.quantity, price, primary_signal, decision,
-                order_type="market",
-            )
+            if self._recovery_manager:
+                order = await self._execute_with_retry(
+                    lambda: self._order_manager.create_order(
+                        session, symbol, "sell", position.quantity, price, primary_signal, decision,
+                        order_type="market",
+                    ),
+                    context="sell_order", symbol=symbol,
+                )
+                if order is None:
+                    return
+            else:
+                try:
+                    order = await self._order_manager.create_order(
+                        session, symbol, "sell", position.quantity, price, primary_signal, decision,
+                        order_type="market",
+                    )
+                except Exception as e:
+                    logger.error("sell_order_failed", symbol=symbol, error=str(e))
+                    await emit_event("error", "trade", f"매도 주문 실패: {symbol}", detail=str(e))
+                    return
 
             # 미체결 주문은 거래소 취소 + 포트폴리오 건드리지 않음
             if order.status != "filled":
