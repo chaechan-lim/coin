@@ -59,19 +59,24 @@ async def get_engine_status(
     )
     daily_count = result.scalar() or 0
 
-    if exchange == "binance_futures" and _config:
-        mode = _config.binance_trading.mode
-        eval_interval = _config.binance_trading.evaluation_interval_sec
+    cfg = getattr(eng, '_config', None)
+    if exchange == "binance_futures" and cfg:
+        mode = cfg.binance_trading.mode
+        eval_interval = cfg.binance_trading.evaluation_interval_sec
+    elif cfg:
+        trading_cfg = cfg.binance_spot_trading if exchange == "binance_spot" else cfg.trading
+        mode = trading_cfg.mode
+        eval_interval = trading_cfg.evaluation_interval_sec
     else:
-        mode = _config.trading.mode if _config else "paper"
-        eval_interval = _config.trading.evaluation_interval_sec if _config else 300
+        mode = "paper"
+        eval_interval = 300
 
     return EngineStatusResponse(
         exchange=exchange,
         is_running=eng.is_running,
         mode=mode,
         evaluation_interval_sec=eval_interval,
-        tracked_coins=getattr(eng, 'tracked_coins', _config.trading.tracked_coins if _config else []),
+        tracked_coins=getattr(eng, 'tracked_coins', []),
         daily_trade_count=daily_count,
         strategies_active=list(eng.strategies.keys()),
     )
