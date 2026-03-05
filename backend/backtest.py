@@ -2407,7 +2407,8 @@ class FuturesBacktester:
                 _atr_margin_mult = 1.0
                 _atr_lev = self._leverage
                 if _atr_pct is not None:
-                    for _thr, _mm, _lo in ((5.0, 1.0, None), (10.0, 0.7, None),
+                    for _thr, _mm, _lo in ((2.0, 1.2, None), (3.0, 1.1, None),
+                                           (5.0, 1.0, None), (10.0, 0.7, None),
                                            (20.0, 0.5, 2), (999, 0.3, 1)):
                         if _atr_pct <= _thr:
                             _atr_margin_mult = _mm

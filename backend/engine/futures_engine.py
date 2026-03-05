@@ -47,10 +47,13 @@ _FUTURES_TIMEFRAME = "4h"  # 전략 평가 타임프레임
 # ATR 적응형 리스크 조절: 차단 대신 레버리지/마진 축소
 # ATR% 구간별: ~5% 기본, 5~10% 마진축소, 10~20% 레버리지↓, 20%+ 레버리지1x+마진축소
 _ATR_RISK_TIERS = (
-    (5.0,  1.0, None),   # ATR ≤ 5%: 기본 (마진 100%, 레버리지 유지)
-    (10.0, 0.7, None),   # ATR 5~10%: 마진 70%, 레버리지 유지
-    (20.0, 0.5, 2),      # ATR 10~20%: 마진 50%, 레버리지 2x
-    (999,  0.3, 1),      # ATR 20%+: 마진 30%, 레버리지 1x (현물급)
+    # (threshold, margin_mult, lev_override)  — 양방향 적응형 v2 (보수적)
+    (2.0,  1.2, None),   # ATR ≤ 2%: 초안정 → 마진 120%, 레버리지 유지
+    (3.0,  1.1, None),   # ATR 2~3%: 안정 → 마진 110%, 레버리지 유지
+    (5.0,  1.0, None),   # ATR 3~5%: 기본 (마진 100%, 레버리지 유지)
+    (10.0, 0.7, None),   # ATR 5~10%: 변동 → 마진 70%, 레버리지 유지
+    (20.0, 0.5, 2),      # ATR 10~20%: 고변동 → 마진 50%, 레버리지 2x
+    (999,  0.3, 1),      # ATR 20%+: 극단 → 마진 30%, 레버리지 1x
 )
 
 
@@ -1090,7 +1093,7 @@ class BinanceFuturesEngine(TradingEngine):
             return 1.0, None
         for threshold, margin_mult, lev_override in _ATR_RISK_TIERS:
             if atr_pct <= threshold:
-                if margin_mult < 1.0 or lev_override is not None:
+                if margin_mult != 1.0 or lev_override is not None:
                     logger.info("atr_risk_adjusted", symbol=symbol,
                                 atr_pct=round(atr_pct, 1),
                                 margin_mult=margin_mult,
