@@ -1928,6 +1928,7 @@ class FuturesBacktester:
         short_sideways: bool = False,        # sideways+downtrend+crash에서 숏 허용
         dynamic_position: bool = False,      # 시장 상태별 동적 포지션 사이징
         dual_timeframe: bool = False,        # 듀얼 타임프레임 (4h+1h)
+        directional_weights: bool = False,   # 방향별 가중치 (롱=추세, 숏=평균회귀)
         risk_enabled: bool = False,
         trade_limit_enabled: bool = False,
         risk_max_drawdown: float = 0.10,
@@ -1938,6 +1939,7 @@ class FuturesBacktester:
     ):
         self._exchange = exchange
         self._initial_balance = initial_balance
+        self._directional_weights = directional_weights
         self._min_confidence = min_confidence
         self._stop_loss_pct = stop_loss_pct
         self._take_profit_pct = take_profit_pct
@@ -2002,6 +2004,7 @@ class FuturesBacktester:
         self._combiner = SignalCombiner(
             strategy_weights=weights,
             min_confidence=min_confidence,
+            directional_weights=self._directional_weights,
         )
 
     async def fetch_history(
@@ -2823,6 +2826,7 @@ class FuturesPortfolioBacktester:
         short_sideways: bool = False,
         dynamic_position: bool = False,
         dual_timeframe: bool = False,
+        directional_weights: bool = False,
         max_positions: int = 5,
         # 리스크 관리
         risk_enabled: bool = False,
@@ -2853,6 +2857,7 @@ class FuturesPortfolioBacktester:
         self._short_sideways = short_sideways
         self._dynamic_position = dynamic_position
         self._dual_timeframe = dual_timeframe
+        self._directional_weights = directional_weights
         self._max_positions = max_positions
         self._base_position_pct = position_pct
         self._symbols = symbols or DEFAULT_FUTURES_PORTFOLIO_COINS
@@ -2900,6 +2905,7 @@ class FuturesPortfolioBacktester:
         self._combiner = SignalCombiner(
             strategy_weights=weights,
             min_confidence=min_confidence,
+            directional_weights=self._directional_weights,
         )
 
     async def prefetch_all(
@@ -4446,6 +4452,9 @@ async def main():
                         help="적응형 가중치 ON (기본)")
     parser.add_argument("--no-adaptive-weights", dest="adaptive_weights", action="store_false",
                         help="적응형 가중치 OFF")
+    # 방향별 가중치
+    parser.add_argument("--directional-weights", dest="directional_weights", action="store_true", default=False,
+                        help="방향별 가중치 ON (롱=추세추종, 숏=평균회귀)")
     # 동적 손절 (ATR + 시장 상태)
     parser.add_argument("--dynamic-sl",         dest="dynamic_sl", action="store_true", default=False,
                         help="ATR+시장상태 기반 동적 손절 ON")
@@ -4601,6 +4610,7 @@ async def main():
                 short_sideways=args.short_sideways,
                 dynamic_position=args.dynamic_position,
                 dual_timeframe=args.dual_timeframe,
+                directional_weights=args.directional_weights,
                 max_positions=args.max_positions,
                 risk_enabled=args.risk,
                 risk_max_drawdown=args.max_drawdown / 100,
@@ -4638,6 +4648,7 @@ async def main():
             short_sideways=args.short_sideways,
             dynamic_position=args.dynamic_position,
             dual_timeframe=args.dual_timeframe,
+            directional_weights=args.directional_weights,
             risk_enabled=args.risk,
             trade_limit_enabled=args.trade_limits,
             risk_max_drawdown=args.max_drawdown / 100,

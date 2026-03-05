@@ -29,6 +29,25 @@ class SignalCombiner:
         "obv_divergence": 0.13,
     }
 
+    # 방향별 가중치 — 롱은 추세추종 중심, 숏은 평균회귀 중심
+    # 백테스트 근거: MACD 롱 100% 승률, 평균회귀 숏 35% 승률
+    BUY_WEIGHTS = {
+        "ma_crossover": 0.18,
+        "rsi": 0.10,
+        "macd_crossover": 0.25,
+        "bollinger_rsi": 0.15,
+        "stochastic_rsi": 0.10,
+        "obv_divergence": 0.22,
+    }
+    SELL_WEIGHTS = {
+        "ma_crossover": 0.05,
+        "rsi": 0.25,
+        "macd_crossover": 0.10,
+        "bollinger_rsi": 0.30,
+        "stochastic_rsi": 0.20,
+        "obv_divergence": 0.10,
+    }
+
     # 현물용 신규 4전략 가중치 (추세추종 3인방 + BNF 평균회귀)
     SPOT_WEIGHTS = {
         "bnf_deviation": 0.10,
@@ -41,9 +60,11 @@ class SignalCombiner:
         self,
         strategy_weights: dict[str, float] | None = None,
         min_confidence: float = 0.50,
+        directional_weights: bool = False,
     ):
         self.weights = strategy_weights or self.DEFAULT_WEIGHTS.copy()
         self.min_confidence = min_confidence
+        self.directional_weights = directional_weights
 
     # 시장 상태별 적응형 가중치 프로필 (8전략)
     ADAPTIVE_PROFILES: dict[str, dict[str, float]] = {
@@ -107,17 +128,25 @@ class SignalCombiner:
         # Calculate weighted score: HOLD = abstain
         buy_score = 0.0
         sell_score = 0.0
-        active_weight = 0.0  # BUY/SELL 전략의 가중치 합
+        buy_active = 0.0
+        sell_active = 0.0
 
         for signal in signals:
-            weight = self.weights.get(signal.strategy_name, 0.1)
             if signal.signal_type == SignalType.BUY:
-                buy_score += weight * signal.confidence
-                active_weight += weight
+                w = (self.BUY_WEIGHTS.get(signal.strategy_name, 0.1)
+                     if self.directional_weights
+                     else self.weights.get(signal.strategy_name, 0.1))
+                buy_score += w * signal.confidence
+                buy_active += w
             elif signal.signal_type == SignalType.SELL:
-                sell_score += weight * signal.confidence
-                active_weight += weight
+                w = (self.SELL_WEIGHTS.get(signal.strategy_name, 0.1)
+                     if self.directional_weights
+                     else self.weights.get(signal.strategy_name, 0.1))
+                sell_score += w * signal.confidence
+                sell_active += w
             # HOLD: 기권 — 투표 미참여
+
+        active_weight = buy_active + sell_active
 
         # crash 시장에서는 단일 전략 SELL도 허용 (숏 진입 활성화)
         effective_min = self.MIN_ACTIVE_WEIGHT
@@ -133,9 +162,13 @@ class SignalCombiner:
                 final_reason=f"Active weight {active_weight:.2f} below {effective_min} (all abstain)",
             )
 
-        # 참여 가중치로 정규화
-        buy_norm = buy_score / active_weight
-        sell_norm = sell_score / active_weight
+        # 정규화: 방향별 모드면 각 방향 독립, 아니면 공유 active_weight
+        if self.directional_weights:
+            buy_norm = buy_score / buy_active if buy_active > 0 else 0.0
+            sell_norm = sell_score / sell_active if sell_active > 0 else 0.0
+        else:
+            buy_norm = buy_score / active_weight
+            sell_norm = sell_score / active_weight
 
         # 승리 타입 결정
         if buy_norm >= sell_norm:
