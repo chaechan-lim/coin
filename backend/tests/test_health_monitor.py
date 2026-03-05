@@ -166,7 +166,7 @@ class TestPositionConsistency:
         session = AsyncMock()
         pos = MagicMock()
         pos.symbol = "BTC/USDT"
-        pos.avg_buy_price = 0
+        pos.average_buy_price = 0
         pos.stop_loss_pct = None
 
         mock_result = MagicMock()
@@ -177,14 +177,14 @@ class TestPositionConsistency:
         result = await health._check_position_consistency(session)
         assert result.healthy is False
         assert result.auto_fixed is True
-        assert pos.avg_buy_price == 50000  # 현재가 대입
+        assert pos.average_buy_price == 50000  # 현재가 대입
 
     @pytest.mark.asyncio
     async def test_missing_tracker_detected(self, health, mock_engine):
         session = AsyncMock()
         pos = MagicMock()
         pos.symbol = "ETH/USDT"
-        pos.avg_buy_price = 3000.0
+        pos.average_buy_price = 3000.0
         pos.stop_loss_pct = None  # DB에도 tracker 없음
 
         mock_engine._position_trackers = {}  # 엔진에도 없음

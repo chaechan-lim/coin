@@ -736,6 +736,26 @@ class BinanceFuturesEngine(TradingEngine):
             await self._save_tracker_to_db(session, symbol, tracker)
 
         if sell_reason:
+            # 스탑 경고 이벤트 (PnL + 손절/익절 가격 포함)
+            lev_val = position.leverage or getattr(self, '_leverage', 3)
+            leveraged_pnl = pnl_pct * lev_val
+            loss_amount = abs(pnl_pct / 100 * entry * (position.quantity or 0))
+            await emit_event(
+                "warning", "futures_trade",
+                f"선물 {direction} 스탑: {symbol}",
+                detail=sell_reason,
+                metadata={
+                    "symbol": symbol,
+                    "price": price,
+                    "entry_price": entry,
+                    "pnl_pct": round(pnl_pct, 2),
+                    "leveraged_pnl_pct": round(leveraged_pnl, 2),
+                    "loss_amount": round(loss_amount, 2),
+                    "reason": sell_reason,
+                    "direction": direction,
+                    "leverage": lev_val,
+                },
+            )
             await self._close_position(session, symbol, position, price, sell_reason)
             return True
 

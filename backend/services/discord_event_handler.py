@@ -93,6 +93,10 @@ class DiscordEventHandler:
         if category == "trade" and level == "warning":
             return self._format_stop(title, detail, meta)
 
+        # ── 선물 스탑 (SL/TP/Trailing) ──────────────────────
+        if category == "futures_trade" and level == "warning":
+            return self._format_futures_stop(title, detail, meta)
+
         # ── 선물 매매 ─────────────────────────────────────
         if category == "futures_trade" and level == "info":
             return self._format_futures_trade(title, meta)
@@ -174,6 +178,42 @@ class DiscordEventHandler:
             "title": f"⚠️ {title}",
             "description": detail,
             "color": COLOR_ORANGE,
+            "fields": fields,
+        }
+
+    def _format_futures_stop(self, title: str, detail: str | None, meta: dict) -> dict:
+        """선물 SL/TP/Trailing 스탑 embed."""
+        pnl = meta.get("pnl_pct", 0)
+        color = COLOR_GREEN if pnl >= 0 else COLOR_RED
+        icon = "🟢" if pnl >= 0 else "🔴"
+        fields = []
+        if meta.get("price"):
+            v = meta["price"]
+            fmt = f"{v:,.2f}" if v >= 10 else f"{v:,.4f}"
+            fields.append({"name": "현재가", "value": f"{fmt} USDT", "inline": True})
+        if meta.get("entry_price"):
+            v = meta["entry_price"]
+            fmt = f"{v:,.2f}" if v >= 10 else f"{v:,.4f}"
+            fields.append({"name": "진입가", "value": f"{fmt} USDT", "inline": True})
+        if meta.get("direction"):
+            fields.append({"name": "방향", "value": meta["direction"].upper(), "inline": True})
+        if pnl is not None:
+            sign = "+" if pnl >= 0 else ""
+            fields.append({"name": "PnL", "value": f"{sign}{pnl:.2f}%", "inline": True})
+        if meta.get("leveraged_pnl_pct") is not None:
+            lp = meta["leveraged_pnl_pct"]
+            sign = "+" if lp >= 0 else ""
+            fields.append({"name": "레버리지 PnL", "value": f"{sign}{lp:.2f}%", "inline": True})
+        if meta.get("loss_amount") is not None:
+            fields.append({"name": "손익 금액", "value": f"{meta['loss_amount']:,.2f} USDT", "inline": True})
+        if meta.get("leverage"):
+            fields.append({"name": "레버리지", "value": f"{meta['leverage']}x", "inline": True})
+        if meta.get("reason"):
+            fields.append({"name": "사유", "value": meta["reason"], "inline": False})
+        return {
+            "title": f"{icon} {title}",
+            "description": detail,
+            "color": color,
             "fields": fields,
         }
 

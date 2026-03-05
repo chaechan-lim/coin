@@ -198,12 +198,12 @@ class HealthMonitor:
 
         for pos in positions:
             # entry_price = 0 감지
-            if (pos.avg_buy_price or 0) <= 0:
+            if (pos.average_buy_price or 0) <= 0:
                 # 현재가로 대입 시도
                 try:
                     ticker = await self._market_data.get_ticker(pos.symbol)
                     if ticker and ticker.last > 0:
-                        pos.avg_buy_price = ticker.last
+                        pos.average_buy_price = ticker.last
                         issues.append(f"{pos.symbol}: entry=0 → {ticker.last:.4f}")
                 except Exception:
                     issues.append(f"{pos.symbol}: entry=0 (가격 조회 실패)")
