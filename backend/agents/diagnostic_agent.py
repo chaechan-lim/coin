@@ -257,7 +257,7 @@ DIAGNOSIS: <1-2줄 진단 요약>"""
                 try:
                     response = await self._llm_client.messages.create(
                         model=model,
-                        max_tokens=256,
+                        max_tokens=self._llm_config.diagnostic_max_tokens,
                         messages=[{"role": "user", "content": prompt}],
                     )
                     text = response.content[0].text

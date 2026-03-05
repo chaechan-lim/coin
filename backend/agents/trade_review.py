@@ -943,11 +943,14 @@ RECOMMENDATIONS:
                 try:
                     response = await self._llm_client.messages.create(
                         model=model,
-                        max_tokens=1024,
+                        max_tokens=self._llm_config.max_tokens,
                         messages=[{"role": "user", "content": prompt}],
                     )
 
                     text = response.content[0].text
+                    if response.stop_reason == "max_tokens":
+                        logger.warning("llm_response_truncated",
+                                       model=model, tokens=self._llm_config.max_tokens)
                     insights = []
                     recommendations = []
                     section = None
