@@ -61,6 +61,8 @@ async def lifespan(app: FastAPI):
 
     logger.info("startup_begin", mode=config.trading.mode)
 
+    from core.models import CapitalTransaction, Position as PositionModel
+
     # ── 1. DB 초기화 ─────────────────────────────────────────
     engine = get_engine()
     async with engine.begin() as conn:
@@ -116,7 +118,6 @@ async def lifespan(app: FastAPI):
 
             # 시드 입금 자동 생성 (CapitalTransaction 0건이면)
             # 신규 DB: 실제 총자산(현금+포지션) 기준으로 시드 생성
-            from core.models import CapitalTransaction, Position as PositionModel
             count_result = await sess.execute(
                 select(func.count()).select_from(CapitalTransaction)
                 .where(CapitalTransaction.exchange == "bithumb")
@@ -221,6 +222,8 @@ async def lifespan(app: FastAPI):
     engine_registry.register("bithumb", trading_engine, portfolio_mgr, combiner, coordinator)
 
     # ── 7. 바이낸스 선물 (조건부) ──────────────────────────────
+    futures_health = None
+    spot_health = None
     binance_exchange = None
     if config.binance.enabled:
         try:
@@ -669,13 +672,13 @@ async def lifespan(app: FastAPI):
         name="bithumb_health_check",
         seconds=120,
     )
-    if config.binance.enabled and _binance_engine:
+    if _binance_engine and futures_health:
         _scheduler.add_job(
             _wrap(futures_health.run_health_checks),
             name="futures_health_check",
             seconds=120,
         )
-    if config.binance.spot_enabled and _binance_spot_engine:
+    if _binance_spot_engine and spot_health:
         _scheduler.add_job(
             _wrap(spot_health.run_health_checks),
             name="spot_health_check",
