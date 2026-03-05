@@ -733,8 +733,8 @@ class TestPositionTrackerState:
         t = PositionTracker(entry_price=100, highest_price=100)
         assert t.stop_loss_pct == 5.0
         assert t.take_profit_pct == 10.0
-        assert t.trailing_activation_pct == 3.0
-        assert t.trailing_stop_pct == 3.0
+        assert t.trailing_activation_pct == 5.0
+        assert t.trailing_stop_pct == 4.0
         assert t.trailing_active is False
         assert t.is_surge is False
         assert t.max_hold_hours == 0

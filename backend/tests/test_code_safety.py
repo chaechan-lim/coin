@@ -380,8 +380,8 @@ class TestPositionTrackerDefaults:
         tracker = PositionTracker(entry_price=100, highest_price=100)
         assert tracker.stop_loss_pct == 5.0
         assert tracker.take_profit_pct == 10.0
-        assert tracker.trailing_activation_pct == 3.0
-        assert tracker.trailing_stop_pct == 3.0
+        assert tracker.trailing_activation_pct == 5.0
+        assert tracker.trailing_stop_pct == 4.0
         assert tracker.trailing_active is False
         assert tracker.highest_price == 100
 

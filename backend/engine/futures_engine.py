@@ -31,8 +31,8 @@ logger = structlog.get_logger(__name__)
 # 선물 전용 SL/TP: 레버리지에 따라 자동 축소 (P1 최적화: 4h 기반)
 _FUTURES_DEFAULT_SL_PCT = 8.0
 _FUTURES_DEFAULT_TP_PCT = 16.0
-_FUTURES_TRAILING_ACTIVATION = 5.0
-_FUTURES_TRAILING_STOP = 3.5
+_FUTURES_TRAILING_ACTIVATION = 7.0
+_FUTURES_TRAILING_STOP = 5.0
 
 # 동적 SL 프로필 (ATR 기반): (atr_multiplier, floor_pct, cap_pct)
 _DYNAMIC_SL_PROFILES = {
@@ -698,8 +698,8 @@ class BinanceFuturesEngine(TradingEngine):
                     highest_price=position.highest_price or position.average_buy_price,
                     stop_loss_pct=position.stop_loss_pct,
                     take_profit_pct=position.take_profit_pct or 10.0,
-                    trailing_activation_pct=position.trailing_activation_pct or 3.0,
-                    trailing_stop_pct=position.trailing_stop_pct or 3.0,
+                    trailing_activation_pct=position.trailing_activation_pct or 5.0,
+                    trailing_stop_pct=position.trailing_stop_pct or 4.0,
                     trailing_active=position.trailing_active or False,
                     is_surge=position.is_surge or False,
                     max_hold_hours=position.max_hold_hours or 0,

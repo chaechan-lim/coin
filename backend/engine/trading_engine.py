@@ -41,8 +41,8 @@ class PositionTracker:
     highest_price: float
     stop_loss_pct: float = 5.0       # 동적 SL %
     take_profit_pct: float = 10.0
-    trailing_activation_pct: float = 3.0
-    trailing_stop_pct: float = 3.0
+    trailing_activation_pct: float = 5.0
+    trailing_stop_pct: float = 4.0
     trailing_active: bool = False     # 트레일링 활성 여부
     is_surge: bool = False            # 서지 코인 여부
     max_hold_hours: float = 0        # 최대 보유 시간 (0=무제한)
@@ -624,8 +624,8 @@ class TradingEngine:
                     highest_price=position.highest_price or position.average_buy_price,
                     stop_loss_pct=position.stop_loss_pct,
                     take_profit_pct=position.take_profit_pct or 10.0,
-                    trailing_activation_pct=position.trailing_activation_pct or 3.0,
-                    trailing_stop_pct=position.trailing_stop_pct or 3.0,
+                    trailing_activation_pct=position.trailing_activation_pct or 5.0,
+                    trailing_stop_pct=position.trailing_stop_pct or 4.0,
                     trailing_active=position.trailing_active or False,
                     is_surge=position.is_surge or False,
                     max_hold_hours=position.max_hold_hours or 0,
