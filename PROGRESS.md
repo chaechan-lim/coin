@@ -31,8 +31,11 @@
 
 ```
 coin/
+├── CLAUDE.md                    <- AI 어시스턴트 지침 (자동 로드)
 ├── PROGRESS.md                  <- 이 파일 (운영 참조)
-├── CHANGELOG.md                 <- 버전 이력 + 완료 기록
+├── CHANGELOG.md                 <- 버전 이력
+├── DEVELOPMENT.md               <- 개발 규칙 (테스트, 백테스트, 컨벤션)
+├── DEPLOYMENT.md                <- 배포 프로세스 (라즈베리파이)
 ├── backend/
 │   ├── main.py, config.py, backtest.py
 │   ├── core/          (models, schemas, enums, event_bus, error_classifier)
@@ -95,14 +98,14 @@ coin/
 | 하락 | 0.06 | 0.27 | 0.08 | 0.32 | 0.15 | 0.12 |
 | 폭락 | 0.04 | 0.28 | 0.06 | 0.34 | 0.15 | 0.13 |
 
-**현물** (4전략, 시장 상태별):
+**현물** (4전략, 고정 SPOT_WEIGHTS):
 
-| 시장 상태 | BNF이격도 | CIS모멘텀 | 래리윌리엄스 | 돈치안채널 |
-|---|---|---|---|---|
-| 강한 상승 | 0.05 | 0.35 | 0.35 | 0.25 |
-| 상승 | 0.08 | 0.33 | 0.33 | 0.26 |
-| 횡보 (기본) | 0.15 | 0.30 | 0.30 | 0.25 |
-| 하락 | 0.20 | 0.28 | 0.28 | 0.24 |
+| 전략 | 가중치 |
+|---|---|
+| cis_momentum | 0.32 |
+| larry_williams | 0.32 |
+| donchian_channel | 0.26 |
+| bnf_deviation | 0.10 |
 
 ### 리스크 설정
 
@@ -161,27 +164,17 @@ coin/
 
 ## 실행 방법
 
-### 로컬 개발
+> 상세 배포 절차: `DEPLOYMENT.md`, 개발 규칙: `DEVELOPMENT.md`, AI 지침: `CLAUDE.md`
+
 ```bash
-# DB 실행
-docker compose up -d postgres redis
+# 서버 실행
+cd backend && .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 
-# 백엔드
-cd backend && .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-
-# 프론트엔드
-cd frontend && npm run dev
-```
-
-### 라즈베리파이 배포
-```bash
-# 배포
-git pull && sudo systemctl restart coin-backend
-
-# 엔진 시작
+# 엔진 시작 (재시작 후 반드시 호출)
 curl -X POST http://localhost:8000/api/v1/engine/start?exchange=binance_futures
 curl -X POST http://localhost:8000/api/v1/engine/start?exchange=binance_spot
+curl -X POST http://localhost:8000/api/v1/engine/start
 
 # 테스트
-cd backend && .venv/bin/python -m pytest tests/ -v
+cd backend && .venv/bin/python -m pytest tests/ -x -q
 ```
