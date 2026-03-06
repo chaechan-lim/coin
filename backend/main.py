@@ -728,10 +728,11 @@ async def lifespan(app: FastAPI):
     # 현재 포지션 요약
     positions_summary = await _build_positions_summary(engine_registry)
 
-    startup_msg = (
-        f"🚀 트레이딩 봇 시작 ({config.trading.mode.upper()} 모드)\n"
-        f"빗썸 현물: {', '.join(spot_coins)}"
-    )
+    startup_msg = f"🚀 트레이딩 봇 시작 ({config.trading.mode.upper()} 모드)"
+    # 빗썸: live 모드 + tracked_coins 있을 때만 표시
+    bithumb_active = config.trading.mode == "live" and spot_coins
+    if bithumb_active:
+        startup_msg += f"\n빗썸 현물: {', '.join(spot_coins)}"
     if config.binance.enabled:
         startup_msg += f"\n선물: {', '.join(futures_coins)}"
     if config.binance.spot_enabled:
@@ -741,11 +742,14 @@ async def lifespan(app: FastAPI):
     await notification.send_engine_alert(startup_msg)
 
     logger.info("startup_complete")
-    startup_detail = f"{config.trading.mode} 모드 | 빗썸 현물: {', '.join(spot_coins)}"
+    startup_parts = [f"{config.trading.mode} 모드"]
+    if bithumb_active:
+        startup_parts.append(f"빗썸 현물: {', '.join(spot_coins)}")
     if config.binance.enabled:
-        startup_detail += f" | 선물: {', '.join(futures_coins)}"
+        startup_parts.append(f"선물: {', '.join(futures_coins)}")
     if config.binance.spot_enabled:
-        startup_detail += f" | 바이낸스 현물: {', '.join(config.binance.tracked_coins)}"
+        startup_parts.append(f"바이낸스 현물: {', '.join(config.binance.tracked_coins)}")
+    startup_detail = " | ".join(startup_parts)
     metadata = {"spot_coins": spot_coins, "futures_coins": futures_coins if config.binance.enabled else []}
     await emit_event("info", "system", "서버 시작", detail=startup_detail, metadata=metadata)
 
@@ -801,8 +805,12 @@ async def _build_positions_summary(registry) -> str:
     parts = []
     try:
         session_factory = get_session_factory()
+        config = get_config()
         async with session_factory() as session:
             for ex_name in registry.available_exchanges:
+                # 빗썸: paper 모드면 알림 제외
+                if ex_name == "bithumb" and config.trading.mode != "live":
+                    continue
                 pm = registry.get_portfolio_manager(ex_name)
                 if not pm:
                     continue

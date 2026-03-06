@@ -496,7 +496,13 @@ async def send_daily_summary(
 
     session_factory = get_session_factory()
 
+    from config import get_config
+    config = get_config()
+
     for exchange_name in engine_registry.available_exchanges:
+        # 빗썸: paper 모드(비활성)면 일일 요약 제외
+        if exchange_name == "bithumb" and config.trading.mode != "live":
+            continue
         pm = engine_registry.get_portfolio_manager(exchange_name)
         eng = engine_registry.get_engine(exchange_name)
         if not pm or not eng:
