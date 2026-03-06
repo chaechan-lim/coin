@@ -52,12 +52,6 @@ coin/
 
 ## 남은 과제 (Phase 6)
 
-### 높은 우선순위
-
-| 항목 | 상세 |
-|---|---|
-| 엔진 auto-start | 재부팅 후 수동 curl 필요 → systemd ExecStartPost 자동화 |
-
 ### 중간 우선순위
 
 | 항목 | 상세 |
