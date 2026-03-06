@@ -35,6 +35,144 @@ _DEFAULT_SL_PROFILE = (2.0, 4.0, 7.0)
 
 
 @dataclass
+class EngineConfig:
+    """Exchange-agnostic engine configuration.
+
+    main.py에서 거래소별 설정을 주입 → 엔진 내부에서 거래소 분기 제거.
+    """
+    exchange_name: str = "bithumb"
+    mode: str = "paper"
+    quote_currency: str = "KRW"        # KRW or USDT
+
+    # 추적 코인
+    tracked_coins: list[str] = field(default_factory=list)
+
+    # 평가 주기
+    evaluation_interval_sec: int = 300
+
+    # 매매 제한
+    min_combined_confidence: float = 0.50
+    daily_buy_limit: int = 20
+    max_daily_coin_buys: int = 3
+    min_trade_interval_sec: int = 3600
+    cooldown_after_sell_sec: int = 14400
+    min_profit_vs_fee_ratio: float = 2.0
+
+    # 주문 사이징
+    min_order_amount: float = 5000     # KRW(5000) or USDT(5)
+    fee_margin: float = 1.003          # 1 + fee (빗썸 0.3%, 바이낸스 0.2%)
+    min_fallback_amount: float = 5000  # 잔고 전체 시도 기준
+    max_trade_size_pct: float = 0.20   # 1회 매매 최대 비중
+
+    # 전략
+    asymmetric_mode: bool = True
+    max_single_coin_pct: float = 0.40
+    rebalancing_enabled: bool = True
+    rebalancing_target_pct: float = 0.35
+
+    # 로테이션 (서지 매수)
+    rotation_enabled: bool = True
+    rotation_coins: list[str] = field(default_factory=list)
+    surge_threshold: float = 3.0
+    rotation_cooldown_sec: int = 7200
+    stablecoins: set[str] = field(default_factory=lambda: {"USDT/KRW", "USDC/KRW", "DAI/KRW", "TUSD/KRW"})
+    min_quote_volume: float = 1e9      # 최소 24h 거래대금
+
+    @property
+    def quote_suffix(self) -> str:
+        return f"/{self.quote_currency}"
+
+    @property
+    def btc_symbol(self) -> str:
+        return f"BTC/{self.quote_currency}"
+
+    @classmethod
+    def from_app_config(cls, app_config, exchange_name: str) -> "EngineConfig":
+        """AppConfig에서 거래소별 EngineConfig 자동 생성."""
+        if exchange_name == "binance_spot":
+            bst = app_config.binance_spot_trading
+            bc = app_config.binance
+            return cls(
+                exchange_name=exchange_name,
+                mode=bst.mode,
+                quote_currency="USDT",
+                tracked_coins=list(bc.tracked_coins),
+                evaluation_interval_sec=bst.evaluation_interval_sec,
+                min_combined_confidence=bst.min_combined_confidence,
+                daily_buy_limit=bst.daily_buy_limit,
+                max_daily_coin_buys=bst.max_daily_coin_buys,
+                min_trade_interval_sec=bst.cooldown_after_buy_sec,
+                cooldown_after_sell_sec=bst.cooldown_after_sell_sec,
+                min_order_amount=5.0,
+                fee_margin=1.002,
+                min_fallback_amount=10.0,
+                max_trade_size_pct=bst.max_trade_size_pct,
+                asymmetric_mode=app_config.trading.asymmetric_mode,
+                max_single_coin_pct=app_config.risk.max_single_coin_pct,
+                rebalancing_enabled=app_config.risk.rebalancing_enabled,
+                rebalancing_target_pct=app_config.risk.rebalancing_target_pct,
+                rotation_enabled=bst.rotation_enabled,
+                rotation_coins=[],
+                surge_threshold=app_config.trading.surge_threshold,
+                rotation_cooldown_sec=app_config.trading.rotation_cooldown_sec,
+                stablecoins={"USDC/USDT", "DAI/USDT", "TUSD/USDT", "BUSD/USDT", "FDUSD/USDT"},
+                min_quote_volume=5e6,
+            )
+        elif exchange_name == "bithumb":
+            tc = app_config.trading
+            return cls(
+                exchange_name=exchange_name,
+                mode=tc.mode,
+                quote_currency="KRW",
+                tracked_coins=list(tc.tracked_coins),
+                evaluation_interval_sec=tc.evaluation_interval_sec,
+                min_combined_confidence=tc.min_combined_confidence,
+                daily_buy_limit=tc.daily_buy_limit,
+                max_daily_coin_buys=tc.max_daily_coin_buys,
+                min_trade_interval_sec=tc.min_trade_interval_sec,
+                cooldown_after_sell_sec=tc.cooldown_after_sell_sec,
+                min_order_amount=5000,
+                fee_margin=1.003,
+                min_fallback_amount=5000,
+                max_trade_size_pct=app_config.risk.max_trade_size_pct,
+                asymmetric_mode=tc.asymmetric_mode,
+                max_single_coin_pct=app_config.risk.max_single_coin_pct,
+                rebalancing_enabled=app_config.risk.rebalancing_enabled,
+                rebalancing_target_pct=app_config.risk.rebalancing_target_pct,
+                rotation_enabled=tc.rotation_enabled,
+                rotation_coins=list(tc.rotation_coins),
+                surge_threshold=tc.surge_threshold,
+                rotation_cooldown_sec=tc.rotation_cooldown_sec,
+            )
+        elif "binance" in exchange_name:
+            # binance_futures 등 — 선물 엔진은 자체 설정 사용, 기본값만 세팅
+            bt = app_config.binance_trading
+            bc = app_config.binance
+            return cls(
+                exchange_name=exchange_name,
+                mode=bt.mode,
+                quote_currency="USDT",
+                tracked_coins=list(bc.tracked_coins),
+                evaluation_interval_sec=bt.evaluation_interval_sec,
+                min_combined_confidence=bt.min_combined_confidence,
+                daily_buy_limit=bt.daily_buy_limit,
+                max_daily_coin_buys=bt.max_daily_coin_buys,
+                min_order_amount=5.0,
+                fee_margin=1.002,
+                min_fallback_amount=10.0,
+                max_trade_size_pct=bt.max_trade_size_pct,
+                asymmetric_mode=False,
+                max_single_coin_pct=app_config.risk.max_single_coin_pct,
+                rebalancing_enabled=False,
+                rotation_enabled=False,
+                stablecoins={"USDC/USDT", "DAI/USDT", "TUSD/USDT", "BUSD/USDT", "FDUSD/USDT"},
+                min_quote_volume=5e6,
+            )
+        else:
+            raise ValueError(f"Unknown exchange: {exchange_name}")
+
+
+@dataclass
 class PositionTracker:
     """In-memory state for SL/TP/trailing stop tracking."""
     entry_price: float
@@ -64,6 +202,7 @@ class TradingEngine:
         exchange_name: str = "bithumb",
         tracked_coins: list[str] | None = None,
         evaluation_interval_sec: int | None = None,
+        engine_config: EngineConfig | None = None,
     ):
         self._config = config
         self._exchange = exchange
@@ -73,8 +212,21 @@ class TradingEngine:
         self._combiner = combiner
         self._agent_coordinator = agent_coordinator
         self._exchange_name = exchange_name
-        self._tracked_coins = tracked_coins
-        self._eval_interval = evaluation_interval_sec
+
+        # EngineConfig: 명시적으로 전달되면 사용, 아니면 자동 생성
+        if engine_config:
+            self._ec = engine_config
+        else:
+            self._ec = EngineConfig.from_app_config(config, exchange_name)
+
+        # tracked_coins/eval_interval 오버라이드 (하위 호환)
+        if tracked_coins:
+            self._ec.tracked_coins = list(tracked_coins)
+        if evaluation_interval_sec:
+            self._ec.evaluation_interval_sec = evaluation_interval_sec
+
+        self._tracked_coins = self._ec.tracked_coins or None
+        self._eval_interval = self._ec.evaluation_interval_sec
 
         self._strategies: dict[str, BaseStrategy] = {}
         self._is_running = False
@@ -116,19 +268,21 @@ class TradingEngine:
         self._recovery_manager = None
 
     @property
+    def tracked_coins(self) -> list[str]:
+        """추적 코인 목록 (외부 접근용)."""
+        return list(self._ec.tracked_coins)
+
+    @property
     def _min_order_amount(self) -> float:
-        """최소 주문금액: 바이낸스 5 USDT, 빗썸 5000 KRW."""
-        return 5.0 if "binance" in self._exchange_name else 5000
+        return self._ec.min_order_amount
 
     @property
     def _fee_margin(self) -> float:
-        """수수료 마진: 바이낸스 0.2%, 빗썸 0.3%."""
-        return 1.002 if "binance" in self._exchange_name else 1.003
+        return self._ec.fee_margin
 
     @property
     def _min_fallback_amount(self) -> float:
-        """잔고 전체 시도 기준: 바이낸스 10 USDT, 빗썸 5000 KRW."""
-        return 10.0 if "binance" in self._exchange_name else 5000
+        return self._ec.min_fallback_amount
 
     def set_broadcast_callback(self, callback) -> None:
         self._broadcast_callback = callback
@@ -200,7 +354,7 @@ class TradingEngine:
         logger.info(
             "engine_initialized",
             strategies=list(self._strategies.keys()),
-            mode=self._config.trading.mode,
+            mode=self._ec.mode,
         )
 
     async def _restore_trade_timestamps(self) -> None:
@@ -232,7 +386,7 @@ class TradingEngine:
         self._is_running = True
         await self._restore_trade_timestamps()
         logger.info("engine_started")
-        await emit_event("info", "engine", f"{self._exchange_name} 엔진 시작", metadata={"mode": self._config.trading.mode, "exchange": self._exchange_name})
+        await emit_event("info", "engine", f"{self._exchange_name} 엔진 시작", metadata={"mode": self._ec.mode, "exchange": self._exchange_name})
 
         # 전략 평가 루프 + 빠른 SL/TP 체크 루프 병렬 실행
         await asyncio.gather(
@@ -248,7 +402,7 @@ class TradingEngine:
                 await self._evaluation_cycle()
             except Exception as e:
                 logger.error("engine_cycle_error", error=str(e), exc_info=True)
-            await asyncio.sleep(self._eval_interval or self._config.trading.evaluation_interval_sec)
+            await asyncio.sleep(self._ec.evaluation_interval_sec)
 
     async def _fast_stop_check_loop(self) -> None:
         """보유 포지션 SL/TP/trailing 빠른 체크 (30초 주기, 가격만 조회)."""
@@ -384,27 +538,27 @@ class TradingEngine:
 
         if side == "buy":
             # 일일 총 매수 상한
-            if self._daily_buy_count >= self._config.trading.daily_buy_limit:
-                return False, f"Daily buy limit reached ({self._config.trading.daily_buy_limit})"
+            if self._daily_buy_count >= self._ec.daily_buy_limit:
+                return False, f"Daily buy limit reached ({self._ec.daily_buy_limit})"
 
             # 코인별 일일 매수 상한
             coin_buys = self._daily_coin_buy_count.get(symbol, 0)
-            if coin_buys >= self._config.trading.max_daily_coin_buys:
-                return False, f"Coin daily buy limit reached ({symbol}: {coin_buys}/{self._config.trading.max_daily_coin_buys})"
+            if coin_buys >= self._ec.max_daily_coin_buys:
+                return False, f"Coin daily buy limit reached ({symbol}: {coin_buys}/{self._ec.max_daily_coin_buys})"
 
             # 코인당 최소 거래 간격
             last = self._last_trade_time.get(symbol)
             if last:
                 elapsed = (datetime.now(timezone.utc) - last).total_seconds()
-                if elapsed < self._config.trading.min_trade_interval_sec:
-                    remaining = self._config.trading.min_trade_interval_sec - elapsed
+                if elapsed < self._ec.min_trade_interval_sec:
+                    remaining = self._ec.min_trade_interval_sec - elapsed
                     return False, f"Coin cooldown: {remaining:.0f}s remaining"
 
             # 매도 후 재매수 대기 (당일 왕복 방지)
             last_sell = self._last_sell_time.get(symbol)
             if last_sell:
                 sell_elapsed = (datetime.now(timezone.utc) - last_sell).total_seconds()
-                washout = self._config.trading.cooldown_after_sell_sec
+                washout = self._ec.cooldown_after_sell_sec
                 if sell_elapsed < washout:
                     remaining = washout - sell_elapsed
                     return False, f"Post-sell washout: {remaining:.0f}s remaining"
@@ -547,7 +701,7 @@ class TradingEngine:
             return
 
         try:
-            btc_symbol = "BTC/USDT" if "binance" in self._exchange_name else "BTC/KRW"
+            btc_symbol = self._ec.btc_symbol
             df = await self._market_data.get_candles(btc_symbol, "4h", 200)
             new_state, new_confidence = self._detect_market_state(df)
             self._market_confidence = new_confidence
@@ -900,8 +1054,7 @@ class TradingEngine:
 
     async def _check_and_rebalance(self, session: AsyncSession) -> None:
         """비중 초과 코인 자동 일부 매도 (max_single_coin_pct → target_pct)."""
-        risk = self._config.risk
-        if not risk.rebalancing_enabled:
+        if not self._ec.rebalancing_enabled:
             return
 
         summary = await self._portfolio_manager.get_portfolio_summary(session)
@@ -917,7 +1070,7 @@ class TradingEngine:
             current_value = pos_info["current_value"]
             weight = current_value / total_value
 
-            if weight <= risk.max_single_coin_pct:
+            if weight <= self._ec.max_single_coin_pct:
                 continue
 
             # 서지 포지션 스킵
@@ -931,7 +1084,7 @@ class TradingEngine:
                 continue
 
             # 매도 수량 계산: (weight - target) / weight 비율만큼
-            target = risk.rebalancing_target_pct
+            target = self._ec.rebalancing_target_pct
             sell_ratio = (weight - target) / weight
             qty = pos_info["quantity"] * sell_ratio
             price = pos_info["current_price"]
@@ -1008,7 +1161,7 @@ class TradingEngine:
                     # 포트폴리오 리밸런싱 (비중 초과 코인 자동 일부 매도)
                     await self._check_and_rebalance(session)
 
-                    coins = set(self._tracked_coins or self._config.trading.tracked_coins)
+                    coins = set(self._ec.tracked_coins)
 
                     # 보유 중인 포지션도 평가 대상에 포함 (서지 코인 SL/TP/SELL)
                     result = await session.execute(
@@ -1042,7 +1195,7 @@ class TradingEngine:
                             continue
 
                     # 거래량 급등 로테이션 모드
-                    if self._config.trading.rotation_enabled:
+                    if self._ec.rotation_enabled:
                         surges = await self._scan_volume_surges()
                         if surges:
                             await self._try_rotation(session, surges)
@@ -1166,13 +1319,11 @@ class TradingEngine:
 
     # ── 거래량 급등 로테이션 ──────────────────────────────────────
 
-    _STABLECOINS = {"USDT/KRW", "USDC/KRW", "DAI/KRW", "TUSD/KRW"}
     _ROTATION_REFRESH_SEC = 6 * 3600  # 6시간마다 갱신
-    _MIN_QUOTE_VOLUME = 1e9  # 최소 24h 거래대금 10억원
     _MAX_ROTATION_COINS = 40  # 로테이션 코인 상한
 
     async def _refresh_rotation_coins(self) -> None:
-        """빗썸 전체 마켓에서 24h 거래대금 상위 코인을 로테이션 대상으로 선정."""
+        """전체 마켓에서 24h 거래대금 상위 코인을 로테이션 대상으로 선정."""
         now = datetime.now(timezone.utc)
         if (self._rotation_coins_updated
                 and (now - self._rotation_coins_updated).total_seconds() < self._ROTATION_REFRESH_SEC):
@@ -1180,16 +1331,19 @@ class TradingEngine:
 
         try:
             tickers = await self._exchange.fetch_tickers()
-            tracked = set(self._config.trading.tracked_coins)
+            tracked = set(self._ec.tracked_coins)
+            suffix = self._ec.quote_suffix
+            stables = self._ec.stablecoins
+            min_vol = self._ec.min_quote_volume
 
             ranked = []
             for sym, t in tickers.items():
-                if not sym.endswith("/KRW"):
+                if not sym.endswith(suffix):
                     continue
-                if sym in tracked or sym in self._STABLECOINS:
+                if sym in tracked or sym in stables:
                     continue
                 vol = t.get("quoteVolume") or 0
-                if vol >= self._MIN_QUOTE_VOLUME:
+                if vol >= min_vol:
                     ranked.append((sym, vol))
 
             ranked.sort(key=lambda x: x[1], reverse=True)
@@ -1198,27 +1352,27 @@ class TradingEngine:
 
             logger.info(
                 "rotation_coins_refreshed",
+                exchange=self._exchange_name,
                 count=len(self._dynamic_rotation_coins),
                 top5=[s for s, _ in ranked[:5]],
             )
         except Exception as e:
             logger.warning("rotation_coins_refresh_failed", error=str(e))
-            # 실패 시 config 폴백
-            if not self._dynamic_rotation_coins:
-                self._dynamic_rotation_coins = list(self._config.trading.rotation_coins)
+            if not self._dynamic_rotation_coins and self._ec.rotation_coins:
+                self._dynamic_rotation_coins = list(self._ec.rotation_coins)
 
     def _get_rotation_coins(self) -> list[str]:
         """동적 코인이 있으면 사용, 없으면 config 폴백."""
         if self._dynamic_rotation_coins:
             return self._dynamic_rotation_coins
-        return list(self._config.trading.rotation_coins)
+        return list(self._ec.rotation_coins)
 
     async def _scan_volume_surges(self) -> list[tuple[str, float]]:
         """거래대금 상위 코인 거래량 서지 스캔. (symbol, surge_score) 리스트 반환."""
         await self._refresh_rotation_coins()
         surges: list[tuple[str, float]] = []
         all_scores: dict[str, float] = {}
-        threshold = self._config.trading.surge_threshold
+        threshold = self._ec.surge_threshold
         for symbol in self._get_rotation_coins():
             try:
                 df = await self._market_data.get_candles(symbol, "1h", 30)
@@ -1246,7 +1400,7 @@ class TradingEngine:
         # 쿨다운 체크
         if self._last_rotation_time:
             elapsed = (now - self._last_rotation_time).total_seconds()
-            if elapsed < self._config.trading.rotation_cooldown_sec:
+            if elapsed < self._ec.rotation_cooldown_sec:
                 return
 
         # 현금 부족 시 스킵
@@ -1495,14 +1649,14 @@ class TradingEngine:
 
         if decision.action == SignalType.BUY:
             # ── 비대칭 전략: 시장 상태별 차등 매수 기준 ──
-            if self._config.trading.asymmetric_mode:
+            if self._ec.asymmetric_mode:
                 # 하락장 매수 완전 차단
                 if self._market_state in ("crash", "downtrend"):
                     logger.info("asymmetric_buy_blocked",
                                 symbol=symbol, market_state=self._market_state)
                     return
                 # 시장 상태별 신뢰도 임계값
-                base_conf = self._config.trading.min_combined_confidence
+                base_conf = self._ec.min_combined_confidence
                 _asym_conf = {
                     "strong_uptrend": max(base_conf - 0.15, 0.35),
                     "uptrend":        max(base_conf - 0.10, 0.40),
@@ -1511,7 +1665,7 @@ class TradingEngine:
                 min_conf = _asym_conf.get(self._market_state, base_conf)
             else:
                 # 기존 로직
-                min_conf = self._config.trading.min_combined_confidence
+                min_conf = self._ec.min_combined_confidence
                 if self._market_confidence < 0.35:
                     min_conf += 0.10
 
@@ -1580,16 +1734,16 @@ class TradingEngine:
                                    cash=round(cash, 2), min_order=self._min_order_amount)
                     return
 
-            if self._config.trading.asymmetric_mode:
+            if self._ec.asymmetric_mode:
                 # 비대칭 사이징: 상승장 공격적, 횡보장 보수적
                 _asym_size = {
-                    "strong_uptrend": self._config.risk.max_trade_size_pct,       # 풀 사이즈
-                    "uptrend":        self._config.risk.max_trade_size_pct * 0.8,  # 80%
-                    "sideways":       self._config.risk.max_trade_size_pct * 0.5,  # 50%
+                    "strong_uptrend": self._ec.max_trade_size_pct,       # 풀 사이즈
+                    "uptrend":        self._ec.max_trade_size_pct * 0.8,  # 80%
+                    "sideways":       self._ec.max_trade_size_pct * 0.5,  # 50%
                 }
-                size_pct = _asym_size.get(self._market_state, self._config.risk.max_trade_size_pct * 0.5)
+                size_pct = _asym_size.get(self._market_state, self._ec.max_trade_size_pct * 0.5)
             else:
-                size_pct = self._config.risk.max_trade_size_pct
+                size_pct = self._ec.max_trade_size_pct
                 if trend_action == "heavy_reduce":
                     size_pct *= 0.25
                     logger.info("buy_reduced_crash", symbol=symbol, size_pct=round(size_pct, 3))
@@ -1776,15 +1930,15 @@ class TradingEngine:
     def rotation_status(self) -> dict:
         return {
             "all_surge_scores": self._all_surge_scores,
-            "surge_threshold": self._config.trading.surge_threshold,
+            "surge_threshold": self._ec.surge_threshold,
             "current_surge_symbol": self._current_surge_symbol,
             "last_rotation_time": self._last_rotation_time,
             "last_scan_time": self._last_surge_scan_time,
-            "rotation_enabled": self._config.trading.rotation_enabled,
-            "rotation_cooldown_sec": self._config.trading.rotation_cooldown_sec,
+            "rotation_enabled": self._ec.rotation_enabled,
+            "rotation_cooldown_sec": self._ec.rotation_cooldown_sec,
             "market_state": self._market_state,
             "market_confidence": self._market_confidence,
-            "tracked_coins": self._config.trading.tracked_coins,
+            "tracked_coins": self.tracked_coins,
             "rotation_coins": self._get_rotation_coins(),
             "rotation_coins_count": len(self._get_rotation_coins()),
             "rotation_coins_updated": self._rotation_coins_updated,

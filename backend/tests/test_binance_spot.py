@@ -218,7 +218,7 @@ def test_binance_spot_config():
     bst = BinanceSpotTradingConfig()
     assert bst.mode == "paper"
     assert bst.initial_balance_usdt == 500.0
-    assert bst.rotation_enabled is False
+    assert bst.rotation_enabled is True
 
     bc = BinanceConfig()
     assert bc.spot_enabled is False

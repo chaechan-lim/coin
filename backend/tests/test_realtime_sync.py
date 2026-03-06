@@ -616,7 +616,7 @@ class TestParallelLoops:
     @pytest.mark.asyncio
     async def test_strategy_loop_respects_eval_interval(self, spot_engine):
         """전략 루프가 설정된 평가 간격을 사용."""
-        spot_engine._eval_interval = 60  # Override
+        spot_engine._ec.evaluation_interval_sec = 60  # Override
         spot_engine._is_running = True
         call_count = 0
 

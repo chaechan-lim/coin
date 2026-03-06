@@ -668,12 +668,7 @@ async def lifespan(app: FastAPI):
             pm = engine_registry.get_portfolio_manager(ex_name)
             if not eng or not pm:
                 continue
-            if hasattr(eng, '_tracked_coins') and eng._tracked_coins:
-                coins = eng._tracked_coins
-            elif "binance" in ex_name and hasattr(eng, 'tracked_coins'):
-                coins = eng.tracked_coins
-            else:
-                coins = eng._config.trading.tracked_coins if hasattr(eng._config, 'trading') else []
+            coins = eng.tracked_coins if hasattr(eng, 'tracked_coins') else []
             async with sf() as sess:
                 await pm.sync_exchange_positions(sess, eng._exchange, coins)
                 await sess.commit()
@@ -722,7 +717,7 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_run_initial_analysis(spot_coord, spot_pm_init, config))
 
     # 실제 추적 코인 리스트 (엔진 인스턴스의 동적 코인 포함)
-    spot_coins = _engine_instance._config.trading.tracked_coins if _engine_instance else config.trading.tracked_coins
+    spot_coins = _engine_instance.tracked_coins if _engine_instance else config.trading.tracked_coins
     futures_coins = _binance_engine.tracked_coins if _binance_engine else config.binance.tracked_coins
 
     # 현재 포지션 요약

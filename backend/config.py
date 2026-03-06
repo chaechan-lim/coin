@@ -94,6 +94,9 @@ class BinanceConfig(BaseSettings):
     tracked_coins: list[str] = [
         "BTC/USDT",
         "ETH/USDT",
+        "SOL/USDT",
+        "XRP/USDT",
+        "BNB/USDT",
     ]
     futures_fee: float = 0.0004  # 0.04% maker/taker
 
@@ -125,7 +128,7 @@ class BinanceSpotTradingConfig(BaseSettings):
     max_daily_coin_buys: int = 3
     cooldown_after_sell_sec: int = 14400
     cooldown_after_buy_sec: int = 1800
-    rotation_enabled: bool = False
+    rotation_enabled: bool = True
 
     model_config = {"env_prefix": "BINANCE_SPOT_TRADING_"}
 

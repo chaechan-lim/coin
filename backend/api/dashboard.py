@@ -60,14 +60,10 @@ async def get_engine_status(
     )
     daily_count = result.scalar() or 0
 
-    cfg = getattr(eng, '_config', None)
-    if exchange == "binance_futures" and cfg:
-        mode = cfg.binance_trading.mode
-        eval_interval = cfg.binance_trading.evaluation_interval_sec
-    elif cfg:
-        trading_cfg = cfg.binance_spot_trading if exchange == "binance_spot" else cfg.trading
-        mode = trading_cfg.mode
-        eval_interval = trading_cfg.evaluation_interval_sec
+    ec = getattr(eng, '_ec', None)
+    if ec:
+        mode = ec.mode
+        eval_interval = ec.evaluation_interval_sec
     else:
         mode = "paper"
         eval_interval = 300
