@@ -42,7 +42,7 @@ _DYNAMIC_SL_PROFILES = {
     "downtrend":      (2.0, 4.0,  7.0),
     "crash":          (1.5, 3.0,  5.0),
 }
-_FUTURES_TIMEFRAME = "1h"  # 전략 평가 타임프레임 (1h: TA 파라미터 기본 설계 기준)
+_FUTURES_TIMEFRAME = "4h"  # 전략 평가 타임프레임 (4h: P1 최적화, 1h→4h 복원 — 1h PF 0.76 vs 4h PF 0.98)
 
 # ATR 적응형 리스크 조절: 차단 대신 레버리지/마진 축소
 # ATR% 구간별: ~5% 기본, 5~10% 마진축소, 10~20% 레버리지↓, 20%+ 레버리지1x+마진축소
