@@ -396,10 +396,34 @@ class DiscordEventHandler:
                 if lines:
                     fields.append({"name": "전략별 성과", "value": "\n".join(lines[:6]), "inline": False})
 
+            # ── 코인별 성과 (상위/하위) ──
+            by_sym = review.get("by_symbol", {})
+            if by_sym:
+                sorted_syms = sorted(by_sym.items(), key=lambda x: x[1].get("total_pnl", 0), reverse=True)
+                sym_lines = []
+                for sym, stats in sorted_syms[:3]:
+                    coin = sym.split("/")[0]
+                    pnl = stats.get("total_pnl", 0)
+                    wr = stats.get("win_rate", 0) * 100
+                    cnt = stats.get("trades", 0)
+                    sym_lines.append(f"**{coin}** {cnt}건 {wr:.0f}% {_fmt(pnl)}")
+                if sym_lines:
+                    fields.append({"name": "코인별 성과", "value": "\n".join(sym_lines), "inline": False})
+
+            # ── 최대 수익/손실 ──
+            largest_win = review.get("largest_win", 0)
+            largest_loss = review.get("largest_loss", 0)
+            if largest_win > 0 or largest_loss < 0:
+                wl_parts = []
+                if largest_win > 0:
+                    wl_parts.append(f"최대 수익: {_fmt(largest_win)}")
+                if largest_loss < 0:
+                    wl_parts.append(f"최대 손실: {_fmt(largest_loss)}")
+                fields.append({"name": "최대 거래", "value": " | ".join(wl_parts), "inline": False})
+
             # ── 핵심 인사이트 ──
             insights = review.get("insights", [])
             if insights:
-                # 최대 3개, 짧게
                 insight_text = "\n".join(f"• {s}" for s in insights[:3])
                 fields.append({"name": "인사이트", "value": insight_text, "inline": False})
 
@@ -534,6 +558,9 @@ async def send_daily_summary(
                     "win_rate": r.win_rate,
                     "profit_factor": r.profit_factor,
                     "by_strategy": r.by_strategy,
+                    "by_symbol": getattr(r, "by_symbol", {}),
+                    "largest_win": getattr(r, "largest_win", 0),
+                    "largest_loss": getattr(r, "largest_loss", 0),
                     "insights": r.insights[:3] if r.insights else [],
                     "recommendations": r.recommendations[:2] if r.recommendations else [],
                 }
