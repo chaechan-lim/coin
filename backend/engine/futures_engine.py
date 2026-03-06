@@ -682,7 +682,6 @@ class BinanceFuturesEngine(TradingEngine):
         decision = self._combiner.combine(signals, market_state=self._market_state, symbol=symbol)
         if decision.action == SignalType.HOLD:
             return
-
         await self._process_futures_decision(session, symbol, decision, signals, position)
 
     async def _check_futures_stop_conditions(
@@ -916,12 +915,19 @@ class BinanceFuturesEngine(TradingEngine):
         )
 
         if order.status == "filled":
-            await self._portfolio_manager.update_position_on_sell(
-                session, symbol, position.quantity, price,
-                position.quantity * price, order.fee
-            )
+            # 워시아웃 먼저 설정 — 후속 처리 실패해도 재진입 방지 보장
+            self._last_sell_time[symbol] = datetime.now(timezone.utc)
             self._position_trackers.pop(symbol, None)
-            self._last_sell_time[symbol] = datetime.now(timezone.utc)  # 재진입 대기용
+
+            try:
+                await self._portfolio_manager.update_position_on_sell(
+                    session, symbol, position.quantity, price,
+                    position.quantity * price, order.fee
+                )
+            except Exception as e:
+                logger.error("futures_close_portfolio_update_failed",
+                             symbol=symbol, error=str(e))
+
             entry_price = ep or price
             pnl_pct = ((price - entry_price) / entry_price * 100) if direction == "long" else ((entry_price - price) / entry_price * 100)
             lev_val = position.leverage or self._leverage

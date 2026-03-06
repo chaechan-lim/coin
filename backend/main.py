@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
 
     market_data = MarketDataService(exchange)
     notification = NotificationService(config.notification)
-    combiner = SignalCombiner(min_confidence=config.trading.min_combined_confidence)
+    combiner = SignalCombiner(min_confidence=config.trading.min_combined_confidence, exchange_name="bithumb")
     order_mgr = OrderManager(exchange, is_paper=is_paper, exchange_name="bithumb")
     portfolio_mgr = PortfolioManager(
         market_data=market_data,
@@ -246,7 +246,7 @@ async def lifespan(app: FastAPI):
             # 원금은 항상 config에서 고정 (서버 재시작마다 재계산 방지)
             initial_usdt = bt.initial_balance_usdt
 
-            binance_combiner = SignalCombiner(min_confidence=bt.min_combined_confidence)
+            binance_combiner = SignalCombiner(min_confidence=bt.min_combined_confidence, exchange_name="binance_futures")
             binance_order_mgr = OrderManager(
                 binance_adapter, is_paper=binance_is_paper,
                 exchange_name="binance_futures", fee_currency="USDT",
@@ -399,7 +399,7 @@ async def lifespan(app: FastAPI):
                 spot_exchange = spot_adapter
 
             spot_market_data = MarketDataService(spot_exchange)
-            spot_combiner = SignalCombiner(min_confidence=bst.min_combined_confidence)
+            spot_combiner = SignalCombiner(min_confidence=bst.min_combined_confidence, exchange_name="binance_spot")
             spot_order_mgr = OrderManager(
                 spot_exchange, is_paper=spot_is_paper,
                 exchange_name="binance_spot", fee_currency="USDT",

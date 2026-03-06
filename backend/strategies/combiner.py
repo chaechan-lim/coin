@@ -61,10 +61,12 @@ class SignalCombiner:
         strategy_weights: dict[str, float] | None = None,
         min_confidence: float = 0.50,
         directional_weights: bool = False,
+        exchange_name: str = "",
     ):
         self.weights = strategy_weights or self.DEFAULT_WEIGHTS.copy()
         self.min_confidence = min_confidence
         self.directional_weights = directional_weights
+        self.exchange_name = exchange_name
 
     # 시장 상태별 적응형 가중치 프로필 (8전략)
     ADAPTIVE_PROFILES: dict[str, dict[str, float]] = {
@@ -199,6 +201,7 @@ class SignalCombiner:
 
         logger.info(
             "signals_combined",
+            exchange=self.exchange_name or "unknown",
             symbol=symbol or "unknown",
             action=winning_type.value,
             confidence=winning_score,

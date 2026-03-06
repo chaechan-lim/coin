@@ -158,7 +158,15 @@ class BinanceUSDMAdapter(ExchangeAdapter):
 
     # ── 주문 ─────────────────────────────────────────────────────
 
+    # Binance USDM taker fee (BNB 미사용 기준)
+    _DEFAULT_FEE_RATE = 0.0004  # 0.04%
+
     def _parse_order(self, data: dict) -> OrderResult:
+        cost = float(data["cost"] or 0)
+        # CCXT futures create_order 응답에 fee 미포함 → cost 기반 추정
+        raw_fee = float((data.get("fee") or {}).get("cost", 0) or 0)
+        fee = raw_fee if raw_fee > 0 else cost * self._DEFAULT_FEE_RATE
+
         return OrderResult(
             order_id=str(data["id"]),
             symbol=data["symbol"],
@@ -169,8 +177,8 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             amount=float(data["amount"] or 0),
             filled=float(data["filled"] or 0),
             remaining=float(data["remaining"] or 0),
-            cost=float(data["cost"] or 0),
-            fee=float((data.get("fee") or {}).get("cost", 0) or 0),
+            cost=cost,
+            fee=fee,
             fee_currency=(data.get("fee") or {}).get("currency", "USDT"),
             timestamp=datetime.fromtimestamp(
                 data["timestamp"] / 1000, tz=timezone.utc
