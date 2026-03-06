@@ -457,6 +457,7 @@ class TestOrderErrorHandling:
 
         pos = MagicMock()
         pos.quantity = 0.5
+        pos.average_buy_price = 3000000.0
         session = _make_session_no_position()
 
         async def sell_execute(*args, **kwargs):

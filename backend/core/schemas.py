@@ -79,6 +79,10 @@ class OrderResponse(BaseModel):
     direction: Optional[str] = None
     leverage: Optional[int] = None
     margin_used: Optional[float] = None
+    # PnL (sell/close orders)
+    entry_price: Optional[float] = None
+    realized_pnl: Optional[float] = None
+    realized_pnl_pct: Optional[float] = None
     # Strategy attribution
     strategy_name: str
     signal_confidence: Optional[float]

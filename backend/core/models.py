@@ -67,6 +67,11 @@ class Order(Base):
     leverage = Column(Integer, nullable=True)
     margin_used = Column(Float, nullable=True)
 
+    # PnL (sell/close orders only)
+    entry_price = Column(Float, nullable=True)         # 진입 평단가
+    realized_pnl = Column(Float, nullable=True)        # 실현 손익 (금액)
+    realized_pnl_pct = Column(Float, nullable=True)    # 실현 손익 (%)
+
     # Strategy attribution
     strategy_name = Column(String(50), nullable=False)
     signal_confidence = Column(Float)

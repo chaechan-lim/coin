@@ -1007,6 +1007,7 @@ class TradingEngine:
         order = await self._order_manager.create_order(
             session, symbol, "sell", position.quantity, price, sell_signal,
             order_type="market",
+            entry_price=position.average_buy_price if position.average_buy_price and position.average_buy_price > 0 else None,
         )
 
         # 미체결 주문은 거래소 취소 + 포트폴리오 건드리지 않음
@@ -1120,9 +1121,17 @@ class TradingEngine:
             reason=f"포트폴리오 리밸런싱: 비중 초과 부분 매도",
         )
 
+        # 진입가 조회
+        pos_result = await session.execute(
+            select(Position).where(Position.symbol == symbol, Position.exchange == self._exchange_name)
+        )
+        pos = pos_result.scalar_one_or_none()
+        ep = pos.average_buy_price if pos and pos.average_buy_price and pos.average_buy_price > 0 else None
+
         order = await self._order_manager.create_order(
             session, symbol, "sell", qty, price, signal,
             order_type="market",
+            entry_price=ep,
         )
 
         if order.status != "filled":
@@ -1847,11 +1856,13 @@ class TradingEngine:
             if not position or position.quantity <= 0:
                 return
 
+            ep = position.average_buy_price if position.average_buy_price and position.average_buy_price > 0 else None
+
             if self._recovery_manager:
                 order = await self._execute_with_retry(
                     lambda: self._order_manager.create_order(
                         session, symbol, "sell", position.quantity, price, primary_signal, decision,
-                        order_type="market",
+                        order_type="market", entry_price=ep,
                     ),
                     context="sell_order", symbol=symbol,
                 )
@@ -1861,7 +1872,7 @@ class TradingEngine:
                 try:
                     order = await self._order_manager.create_order(
                         session, symbol, "sell", position.quantity, price, primary_signal, decision,
-                        order_type="market",
+                        order_type="market", entry_price=ep,
                     )
                 except Exception as e:
                     logger.error("sell_order_failed", symbol=symbol, error=str(e))

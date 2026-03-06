@@ -80,6 +80,7 @@ class OrderManager:
         direction: str | None = None,
         leverage: int | None = None,
         margin_used: float | None = None,
+        entry_price: float | None = None,
     ) -> Order:
         """Create and execute an order with full strategy attribution."""
 
@@ -122,6 +123,23 @@ class OrderManager:
             ]
             combined_score = _f(decision.combined_confidence)
 
+        # PnL 계산 (매도/청산 시)
+        calc_pnl = None
+        calc_pnl_pct = None
+        if side == "sell" and entry_price and entry_price > 0:
+            exec_price = result.price if result.filled > 0 else price
+            if direction == "short":
+                calc_pnl_pct = (entry_price - exec_price) / entry_price * 100
+            else:
+                calc_pnl_pct = (exec_price - entry_price) / entry_price * 100
+            if leverage and leverage > 1:
+                calc_pnl_pct *= leverage
+            calc_pnl = (result.filled or amount) * abs(exec_price - entry_price)
+            if direction == "short" and exec_price > entry_price:
+                calc_pnl = -calc_pnl
+            elif direction != "short" and exec_price < entry_price:
+                calc_pnl = -calc_pnl
+
         # Create DB record
         order = Order(
             exchange=self._exchange_name,
@@ -140,6 +158,9 @@ class OrderManager:
             direction=direction,
             leverage=leverage,
             margin_used=_f(margin_used),
+            entry_price=_f(entry_price),
+            realized_pnl=_f(calc_pnl),
+            realized_pnl_pct=_f(calc_pnl_pct),
             strategy_name=signal.strategy_name,
             signal_confidence=_f(signal.confidence),
             signal_reason=signal.reason,

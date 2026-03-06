@@ -29,6 +29,17 @@ function StrategyBadge({ name }: { name: string }) {
   )
 }
 
+function PnlBadge({ pnl_pct }: { pnl_pct: number }) {
+  const isProfit = pnl_pct >= 0
+  const color = isProfit ? 'text-green-400' : 'text-red-400'
+  const sign = isProfit ? '+' : ''
+  return (
+    <span className={`text-xs font-semibold ${color}`}>
+      {sign}{pnl_pct.toFixed(2)}%
+    </span>
+  )
+}
+
 function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const side = order.side === 'buy'
@@ -36,6 +47,7 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
   const isFutures = !!order.direction
   const dirLabel = order.direction === 'short' ? 'SHORT' : 'LONG'
   const dirColor = order.direction === 'short' ? 'text-sell' : 'text-buy'
+  const hasPnl = order.side === 'sell' && order.realized_pnl_pct != null
 
   return (
     <div className="border-b border-gray-700/50">
@@ -60,6 +72,7 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400 font-semibold">{order.leverage}x</span>
             )}
             <StrategyBadge name={order.strategy_name} />
+            {hasPnl && <PnlBadge pnl_pct={order.realized_pnl_pct!} />}
             {order.is_paper && (
               <span className="text-xs text-gray-500 border border-gray-600 px-1 rounded">페이퍼</span>
             )}
@@ -100,6 +113,7 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <StrategyBadge name={order.strategy_name} />
+              {hasPnl && <PnlBadge pnl_pct={order.realized_pnl_pct!} />}
               {order.is_paper && (
                 <span className="text-xs text-gray-500 border border-gray-600 px-1 rounded">P</span>
               )}
@@ -116,6 +130,36 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
             <div className="bg-gray-900 rounded-lg p-3">
               <div className="text-gray-400 text-xs mb-1">전략 사유</div>
               <div className="text-gray-200 leading-relaxed">{order.signal_reason}</div>
+            </div>
+          )}
+
+          {/* 손익 정보 (매도 주문) */}
+          {hasPnl && (
+            <div className={`rounded-lg p-3 ${order.realized_pnl_pct! >= 0 ? 'bg-green-900/30 border border-green-800/50' : 'bg-red-900/30 border border-red-800/50'}`}>
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-gray-400 text-xs">진입가</span>
+                  <div className="text-white font-medium">{fmtPrice(order.entry_price ?? 0, isUsdt)}</div>
+                </div>
+                <div>
+                  <span className="text-gray-400 text-xs">청산가</span>
+                  <div className="text-white font-medium">{fmtPrice(price, isUsdt)}</div>
+                </div>
+                <div className="text-right">
+                  <span className="text-gray-400 text-xs">수익률</span>
+                  <div className={`font-bold text-lg ${order.realized_pnl_pct! >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {order.realized_pnl_pct! >= 0 ? '+' : ''}{order.realized_pnl_pct!.toFixed(2)}%
+                  </div>
+                </div>
+                {order.realized_pnl != null && (
+                  <div className="text-right">
+                    <span className="text-gray-400 text-xs">손익</span>
+                    <div className={`font-semibold ${order.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {order.realized_pnl >= 0 ? '+' : ''}{fmtPrice(order.realized_pnl, isUsdt)}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

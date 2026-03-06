@@ -907,10 +907,12 @@ class BinanceFuturesEngine(TradingEngine):
         )
 
         lev = position.leverage or self._leverage
+        ep = position.average_buy_price if position.average_buy_price and position.average_buy_price > 0 else None
         order = await self._order_manager.create_order(
             session, symbol, side, position.quantity, price, signal,
             order_type="market",
             direction=direction, leverage=lev, margin_used=position.margin_used,
+            entry_price=ep,
         )
 
         if order.status == "filled":
@@ -920,7 +922,7 @@ class BinanceFuturesEngine(TradingEngine):
             )
             self._position_trackers.pop(symbol, None)
             self._last_sell_time[symbol] = datetime.now(timezone.utc)  # 재진입 대기용
-            entry_price = position.average_buy_price if position.average_buy_price and position.average_buy_price > 0 else price
+            entry_price = ep or price
             pnl_pct = ((price - entry_price) / entry_price * 100) if direction == "long" else ((entry_price - price) / entry_price * 100)
             lev_val = position.leverage or self._leverage
             leveraged_pnl = pnl_pct * lev_val
@@ -964,11 +966,13 @@ class BinanceFuturesEngine(TradingEngine):
         )
 
         lev = position.leverage or self._leverage
+        ep = position.average_buy_price if position.average_buy_price and position.average_buy_price > 0 else None
         async with self._close_lock:
             order = await self._order_manager.create_order(
                 session, symbol, side, qty, price, signal,
                 order_type="market",
                 direction=direction, leverage=lev, margin_used=position.margin_used,
+                entry_price=ep,
             )
 
             if order.status != "filled":

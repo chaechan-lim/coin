@@ -76,6 +76,10 @@ export interface Order {
   direction?: string | null
   leverage?: number | null
   margin_used?: number | null
+  // PnL (sell/close orders)
+  entry_price?: number | null
+  realized_pnl?: number | null
+  realized_pnl_pct?: number | null
   // Strategy attribution
   strategy_name: string
   signal_confidence: number | null
