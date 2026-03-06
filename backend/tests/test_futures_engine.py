@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 from datetime import datetime, timezone
 
 from core.models import Position
+from exchange.data_models import OrderBook
 from engine.futures_engine import (
     BinanceFuturesEngine,
     _FUTURES_DEFAULT_SL_PCT,
@@ -270,3 +271,100 @@ class TestForceCloseStuckPosition:
         mock_market_data.get_ticker = AsyncMock(side_effect=Exception("404"))
         signals = await futures_engine._collect_signals("DEAD/USDT")
         assert signals == []
+
+
+class TestDynamicCoinOrderbookFilter:
+    """동적 코인 선정 시 오더북 깊이 필터 테스트."""
+
+    def _make_ticker(self, symbol, quote_vol, pct_change=5.0):
+        return {
+            f"{symbol}:USDT": {
+                "quoteVolume": quote_vol,
+                "percentage": pct_change,
+            }
+        }
+
+    def _make_orderbook(self, mid_price, depth_usdt):
+        """지정된 1% depth를 가진 오더북 생성."""
+        bid_price = mid_price
+        bid_qty = depth_usdt / mid_price  # depth_usdt 만큼의 물량
+        ask_price = mid_price * 1.001
+        ask_qty = bid_qty
+        return OrderBook(
+            symbol="",
+            bids=[(bid_price, bid_qty)],
+            asks=[(ask_price, ask_qty)],
+            timestamp=datetime.now(timezone.utc),
+        )
+
+    @pytest.mark.asyncio
+    async def test_shallow_orderbook_excluded(self, futures_engine):
+        """오더북 깊이 부족 코인 제외."""
+        tickers = {}
+        tickers.update(self._make_ticker("SHALLOW/USDT", 100_000_000))
+        tickers.update(self._make_ticker("DEEP/USDT", 80_000_000))
+
+        futures_engine._exchange.fetch_tickers = AsyncMock(return_value=tickers)
+        futures_engine._last_coin_refresh = None
+
+        # SHALLOW: 3000 USDT depth (< 50000 임계값), DEEP: 200000 USDT depth
+        async def mock_fetch_orderbook(sym, limit=20):
+            if "SHALLOW" in sym:
+                return self._make_orderbook(10.0, 3000)
+            return self._make_orderbook(50.0, 200000)
+
+        futures_engine._exchange.fetch_orderbook = mock_fetch_orderbook
+
+        await futures_engine._refresh_dynamic_coins()
+
+        assert "DEEP/USDT" in futures_engine._dynamic_coins
+        assert "SHALLOW/USDT" not in futures_engine._dynamic_coins
+
+    @pytest.mark.asyncio
+    async def test_tracked_coins_skip_depth_check(self, futures_engine):
+        """고정 추적 코인(config)은 오더북 체크 스킵."""
+        tickers = {}
+        tickers.update(self._make_ticker("BTC/USDT", 500_000_000))
+
+        futures_engine._exchange.fetch_tickers = AsyncMock(return_value=tickers)
+        futures_engine._last_coin_refresh = None
+        # fetch_orderbook 호출되지 않아야 함 (tracked_coins에 BTC/USDT 포함)
+        futures_engine._exchange.fetch_orderbook = AsyncMock(
+            side_effect=Exception("should not be called")
+        )
+
+        await futures_engine._refresh_dynamic_coins()
+
+        assert "BTC/USDT" in futures_engine._dynamic_coins
+
+    @pytest.mark.asyncio
+    async def test_orderbook_fetch_failure_passes_coin(self, futures_engine):
+        """오더북 조회 실패 시 코인 통과 (거래대금 필터만 적용)."""
+        tickers = {}
+        tickers.update(self._make_ticker("FAIL/USDT", 100_000_000))
+
+        futures_engine._exchange.fetch_tickers = AsyncMock(return_value=tickers)
+        futures_engine._last_coin_refresh = None
+        futures_engine._exchange.fetch_orderbook = AsyncMock(
+            side_effect=Exception("timeout")
+        )
+
+        await futures_engine._refresh_dynamic_coins()
+
+        assert "FAIL/USDT" in futures_engine._dynamic_coins
+
+    @pytest.mark.asyncio
+    async def test_deep_orderbook_passes(self, futures_engine):
+        """오더북 깊이 충분한 코인 통과."""
+        tickers = {}
+        tickers.update(self._make_ticker("GOOD/USDT", 100_000_000))
+
+        futures_engine._exchange.fetch_tickers = AsyncMock(return_value=tickers)
+        futures_engine._last_coin_refresh = None
+        futures_engine._exchange.fetch_orderbook = AsyncMock(
+            return_value=self._make_orderbook(100.0, 100_000)
+        )
+
+        await futures_engine._refresh_dynamic_coins()
+
+        assert "GOOD/USDT" in futures_engine._dynamic_coins

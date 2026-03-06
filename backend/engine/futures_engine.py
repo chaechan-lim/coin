@@ -91,6 +91,7 @@ class BinanceFuturesEngine(TradingEngine):
         self._COIN_REFRESH_SEC = 6 * 3600  # 6시간마다 갱신
         self._MAX_DYNAMIC_COINS = 10
         self._MIN_QUOTE_VOLUME = 50_000_000  # 24h 거래대금 5천만 USDT 이상
+        self._MIN_ORDERBOOK_DEPTH = 50_000  # 오더북 1% 이내 bid 깊이 최소 5만 USDT
         # 스테이블코인/레버리지 토큰 제외
         self._EXCLUDED_BASES = {"USDC", "BUSD", "DAI", "TUSD", "FDUSD", "USDP"}
 
@@ -535,9 +536,33 @@ class BinanceFuturesEngine(TradingEngine):
                     continue
                 candidates.append((clean_sym, quote_vol))
 
-            # 거래대금 상위 N개
+            # 거래대금 상위 후보 → 오더북 깊이 필터
             candidates.sort(key=lambda x: x[1], reverse=True)
-            new_coins = [sym for sym, _ in candidates[:self._MAX_DYNAMIC_COINS]]
+            # 상위 20개만 오더북 조회 (API 부담 최소화)
+            shortlist = candidates[:self._MAX_DYNAMIC_COINS * 2]
+            filtered = []
+            for sym, vol in shortlist:
+                if len(filtered) >= self._MAX_DYNAMIC_COINS:
+                    break
+                # 고정 추적 코인은 깊이 체크 스킵
+                if sym in self._config.binance.tracked_coins:
+                    filtered.append(sym)
+                    continue
+                try:
+                    ob = await self._exchange.fetch_orderbook(sym, limit=20)
+                    mid = (ob.bids[0][0] + ob.asks[0][0]) / 2 if ob.bids and ob.asks else 0
+                    if mid <= 0:
+                        continue
+                    depth = sum(p * q for p, q in ob.bids if p >= mid * 0.99)
+                    if depth < self._MIN_ORDERBOOK_DEPTH:
+                        logger.info("dynamic_coin_excluded_shallow_orderbook",
+                                    symbol=sym, depth_usdt=round(depth),
+                                    min_required=self._MIN_ORDERBOOK_DEPTH)
+                        continue
+                    filtered.append(sym)
+                except Exception:
+                    filtered.append(sym)  # 조회 실패 시 통과 (거래대금 필터만 적용)
+            new_coins = filtered
 
             # 새로 추가된 코인 레버리지 설정
             old_set = set(self._dynamic_coins)
