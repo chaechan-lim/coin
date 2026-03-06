@@ -98,16 +98,17 @@ class TestOrderPnlCalculation:
 
     @pytest.mark.asyncio
     async def test_futures_short_close_profit(self):
-        """선물 숏 청산 수익 — 가격 하락이 수익."""
+        """선물 숏 청산 수익 — side=buy, direction=short (가격 하락이 수익)."""
         om = _make_order_manager(exchange_name="binance_futures")
         # 숏 청산은 buy로 실행
-        om._exchange.create_market_sell = AsyncMock(
+        om._exchange.create_market_buy = AsyncMock(
             return_value=_make_order_result(price=95.0, filled=1.0)
         )
         session = AsyncMock()
 
         order = await om.create_order(
-            session, "BTC/USDT", "sell", 1.0, 95.0, _make_signal(),
+            session, "BTC/USDT", "buy", 1.0, 95.0,
+            Signal(strategy_name="futures_stop", signal_type=SignalType.BUY, confidence=1.0, reason="숏 청산"),
             order_type="market", direction="short", leverage=3, entry_price=100.0,
         )
 
@@ -117,15 +118,16 @@ class TestOrderPnlCalculation:
 
     @pytest.mark.asyncio
     async def test_futures_short_close_loss(self):
-        """선물 숏 청산 손실 — 가격 상승이 손실."""
+        """선물 숏 청산 손실 — side=buy, direction=short (가격 상승이 손실)."""
         om = _make_order_manager(exchange_name="binance_futures")
-        om._exchange.create_market_sell = AsyncMock(
+        om._exchange.create_market_buy = AsyncMock(
             return_value=_make_order_result(price=110.0, filled=1.0)
         )
         session = AsyncMock()
 
         order = await om.create_order(
-            session, "BTC/USDT", "sell", 1.0, 110.0, _make_signal(),
+            session, "BTC/USDT", "buy", 1.0, 110.0,
+            Signal(strategy_name="futures_stop", signal_type=SignalType.BUY, confidence=1.0, reason="숏 청산"),
             order_type="market", direction="short", leverage=3, entry_price=100.0,
         )
 

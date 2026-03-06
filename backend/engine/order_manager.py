@@ -123,10 +123,11 @@ class OrderManager:
             ]
             combined_score = _f(decision.combined_confidence)
 
-        # PnL 계산 (매도/청산 시)
+        # PnL 계산 (매도/청산 시: 롱→sell, 숏→buy)
         calc_pnl = None
         calc_pnl_pct = None
-        if side == "sell" and entry_price and entry_price > 0:
+        is_closing = (side == "sell" and direction != "short") or (side == "buy" and direction == "short")
+        if is_closing and entry_price and entry_price > 0:
             exec_price = result.price if result.filled > 0 else price
             if direction == "short":
                 calc_pnl_pct = (entry_price - exec_price) / entry_price * 100
