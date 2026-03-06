@@ -100,14 +100,13 @@ class StochasticRSIStrategy(BaseStrategy):
                 indicators=indicators,
             )
 
-        # K가 과매도 구간에서 상승 중 (크로스 전이라도 소프트 시그널)
+        # K가 과매도 구간에서 상승 중 — HOLD (크로스 없이는 노이즈)
         if k_now < self._oversold and k_now > k_prev:
             return Signal(
-                signal_type=SignalType.BUY,
-                confidence=0.45,
+                signal_type=SignalType.HOLD,
+                confidence=0.35,
                 strategy_name=self.name,
-                reason=f"StochRSI 과매도 반등: K={k_now:.1f} ↑, D={d_now:.1f}",
-                suggested_price=ticker.last,
+                reason=f"StochRSI 과매도 반등 대기: K={k_now:.1f} ↑, D={d_now:.1f} (크로스 필요)",
                 indicators=indicators,
             )
 
@@ -123,14 +122,13 @@ class StochasticRSIStrategy(BaseStrategy):
                 indicators=indicators,
             )
 
-        # K가 과매수 구간에서 하락 중
+        # K가 과매수 구간에서 하락 중 — HOLD (크로스 없이는 노이즈)
         if k_now > self._overbought and k_now < k_prev:
             return Signal(
-                signal_type=SignalType.SELL,
-                confidence=0.45,
+                signal_type=SignalType.HOLD,
+                confidence=0.35,
                 strategy_name=self.name,
-                reason=f"StochRSI 과매수 하락: K={k_now:.1f} ↓, D={d_now:.1f}",
-                suggested_price=ticker.last,
+                reason=f"StochRSI 과매수 하락 대기: K={k_now:.1f} ↓, D={d_now:.1f} (크로스 필요)",
                 indicators=indicators,
             )
 

@@ -221,23 +221,39 @@ class DiscordEventHandler:
         """선물 롱/숏/청산 embed."""
         is_long = "롱" in title or "Long" in title
         is_close = "청산" in title or "Close" in title
+        pnl = meta.get("pnl_pct")
         if is_close:
-            color = COLOR_RED
+            color = COLOR_GREEN if pnl and pnl > 0 else COLOR_RED
         elif is_long:
             color = COLOR_GREEN
         else:
             color = COLOR_RED
         fields = []
         if meta.get("price"):
-            fields.append({"name": "가격", "value": f"{meta['price']:,.2f} USDT", "inline": True})
+            v = meta["price"]
+            fmt = f"{v:,.2f}" if v >= 10 else f"{v:,.4f}"
+            fields.append({"name": "가격", "value": f"{fmt} USDT", "inline": True})
+        if meta.get("entry_price"):
+            v = meta["entry_price"]
+            fmt = f"{v:,.2f}" if v >= 10 else f"{v:,.4f}"
+            fields.append({"name": "진입가", "value": f"{fmt} USDT", "inline": True})
+        if meta.get("direction"):
+            fields.append({"name": "방향", "value": meta["direction"].upper(), "inline": True})
         if meta.get("strategy"):
             fields.append({"name": "전략", "value": meta["strategy"], "inline": True})
         if meta.get("confidence"):
             fields.append({"name": "신뢰도", "value": f"{meta['confidence']:.0%}", "inline": True})
-        if meta.get("pnl_pct") is not None:
-            pnl = meta["pnl_pct"]
+        if pnl is not None:
             sign = "+" if pnl >= 0 else ""
             fields.append({"name": "PnL", "value": f"{sign}{pnl:.2f}%", "inline": True})
+        if meta.get("leveraged_pnl_pct") is not None:
+            lp = meta["leveraged_pnl_pct"]
+            sign = "+" if lp >= 0 else ""
+            fields.append({"name": "레버리지 PnL", "value": f"{sign}{lp:.2f}%", "inline": True})
+        if meta.get("loss_amount") is not None:
+            la = meta["loss_amount"]
+            sign = "+" if la >= 0 else ""
+            fields.append({"name": "손익 금액", "value": f"{sign}{la:,.2f} USDT", "inline": True})
         if meta.get("leverage"):
             fields.append({"name": "레버리지", "value": f"{meta['leverage']}x", "inline": True})
         if meta.get("sl_price") is not None:
@@ -248,6 +264,8 @@ class DiscordEventHandler:
             v = meta["tp_price"]
             fmt = f"{v:,.2f}" if v >= 10 else f"{v:,.4f}"
             fields.append({"name": "익절가", "value": f"{fmt} USDT", "inline": True})
+        if meta.get("reason"):
+            fields.append({"name": "사유", "value": meta["reason"], "inline": False})
         return {"title": title, "color": color, "fields": fields}
 
     def _format_rotation(self, title: str, meta: dict) -> dict:

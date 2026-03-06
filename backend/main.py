@@ -633,6 +633,23 @@ async def lifespan(app: FastAPI):
         seconds=86400,
     )
 
+    # 시작 시 누락된 일일 PnL 보충 (최근 7일)
+    async def daily_pnl_catchup():
+        from datetime import timedelta
+        sf = get_session_factory()
+        from datetime import datetime, timezone
+        today_utc = datetime.now(timezone.utc).date()
+        for ex_name in engine_registry.available_exchanges:
+            for days_ago in range(1, 8):
+                target = today_utc - timedelta(days=days_ago)
+                try:
+                    async with sf() as sess:
+                        await PortfolioManager.record_daily_pnl(sess, ex_name, target_date=target)
+                        await sess.commit()
+                except Exception:
+                    pass
+    asyncio.create_task(daily_pnl_catchup())
+
     # ── 일일 요약 스케줄러 (Discord) ───────────────────────────
     if _discord_handler and discord_webhook:
         async def daily_summary_job():

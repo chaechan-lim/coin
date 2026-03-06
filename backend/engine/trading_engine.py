@@ -232,7 +232,7 @@ class TradingEngine:
         self._is_running = True
         await self._restore_trade_timestamps()
         logger.info("engine_started")
-        await emit_event("info", "engine", "엔진 시작", metadata={"mode": self._config.trading.mode})
+        await emit_event("info", "engine", f"{self._exchange_name} 엔진 시작", metadata={"mode": self._config.trading.mode, "exchange": self._exchange_name})
 
         # 전략 평가 루프 + 빠른 SL/TP 체크 루프 병렬 실행
         await asyncio.gather(
@@ -285,7 +285,7 @@ class TradingEngine:
         """Stop the trading engine gracefully."""
         self._is_running = False
         logger.info("engine_stopping")
-        await emit_event("info", "engine", "엔진 중지")
+        await emit_event("info", "engine", f"{self._exchange_name} 엔진 중지", metadata={"exchange": self._exchange_name})
 
     def pause_buying(self, coins: list[str]) -> None:
         self._paused_coins.update(coins)

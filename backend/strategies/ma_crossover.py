@@ -96,29 +96,15 @@ class MACrossoverStrategy(BaseStrategy):
                 indicators=indicators,
             )
 
-        # 추세 지속 시 소프트 신호 (크로스오버가 아니어도 방향 강화)
-        if current_short > current_long:
-            # 상승 추세 지속: 소프트 BUY (갭이 클수록 강한 신호)
-            soft_conf = min(0.35 + ma_gap_pct * 5, 0.55)
-            return Signal(
-                signal_type=SignalType.BUY,
-                confidence=round(soft_conf, 2),
-                strategy_name=self.name,
-                reason=f"상승 추세 지속: SMA{self._short_period}({current_short:,.0f}) > "
-                f"SMA{self._long_period}({current_long:,.0f}), 갭 {ma_gap_pct*100:.2f}%",
-                suggested_price=ticker.last,
-                indicators=indicators,
-            )
-
-        # 하락 추세 지속: 소프트 SELL
-        soft_conf = min(0.35 + ma_gap_pct * 5, 0.55)
+        # 추세 지속 — HOLD (크로스 이벤트만 시그널 발생)
+        direction = "상승" if current_short > current_long else "하락"
         return Signal(
-            signal_type=SignalType.SELL,
-            confidence=round(soft_conf, 2),
+            signal_type=SignalType.HOLD,
+            confidence=0.3,
             strategy_name=self.name,
-            reason=f"하락 추세 지속: SMA{self._short_period}({current_short:,.0f}) < "
+            reason=f"{direction} 추세 지속: SMA{self._short_period}({current_short:,.0f}) "
+            f"{'>' if current_short > current_long else '<'} "
             f"SMA{self._long_period}({current_long:,.0f}), 갭 {ma_gap_pct*100:.2f}%",
-            suggested_price=ticker.last,
             indicators=indicators,
         )
 

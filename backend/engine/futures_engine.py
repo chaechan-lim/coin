@@ -920,9 +920,11 @@ class BinanceFuturesEngine(TradingEngine):
             )
             self._position_trackers.pop(symbol, None)
             self._last_sell_time[symbol] = datetime.now(timezone.utc)  # 재진입 대기용
-            entry_price = position.average_buy_price or price
+            entry_price = position.average_buy_price if position.average_buy_price and position.average_buy_price > 0 else price
             pnl_pct = ((price - entry_price) / entry_price * 100) if direction == "long" else ((entry_price - price) / entry_price * 100)
             lev_val = position.leverage or self._leverage
+            leveraged_pnl = pnl_pct * lev_val
+            loss_amount = position.margin_used * leveraged_pnl / 100 if position.margin_used else 0
             logger.info("futures_position_closed", symbol=symbol, direction=direction, reason=reason, pnl_pct=round(pnl_pct, 2))
             await emit_event("info", "futures_trade",
                              f"선물 {direction} 청산: {symbol}",
@@ -931,6 +933,8 @@ class BinanceFuturesEngine(TradingEngine):
                                  "direction": direction,
                                  "entry_price": entry_price,
                                  "pnl_pct": round(pnl_pct, 2),
+                                 "leveraged_pnl_pct": round(leveraged_pnl, 2),
+                                 "loss_amount": round(loss_amount, 2),
                                  "leverage": lev_val,
                              })
 

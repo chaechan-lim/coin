@@ -165,28 +165,26 @@ class TestMACrossoverStrategy:
         assert signal.confidence >= 0.60
 
     @pytest.mark.asyncio
-    async def test_uptrend_continuation_soft_buy(self, strategy):
-        """SMA20 > SMA50 (크로스오버 없음) → soft BUY."""
+    async def test_uptrend_continuation_hold(self, strategy):
+        """SMA20 > SMA50 (크로스오버 없음) → HOLD (소프트 시그널 제거)."""
         df = _make_df(60)
         df["sma_20"] = 51_000_000
         df["sma_50"] = 50_000_000
         df.iloc[-2, df.columns.get_loc("sma_20")] = 50_800_000
         df.iloc[-2, df.columns.get_loc("sma_50")] = 50_000_000
         signal = await strategy.analyze(df, _ticker(51_000_000))
-        assert signal.signal_type == SignalType.BUY
-        assert signal.confidence <= 0.55  # soft signal
+        assert signal.signal_type == SignalType.HOLD
 
     @pytest.mark.asyncio
-    async def test_downtrend_continuation_soft_sell(self, strategy):
-        """SMA20 < SMA50 (크로스오버 없음) → soft SELL."""
+    async def test_downtrend_continuation_hold(self, strategy):
+        """SMA20 < SMA50 (크로스오버 없음) → HOLD (소프트 시그널 제거)."""
         df = _make_df(60)
         df["sma_20"] = 49_000_000
         df["sma_50"] = 50_000_000
         df.iloc[-2, df.columns.get_loc("sma_20")] = 49_200_000
         df.iloc[-2, df.columns.get_loc("sma_50")] = 50_000_000
         signal = await strategy.analyze(df, _ticker(49_000_000))
-        assert signal.signal_type == SignalType.SELL
-        assert signal.confidence <= 0.55
+        assert signal.signal_type == SignalType.HOLD
 
     @pytest.mark.asyncio
     async def test_insufficient_data(self, strategy):
