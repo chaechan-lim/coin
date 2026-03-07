@@ -273,7 +273,7 @@ class TestDiscordErrorHandling:
     @pytest.mark.asyncio
     async def test_429_invalid_json_no_crash(self):
         """Discord 429 + 유효하지 않은 JSON → 크래시 없이 처리."""
-        from services.discord_event_handler import DiscordEventHandler
+        from services.notification.discord import DiscordAdapter as DiscordEventHandler
 
         handler = DiscordEventHandler.__new__(DiscordEventHandler)
         handler._webhook_url = "https://test.example.com/webhook"
@@ -296,7 +296,7 @@ class TestDiscordErrorHandling:
     @pytest.mark.asyncio
     async def test_429_retry_failure_no_crash(self):
         """Discord 429 재시도도 실패 → 크래시 없이 로그만."""
-        from services.discord_event_handler import DiscordEventHandler
+        from services.notification.discord import DiscordAdapter as DiscordEventHandler
 
         handler = DiscordEventHandler.__new__(DiscordEventHandler)
         handler._webhook_url = "https://test.example.com/webhook"

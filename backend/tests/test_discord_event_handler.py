@@ -1,15 +1,15 @@
-"""DiscordEventHandler unit tests."""
+"""DiscordAdapter unit tests."""
 import time
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
-from services.discord_event_handler import DiscordEventHandler
+from services.notification.discord import DiscordAdapter
 
 
 # ── helpers ─────────────────────────────────────────────────────
 
 def _make_handler(url="https://discord.com/api/webhooks/test/token"):
-    return DiscordEventHandler(url)
+    return DiscordAdapter(url)
 
 
 def _mock_response(status_code=204):
@@ -372,7 +372,7 @@ async def test_handle_event_no_exception_on_send_error():
     h._client = AsyncMock()
     h._client.post = AsyncMock(side_effect=Exception("network error"))
     # 매수 이벤트 → 포맷 성공 → 전송 실패 → 예외 없이 종료
-    await h.handle_event(
+    await h.send(
         "info", "trade", "매수: BTC/KRW", None,
         {"price": 100_000_000, "strategy": "rsi", "confidence": 0.7},
     )
@@ -384,7 +384,7 @@ async def test_handle_event_ignored_silently():
     h = _make_handler()
     h._client = AsyncMock()
     # 무시되는 이벤트 → _send_embed 호출 안 함
-    await h.handle_event("debug", "engine", "heartbeat", None, None)
+    await h.send("debug", "engine", "heartbeat", None, None)
     h._client.post.assert_not_called()
 
 

@@ -26,7 +26,7 @@ from core.models import Base
 from exchange.bithumb_v2_adapter import BithumbV2Adapter
 from exchange.paper_adapter import PaperAdapter
 from services.market_data import MarketDataService
-from services.notification import NotificationService
+from services.notification import NotificationDispatcher
 
 from strategies.combiner import SignalCombiner
 from engine.order_manager import OrderManager
@@ -42,7 +42,9 @@ from api.router import create_api_router, get_ws_router
 from api.websocket import ws_manager
 from api.dependencies import engine_registry
 from core.event_bus import set_broadcast as set_event_broadcast, set_notification as set_event_notification, emit_event
-from services.discord_event_handler import DiscordEventHandler, send_daily_summary
+from services.notification.discord import DiscordAdapter
+from services.notification.telegram import TelegramAdapter
+from services.notification.daily_summary import send_daily_summary
 
 logger = structlog.get_logger(__name__)
 
@@ -50,13 +52,13 @@ _scheduler = None
 _engine_instance: TradingEngine | None = None
 _binance_engine = None
 _binance_spot_engine = None
-_discord_handler: DiscordEventHandler | None = None
+_notification_dispatcher: NotificationDispatcher | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
-    global _scheduler, _engine_instance, _binance_engine, _binance_spot_engine, _discord_handler
+    global _scheduler, _engine_instance, _binance_engine, _binance_spot_engine, _notification_dispatcher
     config = get_config()
 
     logger.info("startup_begin", mode=config.trading.mode)
@@ -94,7 +96,7 @@ async def lifespan(app: FastAPI):
     initial_krw = config.trading.initial_balance_krw
 
     market_data = MarketDataService(exchange)
-    notification = NotificationService(config.notification)
+    notification = NotificationDispatcher()  # 어댑터는 아래에서 등록
     combiner = SignalCombiner(min_confidence=config.trading.min_combined_confidence, exchange_name="bithumb")
     order_mgr = OrderManager(exchange, is_paper=is_paper, exchange_name="bithumb")
     portfolio_mgr = PortfolioManager(
@@ -180,12 +182,20 @@ async def lifespan(app: FastAPI):
     trading_engine.set_broadcast_callback(ws_manager.broadcast)
     set_event_broadcast(ws_manager.broadcast)
 
-    # Discord 이벤트 핸들러 연결
-    discord_webhook = config.notification.discord_webhook_url
-    if config.notification.enabled and discord_webhook:
-        _discord_handler = DiscordEventHandler(discord_webhook)
-        set_event_notification(_discord_handler.handle_event)
-        logger.info("discord_event_handler_registered")
+    # ── 알림 어댑터 등록 ──────────────────────────────────────
+    _notification_dispatcher = notification
+    if config.notification.enabled:
+        discord_webhook = config.notification.discord_webhook_url
+        if discord_webhook:
+            notification.add_adapter(DiscordAdapter(discord_webhook))
+        tg_token = config.notification.telegram_bot_token
+        tg_chat = config.notification.telegram_chat_id
+        if tg_token and tg_chat:
+            notification.add_adapter(TelegramAdapter(tg_token, tg_chat))
+    if notification.adapters:
+        set_event_notification(notification.handle_event)
+        logger.info("notification_dispatchers_registered",
+                     adapters=[type(a).__name__ for a in notification.adapters])
 
     # Self-healing: RecoveryManager + DiagnosticAgent 주입 (빗썸)
     from engine.recovery import RecoveryManager
@@ -650,13 +660,13 @@ async def lifespan(app: FastAPI):
                     pass
     asyncio.create_task(daily_pnl_catchup())
 
-    # ── 일일 요약 스케줄러 (Discord) ───────────────────────────
-    if _discord_handler and discord_webhook:
+    # ── 일일 요약 스케줄러 ────────────────────────────────────
+    if _notification_dispatcher and _notification_dispatcher.adapters:
         async def daily_summary_job():
-            await send_daily_summary(discord_webhook, engine_registry)
+            await send_daily_summary(engine_registry)
         _scheduler.add_job(
             _wrap(daily_summary_job),
-            name="daily_summary_discord",
+            name="daily_summary",
             seconds=86400,
         )
 
@@ -776,8 +786,8 @@ async def lifespan(app: FastAPI):
         shutdown_detail += f" | {shutdown_positions}"
     await emit_event("info", "system", "서버 종료", detail=shutdown_detail,
                      metadata={"positions_summary": shutdown_positions or None})
-    if _discord_handler:
-        await _discord_handler.close()
+    if _notification_dispatcher:
+        await _notification_dispatcher.close()
     logger.info("shutdown_complete")
 
 

@@ -1,8 +1,5 @@
 """
-Discord Event Handler — event_bus 이벤트를 Discord Embed로 전송
-
-event_bus.set_notification() 콜백으로 등록되어,
-모든 emit_event() 호출 시 카테고리별 필터링 후 Discord 웹훅으로 전송.
+Discord 알림 어댑터 — 이벤트를 Discord Embed로 변환 + 웹훅 전송
 """
 import time
 import asyncio
@@ -11,6 +8,8 @@ from typing import Any
 
 import httpx
 import structlog
+
+from services.notification.base import NotificationAdapter
 
 logger = structlog.get_logger(__name__)
 
@@ -29,8 +28,8 @@ RATE_LIMIT_WINDOW = 5.0
 RATE_LIMIT_MAX = 5
 
 
-class DiscordEventHandler:
-    """event_bus 이벤트를 Discord Embed로 변환 + 웹훅 전송."""
+class DiscordAdapter(NotificationAdapter):
+    """이벤트를 Discord Embed로 변환 + 웹훅 전송."""
 
     def __init__(self, webhook_url: str):
         self._webhook_url = webhook_url
@@ -38,10 +37,9 @@ class DiscordEventHandler:
         self._timestamps: deque[float] = deque(maxlen=RATE_LIMIT_MAX)
 
     async def close(self) -> None:
-        """HTTP 클라이언트 종료."""
         await self._client.aclose()
 
-    async def handle_event(
+    async def send(
         self,
         level: str,
         category: str,
@@ -49,7 +47,7 @@ class DiscordEventHandler:
         detail: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """event_bus 콜백 — 필터링 + 전송. 절대 예외 미전파."""
+        """이벤트 → Discord Embed 변환 → 전송. 절대 예외 미전파."""
         try:
             embed = self._format_event(level, category, title, detail, metadata)
             if embed is None:
@@ -61,12 +59,10 @@ class DiscordEventHandler:
 
             await self._send_embed(embed)
         except Exception as e:
-            logger.warning("discord_event_handler_error", error=str(e), title=title)
+            logger.warning("discord_adapter_error", error=str(e), title=title)
 
     def _check_rate_limit(self) -> bool:
-        """5초 윈도우 내 5건 제한. 초과 시 False."""
         now = time.monotonic()
-        # 윈도우 밖 타임스탬프 제거
         while self._timestamps and now - self._timestamps[0] > RATE_LIMIT_WINDOW:
             self._timestamps.popleft()
         if len(self._timestamps) >= RATE_LIMIT_MAX:
@@ -85,65 +81,37 @@ class DiscordEventHandler:
         """카테고리별 Discord Embed 생성. 불필요한 이벤트는 None 반환."""
         meta = metadata or {}
 
-        # ── 매수/매도 (현물) ─────────────────────────────
         if category == "trade" and level == "info":
             return self._format_trade(title, meta)
-
-        # ── SL/TP/Trailing 청산 ──────────────────────────
         if category == "trade" and level == "warning":
             return self._format_stop(title, detail, meta)
-
-        # ── 선물 스탑 (SL/TP/Trailing) ──────────────────────
         if category == "futures_trade" and level == "warning":
             return self._format_futures_stop(title, detail, meta)
-
-        # ── 선물 매매 ─────────────────────────────────────
         if category == "futures_trade" and level == "info":
             return self._format_futures_trade(title, meta)
-
-        # ── 로테이션 (서지 매수) ──────────────────────────
         if category == "rotation" and level == "info":
             return self._format_rotation(title, meta)
-
-        # ── 리스크 경고 ───────────────────────────────────
         if category == "risk" and level == "warning":
             return self._format_risk(title, detail, meta)
-
-        # ── 시스템 (시작/종료) ────────────────────────────
         if category == "system":
             return self._format_system(title, detail, meta)
-
-        # ── 엔진 시작/중지 ────────────────────────────────
         if category == "engine" and level == "info":
             return self._format_engine_lifecycle(title, detail, meta)
-
-        # ── 엔진 에러/경고 (평가 실패, 매수 차단 등) ────
         if category == "engine" and level in ("warning", "critical", "error"):
             return self._format_engine_error(level, title, detail, meta)
-
-        # ── 통합 시그널 ───────────────────────────────────
         if category == "signal":
             return self._format_signal(title, detail, meta)
-
-        # ── 일일 요약 ────────────────────────────────────
         if category == "daily_summary":
             return self._format_daily_summary(title, detail, meta)
-
-        # ── 헬스체크 ────────────────────────────────────
         if category == "health":
             return self._format_health(level, title, detail, meta)
-
-        # ── 복구 ────────────────────────────────────────
         if category == "recovery":
             return self._format_recovery(title, detail, meta)
-
-        # 그 외 무시
         return None
 
     # ── 포맷 함수들 ──────────────────────────────────────────
 
     def _format_trade(self, title: str, meta: dict) -> dict:
-        """현물 매수/매도 embed."""
         is_buy = "매수" in title
         color = COLOR_GREEN if is_buy else COLOR_RED
         fields = []
@@ -168,7 +136,6 @@ class DiscordEventHandler:
         return {"title": title, "color": color, "fields": fields}
 
     def _format_stop(self, title: str, detail: str | None, meta: dict) -> dict:
-        """SL/TP/Trailing 청산 embed."""
         fields = []
         if meta.get("price"):
             fields.append({"name": "가격", "value": f"{meta['price']:,}", "inline": True})
@@ -178,15 +145,9 @@ class DiscordEventHandler:
             fields.append({"name": "PnL", "value": f"{sign}{pnl:.2f}%", "inline": True})
         if meta.get("reason"):
             fields.append({"name": "사유", "value": meta["reason"], "inline": False})
-        return {
-            "title": f"⚠️ {title}",
-            "description": detail,
-            "color": COLOR_ORANGE,
-            "fields": fields,
-        }
+        return {"title": f"⚠️ {title}", "description": detail, "color": COLOR_ORANGE, "fields": fields}
 
     def _format_futures_stop(self, title: str, detail: str | None, meta: dict) -> dict:
-        """선물 SL/TP/Trailing 스탑 embed."""
         pnl = meta.get("pnl_pct", 0)
         color = COLOR_GREEN if pnl >= 0 else COLOR_RED
         icon = "🟢" if pnl >= 0 else "🔴"
@@ -214,15 +175,9 @@ class DiscordEventHandler:
             fields.append({"name": "레버리지", "value": f"{meta['leverage']}x", "inline": True})
         if meta.get("reason"):
             fields.append({"name": "사유", "value": meta["reason"], "inline": False})
-        return {
-            "title": f"{icon} {title}",
-            "description": detail,
-            "color": color,
-            "fields": fields,
-        }
+        return {"title": f"{icon} {title}", "description": detail, "color": color, "fields": fields}
 
     def _format_futures_trade(self, title: str, meta: dict) -> dict:
-        """선물 롱/숏/청산 embed."""
         is_long = "롱" in title or "Long" in title
         is_close = "청산" in title or "Close" in title
         pnl = meta.get("pnl_pct")
@@ -273,7 +228,6 @@ class DiscordEventHandler:
         return {"title": title, "color": color, "fields": fields}
 
     def _format_rotation(self, title: str, meta: dict) -> dict:
-        """로테이션 서지 매수 embed."""
         fields = []
         if meta.get("price"):
             fields.append({"name": "가격", "value": f"{meta['price']:,.0f}", "inline": True})
@@ -284,21 +238,14 @@ class DiscordEventHandler:
         return {"title": f"🚀 {title}", "color": COLOR_GOLD, "fields": fields}
 
     def _format_risk(self, title: str, detail: str | None, meta: dict) -> dict:
-        """리스크 경고 embed."""
         fields = []
         if meta.get("drawdown_pct"):
             fields.append({"name": "드로다운", "value": f"{meta['drawdown_pct']:.2f}%", "inline": True})
         if meta.get("daily_loss_pct"):
             fields.append({"name": "일일 손실", "value": f"{meta['daily_loss_pct']:.2f}%", "inline": True})
-        return {
-            "title": f"🚨 {title}",
-            "description": detail,
-            "color": COLOR_ORANGE,
-            "fields": fields,
-        }
+        return {"title": f"🚨 {title}", "description": detail, "color": COLOR_ORANGE, "fields": fields}
 
     def _format_system(self, title: str, detail: str | None, meta: dict) -> dict:
-        """시스템 시작/종료 embed (코인/포지션 정보 포함)."""
         is_start = "시작" in title
         icon = "🚀" if is_start else "🛑"
         fields = []
@@ -308,15 +255,9 @@ class DiscordEventHandler:
             fields.append({"name": "선물 추적", "value": ", ".join(meta["futures_coins"]), "inline": False})
         if meta.get("positions_summary"):
             fields.append({"name": "포지션", "value": meta["positions_summary"], "inline": False})
-        return {
-            "title": f"{icon} {title}",
-            "description": detail,
-            "color": COLOR_BLUE,
-            "fields": fields,
-        }
+        return {"title": f"{icon} {title}", "description": detail, "color": COLOR_BLUE, "fields": fields}
 
     def _format_engine_lifecycle(self, title: str, detail: str | None, meta: dict) -> dict:
-        """엔진 시작/중지 embed."""
         is_start = "시작" in title
         icon = "▶️" if is_start else "⏹️"
         fields = []
@@ -324,15 +265,9 @@ class DiscordEventHandler:
             fields.append({"name": "거래소", "value": meta["exchange"], "inline": True})
         if meta.get("mode"):
             fields.append({"name": "모드", "value": meta["mode"], "inline": True})
-        return {
-            "title": f"{icon} {title}",
-            "description": detail,
-            "color": COLOR_BLUE,
-            "fields": fields,
-        }
+        return {"title": f"{icon} {title}", "description": detail, "color": COLOR_BLUE, "fields": fields}
 
     def _format_engine_error(self, level: str, title: str, detail: str | None, meta: dict) -> dict:
-        """엔진 에러/경고 embed (평가 실패, 매수 차단 등)."""
         color = COLOR_RED if level == "critical" else COLOR_ORANGE
         icon = "🚨" if level == "critical" else "⚠️"
         fields = []
@@ -347,15 +282,9 @@ class DiscordEventHandler:
         if meta.get("confidence"):
             fields.append({"name": "신뢰도", "value": f"{meta['confidence']:.0%}", "inline": True})
         desc = detail[:500] if detail else None
-        return {
-            "title": f"{icon} {title}",
-            "description": desc,
-            "color": color,
-            "fields": fields,
-        }
+        return {"title": f"{icon} {title}", "description": desc, "color": color, "fields": fields}
 
     def _format_signal(self, title: str, detail: str | None, meta: dict) -> dict:
-        """통합 시그널 embed."""
         fields = []
         if meta.get("action"):
             fields.append({"name": "판단", "value": meta["action"], "inline": True})
@@ -366,29 +295,18 @@ class DiscordEventHandler:
             if isinstance(strats, list):
                 strats = ", ".join(strats)
             fields.append({"name": "참여 전략", "value": strats, "inline": False})
-        return {
-            "title": f"📊 {title}",
-            "description": detail,
-            "color": COLOR_PURPLE,
-            "fields": fields,
-        }
+        return {"title": f"📊 {title}", "description": detail, "color": COLOR_PURPLE, "fields": fields}
 
     def _format_daily_summary(self, title: str, detail: str | None, meta: dict) -> dict:
-        """일일 요약 embed (포트폴리오 + 전략별 성과 + 인사이트)."""
         is_usdt = "binance" in meta.get("exchange", "")
-        currency = "USDT" if is_usdt else "₩"
 
         def _fmt(n: float) -> str:
-            if is_usdt:
-                return f"{n:,.2f} USDT"
-            return f"{n:,.0f} ₩"
+            return f"{n:,.2f} USDT" if is_usdt else f"{n:,.0f} ₩"
 
         def _pct(n: float) -> str:
             return f"{'+' if n >= 0 else ''}{n:.2f}%"
 
         fields = []
-
-        # ── 포트폴리오 핵심 지표 ──
         if meta.get("total_value") is not None:
             fields.append({"name": "총 자산", "value": _fmt(meta["total_value"]), "inline": True})
         if meta.get("return_pct") is not None:
@@ -403,7 +321,6 @@ class DiscordEventHandler:
         if meta.get("total_fees") is not None:
             fields.append({"name": "수수료", "value": _fmt(meta["total_fees"]), "inline": True})
 
-        # ── 매매 요약 ──
         review = meta.get("review")
         if review:
             trade_line = f"{review['total_trades']}건 (매수 {review['buy_count']} / 매도 {review['sell_count']})"
@@ -412,10 +329,8 @@ class DiscordEventHandler:
                 wr = review["win_rate"] * 100
                 fields.append({"name": "승률", "value": f"{wr:.0f}% ({review['win_count']}승 {review['loss_count']}패)", "inline": True})
             if review.get("profit_factor") is not None:
-                pf = review["profit_factor"]
-                fields.append({"name": "Profit Factor", "value": f"{pf:.2f}x", "inline": True})
+                fields.append({"name": "Profit Factor", "value": f"{review['profit_factor']:.2f}x", "inline": True})
 
-            # ── 전략별 성과 ──
             by_strat = review.get("by_strategy", {})
             if by_strat:
                 lines = []
@@ -426,7 +341,6 @@ class DiscordEventHandler:
                 if lines:
                     fields.append({"name": "전략별 성과", "value": "\n".join(lines[:6]), "inline": False})
 
-            # ── 코인별 성과 (상위/하위) ──
             by_sym = review.get("by_symbol", {})
             if by_sym:
                 sorted_syms = sorted(by_sym.items(), key=lambda x: x[1].get("total_pnl", 0), reverse=True)
@@ -440,7 +354,6 @@ class DiscordEventHandler:
                 if sym_lines:
                     fields.append({"name": "코인별 성과", "value": "\n".join(sym_lines), "inline": False})
 
-            # ── 최대 수익/손실 ──
             largest_win = review.get("largest_win", 0)
             largest_loss = review.get("largest_loss", 0)
             if largest_win > 0 or largest_loss < 0:
@@ -451,33 +364,22 @@ class DiscordEventHandler:
                     wl_parts.append(f"최대 손실: {_fmt(largest_loss)}")
                 fields.append({"name": "최대 거래", "value": " | ".join(wl_parts), "inline": False})
 
-            # ── 핵심 인사이트 ──
             insights = review.get("insights", [])
             if insights:
-                insight_text = "\n".join(f"• {s}" for s in insights[:3])
-                fields.append({"name": "인사이트", "value": insight_text, "inline": False})
+                fields.append({"name": "인사이트", "value": "\n".join(f"• {s}" for s in insights[:3]), "inline": False})
 
-            # ── 추천 ──
             recs = review.get("recommendations", [])
             if recs:
-                rec_text = "\n".join(f"• {s}" for s in recs[:2])
-                fields.append({"name": "추천", "value": rec_text, "inline": False})
+                fields.append({"name": "추천", "value": "\n".join(f"• {s}" for s in recs[:2]), "inline": False})
         else:
-            # review 없으면 기본 정보만
             if meta.get("positions"):
                 fields.append({"name": "포지션", "value": str(meta["positions"]), "inline": True})
             if meta.get("trades_today"):
                 fields.append({"name": "금일 거래", "value": str(meta["trades_today"]), "inline": True})
 
-        return {
-            "title": f"📋 {title}",
-            "description": detail,
-            "color": COLOR_GOLD,
-            "fields": fields,
-        }
+        return {"title": f"📋 {title}", "description": detail, "color": COLOR_GOLD, "fields": fields}
 
     def _format_health(self, level: str, title: str, detail: str | None, meta: dict) -> dict:
-        """헬스체크 embed (🏥 TEAL/RED)."""
         color = COLOR_RED if level == "critical" else COLOR_TEAL
         icon = "🚨" if level == "critical" else "🏥"
         fields = []
@@ -490,15 +392,9 @@ class DiscordEventHandler:
         if meta.get("fail_streak"):
             fields.append({"name": "연속 실패", "value": str(meta["fail_streak"]), "inline": True})
         desc = detail[:500] if detail else None
-        return {
-            "title": f"{icon} {title}",
-            "description": desc,
-            "color": color,
-            "fields": fields,
-        }
+        return {"title": f"{icon} {title}", "description": desc, "color": color, "fields": fields}
 
     def _format_recovery(self, title: str, detail: str | None, meta: dict) -> dict:
-        """복구 액션 embed (🔧 CYAN)."""
         fields = []
         if meta.get("exchange"):
             fields.append({"name": "거래소", "value": meta["exchange"], "inline": True})
@@ -509,17 +405,11 @@ class DiscordEventHandler:
         if meta.get("old_cash") is not None and meta.get("new_cash") is not None:
             fields.append({"name": "잔고 변화", "value": f"{meta['old_cash']:.2f} → {meta['new_cash']:.2f}", "inline": True})
         desc = detail[:500] if detail else None
-        return {
-            "title": f"🔧 {title}",
-            "description": desc,
-            "color": COLOR_CYAN,
-            "fields": fields,
-        }
+        return {"title": f"🔧 {title}", "description": desc, "color": COLOR_CYAN, "fields": fields}
 
     # ── 전송 ───────────────────────────────────────────────────
 
     async def _send_embed(self, embed: dict) -> None:
-        """Discord 웹훅으로 embed 전송."""
         payload = {"embeds": [embed]}
         try:
             resp = await self._client.post(self._webhook_url, json=payload)
@@ -538,86 +428,3 @@ class DiscordEventHandler:
                 logger.warning("discord_webhook_failed", status=resp.status_code)
         except Exception as e:
             logger.warning("discord_send_error", error=str(e))
-
-
-async def send_daily_summary(
-    webhook_url: str,
-    engine_registry,
-) -> None:
-    """일일 요약을 Discord로 전송하는 스케줄러 잡 (포트폴리오 + 매매 회고)."""
-    from core.event_bus import emit_event
-    from db.session import get_session_factory
-
-    session_factory = get_session_factory()
-
-    from config import get_config
-    config = get_config()
-
-    for exchange_name in engine_registry.available_exchanges:
-        # 빗썸: paper 모드(비활성)면 일일 요약 제외
-        if exchange_name == "bithumb" and config.trading.mode != "live":
-            continue
-        pm = engine_registry.get_portfolio_manager(exchange_name)
-        eng = engine_registry.get_engine(exchange_name)
-        if not pm or not eng:
-            continue
-
-        try:
-            is_usdt = "binance" in exchange_name
-            currency = "USDT" if is_usdt else "KRW"
-
-            # 포트폴리오 요약 (DB 세션 필요)
-            async with session_factory() as session:
-                summary = await pm.get_portfolio_summary(session)
-
-            total_value = summary.get("total_value_krw", 0)
-            initial = summary.get("initial_balance_krw", 0)
-            return_pct = ((total_value - initial) / initial * 100) if initial > 0 else 0
-
-            # 매매 회고 데이터 (coordinator에서 캐시된 결과)
-            review_data = None
-            coord = engine_registry.get_coordinator(exchange_name)
-            if coord and coord.last_trade_review:
-                r = coord.last_trade_review
-                review_data = {
-                    "total_trades": r.total_trades,
-                    "buy_count": r.buy_count,
-                    "sell_count": r.sell_count,
-                    "win_count": r.win_count,
-                    "loss_count": r.loss_count,
-                    "win_rate": r.win_rate,
-                    "profit_factor": r.profit_factor,
-                    "by_strategy": r.by_strategy,
-                    "by_symbol": getattr(r, "by_symbol", {}),
-                    "largest_win": getattr(r, "largest_win", 0),
-                    "largest_loss": getattr(r, "largest_loss", 0),
-                    "insights": r.insights[:3] if r.insights else [],
-                    "recommendations": r.recommendations[:2] if r.recommendations else [],
-                }
-
-            detail_parts = [f"총 자산: {total_value:,.2f} {currency}" if is_usdt
-                            else f"총 자산: {total_value:,.0f} {currency}"]
-            if return_pct != 0:
-                sign = "+" if return_pct >= 0 else ""
-                detail_parts.append(f"원금 대비 {sign}{return_pct:.2f}%")
-
-            await emit_event(
-                "info", "daily_summary",
-                f"일일 요약 [{exchange_name}]",
-                detail=" | ".join(detail_parts),
-                metadata={
-                    "exchange": exchange_name,
-                    "total_value": round(total_value, 4 if is_usdt else 0),
-                    "return_pct": round(return_pct, 2),
-                    "realized_pnl": round(summary.get("realized_pnl", 0), 4 if is_usdt else 0),
-                    "unrealized_pnl": round(summary.get("unrealized_pnl", 0), 4 if is_usdt else 0),
-                    "total_fees": round(summary.get("total_fees", 0), 4 if is_usdt else 0),
-                    "drawdown_pct": round(summary.get("drawdown_pct", 0), 2),
-                    "positions": len(summary.get("positions", [])),
-                    "cash": round(summary.get("cash_balance_krw", 0), 4 if is_usdt else 0),
-                    "trades_today": getattr(eng, "_daily_trade_count", 0),
-                    "review": review_data,
-                },
-            )
-        except Exception as e:
-            logger.warning("daily_summary_error", exchange=exchange_name, error=str(e))

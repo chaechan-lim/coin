@@ -10,7 +10,7 @@
 빗썸(현물, paper) + 바이낸스 현물(live) + 바이낸스 USDM 선물(live, 3x) **트리플 엔진** 24시간 자동 트레이딩 시스템.
 가중 투표 (HOLD=기권) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰), React 대시보드(8탭, 거래소 전환).
 **현물 4전략** (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + **선물 6전략** (MA, RSI, MACD, 볼린저RSI, 스토캐스틱RSI, OBV).
-**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **519+ 유닛 테스트**.
+**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **533+ 유닛 테스트**.
 
 ---
 
@@ -46,7 +46,7 @@ coin/
 │   ├── agents/        (market_analysis, risk_management, trade_review, diagnostic_agent, coordinator)
 │   ├── engine/        (trading_engine, futures_engine, order_manager, portfolio_manager, recovery, health_monitor, capital_sync, scheduler)
 │   ├── api/           (router, dependencies, dashboard, portfolio, trades, strategies, events, capital, websocket)
-│   └── tests/         (519+ tests)
+│   └── tests/         (533+ tests)
 └── frontend/
     └── src/           (Dashboard, 8탭 컴포넌트, hooks, types)
 ```
