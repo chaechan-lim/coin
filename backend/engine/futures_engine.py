@@ -256,6 +256,13 @@ class BinanceFuturesEngine(TradingEngine):
                 cash = wallet_total - margin_used
                 if cash >= 0:
                     old = self._portfolio_manager.cash_balance
+                    # 바이낸스 4시간 정각 margin=0 스파이크 방어
+                    # cash가 300% 이상 급증하면 무시 (정상 거래는 이 범위 초과 불가)
+                    if old > 1 and cash > old * 4:
+                        logger.warning("ws_balance_spike_ignored",
+                                       old=round(old, 2), new=round(cash, 2),
+                                       margin=round(margin_used, 2))
+                        continue
                     self._portfolio_manager.cash_balance = cash
                     if abs(old - cash) > 0.5:
                         logger.debug("ws_balance_updated",

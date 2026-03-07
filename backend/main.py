@@ -652,14 +652,15 @@ async def lifespan(app: FastAPI):
                     pass
     asyncio.create_task(daily_pnl_catchup())
 
-    # ── 일일 요약 스케줄러 (매일 21:00 KST = 12:00 UTC) ────
+    # ── 일일 요약 스케줄러 (매일 21:05 KST = 12:05 UTC) ────
+    # 바이낸스 4시간 정각(00/04/08/12/16/20 UTC) margin=0 버그 회피
     if _notification_dispatcher and _notification_dispatcher.adapters:
         async def daily_summary_job():
             await send_daily_summary(engine_registry)
         _scheduler.add_cron_job(
             _wrap(daily_summary_job),
             name="daily_summary",
-            hour=12, minute=0,  # 21:00 KST
+            hour=12, minute=5,  # 21:05 KST
         )
 
     # ── 포지션 동기화 스케줄러 (1분) — 수동 매매 반영, 잔고 실시간성 개선 ──
