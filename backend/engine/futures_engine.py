@@ -31,8 +31,8 @@ logger = structlog.get_logger(__name__)
 # 선물 전용 SL/TP: 레버리지에 따라 자동 축소 (P1 최적화: 4h 기반)
 _FUTURES_DEFAULT_SL_PCT = 8.0
 _FUTURES_DEFAULT_TP_PCT = 16.0
-_FUTURES_TRAILING_ACTIVATION = 7.0
-_FUTURES_TRAILING_STOP = 5.0
+_FUTURES_TRAILING_ACTIVATION = 5.0
+_FUTURES_TRAILING_STOP = 3.5
 
 # 동적 SL 프로필 (ATR 기반): (atr_multiplier, floor_pct, cap_pct)
 _DYNAMIC_SL_PROFILES = {
