@@ -195,8 +195,58 @@ def test_system_embed():
     h = _make_handler()
     embed = h._format_event("info", "system", "서버 시작", "paper 모드", None)
     assert embed is not None
-    assert "⚙️" in embed["title"]
+    assert "🚀" in embed["title"]
     assert embed["color"] == 0x3498DB
+
+
+def test_system_shutdown_embed():
+    h = _make_handler()
+    embed = h._format_event("info", "system", "서버 종료", "모든 엔진 중지 완료", None)
+    assert embed is not None
+    assert "🛑" in embed["title"]
+
+
+def test_system_embed_with_metadata():
+    h = _make_handler()
+    meta = {
+        "spot_coins": ["BTC/KRW"],
+        "futures_coins": ["BTC/USDT", "ETH/USDT"],
+        "positions_summary": "[선물] BTC↑ | 현금 500 USDT",
+    }
+    embed = h._format_event("info", "system", "서버 시작", "live 모드", meta)
+    assert embed is not None
+    field_names = [f["name"] for f in embed.get("fields", [])]
+    assert "현물 추적" in field_names
+    assert "선물 추적" in field_names
+    assert "포지션" in field_names
+
+
+# ── 필터: 엔진 라이프사이클 ──────────────────────────────────────
+
+def test_engine_start_embed():
+    h = _make_handler()
+    embed = h._format_event("info", "engine", "binance_futures 엔진 시작", None,
+                            {"mode": "live", "exchange": "binance_futures"})
+    assert embed is not None
+    assert "▶️" in embed["title"]
+    assert embed["color"] == 0x3498DB
+
+
+def test_engine_stop_embed():
+    h = _make_handler()
+    embed = h._format_event("info", "engine", "binance_futures 엔진 중지", None,
+                            {"exchange": "binance_futures"})
+    assert embed is not None
+    assert "⏹️" in embed["title"]
+
+
+def test_engine_error_still_handled():
+    """engine warning/error는 기존대로 처리."""
+    h = _make_handler()
+    embed = h._format_event("warning", "engine", "평가 실패", "timeout",
+                            {"symbol": "BTC/USDT"})
+    assert embed is not None
+    assert "⚠️" in embed["title"]
 
 
 # ── 필터: 시그널 ───────────────────────────────────────────────

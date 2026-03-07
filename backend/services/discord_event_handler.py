@@ -111,7 +111,11 @@ class DiscordEventHandler:
 
         # ── 시스템 (시작/종료) ────────────────────────────
         if category == "system":
-            return self._format_system(title, detail)
+            return self._format_system(title, detail, meta)
+
+        # ── 엔진 시작/중지 ────────────────────────────────
+        if category == "engine" and level == "info":
+            return self._format_engine_lifecycle(title, detail, meta)
 
         # ── 엔진 에러/경고 (평가 실패, 매수 차단 등) ────
         if category == "engine" and level in ("warning", "critical", "error"):
@@ -293,12 +297,38 @@ class DiscordEventHandler:
             "fields": fields,
         }
 
-    def _format_system(self, title: str, detail: str | None) -> dict:
-        """시스템 시작/종료 embed."""
+    def _format_system(self, title: str, detail: str | None, meta: dict) -> dict:
+        """시스템 시작/종료 embed (코인/포지션 정보 포함)."""
+        is_start = "시작" in title
+        icon = "🚀" if is_start else "🛑"
+        fields = []
+        if meta.get("spot_coins"):
+            fields.append({"name": "현물 추적", "value": ", ".join(meta["spot_coins"]), "inline": False})
+        if meta.get("futures_coins"):
+            fields.append({"name": "선물 추적", "value": ", ".join(meta["futures_coins"]), "inline": False})
+        if meta.get("positions_summary"):
+            fields.append({"name": "포지션", "value": meta["positions_summary"], "inline": False})
         return {
-            "title": f"⚙️ {title}",
+            "title": f"{icon} {title}",
             "description": detail,
             "color": COLOR_BLUE,
+            "fields": fields,
+        }
+
+    def _format_engine_lifecycle(self, title: str, detail: str | None, meta: dict) -> dict:
+        """엔진 시작/중지 embed."""
+        is_start = "시작" in title
+        icon = "▶️" if is_start else "⏹️"
+        fields = []
+        if meta.get("exchange"):
+            fields.append({"name": "거래소", "value": meta["exchange"], "inline": True})
+        if meta.get("mode"):
+            fields.append({"name": "모드", "value": meta["mode"], "inline": True})
+        return {
+            "title": f"{icon} {title}",
+            "description": detail,
+            "color": COLOR_BLUE,
+            "fields": fields,
         }
 
     def _format_engine_error(self, level: str, title: str, detail: str | None, meta: dict) -> dict:

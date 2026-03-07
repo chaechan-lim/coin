@@ -147,7 +147,31 @@ class MyStrategy(BaseStrategy):
 
 ---
 
-## 4. Workflow
+## 4. Documentation Maintenance
+
+### 원칙
+- **코드 변경 시 관련 문서를 항상 최신으로 유지.** 코드만 바꾸고 문서를 안 바꾸면 안 됨.
+- 문서 업데이트는 코드 커밋과 **같은 커밋** 또는 **직후 커밋**에 포함.
+
+### 어떤 문서를 업데이트하나?
+| 변경 유형 | 업데이트 대상 |
+|-----------|--------------|
+| 기능 추가/수정 | `PROGRESS.md` (현재 설정/설계), `MEMORY.md` (요약 반영) |
+| 버전 릴리즈 | `CHANGELOG.md` (버전 이력 추가) |
+| 전략 변경/백테스트 | `backtest-analysis.md` (메모리, 결과 기록) |
+| 배포/인프라 변경 | `DEPLOYMENT.md` |
+| 개발 규칙 변경 | `DEVELOPMENT.md`, `CLAUDE.md` |
+| 테스트 수 변동 | `CLAUDE.md`, `README.md` (테스트 카운트) |
+| 새 환경변수 추가 | `CLAUDE.md` (Config Reference), `.env.example` |
+
+### MEMORY.md 관리
+- **200줄 이내 유지** — 초과 시 상세 내용을 토픽 파일(`architecture.md` 등)로 분리.
+- 세션별 임시 정보는 저장하지 않음 — 안정적으로 확인된 패턴만 기록.
+- 틀린 정보 발견 시 즉시 수정.
+
+---
+
+## 5. Workflow
 
 ### 일반 버그 수정
 1. 버그 재현 테스트 작성

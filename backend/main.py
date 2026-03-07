@@ -723,20 +723,8 @@ async def lifespan(app: FastAPI):
     # 현재 포지션 요약
     positions_summary = await _build_positions_summary(engine_registry)
 
-    startup_msg = f"🚀 트레이딩 봇 시작 ({config.trading.mode.upper()} 모드)"
-    # 빗썸: live 모드 + tracked_coins 있을 때만 표시
-    bithumb_active = config.trading.mode == "live" and spot_coins
-    if bithumb_active:
-        startup_msg += f"\n빗썸 현물: {', '.join(spot_coins)}"
-    if config.binance.enabled:
-        startup_msg += f"\n선물: {', '.join(futures_coins)}"
-    if config.binance.spot_enabled:
-        startup_msg += f"\n바이낸스 현물: {', '.join(config.binance.tracked_coins)}"
-    if positions_summary:
-        startup_msg += f"\n{positions_summary}"
-    await notification.send_engine_alert(startup_msg)
-
     logger.info("startup_complete")
+    bithumb_active = config.trading.mode == "live" and spot_coins
     startup_parts = [f"{config.trading.mode} 모드"]
     if bithumb_active:
         startup_parts.append(f"빗썸 현물: {', '.join(spot_coins)}")
@@ -745,7 +733,11 @@ async def lifespan(app: FastAPI):
     if config.binance.spot_enabled:
         startup_parts.append(f"바이낸스 현물: {', '.join(config.binance.tracked_coins)}")
     startup_detail = " | ".join(startup_parts)
-    metadata = {"spot_coins": spot_coins, "futures_coins": futures_coins if config.binance.enabled else []}
+    metadata = {
+        "spot_coins": spot_coins,
+        "futures_coins": futures_coins if config.binance.enabled else [],
+        "positions_summary": positions_summary or None,
+    }
     await emit_event("info", "system", "서버 시작", detail=startup_detail, metadata=metadata)
 
     # ── 엔진 자동 시작 ────────────────────────────────────────
@@ -764,12 +756,8 @@ async def lifespan(app: FastAPI):
     yield  # ─── 앱 실행 중 ───
 
     # ── Shutdown ─────────────────────────────────────────────
-    shutdown_positions = await _build_positions_summary(engine_registry)
-    shutdown_detail = "서버 종료"
-    if shutdown_positions:
-        shutdown_detail += f" | {shutdown_positions}"
-    await emit_event("info", "system", "서버 종료", detail=shutdown_detail)
     logger.info("shutdown_begin")
+    shutdown_positions = await _build_positions_summary(engine_registry)
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)
     if _engine_instance:
@@ -783,10 +771,11 @@ async def lifespan(app: FastAPI):
         await binance_exchange.close()
     if binance_spot_exchange:
         await binance_spot_exchange.close()
-    shutdown_msg = "🛑 트레이딩 봇 종료"
+    shutdown_detail = "모든 엔진 중지 완료"
     if shutdown_positions:
-        shutdown_msg += f"\n{shutdown_positions}"
-    await notification.send_engine_alert(shutdown_msg)
+        shutdown_detail += f" | {shutdown_positions}"
+    await emit_event("info", "system", "서버 종료", detail=shutdown_detail,
+                     metadata={"positions_summary": shutdown_positions or None})
     if _discord_handler:
         await _discord_handler.close()
     logger.info("shutdown_complete")
