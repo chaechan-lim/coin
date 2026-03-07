@@ -368,3 +368,49 @@ class TestDynamicCoinOrderbookFilter:
         await futures_engine._refresh_dynamic_coins()
 
         assert "GOOD/USDT" in futures_engine._dynamic_coins
+
+
+class TestSellTriggeredReview:
+    """매도 N회마다 매매 회고 트리거 테스트."""
+
+    def test_sell_counter_initialized(self, futures_engine):
+        assert futures_engine._sells_since_review == 0
+        assert futures_engine._REVIEW_TRIGGER_SELLS == 5
+
+    @pytest.mark.asyncio
+    async def test_sell_counter_increments(self, futures_engine):
+        """카운터가 올바르게 증가하는지."""
+        futures_engine._agent_coordinator = None
+        for i in range(1, 4):
+            await futures_engine._on_sell_completed()
+            assert futures_engine._sells_since_review == i
+
+    @pytest.mark.asyncio
+    async def test_review_triggered_at_threshold(self, futures_engine):
+        """N회 매도 시 리뷰 트리거 + 카운터 리셋."""
+        mock_coord = MagicMock()
+        mock_coord.run_trade_review = AsyncMock()
+        futures_engine._agent_coordinator = mock_coord
+        futures_engine._sells_since_review = 4  # 다음 1회면 5회
+
+        await futures_engine._on_sell_completed()
+        assert futures_engine._sells_since_review == 0
+
+    @pytest.mark.asyncio
+    async def test_no_review_below_threshold(self, futures_engine):
+        """임계값 미만이면 리뷰 안 돔."""
+        mock_coord = MagicMock()
+        mock_coord.run_trade_review = AsyncMock()
+        futures_engine._agent_coordinator = mock_coord
+        futures_engine._sells_since_review = 2
+
+        await futures_engine._on_sell_completed()
+        assert futures_engine._sells_since_review == 3
+
+    @pytest.mark.asyncio
+    async def test_no_coordinator_no_crash(self, futures_engine):
+        """코디네이터 없어도 에러 없이 동작."""
+        futures_engine._agent_coordinator = None
+        futures_engine._sells_since_review = 4
+        await futures_engine._on_sell_completed()
+        assert futures_engine._sells_since_review == 5  # 트리거 안 되고 증가만

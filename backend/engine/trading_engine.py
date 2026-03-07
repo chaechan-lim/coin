@@ -261,6 +261,10 @@ class TradingEngine:
         # 리밸런싱 쿨다운 (코인별 마지막 리밸런싱 시각)
         self._last_rebalance: dict[str, datetime] = {}
 
+        # 매도 카운터 → N회마다 매매 회고 트리거
+        self._sells_since_review: int = 0
+        self._REVIEW_TRIGGER_SELLS: int = 5
+
         # WebSocket broadcast callback
         self._broadcast_callback = None
 
@@ -286,6 +290,20 @@ class TradingEngine:
 
     def set_broadcast_callback(self, callback) -> None:
         self._broadcast_callback = callback
+
+    async def _on_sell_completed(self) -> None:
+        """매도 완료 시 카운터 증가 → N회마다 매매 회고 트리거."""
+        self._sells_since_review += 1
+        if (self._sells_since_review >= self._REVIEW_TRIGGER_SELLS
+                and self._agent_coordinator):
+            self._sells_since_review = 0
+            try:
+                asyncio.create_task(self._agent_coordinator.run_trade_review())
+                logger.info("trade_review_triggered_by_sells",
+                            exchange=self._exchange_name,
+                            trigger=self._REVIEW_TRIGGER_SELLS)
+            except Exception as e:
+                logger.warning("trade_review_trigger_failed", error=str(e))
 
     async def _save_tracker_to_db(self, session: AsyncSession, symbol: str, tracker: PositionTracker) -> None:
         """PositionTracker 상태를 DB Position 레코드에 저장."""
@@ -1034,6 +1052,7 @@ class TradingEngine:
         self._last_trade_time[symbol] = now
         self._last_sell_time[symbol] = now  # 매도 후 재매수 대기용
         self._daily_trade_count += 1
+        await self._on_sell_completed()
 
         # 브로드캐스트
         if self._broadcast_callback:
@@ -1914,6 +1933,8 @@ class TradingEngine:
         if decision.action == SignalType.BUY:
             self._daily_buy_count += 1
             self._daily_coin_buy_count[symbol] = self._daily_coin_buy_count.get(symbol, 0) + 1
+        else:
+            await self._on_sell_completed()
 
         # 브로드캐스트
         if self._broadcast_callback:

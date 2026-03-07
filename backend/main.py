@@ -560,11 +560,7 @@ async def lifespan(app: FastAPI):
                 name="binance_risk_check",
                 seconds=300,
             )
-            _scheduler.add_job(
-                _wrap(binance_coord.run_trade_review),
-                name="binance_trade_review",
-                seconds=3600,
-            )
+            # trade_review: 매도 5회마다 엔진에서 직접 트리거
 
     # 바이낸스 현물 스케줄 잡 추가
     if config.binance.spot_enabled and _binance_spot_engine:
@@ -584,11 +580,7 @@ async def lifespan(app: FastAPI):
                 name="binance_spot_risk_check",
                 seconds=300,
             )
-            _scheduler.add_job(
-                _wrap(spot_coord.run_trade_review),
-                name="binance_spot_trade_review",
-                seconds=3600,
-            )
+            # trade_review: 매도 5회마다 엔진에서 직접 트리거
 
     # ── 입출금 자동 감지 스케줄러 ───────────────────────────────
     from engine.capital_sync import sync_binance_deposits, detect_bithumb_balance_change
@@ -660,14 +652,14 @@ async def lifespan(app: FastAPI):
                     pass
     asyncio.create_task(daily_pnl_catchup())
 
-    # ── 일일 요약 스케줄러 ────────────────────────────────────
+    # ── 일일 요약 스케줄러 (매일 21:00 KST = 12:00 UTC) ────
     if _notification_dispatcher and _notification_dispatcher.adapters:
         async def daily_summary_job():
             await send_daily_summary(engine_registry)
-        _scheduler.add_job(
+        _scheduler.add_cron_job(
             _wrap(daily_summary_job),
             name="daily_summary",
-            seconds=86400,
+            hour=12, minute=0,  # 21:00 KST
         )
 
     # ── 포지션 동기화 스케줄러 (1분) — 수동 매매 반영, 잔고 실시간성 개선 ──

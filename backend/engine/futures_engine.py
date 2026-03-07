@@ -970,6 +970,7 @@ class BinanceFuturesEngine(TradingEngine):
                                  "loss_amount": round(loss_amount, 2),
                                  "leverage": lev_val,
                              })
+            await self._on_sell_completed()
 
     async def _execute_rebalancing_sell(
         self, session: AsyncSession, symbol: str, qty: float, price: float

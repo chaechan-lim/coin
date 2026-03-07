@@ -3,6 +3,7 @@ import structlog
 from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import delete
 
 logger = structlog.get_logger(__name__)
@@ -29,6 +30,21 @@ class TradingScheduler:
         )
         self._jobs[name] = job.id
         logger.info("scheduler_job_added", name=name, interval_sec=seconds)
+
+    def add_cron_job(self, func, name: str, hour: int, minute: int = 0, **kwargs) -> None:
+        """Add a daily cron job (UTC)."""
+        job = self._scheduler.add_job(
+            func,
+            trigger=CronTrigger(hour=hour, minute=minute, timezone="UTC"),
+            id=name,
+            name=name,
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            **kwargs,
+        )
+        self._jobs[name] = job.id
+        logger.info("scheduler_cron_job_added", name=name, hour=hour, minute=minute)
 
     def start(self) -> None:
         self._scheduler.start()
@@ -88,12 +104,8 @@ def setup_scheduler(
         seconds=300,  # 5 minutes
     )
 
-    # Trade review agent (매시간)
-    scheduler.add_job(
-        _wrap(coordinator.run_trade_review),
-        name="trade_review",
-        seconds=3600,  # 1 hour
-    )
+    # Trade review: 매도 5회마다 엔진에서 직접 트리거 (engine._on_sell_completed)
+    # 시간 기반 스케줄러 제거 → 매매 없으면 안 돌고, 매매 많으면 자주 돔
 
     # 서버 이벤트 7일 자동 정리 (24시간마다)
     async def cleanup_old_events():
