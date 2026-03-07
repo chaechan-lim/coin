@@ -152,25 +152,22 @@ export function Dashboard() {
         )
       })()}
 
-      {/* Tabs - horizontal scroll on mobile */}
-      <nav className="border-b border-gray-700 overflow-x-auto scrollbar-hide">
-        <div className="flex min-w-max">
-          {TABS.map((t) => {
-            // 종목/로테이션 탭은 모든 거래소에서 표시
-            return (
-              <button
-                key={t.id}
-                onClick={() => setTab(t.id)}
-                className={`shrink-0 px-3 md:px-4 py-2.5 md:py-3 text-xs md:text-sm font-medium transition-colors border-b-2 -mb-px whitespace-nowrap ${
-                  tab === t.id
-                    ? 'border-blue-500 text-blue-400'
-                    : 'border-transparent text-gray-400 hover:text-white active:text-white'
-                }`}
-              >
-                {t.label}
-              </button>
-            )
-          })}
+      {/* Tabs - wrap on mobile */}
+      <nav className="border-b border-gray-700 px-1 md:px-0">
+        <div className="flex flex-wrap md:flex-nowrap">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`px-3 md:px-4 py-2 md:py-3 text-xs md:text-sm font-medium transition-colors border-b-2 -mb-px whitespace-nowrap ${
+                tab === t.id
+                  ? 'border-blue-500 text-blue-400'
+                  : 'border-transparent text-gray-400 hover:text-white active:text-white'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
         </div>
       </nav>
 
