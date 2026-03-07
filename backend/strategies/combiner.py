@@ -48,12 +48,12 @@ class SignalCombiner:
         "obv_divergence": 0.10,
     }
 
-    # 현물용 신규 4전략 가중치 (추세추종 3인방 + BNF 평균회귀)
+    # 현물용 4전략 가중치 (Optuna 50trials 다중기간 최적화, 2026-03-08)
     SPOT_WEIGHTS = {
-        "bnf_deviation": 0.10,
-        "cis_momentum": 0.32,
-        "larry_williams": 0.32,
-        "donchian_channel": 0.26,
+        "bnf_deviation": 0.23,
+        "cis_momentum": 0.22,
+        "larry_williams": 0.31,
+        "donchian_channel": 0.24,
     }
 
     def __init__(

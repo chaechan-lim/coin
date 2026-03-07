@@ -26,12 +26,12 @@ logger = structlog.get_logger(__name__)
 # ── 시장 상태별 동적 손절 프로필 (하이브리드) ────────────────────────
 # (atr_multiplier, floor_pct, cap_pct)
 _DYNAMIC_SL_PROFILES = {
-    "strong_uptrend": (2.5, 4.0, 12.0),
-    "uptrend":        (2.0, 4.0, 10.0),
-    "sideways":       (2.0, 4.0,  7.0),
-    "downtrend":      (2.0, 4.0,  7.0),
+    "strong_uptrend": (2.5, 3.0, 12.0),
+    "uptrend":        (2.0, 3.0, 10.0),
+    "sideways":       (2.0, 3.0,  7.0),
+    "downtrend":      (2.0, 3.0,  7.0),
 }
-_DEFAULT_SL_PROFILE = (2.0, 4.0, 7.0)
+_DEFAULT_SL_PROFILE = (2.0, 3.0, 7.0)
 
 
 @dataclass
@@ -62,7 +62,7 @@ class EngineConfig:
     min_order_amount: float = 5000     # KRW(5000) or USDT(5)
     fee_margin: float = 1.003          # 1 + fee (빗썸 0.3%, 바이낸스 0.2%)
     min_fallback_amount: float = 5000  # 잔고 전체 시도 기준
-    max_trade_size_pct: float = 0.20   # 1회 매매 최대 비중
+    max_trade_size_pct: float = 0.30   # 1회 매매 최대 비중
 
     # 전략
     asymmetric_mode: bool = True
@@ -177,8 +177,8 @@ class PositionTracker:
     """In-memory state for SL/TP/trailing stop tracking."""
     entry_price: float
     highest_price: float
-    stop_loss_pct: float = 5.0       # 동적 SL %
-    take_profit_pct: float = 10.0
+    stop_loss_pct: float = 3.0       # 동적 SL %
+    take_profit_pct: float = 8.0
     trailing_activation_pct: float = 5.0
     trailing_stop_pct: float = 4.0
     trailing_active: bool = False     # 트레일링 활성 여부
@@ -846,7 +846,7 @@ class TradingEngine:
                         df, position.average_buy_price, self._market_state
                     )
                 except Exception:
-                    tracker.stop_loss_pct = 5.0
+                    tracker.stop_loss_pct = 3.0
                 logger.info("tracker_restored_normal", symbol=symbol, sl=round(tracker.stop_loss_pct, 2))
             self._position_trackers[symbol] = tracker
 
@@ -1840,7 +1840,7 @@ class TradingEngine:
                 df = await self._market_data.get_candles(symbol, "4h", 200)
                 sl_pct = self._calc_dynamic_sl(df, price, self._market_state)
             except Exception:
-                sl_pct = 5.0
+                sl_pct = 3.0
             self._position_trackers[symbol] = PositionTracker(
                 entry_price=price,
                 highest_price=price,

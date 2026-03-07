@@ -51,7 +51,7 @@ class RiskConfig(BaseSettings):
     max_single_coin_pct: float = 0.40
     max_drawdown_pct: float = 0.10
     daily_loss_limit_pct: float = 0.03
-    max_trade_size_pct: float = 0.20
+    max_trade_size_pct: float = 0.30
     max_open_orders: int = 20
     rebalancing_enabled: bool = True
     rebalancing_target_pct: float = 0.35  # 리밸런싱 후 목표 비중
@@ -122,8 +122,8 @@ class BinanceSpotTradingConfig(BaseSettings):
     mode: str = "paper"  # "paper" or "live" (독립)
     evaluation_interval_sec: int = 300
     initial_balance_usdt: float = 500.0
-    min_combined_confidence: float = 0.50
-    max_trade_size_pct: float = 0.20
+    min_combined_confidence: float = 0.55
+    max_trade_size_pct: float = 0.30
     daily_buy_limit: int = 20
     max_daily_coin_buys: int = 3
     cooldown_after_sell_sec: int = 14400

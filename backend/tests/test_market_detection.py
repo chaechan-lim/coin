@@ -219,8 +219,8 @@ class TestDynamicSL:
         df = _make_market_df(close_base=price)
         df["atr_14"] = 500_000  # 1% of price
         sl = engine._calc_dynamic_sl(df, price, "uptrend")
-        # ATR 1% * mult 2.0 = 2%, floor 4% → 4.0
-        assert sl == 4.0
+        # ATR 1% * mult 2.0 = 2%, floor 3% → 3.0
+        assert sl == 3.0
 
     def test_high_atr_capped(self):
         engine = _make_engine()

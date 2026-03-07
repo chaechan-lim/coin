@@ -731,8 +731,8 @@ class TestPositionTrackerState:
     def test_tracker_defaults(self):
         """기본값 확인."""
         t = PositionTracker(entry_price=100, highest_price=100)
-        assert t.stop_loss_pct == 5.0
-        assert t.take_profit_pct == 10.0
+        assert t.stop_loss_pct == 3.0
+        assert t.take_profit_pct == 8.0
         assert t.trailing_activation_pct == 5.0
         assert t.trailing_stop_pct == 4.0
         assert t.trailing_active is False
