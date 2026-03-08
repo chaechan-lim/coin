@@ -53,6 +53,8 @@ _engine_instance: TradingEngine | None = None
 _binance_engine = None
 _binance_spot_engine = None
 _notification_dispatcher: NotificationDispatcher | None = None
+_discord_bot_task: asyncio.Task | None = None
+_discord_bot_instance = None
 
 
 @asynccontextmanager
@@ -759,6 +761,21 @@ async def lifespan(app: FastAPI):
     }
     await emit_event("info", "system", "서버 시작", detail=startup_detail, metadata=metadata)
 
+    # ── Discord 봇 (조건부) ──────────────────────────────────
+    global _discord_bot_task, _discord_bot_instance
+    if config.discord_bot.enabled and config.discord_bot.bot_token:
+        try:
+            from services.discord_bot import TradingBot
+            _discord_bot_instance = TradingBot(
+                config=config,
+                engine_registry=engine_registry,
+                session_factory=session_factory,
+            )
+            _discord_bot_task = asyncio.create_task(_discord_bot_instance.start())
+            logger.info("discord_bot_started")
+        except Exception as e:
+            logger.warning("discord_bot_init_failed", error=str(e))
+
     # ── 엔진 자동 시작 ────────────────────────────────────────
     auto_start_engines = []
     # 빗썸: paper 모드면 자동 시작 안 함 (자산 이전 완료)
@@ -776,6 +793,10 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ─────────────────────────────────────────────
     logger.info("shutdown_begin")
+    if _discord_bot_instance:
+        await _discord_bot_instance.close()
+    if _discord_bot_task:
+        _discord_bot_task.cancel()
     shutdown_positions = await _build_positions_summary(engine_registry)
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)

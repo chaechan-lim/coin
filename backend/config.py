@@ -145,6 +145,18 @@ class LLMConfig(BaseSettings):
     model_config = {"env_prefix": "LLM_"}
 
 
+class DiscordBotConfig(BaseSettings):
+    """Discord 봇 설정 (자연어 명령)."""
+    enabled: bool = False
+    bot_token: str = ""
+    channel_id: int = 0           # 0이면 멘션으로만 응답
+    allowed_user_ids: list[int] = []  # 빈 리스트면 write 제한 없음
+    max_response_tokens: int = 2048
+    model: str = ""               # 빈 문자열이면 LLMConfig.model 사용
+
+    model_config = {"env_prefix": "DISCORD_BOT_"}
+
+
 class AppConfig(BaseSettings):
     exchange: ExchangeConfig = Field(default_factory=ExchangeConfig)
     binance: BinanceConfig = Field(default_factory=BinanceConfig)
@@ -156,6 +168,7 @@ class AppConfig(BaseSettings):
     redis: RedisConfig = Field(default_factory=RedisConfig)
     notification: NotificationConfig = Field(default_factory=NotificationConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    discord_bot: DiscordBotConfig = Field(default_factory=DiscordBotConfig)
     log_level: str = "INFO"
 
     model_config = {"env_prefix": "APP_"}
