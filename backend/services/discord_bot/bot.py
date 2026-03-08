@@ -99,17 +99,24 @@ class TradingBot:
         if message.author == self._client.user:
             return
 
-        # 채널 제한
+        # 봇 멘션 여부 판단
+        is_mention = self._client.user in message.mentions
+        is_target_channel = bool(self._channel_id) and message.channel.id == self._channel_id
+
+        # 채널 제한: 지정 채널 외에서는 멘션만 응답
         if self._channel_id and message.channel.id != self._channel_id:
-            # 멘션이면 채널 무관하게 응답
-            if self._client.user not in message.mentions:
+            if not is_mention:
                 return
 
         # 멘션 또는 지정 채널에서만 응답
-        is_mention = self._client.user in message.mentions
-        is_target_channel = self._channel_id and message.channel.id == self._channel_id
         if not is_mention and not is_target_channel:
             return
+
+        logger.info("discord_bot_message_received",
+                     author=str(message.author),
+                     channel=message.channel.id,
+                     is_mention=is_mention,
+                     content=message.content[:80])
 
         # 텍스트 추출 (멘션 제거)
         text = message.content
@@ -127,10 +134,11 @@ class TradingBot:
             await self._send_response(message, response_text)
         except Exception as e:
             logger.error("discord_bot_message_error", error=str(e), exc_info=True)
+            error_msg = f"⚠️ 처리 중 오류가 발생했습니다.\n```\n{type(e).__name__}: {str(e)[:300]}\n```"
             try:
-                await message.reply(f"오류가 발생했습니다: {str(e)[:200]}")
+                await message.reply(error_msg)
             except Exception:
-                pass  # 에러 응답도 실패하면 무시
+                pass
 
     async def _process_message(self, text: str, user_id: int) -> str:
         """사용자 메시지 → LLM API → tool_use 루프 → 최종 텍스트."""
