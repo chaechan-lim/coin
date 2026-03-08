@@ -1887,6 +1887,8 @@ class FuturesBacktestResult:
     liquidations: int = 0
     total_funding: float = 0.0
     total_fees: float = 0.0
+    long_pnl: float = 0.0
+    short_pnl: float = 0.0
     trades: list[BacktestTrade] = field(default_factory=list)
     equity_curve: list[tuple] = field(default_factory=list)
     strategy_stats: dict = field(default_factory=dict)
@@ -2634,6 +2636,10 @@ class FuturesBacktester:
         long_total = long_wins + long_losses
         short_total = short_wins + short_losses
 
+        # 방향별 PnL 집계
+        long_pnl_total = sum(t.pnl for t in trades if "long" in t.side and "sell" in t.side)
+        short_pnl_total = sum(t.pnl for t in trades if "short" in t.side and "sell" in t.side)
+
         strategy_stats = {}
         for name in self._strategies:
             n = strategy_trades.get(name, 0)
@@ -2670,6 +2676,8 @@ class FuturesBacktester:
             liquidations=liquidations,
             total_funding=round(total_funding, 2),
             total_fees=round(total_fees, 2),
+            long_pnl=round(long_pnl_total, 2),
+            short_pnl=round(short_pnl_total, 2),
             trades=trades,
             equity_curve=equity_curve,
             strategy_stats=strategy_stats,
@@ -2699,8 +2707,10 @@ def print_futures_result(r: FuturesBacktestResult):
 
     long_wr = r.long_wins / r.long_trades * 100 if r.long_trades > 0 else 0
     short_wr = r.short_wins / r.short_trades * 100 if r.short_trades > 0 else 0
-    print(f"  롱  거래     : {r.long_trades}회  ({r.long_wins}승/{r.long_losses}패, 승률 {long_wr:.1f}%)")
-    print(f"  숏  거래     : {r.short_trades}회  ({r.short_wins}승/{r.short_losses}패, 승률 {short_wr:.1f}%)")
+    long_pnl_sign = "+" if r.long_pnl >= 0 else ""
+    short_pnl_sign = "+" if r.short_pnl >= 0 else ""
+    print(f"  롱  거래     : {r.long_trades}회  ({r.long_wins}승/{r.long_losses}패, 승률 {long_wr:.1f}%)  PnL {long_pnl_sign}{r.long_pnl:,.2f}")
+    print(f"  숏  거래     : {r.short_trades}회  ({r.short_wins}승/{r.short_losses}패, 승률 {short_wr:.1f}%)  PnL {short_pnl_sign}{r.short_pnl:,.2f}")
     print(f"  전체 승률    : {r.win_rate:.1f}%")
     print(f"  평균 수익    : +{r.avg_win_pct:.2f}% | 평균 손실: -{r.avg_loss_pct:.2f}%")
     print(f"  Profit Factor: {r.profit_factor:.2f}")
@@ -2780,6 +2790,8 @@ class FuturesPortfolioBacktestResult:
     liquidations: int = 0
     total_funding: float = 0.0
     total_fees: float = 0.0
+    long_pnl: float = 0.0
+    short_pnl: float = 0.0
     trades: list[BacktestTrade] = field(default_factory=list)
     equity_curve: list[tuple] = field(default_factory=list)
     strategy_stats: dict = field(default_factory=dict)
@@ -3042,7 +3054,8 @@ class FuturesPortfolioBacktester:
 
         coin_stats: dict[str, dict] = {
             sym: {"wins": 0, "losses": 0, "trades": 0, "pnl": 0.0,
-                  "long_wins": 0, "long_losses": 0, "short_wins": 0, "short_losses": 0}
+                  "long_wins": 0, "long_losses": 0, "short_wins": 0, "short_losses": 0,
+                  "long_pnl": 0.0, "short_pnl": 0.0}
             for sym in portfolio_syms
         }
 
@@ -3595,6 +3608,22 @@ class FuturesPortfolioBacktester:
         long_total = long_wins + long_losses
         short_total = short_wins + short_losses
 
+        # 방향별 PnL 집계 (trades 기반)
+        long_pnl_total = sum(t.pnl for t in trades if "long" in t.side and "sell" in t.side)
+        short_pnl_total = sum(t.pnl for t in trades if "short" in t.side and "sell" in t.side)
+
+        # 코인별 방향 PnL 집계
+        for t in trades:
+            if "sell" not in t.side:
+                continue
+            sym = t.symbol
+            if sym not in coin_stats:
+                continue
+            if "long" in t.side:
+                coin_stats[sym]["long_pnl"] += t.pnl
+            elif "short" in t.side:
+                coin_stats[sym]["short_pnl"] += t.pnl
+
         return FuturesPortfolioBacktestResult(
             symbols=portfolio_syms,
             days=days,
@@ -3619,6 +3648,8 @@ class FuturesPortfolioBacktester:
             liquidations=liquidations,
             total_funding=round(total_funding, 2),
             total_fees=round(total_fees, 2),
+            long_pnl=round(long_pnl_total, 2),
+            short_pnl=round(short_pnl_total, 2),
             trades=trades,
             equity_curve=equity_curve,
             strategy_stats=strategy_stats,
@@ -3652,8 +3683,10 @@ def print_futures_portfolio_result(r: FuturesPortfolioBacktestResult):
 
     long_wr = r.long_wins / r.long_trades * 100 if r.long_trades > 0 else 0
     short_wr = r.short_wins / r.short_trades * 100 if r.short_trades > 0 else 0
-    print(f"  롱  거래     : {r.long_trades}회  ({r.long_wins}승/{r.long_losses}패, 승률 {long_wr:.1f}%)")
-    print(f"  숏  거래     : {r.short_trades}회  ({r.short_wins}승/{r.short_losses}패, 승률 {short_wr:.1f}%)")
+    long_pnl_sign = "+" if r.long_pnl >= 0 else ""
+    short_pnl_sign = "+" if r.short_pnl >= 0 else ""
+    print(f"  롱  거래     : {r.long_trades}회  ({r.long_wins}승/{r.long_losses}패, 승률 {long_wr:.1f}%)  PnL {long_pnl_sign}{r.long_pnl:,.2f}")
+    print(f"  숏  거래     : {r.short_trades}회  ({r.short_wins}승/{r.short_losses}패, 승률 {short_wr:.1f}%)  PnL {short_pnl_sign}{r.short_pnl:,.2f}")
     print(f"  전체 승률    : {r.win_rate:.1f}%")
     print(f"  평균 수익    : +{r.avg_win_pct:.2f}% | 평균 손실: -{r.avg_loss_pct:.2f}%")
     print(f"  Profit Factor: {r.profit_factor:.2f}")
@@ -3671,9 +3704,11 @@ def print_futures_portfolio_result(r: FuturesPortfolioBacktestResult):
             pnl_sign = "+" if cs["pnl"] >= 0 else ""
             lt = cs.get("long_wins", 0) + cs.get("long_losses", 0)
             st = cs.get("short_wins", 0) + cs.get("short_losses", 0)
+            lp = cs.get("long_pnl", 0.0)
+            sp = cs.get("short_pnl", 0.0)
             print(f"    {sym_short:<6}  {cs['trades']:>3}회  "
                   f"(L:{cs.get('long_wins',0)}/{lt} S:{cs.get('short_wins',0)}/{st})  "
-                  f"PnL {pnl_sign}{cs['pnl']:>+10,.2f}")
+                  f"PnL {pnl_sign}{cs['pnl']:>+10,.2f}  (L:{lp:+.1f} S:{sp:+.1f})")
         print(f"{'─'*60}")
 
     # 전략별 기여
