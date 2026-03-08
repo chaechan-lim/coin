@@ -15,16 +15,18 @@ from core.schemas import (
     RotationStatusResponse,
     SurgeScoreItem,
 )
-from api.dependencies import engine_registry
+from api.dependencies import engine_registry, validate_exchange
 
 router = APIRouter(tags=["dashboard"])
 
 
 def _get_engine(exchange: str):
+    validate_exchange(exchange)
     return engine_registry.get_engine(exchange)
 
 
 def _get_coordinator(exchange: str):
+    validate_exchange(exchange)
     return engine_registry.get_coordinator(exchange)
 
 
@@ -87,7 +89,7 @@ async def start_engine(exchange: str = Query("bithumb")):
     if eng.is_running:
         return {"status": "already_running", "exchange": exchange}
     import asyncio
-    asyncio.create_task(eng.start())
+    asyncio.create_task(eng.start(), name=f"engine_{exchange}")
     return {"status": "started", "exchange": exchange}
 
 

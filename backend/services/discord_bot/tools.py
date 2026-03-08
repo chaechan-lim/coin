@@ -557,7 +557,7 @@ async def _handle_start_engine(ctx: ToolContext, input_data: dict) -> dict:
     if eng.is_running:
         return {"status": "already_running", "exchange": exchange}
     import asyncio
-    asyncio.create_task(eng.start())
+    asyncio.create_task(eng.start(), name=f"engine_{exchange}")
     return {"status": "started", "exchange": exchange}
 
 

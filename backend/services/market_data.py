@@ -1,55 +1,101 @@
+import asyncio
 import time
 import structlog
 import pandas as pd
 import pandas_ta as ta
+from collections import OrderedDict
 from typing import Optional
 from exchange.base import ExchangeAdapter
 from exchange.data_models import Candle, Ticker
 
 logger = structlog.get_logger(__name__)
 
+_MAX_RETRIES = 3
+_RETRY_BASE_SEC = 1.0
+
+
+class _LRUCache:
+    """Simple LRU cache with TTL and max size."""
+
+    def __init__(self, max_size: int, ttl_sec: float):
+        self._max_size = max_size
+        self._ttl = ttl_sec
+        self._data: OrderedDict[str, tuple[float, object]] = OrderedDict()
+
+    def get(self, key: str):
+        if key in self._data:
+            ts, val = self._data[key]
+            if time.time() - ts < self._ttl:
+                self._data.move_to_end(key)
+                return val
+            del self._data[key]
+        return None
+
+    def put(self, key: str, value):
+        self._data[key] = (time.time(), value)
+        self._data.move_to_end(key)
+        while len(self._data) > self._max_size:
+            self._data.popitem(last=False)
+
+    def clear(self):
+        self._data.clear()
+
 
 class MarketDataService:
-    """Centralized market data provider with caching and indicator computation."""
+    """Centralized market data provider with LRU caching, retry, and indicator computation."""
 
     def __init__(self, exchange: ExchangeAdapter, cache_ttl_sec: int = 60):
         self._exchange = exchange
         self._cache_ttl = cache_ttl_sec
-        self._ohlcv_cache: dict[str, tuple[float, pd.DataFrame]] = {}
-        self._ticker_cache: dict[str, tuple[float, Ticker]] = {}
+        self._ohlcv_cache = _LRUCache(max_size=100, ttl_sec=cache_ttl_sec)
+        self._ticker_cache = _LRUCache(max_size=50, ttl_sec=10)
 
     def _cache_key(self, symbol: str, timeframe: str) -> str:
         return f"{symbol}:{timeframe}"
+
+    async def _fetch_with_retry(self, coro_func, *args, **kwargs):
+        """Retry with exponential backoff on transient failures."""
+        last_err = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                return await coro_func(*args, **kwargs)
+            except Exception as e:
+                last_err = e
+                if attempt < _MAX_RETRIES - 1:
+                    wait = _RETRY_BASE_SEC * (2 ** attempt)
+                    logger.warning("market_data_retry", attempt=attempt + 1, wait=wait, error=str(e))
+                    await asyncio.sleep(wait)
+        raise last_err
 
     async def get_candles(
         self, symbol: str, timeframe: str = "1h", limit: int = 200
     ) -> pd.DataFrame:
         """Fetch OHLCV as DataFrame with technical indicators pre-computed."""
         key = self._cache_key(symbol, timeframe)
-        now = time.time()
 
-        if key in self._ohlcv_cache:
-            cached_time, cached_df = self._ohlcv_cache[key]
-            if now - cached_time < self._cache_ttl:
-                return cached_df
+        cached = self._ohlcv_cache.get(key)
+        if cached is not None:
+            return cached
 
-        candles = await self._exchange.fetch_ohlcv(symbol, timeframe, limit)
+        candles = await self._fetch_with_retry(
+            self._exchange.fetch_ohlcv, symbol, timeframe, limit
+        )
         df = self._candles_to_dataframe(candles)
         df = self._compute_indicators(df)
 
-        self._ohlcv_cache[key] = (now, df)
+        self._ohlcv_cache.put(key, df)
         return df
 
     async def get_ticker(self, symbol: str) -> Ticker:
         """Fetch current ticker with caching."""
-        now = time.time()
-        if symbol in self._ticker_cache:
-            cached_time, cached_ticker = self._ticker_cache[symbol]
-            if now - cached_time < 10:  # 10-second TTL for tickers
-                return cached_ticker
+        cached = self._ticker_cache.get(symbol)
+        if cached is not None:
+            return cached
 
-        ticker = await self._exchange.fetch_ticker(symbol)
-        self._ticker_cache[symbol] = (now, ticker)
+        ticker = await self._fetch_with_retry(
+            self._exchange.fetch_ticker, symbol
+        )
+        self._ticker_cache.put(symbol, ticker)
         return ticker
 
     async def get_current_price(self, symbol: str) -> float:
@@ -128,3 +174,10 @@ class MarketDataService:
     def clear_cache(self) -> None:
         self._ohlcv_cache.clear()
         self._ticker_cache.clear()
+
+    @property
+    def cache_stats(self) -> dict:
+        return {
+            "ohlcv_entries": len(self._ohlcv_cache._data),
+            "ticker_entries": len(self._ticker_cache._data),
+        }

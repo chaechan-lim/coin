@@ -429,48 +429,64 @@ class TradingEngine:
     async def start(self) -> None:
         """Start the trading engine main loop."""
         self._is_running = True
+        self._tasks: list[asyncio.Task] = []
         await self._restore_trade_timestamps()
         logger.info("engine_started")
         await emit_event("info", "engine", f"{self._exchange_name} 엔진 시작", metadata={"mode": self._ec.mode, "exchange": self._exchange_name})
 
         # 전략 평가 루프 + 빠른 SL/TP 체크 루프 병렬 실행
-        await asyncio.gather(
-            self._strategy_loop(),
-            self._fast_stop_check_loop(),
-            return_exceptions=True,
-        )
+        self._tasks = [
+            asyncio.create_task(self._strategy_loop(), name=f"{self._exchange_name}_strategy"),
+            asyncio.create_task(self._fast_stop_check_loop(), name=f"{self._exchange_name}_fast_sl"),
+        ]
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+
+    _MAX_CONSECUTIVE_ERRORS = 5
+    _ERROR_PAUSE_SEC = 60
 
     async def _strategy_loop(self) -> None:
-        """기존 전략 평가 루프 (5분 주기)."""
+        """기존 전략 평가 루프 (5분 주기). 연속 에러 시 일시 중지."""
+        consecutive_errors = 0
         while self._is_running:
             try:
                 await self._evaluation_cycle()
+                consecutive_errors = 0
             except Exception as e:
-                logger.error("engine_cycle_error", error=str(e), exc_info=True)
+                consecutive_errors += 1
+                logger.error("engine_cycle_error", error=str(e), consecutive=consecutive_errors, exc_info=True)
+                if consecutive_errors >= self._MAX_CONSECUTIVE_ERRORS:
+                    logger.warning("engine_pausing_after_errors", count=consecutive_errors, pause_sec=self._ERROR_PAUSE_SEC)
+                    await emit_event("warning", "engine", f"연속 {consecutive_errors}회 에러 — {self._ERROR_PAUSE_SEC}초 대기", metadata={"exchange": self._exchange_name})
+                    await asyncio.sleep(self._ERROR_PAUSE_SEC)
+                    consecutive_errors = 0
             await asyncio.sleep(self._ec.evaluation_interval_sec)
 
     async def _fast_stop_check_loop(self) -> None:
         """보유 포지션 SL/TP/trailing 빠른 체크 (30초 주기, 가격만 조회)."""
         from db.session import get_session_factory
+        from sqlalchemy.orm import selectinload
         while self._is_running:
             await asyncio.sleep(self._FAST_SL_INTERVAL)
             try:
                 trackers = dict(self._position_trackers)
                 if not trackers:
                     continue
+                symbols = list(trackers.keys())
                 session_factory = get_session_factory()
                 async with session_factory() as session:
-                    for symbol, tracker in trackers.items():
+                    # Batch fetch all positions at once (N+1 → 1 query)
+                    result = await session.execute(
+                        select(Position).where(
+                            Position.symbol.in_(symbols),
+                            Position.quantity > 0,
+                            Position.exchange == self._exchange_name,
+                        )
+                    )
+                    positions = {p.symbol: p for p in result.scalars().all()}
+
+                    for symbol in symbols:
                         try:
-                            price = await self._market_data.get_current_price(symbol)
-                            result = await session.execute(
-                                select(Position).where(
-                                    Position.symbol == symbol,
-                                    Position.quantity > 0,
-                                    Position.exchange == self._exchange_name,
-                                )
-                            )
-                            position = result.scalar_one_or_none()
+                            position = positions.get(symbol)
                             if not position:
                                 continue
                             await self._check_stop_conditions(session, symbol, position)
@@ -481,8 +497,16 @@ class TradingEngine:
                 logger.warning("fast_stop_loop_error", error=str(e))
 
     async def stop(self) -> None:
-        """Stop the trading engine gracefully."""
+        """Stop the trading engine gracefully — cancel all running tasks."""
         self._is_running = False
+        for task in getattr(self, '_tasks', []):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._tasks = []
         logger.info("engine_stopping")
         await emit_event("info", "engine", f"{self._exchange_name} 엔진 중지", metadata={"exchange": self._exchange_name})
 
@@ -1203,6 +1227,8 @@ class TradingEngine:
 
     async def _evaluation_cycle(self) -> None:
         """Run one evaluation cycle for all tracked coins."""
+        import time as _time
+        _cycle_start = _time.monotonic()
         # 시장 상태 업데이트
         await self._maybe_update_market_state()
 
@@ -1280,6 +1306,9 @@ class TradingEngine:
                     await session.rollback()
                     logger.error("evaluation_cycle_error", error=str(e), exc_info=True)
                     await emit_event("error", "engine", "평가 사이클 오류", detail=str(e))
+                finally:
+                    elapsed_ms = (_time.monotonic() - _cycle_start) * 1000
+                    logger.info("evaluation_cycle_complete", elapsed_ms=round(elapsed_ms, 1), exchange=self._exchange_name, coins=len(all_coins))
 
     async def _evaluate_coin(self, session: AsyncSession, symbol: str) -> None:
         """Evaluate a single coin: SL/TP first, then strategy signals."""

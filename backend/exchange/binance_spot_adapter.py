@@ -78,11 +78,43 @@ class BinanceSpotAdapter(ExchangeAdapter):
             await self._exchange.close()
             logger.info("binance_spot_disconnected")
 
+    # Circuit breaker settings
+    _CB_THRESHOLD = 5       # consecutive failures to trip
+    _CB_RESET_SEC = 60      # seconds before retry after trip
+    _API_TIMEOUT = 30       # seconds per API call
+
+    def __init_cb(self):
+        """Lazy init circuit breaker state (called in _call)."""
+        if not hasattr(self, '_cb_failures'):
+            self._cb_failures = 0
+            self._cb_open_until = 0.0
+
     async def _call(self, method, *args, **kwargs):
-        """Rate-limited API call with error handling."""
+        """Rate-limited API call with timeout and circuit breaker."""
+        self.__init_cb()
+        import time as _time
+        now = _time.monotonic()
+        if self._cb_failures >= self._CB_THRESHOLD:
+            if now < self._cb_open_until:
+                raise ExchangeConnectionError(
+                    f"Circuit breaker open ({self._cb_failures} consecutive failures)"
+                )
+            # Reset after cooldown
+            self._cb_failures = 0
+
         async with self._semaphore:
             try:
-                return await method(*args, **kwargs)
+                result = await asyncio.wait_for(
+                    method(*args, **kwargs), timeout=self._API_TIMEOUT
+                )
+                self._cb_failures = 0
+                return result
+            except asyncio.TimeoutError:
+                self._cb_failures += 1
+                self._cb_open_until = _time.monotonic() + self._CB_RESET_SEC
+                raise ExchangeConnectionError(
+                    f"API call timed out after {self._API_TIMEOUT}s"
+                )
             except ccxt.RateLimitExceeded as e:
                 raise ExchangeRateLimitError(str(e))
             except ccxt.InsufficientFunds as e:
@@ -90,6 +122,8 @@ class BinanceSpotAdapter(ExchangeAdapter):
             except ccxt.OrderNotFound as e:
                 raise OrderNotFoundError(str(e))
             except ccxt.NetworkError as e:
+                self._cb_failures += 1
+                self._cb_open_until = _time.monotonic() + self._CB_RESET_SEC
                 raise ExchangeConnectionError(str(e))
             except ccxt.ExchangeError as e:
                 raise ExchangeError(str(e))

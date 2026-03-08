@@ -2,9 +2,20 @@
 거래소별 엔진/PM/콤바이너/코디네이터 중앙 레지스트리.
 """
 import structlog
-from typing import Any
+from typing import Any, Literal
 
 logger = structlog.get_logger(__name__)
+
+# Valid exchange names for API parameter validation
+VALID_EXCHANGES = {"bithumb", "binance_futures", "binance_spot"}
+ExchangeNameType = Literal["bithumb", "binance_futures", "binance_spot"]
+
+
+def validate_exchange(exchange: str) -> str:
+    """Validate exchange name, raise ValueError if invalid."""
+    if exchange not in VALID_EXCHANGES:
+        raise ValueError(f"Invalid exchange: '{exchange}'. Valid: {sorted(VALID_EXCHANGES)}")
+    return exchange
 
 
 class EngineRegistry:

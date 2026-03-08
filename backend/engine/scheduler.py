@@ -195,11 +195,16 @@ def setup_scheduler(
     return scheduler
 
 
+_JOB_TIMEOUT_SEC = 300  # 5 minutes max per scheduled job
+
+
 def _wrap(coro_func):
-    """Wrap async function for APScheduler (handles exceptions gracefully)."""
+    """Wrap async function for APScheduler (handles exceptions + timeout)."""
     async def wrapped():
         try:
-            await coro_func()
+            await asyncio.wait_for(coro_func(), timeout=_JOB_TIMEOUT_SEC)
+        except asyncio.TimeoutError:
+            logger.error("scheduled_job_timeout", func=coro_func.__name__, timeout_sec=_JOB_TIMEOUT_SEC)
         except Exception as e:
             logger.error("scheduled_job_error", func=coro_func.__name__, error=str(e), exc_info=True)
     return wrapped

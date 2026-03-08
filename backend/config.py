@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from typing import Optional
 
 
@@ -45,6 +45,27 @@ class TradingConfig(BaseSettings):
     surge_threshold: float = 3.0       # 서지 감지 임계 배수 (백테스트 C 결과 적용)
     rotation_cooldown_sec: int = 7200  # 로테이션 최소 간격 (2시간)
 
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v):
+        if v not in ("paper", "live"):
+            raise ValueError(f"mode must be 'paper' or 'live', got '{v}'")
+        return v
+
+    @field_validator("min_combined_confidence")
+    @classmethod
+    def validate_confidence(cls, v):
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"min_combined_confidence must be 0.0-1.0, got {v}")
+        return v
+
+    @field_validator("daily_buy_limit")
+    @classmethod
+    def validate_daily_buy_limit(cls, v):
+        if v < 1:
+            raise ValueError(f"daily_buy_limit must be >= 1, got {v}")
+        return v
+
     model_config = {"env_prefix": "TRADING_"}
 
 
@@ -56,6 +77,13 @@ class RiskConfig(BaseSettings):
     max_open_orders: int = 20
     rebalancing_enabled: bool = True
     rebalancing_target_pct: float = 0.35  # 리밸런싱 후 목표 비중
+
+    @field_validator("max_single_coin_pct", "max_drawdown_pct", "daily_loss_limit_pct", "max_trade_size_pct", "rebalancing_target_pct")
+    @classmethod
+    def validate_pct(cls, v):
+        if not 0.0 < v <= 1.0:
+            raise ValueError(f"percentage must be 0.0-1.0, got {v}")
+        return v
 
     model_config = {"env_prefix": "RISK_"}
 
@@ -115,6 +143,20 @@ class BinanceTradingConfig(BaseSettings):
     max_daily_coin_buys: int = 3
     ws_price_monitor: bool = True  # WebSocket 실시간 가격 모니터 활성화
 
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v):
+        if v not in ("paper", "live"):
+            raise ValueError(f"mode must be 'paper' or 'live', got '{v}'")
+        return v
+
+    @field_validator("min_combined_confidence")
+    @classmethod
+    def validate_confidence(cls, v):
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"min_combined_confidence must be 0.0-1.0, got {v}")
+        return v
+
     model_config = {"env_prefix": "BINANCE_TRADING_"}
 
 
@@ -130,6 +172,20 @@ class BinanceSpotTradingConfig(BaseSettings):
     cooldown_after_sell_sec: int = 518400  # 6일 (cd36)
     cooldown_after_buy_sec: int = 518400  # 6일 (cd36)
     rotation_enabled: bool = True
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v):
+        if v not in ("paper", "live"):
+            raise ValueError(f"mode must be 'paper' or 'live', got '{v}'")
+        return v
+
+    @field_validator("min_combined_confidence")
+    @classmethod
+    def validate_confidence(cls, v):
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"min_combined_confidence must be 0.0-1.0, got {v}")
+        return v
 
     model_config = {"env_prefix": "BINANCE_SPOT_TRADING_"}
 

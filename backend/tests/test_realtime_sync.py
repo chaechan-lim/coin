@@ -146,7 +146,7 @@ class TestFastStopCheckLoop:
 
     @pytest.mark.asyncio
     async def test_fast_stop_checks_tracked_positions(self, spot_engine, mock_market_data):
-        """포지션 트래커가 있으면 가격 조회 후 SL/TP 체크."""
+        """포지션 트래커가 있으면 배치 DB 조회 후 SL/TP 체크."""
         spot_engine._position_trackers = {
             "BTC/KRW": PositionTracker(entry_price=50_000_000, extreme_price=51_000_000),
         }
@@ -162,10 +162,12 @@ class TestFastStopCheckLoop:
                 spot_engine._is_running = False
             await original_sleep(0)
 
-        # Mock session factory
+        # Mock session factory — batch query returns empty list (no positions)
         mock_session = AsyncMock()
+        mock_scalars = MagicMock()
+        mock_scalars.all.return_value = []
         mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None  # No position in DB
+        mock_result.scalars.return_value = mock_scalars
         mock_session.execute = AsyncMock(return_value=mock_result)
         mock_session_factory = MagicMock()
         mock_session_factory.return_value.__aenter__ = AsyncMock(return_value=mock_session)
@@ -175,7 +177,8 @@ class TestFastStopCheckLoop:
              patch("db.session.get_session_factory", return_value=mock_session_factory):
             await spot_engine._fast_stop_check_loop()
 
-        mock_market_data.get_current_price.assert_called_with("BTC/KRW")
+        # Batch DB query was executed
+        mock_session.execute.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_fast_stop_handles_price_error_gracefully(self, spot_engine, mock_market_data):
@@ -939,15 +942,18 @@ class TestFastStopCheckSignature:
         }
         spot_engine._is_running = True
 
-        # position mock
+        # position mock — batch query returns this position
         mock_position = MagicMock()
+        mock_position.symbol = "BTC/KRW"
         mock_position.quantity = 0.1
         mock_position.stop_loss_pct = 5.0
         mock_position.average_buy_price = 50_000_000
         mock_position.highest_price = 51_000_000
 
+        mock_scalars = MagicMock()
+        mock_scalars.all.return_value = [mock_position]
         mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_position
+        mock_result.scalars.return_value = mock_scalars
         mock_session = AsyncMock()
         mock_session.execute = AsyncMock(return_value=mock_result)
         mock_session.commit = AsyncMock()

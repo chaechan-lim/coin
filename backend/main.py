@@ -579,7 +579,7 @@ async def lifespan(app: FastAPI):
                         await sess.commit()
                 except Exception:
                     pass
-    asyncio.create_task(daily_pnl_catchup())
+    asyncio.create_task(daily_pnl_catchup(), name="daily_pnl_catchup")
 
     # ── 일일 요약 스케줄러 (매일 21:05 KST = 12:05 UTC) ────
     # 바이낸스 4시간 정각(00/04/08/12/16/20 UTC) margin=0 버그 회피
@@ -634,21 +634,21 @@ async def lifespan(app: FastAPI):
 
     # 최초 시장 분석 실행
     if bithumb_coord and bithumb_pm:
-        asyncio.create_task(_run_initial_analysis(bithumb_coord, bithumb_pm, config))
+        asyncio.create_task(_run_initial_analysis(bithumb_coord, bithumb_pm, config), name="bithumb_initial_analysis")
 
     # 바이낸스 최초 시장 분석
     if config.binance.enabled and _binance_engine:
         binance_coord = engine_registry.get_coordinator("binance_futures")
         binance_pm_init = engine_registry.get_portfolio_manager("binance_futures")
         if binance_coord and binance_pm_init:
-            asyncio.create_task(_run_initial_analysis(binance_coord, binance_pm_init, config))
+            asyncio.create_task(_run_initial_analysis(binance_coord, binance_pm_init, config), name="futures_initial_analysis")
 
     # 바이낸스 현물 최초 시장 분석
     if config.binance.spot_enabled and _binance_spot_engine:
         spot_coord = engine_registry.get_coordinator("binance_spot")
         spot_pm_init = engine_registry.get_portfolio_manager("binance_spot")
         if spot_coord and spot_pm_init:
-            asyncio.create_task(_run_initial_analysis(spot_coord, spot_pm_init, config))
+            asyncio.create_task(_run_initial_analysis(spot_coord, spot_pm_init, config), name="spot_initial_analysis")
 
     # 실제 추적 코인 리스트 (엔진 인스턴스의 동적 코인 포함)
     spot_coins = _engine_instance.tracked_coins if _engine_instance else config.trading.tracked_coins
@@ -692,7 +692,7 @@ async def lifespan(app: FastAPI):
                 engine_registry=engine_registry,
                 session_factory=session_factory,
             )
-            _discord_bot_task = asyncio.create_task(_discord_bot_instance.start())
+            _discord_bot_task = asyncio.create_task(_discord_bot_instance.start(), name="discord_bot")
             # 선제 알림: 이벤트 버스에 봇 알림 콜백 추가
             from core.event_bus import set_bot_alert
             set_bot_alert(_discord_bot_instance.send_alert)
@@ -710,7 +710,7 @@ async def lifespan(app: FastAPI):
     if _binance_spot_engine and not _binance_spot_engine.is_running:
         auto_start_engines.append(("binance_spot", _binance_spot_engine))
     for name, eng in auto_start_engines:
-        asyncio.create_task(eng.start())
+        asyncio.create_task(eng.start(), name=f"engine_{name}")
         logger.info("engine_auto_started", exchange=name)
 
     yield  # ─── 앱 실행 중 ───
