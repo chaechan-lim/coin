@@ -151,6 +151,47 @@ def setup_scheduler(
         seconds=86400,
     )
 
+    # DB 테이블 정리 (매일 04:00 UTC = 13:00 KST) — 디스크 고갈 방지
+    async def cleanup_old_data():
+        from core.models import (
+            Order, StrategyLog, PortfolioSnapshot, AgentAnalysisLog,
+        )
+        from db.session import get_session_factory
+        sf = get_session_factory()
+        retention = [
+            (StrategyLog, "logged_at", 30),         # 전략 로그 30일
+            (PortfolioSnapshot, "snapshot_at", 60),  # 포트폴리오 스냅샷 60일
+            (AgentAnalysisLog, "analyzed_at", 60),   # 에이전트 분석 60일
+            (Order, "created_at", 90),               # 주문 기록 90일
+        ]
+        total_deleted = 0
+        for model, ts_field, days in retention:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+            ts_col = getattr(model, ts_field, None)
+            if ts_col is None:
+                continue
+            try:
+                async with sf() as session:
+                    result = await session.execute(
+                        delete(model).where(ts_col < cutoff)
+                    )
+                    deleted = result.rowcount
+                    total_deleted += deleted
+                    await session.commit()
+                    if deleted:
+                        logger.info("db_cleanup", table=model.__tablename__, deleted=deleted, retention_days=days)
+            except Exception as e:
+                logger.warning("db_cleanup_failed", table=model.__tablename__, error=str(e))
+        if total_deleted:
+            # VACUUM은 별도 커넥션 (autocommit) 필요 — 주간 수동 권장
+            logger.info("db_cleanup_complete", total_deleted=total_deleted)
+
+    scheduler.add_cron_job(
+        _wrap(cleanup_old_data),
+        name="db_data_cleanup",
+        hour=4, minute=0,  # 04:00 UTC = 13:00 KST
+    )
+
     return scheduler
 
 

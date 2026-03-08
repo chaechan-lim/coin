@@ -314,6 +314,12 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         self._ws_exchange = ccxtpro.binanceusdm(config)
         if self._testnet:
             self._ws_exchange.set_sandbox_mode(True)
+        # 메모리 최적화: REST 인스턴스의 markets 공유 (~11MB 절감)
+        if self._exchange and self._exchange.markets:
+            self._ws_exchange.markets = self._exchange.markets
+            self._ws_exchange.symbols = self._exchange.symbols
+            self._ws_exchange.currencies = self._exchange.currencies
+            self._ws_exchange.markets_by_id = getattr(self._exchange, 'markets_by_id', {})
         logger.info("binance_ws_exchange_created", testnet=self._testnet)
 
     async def watch_tickers(self, symbols: list[str]) -> dict:

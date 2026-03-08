@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import asyncio
+import gc
 import sys
 import structlog
 from contextlib import asynccontextmanager
@@ -768,6 +769,10 @@ async def lifespan(app: FastAPI):
         "positions_summary": positions_summary or None,
     }
     await emit_event("info", "system", "서버 시작", detail=startup_detail, metadata=metadata)
+
+    # 메모리 최적화: 초기화 완료 후 가비지 컬렉션
+    collected = gc.collect()
+    logger.info("gc_after_startup", collected=collected)
 
     # ── Discord 봇 (조건부) ──────────────────────────────────
     global _discord_bot_task, _discord_bot_instance

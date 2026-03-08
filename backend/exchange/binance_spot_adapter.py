@@ -59,9 +59,15 @@ class BinanceSpotAdapter(ExchangeAdapter):
 
         try:
             await self._exchange.load_markets()
+            # 메모리 최적화: /USDT 마켓만 유지 (4000+ → ~200개, ~70MB 절감)
+            full_count = len(self._exchange.markets)
+            usdt_markets = {k: v for k, v in self._exchange.markets.items() if "/USDT" in k}
+            self._exchange.markets = usdt_markets
+            self._exchange.symbols = list(usdt_markets.keys())
             logger.info(
                 "binance_spot_connected",
-                markets=len(self._exchange.markets),
+                markets_total=full_count,
+                markets_loaded=len(usdt_markets),
                 testnet=self._testnet,
             )
         except Exception as e:
