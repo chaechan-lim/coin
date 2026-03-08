@@ -869,14 +869,16 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health():
+        engines = {}
+        for name in engine_registry.available_exchanges:
+            eng = engine_registry.get(name)
+            engines[name] = {
+                "running": eng.is_running if eng else False,
+                "mode": eng._ec.mode if eng and hasattr(eng, '_ec') else "unknown",
+            }
         return {
             "status": "ok",
-            "mode": config.trading.mode,
-            "engine_running": _engine_instance.is_running if _engine_instance else False,
-            "binance_enabled": config.binance.enabled,
-            "binance_running": _binance_engine.is_running if _binance_engine else False,
-            "binance_spot_enabled": config.binance.spot_enabled,
-            "binance_spot_running": _binance_spot_engine.is_running if _binance_spot_engine else False,
+            "engines": engines,
             "exchanges": engine_registry.available_exchanges,
         }
 
