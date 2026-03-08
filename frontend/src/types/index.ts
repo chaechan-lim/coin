@@ -15,14 +15,23 @@ export interface Position {
   current_value: number
   unrealized_pnl: number
   unrealized_pnl_pct: number
+  total_invested?: number | null
+  margin_used?: number | null
+  entered_at?: string | null
   // Futures-specific
   direction?: string | null
   leverage?: number | null
   liquidation_price?: number | null
-  // SL/TP target prices
+  // SL/TP target prices + tracker params
   stop_loss_price?: number | null
   take_profit_price?: number | null
+  stop_loss_pct?: number | null
+  take_profit_pct?: number | null
+  trailing_activation_pct?: number | null
+  trailing_stop_pct?: number | null
   trailing_active?: boolean | null
+  highest_price?: number | null
+  max_hold_hours?: number | null
   is_surge?: boolean | null
 }
 

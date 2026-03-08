@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { usePortfolioSummary } from '../hooks/usePortfolio'
 import { CapitalManager } from './CapitalManager'
-import type { ExchangeName } from '../types'
+import { PositionDetailModal } from './PositionDetailModal'
+import type { ExchangeName, Position } from '../types'
 import { fmtPrice } from '../utils/format'
 
 function StatCard({
@@ -41,6 +42,7 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
   const fmt = (n: number) => fmtPrice(n, isUsdt)
   const { data, isLoading } = usePortfolioSummary(exchange)
   const [capitalOpen, setCapitalOpen] = useState(false)
+  const [selectedPosition, setSelectedPosition] = useState<Position | null>(null)
 
   if (isLoading || !data) {
     return (
@@ -125,7 +127,7 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
                 const dirLabel = pos.direction === 'short' ? 'SHORT' : 'LONG'
                 const dirColor = pos.direction === 'short' ? 'text-sell' : 'text-buy'
                 return (
-                  <tr key={pos.symbol} className="border-b border-gray-700/50 hover:bg-gray-700/30">
+                  <tr key={pos.symbol} className="border-b border-gray-700/50 hover:bg-gray-700/30 cursor-pointer" onClick={() => setSelectedPosition(pos)}>
                     <td className="px-4 py-2 font-medium text-white">
                       {pos.symbol}
                       {pos.leverage && pos.leverage > 1 && (
@@ -179,7 +181,7 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
               const dirLabel = pos.direction === 'short' ? 'SHORT' : 'LONG'
               const dirColor = pos.direction === 'short' ? 'text-sell' : 'text-buy'
               return (
-                <div key={pos.symbol} className="px-4 py-3 space-y-1.5">
+                <div key={pos.symbol} className="px-4 py-3 space-y-1.5 cursor-pointer hover:bg-gray-700/30" onClick={() => setSelectedPosition(pos)}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium text-white">{pos.symbol.replace(/\/(KRW|USDT)/, '')}</span>
@@ -260,6 +262,13 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
       )}
 
       <CapitalManager exchange={exchange} open={capitalOpen} onClose={() => setCapitalOpen(false)} />
+      {selectedPosition && (
+        <PositionDetailModal
+          position={selectedPosition}
+          exchange={exchange}
+          onClose={() => setSelectedPosition(null)}
+        />
+      )}
     </div>
   )
 }

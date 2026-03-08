@@ -12,14 +12,23 @@ class PositionResponse(BaseModel):
     current_value: float
     unrealized_pnl: float
     unrealized_pnl_pct: float
+    total_invested: Optional[float] = None
+    margin_used: Optional[float] = None
+    entered_at: Optional[datetime] = None
     # Futures-specific (optional)
     direction: Optional[str] = None
     leverage: Optional[int] = None
     liquidation_price: Optional[float] = None
-    # SL/TP target prices
+    # SL/TP target prices + tracker params
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
+    stop_loss_pct: Optional[float] = None
+    take_profit_pct: Optional[float] = None
+    trailing_activation_pct: Optional[float] = None
+    trailing_stop_pct: Optional[float] = None
     trailing_active: Optional[bool] = None
+    highest_price: Optional[float] = None
+    max_hold_hours: Optional[float] = None
     is_surge: Optional[bool] = None
 
 
