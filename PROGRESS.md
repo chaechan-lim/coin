@@ -1,6 +1,6 @@
 # 코인 자동 매매 시스템 — 운영 참조
 
-> 최종 업데이트: 2026-03-08
+> 최종 업데이트: 2026-03-09
 > 완료된 Phase 1-5 상세 및 버전 이력은 `CHANGELOG.md` 참고.
 
 ---
@@ -10,7 +10,7 @@
 빗썸(현물, paper) + 바이낸스 현물(live) + 바이낸스 USDM 선물(live, 3x) **트리플 엔진** 24시간 자동 트레이딩 시스템.
 가중 투표 (HOLD=기권) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰 + 성과 분석 + 전략 조언), React 대시보드(8탭, 거래소 전환).
 **현물 4전략** (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + **선물 6전략** (MA, RSI, MACD, 볼린저RSI, 스토캐스틱RSI, OBV).
-**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **600 유닛 테스트**.
+**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **646 유닛 테스트**.
 
 ---
 
@@ -62,6 +62,13 @@ coin/
 | Discord 봇 대화 컨텍스트 | 채널별 최근 10턴 히스토리, 1시간 만료, 후속 질문 지원 |
 | 메모리 최적화 | Spot USDT 마켓만, WS markets 공유, gc.collect() (~200MB) |
 | DB 자동 정리 | 매일 13:00 KST — strategy_logs 30d, snapshots 60d, agent_logs 60d, orders 90d |
+| extreme_price 의미 명확화 | PositionTracker.extreme_price: 롱=최고가, 숏=최저가. DB 컬럼 호환 유지 |
+| 일일 매수 카운터 DB 복원 | 엔진 재시작 시 Order 테이블에서 오늘 매수 수 복원 |
+| Discord 봇 도구 4종 | get_health_status, get_funding_rates, get_system_stats, close_position (총 18개) |
+| Discord 봇 선제 알림 | event_bus → bot.send_alert() (health/engine/risk 이벤트 자동 알림) |
+| 구조화된 /health | 엔진 상세, 메모리, uptime, DB 연결 상태, WS 상태 |
+| lifespan() 리팩토링 | _create_agent_stack, _sync_live_state, _create_self_healing 추출 (-93줄) |
+| 포지션 상세 모달 | 가격 분포 시각화, SL/TP/트레일링 상세, 선물 청산 거리 |
 
 ### 낮은 우선순위
 
@@ -71,7 +78,7 @@ coin/
 | ~~Alembic 마이그레이션 정리~~ | ~~현 구조로 안정 운영 중~~ |
 | 로그 로테이션/모니터링 | systemd journal 기반, 별도 관리 미설정 |
 | ~~nginx 직접 서빙~~ | ~~완료 (v0.32)~~ |
-| 포지션 상세 모달 | 진입 시그널, 전략 기여도, SL/TP 차트 오버레이 |
+| ~~포지션 상세 모달~~ | ~~완료 (v0.35)~~ |
 
 ---
 
