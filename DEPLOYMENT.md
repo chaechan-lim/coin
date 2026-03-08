@@ -20,12 +20,13 @@
 
 ```
 nginx (HTTPS :443)
-├── /api/* → backend (uvicorn :8000)
-└── /*     → frontend (serve :3000)
+├── /api/*    → backend (uvicorn :8000)
+├── /ws/*     → backend WebSocket
+└── /*        → frontend (nginx 직접 서빙, /home/chans/coin/frontend/dist)
 
 systemd
-├── coin-backend.service  → uvicorn main:app
-└── coin-frontend.service → npx serve (또는 직접 vite)
+└── coin-backend.service  → uvicorn main:app
+# coin-frontend.service 불필요 (nginx가 정적 파일 직접 서빙)
 
 docker compose
 └── postgres:16-alpine (ARM64 지원)
