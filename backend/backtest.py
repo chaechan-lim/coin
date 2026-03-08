@@ -2748,6 +2748,16 @@ def print_futures_result(r: FuturesBacktestResult):
 
 DEFAULT_FUTURES_PORTFOLIO_COINS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"]
 
+# 동적 포트폴리오 후보군 — 바이낸스 선물 주요 코인 (라이브와 유사한 유니버스)
+DEFAULT_FUTURES_CANDIDATE_COINS = [
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT",
+    "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
+    "UNI/USDT", "NEAR/USDT", "FIL/USDT", "ATOM/USDT",
+    "LTC/USDT", "ARB/USDT", "OP/USDT", "APT/USDT", "SUI/USDT",
+    "TRX/USDT", "ETC/USDT", "AAVE/USDT", "PEPE/USDT",
+    "WIF/USDT", "HYPE/USDT", "DYDX/USDT", "SEI/USDT", "INJ/USDT",
+]
+
 
 @dataclass
 class FuturesPortfolioPositionState:
@@ -2840,6 +2850,9 @@ class FuturesPortfolioBacktester:
         dual_timeframe: bool = False,
         directional_weights: bool = False,
         max_positions: int = 5,
+        dynamic_portfolio: bool = False,
+        dynamic_max_coins: int = 10,
+        dynamic_refresh_candles: int = 6,  # 4h에서 6캔들=24시간
         # 리스크 관리
         risk_enabled: bool = False,
         risk_max_drawdown: float = 0.10,
@@ -2872,7 +2885,17 @@ class FuturesPortfolioBacktester:
         self._directional_weights = directional_weights
         self._max_positions = max_positions
         self._base_position_pct = position_pct
-        self._symbols = symbols or DEFAULT_FUTURES_PORTFOLIO_COINS
+        self._dynamic_portfolio = dynamic_portfolio
+        self._dynamic_max_coins = dynamic_max_coins
+        self._dynamic_refresh_candles = dynamic_refresh_candles
+        if dynamic_portfolio:
+            # 후보 전체 프리페치 — 기본 코인 + 후보군 합집합
+            base = list(symbols or DEFAULT_FUTURES_PORTFOLIO_COINS)
+            self._base_coins = base
+            self._symbols = list(dict.fromkeys(base + DEFAULT_FUTURES_CANDIDATE_COINS))
+        else:
+            self._base_coins = list(symbols or DEFAULT_FUTURES_PORTFOLIO_COINS)
+            self._symbols = self._base_coins
 
         # 레버리지 적응형 파라미터
         import math
@@ -2937,6 +2960,42 @@ class FuturesPortfolioBacktester:
                 print(f" 실패({e})")
         return all_data
 
+    def _select_dynamic_coins(
+        self, all_data: dict[str, "pd.DataFrame"], ts, candle_idx: int,
+    ) -> list[str]:
+        """거래량 기반 동적 코인 선택 — 라이브 _refresh_dynamic_coins() 시뮬레이션.
+
+        최근 24h(6캔들@4h) 거래대금으로 상위 코인 선택 후 base_coins와 합집합.
+        """
+        lookback = min(6, candle_idx)  # 24h @ 4h
+        volumes: list[tuple[str, float]] = []
+        for sym, df in all_data.items():
+            if ts not in df.index:
+                continue
+            iloc = df.index.get_loc(ts)
+            if isinstance(iloc, slice):
+                iloc = iloc.start
+            start = max(0, iloc - lookback)
+            recent = df.iloc[start:iloc + 1]
+            quote_vol = float((recent["close"] * recent["volume"]).sum())
+            volumes.append((sym, quote_vol))
+
+        # 거래대금 기준 내림차순 정렬
+        volumes.sort(key=lambda x: x[1], reverse=True)
+
+        # base_coins는 항상 포함, 나머지에서 상위 N개 선택
+        base_set = set(self._base_coins)
+        dynamic = []
+        for sym, _ in volumes:
+            if sym in base_set:
+                continue
+            dynamic.append(sym)
+            if len(dynamic) >= self._dynamic_max_coins:
+                break
+
+        active = list(dict.fromkeys(self._base_coins + dynamic))
+        return active
+
     def _calc_liquidation_price(self, side: str, entry: float) -> float:
         lev = self._leverage
         fee = self._futures_fee
@@ -2997,6 +3056,8 @@ class FuturesPortfolioBacktester:
         print(f"  최대 동시 포지션: {self._max_positions}")
         print(f"  손절: {sl_str} | 익절: {tp_str} | 트레일링: {trail_str}")
         print(f"  숏 허용: {short_str} | 쿨다운: {self._trade_cooldown}캔들")
+        dyn_str = f"ON (base {len(self._base_coins)} + 상위 {self._dynamic_max_coins}, {self._dynamic_refresh_candles}캔들 갱신)" if self._dynamic_portfolio else "OFF"
+        print(f"  동적 포트폴리오: {dyn_str}")
         risk_str = "ON" if self._risk_manager else "OFF"
         limit_str = "ON" if self._trade_limiter else "OFF"
         print(f"  리스크 관리: {risk_str} | 매매 제한: {limit_str}")
@@ -3033,6 +3094,14 @@ class FuturesPortfolioBacktester:
         # 2. 유니온 타임스탬프
         all_timestamps = sorted(set().union(*(df.index for df in all_data.values())))
         print(f"  타임라인: {len(all_timestamps)}개 캔들 ({all_timestamps[0].date()} ~ {all_timestamps[-1].date()})")
+
+        # 동적 포트폴리오: 현재 활성 코인 (진입 후보 스캔 대상)
+        if self._dynamic_portfolio:
+            active_coins = list(self._base_coins)  # 초기: base만
+            _last_dyn_refresh_idx = -9999
+            print(f"  동적 포트폴리오: 후보 {len(portfolio_syms)}코인 중 base {len(self._base_coins)} + 거래량 상위 {self._dynamic_max_coins}")
+        else:
+            active_coins = portfolio_syms
 
         # 3. 초기화
         cash = self._initial_balance
@@ -3283,11 +3352,24 @@ class FuturesPortfolioBacktester:
                 del positions[sym]
                 dynamic_sl_pct.pop(sym, None)
 
+            # 4f-pre. 동적 포트폴리오 갱신
+            if self._dynamic_portfolio and candle_idx - _last_dyn_refresh_idx >= self._dynamic_refresh_candles:
+                active_coins = self._select_dynamic_coins(all_data, ts, candle_idx)
+                # 신규 코인 coin_stats 초기화
+                for sym in active_coins:
+                    if sym not in coin_stats:
+                        coin_stats[sym] = {
+                            "wins": 0, "losses": 0, "trades": 0, "pnl": 0.0,
+                            "long_wins": 0, "long_losses": 0, "short_wins": 0, "short_losses": 0,
+                            "long_pnl": 0.0, "short_pnl": 0.0,
+                        }
+                _last_dyn_refresh_idx = candle_idx
+
             # 4f. 미보유 코인: 전략 시그널 → 롱/숏 후보 수집
             entry_candidates: list[tuple[str, str, float, Signal, object]] = []
             # (sym, side, confidence, best_signal, decision)
 
-            for sym in portfolio_syms:
+            for sym in active_coins:
                 if sym in positions:
                     continue
                 if sym not in all_data or ts not in all_data[sym].index:
@@ -3698,8 +3780,11 @@ def print_futures_portfolio_result(r: FuturesPortfolioBacktestResult):
 
     # 코인별 분석
     if r.per_coin_stats:
-        print(f"  코인별 분석:")
-        for sym, cs in r.per_coin_stats.items():
+        # 거래가 있는 코인만 표시, PnL 기준 정렬
+        traded = {s: cs for s, cs in r.per_coin_stats.items() if cs["trades"] > 0}
+        traded_count = len(traded)
+        print(f"  코인별 분석 ({traded_count}코인 거래):")
+        for sym, cs in sorted(traded.items(), key=lambda x: x[1]["pnl"], reverse=True):
             sym_short = sym.replace("/USDT", "").replace("/KRW", "")
             pnl_sign = "+" if cs["pnl"] >= 0 else ""
             lt = cs.get("long_wins", 0) + cs.get("long_losses", 0)
@@ -4543,6 +4628,8 @@ async def main():
                         help="sideways+downtrend+crash에서 숏 허용")
     parser.add_argument("--dynamic-position", action="store_true", default=False,
                         help="선물: 시장 상태별 동적 포지션 사이징")
+    parser.add_argument("--dynamic-portfolio", action="store_true", default=False,
+                        help="선물: 거래량 기반 동적 코인 선택 (라이브와 동일)")
     # 포트폴리오 모드
     parser.add_argument("--portfolio",       action="store_true",
                         help="멀티코인 포트폴리오 모드")
@@ -4610,6 +4697,8 @@ async def main():
             fut_cooldown = 6
 
         # 선물 기본값 보정: CLI 기본값(현물용)이면 라이브 선물 설정으로 교체
+        if args.timeframe == "1h":
+            args.timeframe = "4h"
         if args.stop_loss == 5.0:
             args.stop_loss = 8.0
         if args.take_profit == 10.0:
@@ -4668,6 +4757,7 @@ async def main():
                 trade_limit_enabled=args.trade_limits,
                 trade_daily_buy_limit=args.daily_buy_limit,
                 trade_max_coin_buys=args.max_coin_buys,
+                dynamic_portfolio=args.dynamic_portfolio,
             )
             result = await bt.run(args.timeframe, args.days)
             print_futures_portfolio_result(result)
