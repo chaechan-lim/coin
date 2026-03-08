@@ -260,3 +260,133 @@ def test_build_system_prompt_with_memories(bot):
         prompt = bot._build_system_prompt()
     assert "빗썸은 비활성화됨" in prompt
     assert "선물 레버리지 3x" in prompt
+
+
+# ── Conversation context tests ──────────────────────────────
+
+@pytest.mark.asyncio
+async def test_conversation_context_saved(bot):
+    """대화 후 컨텍스트가 저장되는지 확인."""
+    bot._llm.generate_with_tools = AsyncMock(
+        return_value=LLMResponse(
+            text="BTC 가격은 65,000 USDT입니다.",
+            stop_reason="end_turn",
+            model="claude-haiku-4-5-20251001",
+        )
+    )
+    await bot._process_message("BTC 가격", user_id=123, channel_id=100)
+
+    # 컨텍스트에 저장됨
+    assert 100 in bot._conversations
+    assert len(bot._conversations[100]) == 1
+
+
+@pytest.mark.asyncio
+async def test_conversation_context_used_in_followup(bot):
+    """후속 질문 시 이전 컨텍스트가 LLM에 전달되는지 확인."""
+    # 1차 대화
+    bot._llm.generate_with_tools = AsyncMock(
+        return_value=LLMResponse(
+            text="BTC 65,000 USDT.",
+            stop_reason="end_turn",
+            model="claude-haiku-4-5-20251001",
+        )
+    )
+    await bot._process_message("BTC 가격", user_id=123, channel_id=100)
+
+    # 2차 대화 (후속)
+    bot._llm.generate_with_tools = AsyncMock(
+        return_value=LLMResponse(
+            text="ETH는 3,200 USDT입니다.",
+            stop_reason="end_turn",
+            model="claude-haiku-4-5-20251001",
+        )
+    )
+    await bot._process_message("ETH는?", user_id=123, channel_id=100)
+
+    # LLM에 전달된 messages에 이전 대화 포함
+    call_args = bot._llm.generate_with_tools.call_args
+    messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
+    # 이전 대화(user+assistant) + 현재 질문 = 3개
+    assert len(messages) == 3
+    assert messages[0]["role"] == "user"
+    assert messages[0]["content"] == "BTC 가격"
+    assert messages[1]["role"] == "assistant"
+    assert messages[2]["content"] == "ETH는?"
+
+
+@pytest.mark.asyncio
+async def test_conversation_context_no_channel_id(bot):
+    """channel_id=0이면 컨텍스트 저장/사용 안 함."""
+    bot._llm.generate_with_tools = AsyncMock(
+        return_value=LLMResponse(
+            text="응답",
+            stop_reason="end_turn",
+            model="claude-haiku-4-5-20251001",
+        )
+    )
+    await bot._process_message("테스트", user_id=123, channel_id=0)
+
+    assert 0 not in bot._conversations
+
+
+@pytest.mark.asyncio
+async def test_conversation_context_separate_channels(bot):
+    """채널별로 독립 컨텍스트 유지."""
+    bot._llm.generate_with_tools = AsyncMock(
+        return_value=LLMResponse(
+            text="응답",
+            stop_reason="end_turn",
+            model="claude-haiku-4-5-20251001",
+        )
+    )
+    await bot._process_message("채널A 질문", user_id=123, channel_id=100)
+    await bot._process_message("채널B 질문", user_id=123, channel_id=200)
+
+    assert len(bot._conversations[100]) == 1
+    assert len(bot._conversations[200]) == 1
+
+
+def test_get_context_empty(bot):
+    """컨텍스트 없는 채널은 빈 리스트."""
+    result = bot._get_context(999)
+    assert result == []
+
+
+def test_save_and_get_context(bot):
+    """저장 후 조회."""
+    bot._save_context(100, [
+        {"role": "user", "content": "질문"},
+        {"role": "assistant", "content": "답변"},
+    ])
+    ctx = bot._get_context(100)
+    assert len(ctx) == 2
+    assert ctx[0]["content"] == "질문"
+    assert ctx[1]["content"] == "답변"
+
+
+def test_context_max_turns(bot):
+    """MAX_CONTEXT_TURNS 초과 시 오래된 대화 제거."""
+    from services.discord_bot.bot import MAX_CONTEXT_TURNS
+    for i in range(MAX_CONTEXT_TURNS + 5):
+        bot._save_context(100, [
+            {"role": "user", "content": f"질문 {i}"},
+            {"role": "assistant", "content": f"답변 {i}"},
+        ])
+    assert len(bot._conversations[100]) == MAX_CONTEXT_TURNS
+
+
+def test_context_expiry(bot):
+    """오래된 컨텍스트 만료."""
+    import time
+    from services.discord_bot.bot import MAX_CONTEXT_AGE_SEC
+    bot._conversations[100] = __import__("collections").deque(maxlen=10)
+    # 2시간 전 대화 추가
+    old_time = time.time() - MAX_CONTEXT_AGE_SEC - 100
+    bot._conversations[100].append((old_time, [
+        {"role": "user", "content": "오래된 질문"},
+        {"role": "assistant", "content": "오래된 답변"},
+    ]))
+
+    ctx = bot._get_context(100)
+    assert len(ctx) == 0  # 만료됨

@@ -414,3 +414,49 @@ class TestSellTriggeredReview:
         futures_engine._sells_since_review = 4
         await futures_engine._on_sell_completed()
         assert futures_engine._sells_since_review == 5  # 트리거 안 되고 증가만
+
+
+class TestWSReconnection:
+    """WebSocket 재연결 로직 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_ws_reconnect_success(self, futures_engine):
+        """재연결 성공 시 backoff 리셋."""
+        futures_engine._exchange.close_ws = AsyncMock()
+        futures_engine._exchange.create_ws_exchange = AsyncMock()
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await futures_engine._ws_reconnect(10)
+        assert result == futures_engine._WS_RECONNECT_MIN  # 성공 → 리셋
+        futures_engine._exchange.create_ws_exchange.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_ws_reconnect_failure_increases_backoff(self, futures_engine):
+        """재연결 실패 시 backoff 증가."""
+        futures_engine._exchange.close_ws = AsyncMock()
+        futures_engine._exchange.create_ws_exchange = AsyncMock(
+            side_effect=Exception("Connection refused")
+        )
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await futures_engine._ws_reconnect(10)
+        assert result == min(10 * futures_engine._WS_RECONNECT_FACTOR,
+                             futures_engine._WS_RECONNECT_MAX)
+
+    @pytest.mark.asyncio
+    async def test_ws_reconnect_max_cap(self, futures_engine):
+        """backoff가 최대값을 초과하지 않음."""
+        futures_engine._exchange.close_ws = AsyncMock()
+        futures_engine._exchange.create_ws_exchange = AsyncMock(
+            side_effect=Exception("Connection refused")
+        )
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await futures_engine._ws_reconnect(999)
+        assert result <= futures_engine._WS_RECONNECT_MAX
+
+    def test_ws_reconnect_constants(self, futures_engine):
+        """WS 재연결 상수가 합리적인 값인지 확인."""
+        assert futures_engine._WS_RECONNECT_MIN == 5
+        assert futures_engine._WS_RECONNECT_MAX == 300
+        assert futures_engine._WS_RECONNECT_FACTOR == 2

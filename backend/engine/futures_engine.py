@@ -184,8 +184,33 @@ class BinanceFuturesEngine(TradingEngine):
                 logger.error("engine_cycle_error", error=str(e), exc_info=True)
             await asyncio.sleep(interval)
 
+    # WS 재연결 상수
+    _WS_RECONNECT_MIN = 5      # 최소 대기 (초)
+    _WS_RECONNECT_MAX = 300    # 최대 대기 (초)
+    _WS_RECONNECT_FACTOR = 2   # 지수 배율
+
+    async def _ws_reconnect(self, backoff: float) -> float:
+        """WS 재연결 시도. 성공 시 backoff 리셋, 실패 시 증가된 backoff 반환."""
+        wait = min(backoff, self._WS_RECONNECT_MAX)
+        logger.info("ws_reconnect_attempt", wait_sec=wait)
+        await asyncio.sleep(wait)
+        try:
+            await self._exchange.close_ws()
+        except Exception:
+            pass
+        try:
+            await self._exchange.create_ws_exchange()
+            logger.info("ws_reconnected")
+            return self._WS_RECONNECT_MIN  # 성공 → backoff 리셋
+        except Exception as e:
+            logger.warning("ws_reconnect_failed", error=str(e))
+            return min(wait * self._WS_RECONNECT_FACTOR, self._WS_RECONNECT_MAX)
+
     async def _price_monitor_loop(self) -> None:
-        """WebSocket으로 실시간 가격 수신 → 보유 포지션 SL/TP/청산가 체크."""
+        """WebSocket으로 실시간 가격 수신 → 보유 포지션 SL/TP/청산가 체크.
+        연결 끊김 시 자동 재연결 (지수 백오프)."""
+        backoff = self._WS_RECONNECT_MIN
+        consecutive_errors = 0
         while self._is_running:
             try:
                 symbols = list(self._position_trackers.keys())
@@ -193,6 +218,8 @@ class BinanceFuturesEngine(TradingEngine):
                     await asyncio.sleep(5)
                     continue
                 tickers = await self._exchange.watch_tickers(symbols)
+                consecutive_errors = 0  # 성공 → 에러 카운터 리셋
+                backoff = self._WS_RECONNECT_MIN
                 for symbol in symbols:
                     if symbol in tickers:
                         price = float(tickers[symbol].get("last", 0))
@@ -201,15 +228,34 @@ class BinanceFuturesEngine(TradingEngine):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning("price_monitor_error", error=str(e))
-                # WS 연속 실패 시 빠른 SL 폴백 자동 시작
-                if not getattr(self, '_fast_sl_task', None):
-                    self._fast_sl_task = asyncio.create_task(
-                        self._fast_stop_check_loop(), name="futures_fast_sl"
-                    )
-                    logger.warning("futures_fast_sl_auto_started",
-                                   reason="ws_error")
-                await asyncio.sleep(3)
+                consecutive_errors += 1
+                logger.warning("price_monitor_error", error=str(e),
+                               consecutive=consecutive_errors)
+
+                # 3회 연속 실패 시 빠른 SL 폴백 시작
+                if consecutive_errors >= 3:
+                    if not getattr(self, '_fast_sl_task', None) or self._fast_sl_task.done():
+                        self._fast_sl_task = asyncio.create_task(
+                            self._fast_stop_check_loop(), name="futures_fast_sl"
+                        )
+                        logger.warning("futures_fast_sl_auto_started",
+                                       reason="ws_error")
+
+                    # WS 재연결 시도
+                    backoff = await self._ws_reconnect(backoff)
+                    if backoff == self._WS_RECONNECT_MIN:
+                        # 재연결 성공 → 폴백 해제
+                        if self._fast_sl_task and not self._fast_sl_task.done():
+                            self._fast_sl_task.cancel()
+                            try:
+                                await self._fast_sl_task
+                            except asyncio.CancelledError:
+                                pass
+                            self._fast_sl_task = None
+                            logger.info("fast_sl_fallback_stopped", reason="ws_reconnected")
+                        consecutive_errors = 0
+                else:
+                    await asyncio.sleep(3)
 
     async def _fast_stop_check_loop(self) -> None:
         """선물 빠른 SL/TP 체크 (30초 주기) — WebSocket 실패 시 폴백."""
@@ -270,10 +316,15 @@ class BinanceFuturesEngine(TradingEngine):
         )
 
     async def _ws_balance_loop(self) -> None:
-        """잔고 실시간 감사 — 내부 장부 vs 거래소 잔고 차이 모니터링 (cash 갱신 안 함)."""
+        """잔고 실시간 감사 — 내부 장부 vs 거래소 잔고 차이 모니터링 (cash 갱신 안 함).
+        연결 끊김 시 자동 재연결."""
+        backoff = self._WS_RECONNECT_MIN
+        consecutive_errors = 0
         while self._is_running:
             try:
                 balance = await self._exchange.watch_balance()
+                consecutive_errors = 0
+                backoff = self._WS_RECONNECT_MIN
                 usdt = balance.get("USDT", {})
                 wallet_total = float(usdt.get("total", 0) or 0)
                 margin_used = float(usdt.get("used", 0) or 0)
@@ -290,12 +341,22 @@ class BinanceFuturesEngine(TradingEngine):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning("ws_balance_audit_error", error=str(e))
-                await asyncio.sleep(5)
+                consecutive_errors += 1
+                logger.warning("ws_balance_audit_error", error=str(e),
+                               consecutive=consecutive_errors)
+                if consecutive_errors >= 3:
+                    backoff = await self._ws_reconnect(backoff)
+                    if backoff == self._WS_RECONNECT_MIN:
+                        consecutive_errors = 0
+                else:
+                    await asyncio.sleep(5)
 
     async def _ws_position_loop(self) -> None:
-        """포지션 실시간 수신 → DB 포지션 즉시 갱신 (margin, unrealizedPnl, 수량)."""
+        """포지션 실시간 수신 → DB 포지션 즉시 갱신 (margin, unrealizedPnl, 수량).
+        연결 끊김 시 자동 재연결."""
         from db.session import get_session_factory
+        backoff = self._WS_RECONNECT_MIN
+        consecutive_errors = 0
         while self._is_running:
             try:
                 positions = await self._exchange.watch_positions()
@@ -346,11 +407,20 @@ class BinanceFuturesEngine(TradingEngine):
                             await session.commit()
                             logger.debug("ws_position_updated", symbol=sym,
                                          margin=round(margin, 2), contracts=contracts)
+                consecutive_errors = 0
+                backoff = self._WS_RECONNECT_MIN
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning("ws_position_error", error=str(e))
-                await asyncio.sleep(5)
+                consecutive_errors += 1
+                logger.warning("ws_position_error", error=str(e),
+                               consecutive=consecutive_errors)
+                if consecutive_errors >= 3:
+                    backoff = await self._ws_reconnect(backoff)
+                    if backoff == self._WS_RECONNECT_MIN:
+                        consecutive_errors = 0
+                else:
+                    await asyncio.sleep(5)
 
     async def _realtime_stop_check(self, symbol: str, price: float) -> None:
         """경량 SL/TP/청산가 체크 (인메모리 트래커 기반, DB 조회 최소화)."""

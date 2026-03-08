@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+from collections import deque
 from typing import Any
 
 import discord
@@ -23,6 +24,10 @@ from services.discord_bot.tools import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# 대화 컨텍스트 설정
+MAX_CONTEXT_TURNS = 10  # 채널당 보관할 최근 대화 턴 수 (user+assistant 쌍)
+MAX_CONTEXT_AGE_SEC = 3600  # 1시간 이상 지난 컨텍스트는 만료
 
 SYSTEM_PROMPT = """\
 당신은 암호화폐 자동매매 시스템의 대화형 어시스턴트입니다.
@@ -83,6 +88,9 @@ class TradingBot:
             engine_registry=engine_registry,
             session_factory=session_factory,
         )
+
+        # 채널별 대화 히스토리: channel_id → deque of (timestamp, messages)
+        self._conversations: dict[int, deque] = {}
 
         # Discord client
         intents = discord.Intents.default()
@@ -148,7 +156,7 @@ class TradingBot:
 
         try:
             async with message.channel.typing():
-                response_text = await self._process_message(text, user_id)
+                response_text = await self._process_message(text, user_id, channel_id=message.channel.id)
             await self._send_response(message, response_text)
         except Exception as e:
             logger.error("discord_bot_message_error", error=str(e), exc_info=True)
@@ -166,12 +174,38 @@ class TradingBot:
         memory_lines = [f"- {m['content']}" for m in memories]
         return SYSTEM_PROMPT + "\n저장된 메모리:\n" + "\n".join(memory_lines) + "\n"
 
-    async def _process_message(self, text: str, user_id: int) -> str:
+    def _get_context(self, channel_id: int) -> list[dict]:
+        """채널의 최근 대화 히스토리를 LLM 메시지 형식으로 반환."""
+        if channel_id not in self._conversations:
+            return []
+        import time
+        now = time.time()
+        history = self._conversations[channel_id]
+        # 만료된 항목 제거
+        while history and (now - history[0][0]) > MAX_CONTEXT_AGE_SEC:
+            history.popleft()
+        # 메시지 목록 결합
+        msgs = []
+        for _, turn_msgs in history:
+            msgs.extend(turn_msgs)
+        return msgs
+
+    def _save_context(self, channel_id: int, turn_messages: list[dict]) -> None:
+        """대화 턴을 히스토리에 저장."""
+        import time
+        if channel_id not in self._conversations:
+            self._conversations[channel_id] = deque(maxlen=MAX_CONTEXT_TURNS)
+        self._conversations[channel_id].append((time.time(), turn_messages))
+
+    async def _process_message(self, text: str, user_id: int, channel_id: int = 0) -> str:
         """사용자 메시지 → LLM API → tool_use 루프 → 최종 텍스트."""
-        messages = [{"role": "user", "content": text}]
+        # 이전 대화 컨텍스트 로드
+        context = self._get_context(channel_id) if channel_id else []
+        messages = context + [{"role": "user", "content": text}]
         system = self._build_system_prompt()
 
-        logger.info("discord_bot_processing", text=text[:100], user_id=user_id)
+        logger.info("discord_bot_processing", text=text[:100], user_id=user_id,
+                     context_turns=len(context) // 2 if context else 0)
 
         response = await self._llm.generate_with_tools(
             messages=messages,
@@ -225,6 +259,14 @@ class TradingBot:
         # 최종 텍스트 추출
         result = response.text or "응답을 생성할 수 없습니다."
         logger.info("discord_bot_response", length=len(result), iterations=iteration)
+
+        # 대화 컨텍스트 저장 (user 질문 + assistant 최종 응답만, tool 루프 중간 과정 제외)
+        if channel_id:
+            self._save_context(channel_id, [
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": result},
+            ])
+
         return result
 
     async def _send_response(self, message: discord.Message, text: str):
