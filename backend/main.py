@@ -73,124 +73,8 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     logger.info("db_tables_ready")
 
-    # ── 2. 빗썸 거래소 어댑터 ──────────────────────────────────
-    bithumb = BithumbV2Adapter(
-        api_key=config.exchange.api_key,
-        api_secret=config.exchange.api_secret,
-        rate_limit=config.exchange.rate_limit_per_sec,
-    )
-    await bithumb.initialize()
-
-    if config.trading.mode == "paper":
-        exchange = PaperAdapter(
-            real_adapter=bithumb,
-            initial_balance_krw=config.trading.initial_balance_krw,
-        )
-        await exchange.initialize()
-    else:
-        exchange = bithumb
-
-    is_paper = config.trading.mode == "paper"
-    logger.info("exchange_ready", mode=config.trading.mode, is_paper=is_paper)
-
-    # ── 3. 빗썸 핵심 서비스 ───────────────────────────────────
-    # 원금은 항상 config에서 고정 (서버 재시작마다 재계산 방지)
-    initial_krw = config.trading.initial_balance_krw
-
-    market_data = MarketDataService(exchange)
-    notification = NotificationDispatcher()  # 어댑터는 아래에서 등록
-    combiner = SignalCombiner(min_confidence=config.trading.min_combined_confidence, exchange_name="bithumb")
-    order_mgr = OrderManager(exchange, is_paper=is_paper, exchange_name="bithumb")
-    portfolio_mgr = PortfolioManager(
-        market_data=market_data,
-        initial_balance_krw=initial_krw,
-        is_paper=is_paper,
-        exchange_name="bithumb",
-    )
-
-    # 라이브 모드: 거래소 실제 잔고 동기화 + DB 스냅샷 복원 + 원금 관리
-    if not is_paper:
-        session_factory = get_session_factory()
-        async with session_factory() as sess:
-            await portfolio_mgr.sync_exchange_positions(
-                sess, exchange, config.trading.tracked_coins,
-            )
-            await portfolio_mgr.restore_state_from_db(sess)
-            spike_fixed = await PortfolioManager.cleanup_spike_snapshots(sess, "bithumb")
-            if spike_fixed:
-                logger.info("bithumb_spike_cleanup", fixed=spike_fixed)
-
-            # 시드 입금 자동 생성 (CapitalTransaction 0건이면)
-            # 신규 DB: 실제 총자산(현금+포지션) 기준으로 시드 생성
-            count_result = await sess.execute(
-                select(func.count()).select_from(CapitalTransaction)
-                .where(CapitalTransaction.exchange == "bithumb")
-            )
-            if count_result.scalar() == 0:
-                # 실제 총자산 계산: sync 후 cash + 포지션 invested 합계
-                pos_result = await sess.execute(
-                    select(func.coalesce(func.sum(PositionModel.total_invested), 0))
-                    .where(PositionModel.exchange == "bithumb", PositionModel.quantity > 0)
-                )
-                actual_invested = float(pos_result.scalar())
-                actual_total = portfolio_mgr.cash_balance + actual_invested
-                seed_amount = actual_total if actual_total > 0 else initial_krw
-
-                seed = CapitalTransaction(
-                    exchange="bithumb",
-                    tx_type="deposit",
-                    amount=round(seed_amount, 0),
-                    currency="KRW",
-                    note=f"초기 원금 (자동 생성, 실제 자산 기준)",
-                    source="seed",
-                    confirmed=True,
-                )
-                sess.add(seed)
-                await sess.flush()
-                logger.info("bithumb_seed_deposit_created",
-                            amount=round(seed_amount, 0),
-                            cash=round(portfolio_mgr.cash_balance, 0),
-                            invested=round(actual_invested, 0))
-
-            await portfolio_mgr.load_initial_balance_from_db(sess)
-            await sess.commit()
-
-    # ── 4. 빗썸 AI 에이전트 ───────────────────────────────────
-    from agents.trade_review import TradeReviewAgent
-    from agents.performance_analytics import PerformanceAnalyticsAgent
-    from agents.strategy_advisor import StrategyAdvisorAgent
-    market_agent = MarketAnalysisAgent(market_data, exchange_name="bithumb")
-    risk_agent = RiskManagementAgent(config.risk, market_data, exchange_name="bithumb")
-    trade_review_agent = TradeReviewAgent(review_window_hours=24, exchange_name="bithumb")
-    perf_agent = PerformanceAnalyticsAgent(exchange_name="bithumb")
-    strategy_advisor = StrategyAdvisorAgent(exchange_name="bithumb")
-    coordinator = AgentCoordinator(
-        market_agent, risk_agent, combiner, trade_review_agent,
-        exchange_name="bithumb",
-        performance_agent=perf_agent,
-        strategy_advisor=strategy_advisor,
-    )
-
-    # ── 5. 빗썸 트레이딩 엔진 ─────────────────────────────────
-    trading_engine = TradingEngine(
-        config=config,
-        exchange=exchange,
-        market_data=market_data,
-        order_manager=order_mgr,
-        portfolio_manager=portfolio_mgr,
-        combiner=combiner,
-        agent_coordinator=coordinator,
-        exchange_name="bithumb",
-    )
-    coordinator.set_engine(trading_engine)
-    await trading_engine.initialize()
-    _engine_instance = trading_engine
-
-    # WebSocket 브로드캐스트 연결
-    trading_engine.set_broadcast_callback(ws_manager.broadcast)
-    set_event_broadcast(ws_manager.broadcast)
-
-    # ── 알림 어댑터 등록 ──────────────────────────────────────
+    # ── 알림 어댑터 등록 (엔진 독립) ─────────────────────────
+    notification = NotificationDispatcher()
     _notification_dispatcher = notification
     if config.notification.enabled:
         discord_webhook = config.notification.discord_webhook_url
@@ -205,39 +89,157 @@ async def lifespan(app: FastAPI):
         logger.info("notification_dispatchers_registered",
                      adapters=[type(a).__name__ for a in notification.adapters])
 
-    # Self-healing: RecoveryManager + DiagnosticAgent 주입 (빗썸)
-    from engine.recovery import RecoveryManager
-    from engine.health_monitor import HealthMonitor
-    from agents.diagnostic_agent import DiagnosticAgent
+    # WebSocket 브로드캐스트 연결 (엔진 독립)
+    set_event_broadcast(ws_manager.broadcast)
 
-    bithumb_recovery = RecoveryManager(
-        engine=trading_engine,
-        portfolio_manager=portfolio_mgr,
-        exchange_adapter=exchange,
-        exchange_name="bithumb",
-        tracked_coins=config.trading.tracked_coins,
-    )
-    bithumb_diagnostic = DiagnosticAgent(
-        engine=trading_engine,
-        portfolio_manager=portfolio_mgr,
-        exchange_adapter=exchange,
-        exchange_name="bithumb",
-        tracked_coins=config.trading.tracked_coins,
-    )
-    bithumb_recovery.set_diagnostic_agent(bithumb_diagnostic)
-    trading_engine.set_recovery_manager(bithumb_recovery)
+    # ── 2. 빗썸 거래소 (조건부) ──────────────────────────────
+    exchange = None  # for shutdown
+    bithumb_health = None
 
-    bithumb_health = HealthMonitor(
-        engine=trading_engine,
-        portfolio_manager=portfolio_mgr,
-        exchange_adapter=exchange,
-        market_data=market_data,
-        exchange_name="bithumb",
-        tracked_coins=config.trading.tracked_coins,
-    )
+    if config.exchange.enabled:
+        bithumb = BithumbV2Adapter(
+            api_key=config.exchange.api_key,
+            api_secret=config.exchange.api_secret,
+            rate_limit=config.exchange.rate_limit_per_sec,
+        )
+        await bithumb.initialize()
 
-    # EngineRegistry 등록 (빗썸)
-    engine_registry.register("bithumb", trading_engine, portfolio_mgr, combiner, coordinator)
+        if config.trading.mode == "paper":
+            exchange = PaperAdapter(
+                real_adapter=bithumb,
+                initial_balance_krw=config.trading.initial_balance_krw,
+            )
+            await exchange.initialize()
+        else:
+            exchange = bithumb
+
+        is_paper = config.trading.mode == "paper"
+        logger.info("exchange_ready", mode=config.trading.mode, is_paper=is_paper)
+
+        # ── 3. 빗썸 핵심 서비스 ───────────────────────────────
+        initial_krw = config.trading.initial_balance_krw
+
+        market_data = MarketDataService(exchange)
+        combiner = SignalCombiner(min_confidence=config.trading.min_combined_confidence, exchange_name="bithumb")
+        order_mgr = OrderManager(exchange, is_paper=is_paper, exchange_name="bithumb")
+        portfolio_mgr = PortfolioManager(
+            market_data=market_data,
+            initial_balance_krw=initial_krw,
+            is_paper=is_paper,
+            exchange_name="bithumb",
+        )
+
+        # 라이브 모드: 거래소 실제 잔고 동기화 + DB 스냅샷 복원 + 원금 관리
+        if not is_paper:
+            session_factory = get_session_factory()
+            async with session_factory() as sess:
+                await portfolio_mgr.sync_exchange_positions(
+                    sess, exchange, config.trading.tracked_coins,
+                )
+                await portfolio_mgr.restore_state_from_db(sess)
+                spike_fixed = await PortfolioManager.cleanup_spike_snapshots(sess, "bithumb")
+                if spike_fixed:
+                    logger.info("bithumb_spike_cleanup", fixed=spike_fixed)
+
+                count_result = await sess.execute(
+                    select(func.count()).select_from(CapitalTransaction)
+                    .where(CapitalTransaction.exchange == "bithumb")
+                )
+                if count_result.scalar() == 0:
+                    pos_result = await sess.execute(
+                        select(func.coalesce(func.sum(PositionModel.total_invested), 0))
+                        .where(PositionModel.exchange == "bithumb", PositionModel.quantity > 0)
+                    )
+                    actual_invested = float(pos_result.scalar())
+                    actual_total = portfolio_mgr.cash_balance + actual_invested
+                    seed_amount = actual_total if actual_total > 0 else initial_krw
+
+                    seed = CapitalTransaction(
+                        exchange="bithumb",
+                        tx_type="deposit",
+                        amount=round(seed_amount, 0),
+                        currency="KRW",
+                        note=f"초기 원금 (자동 생성, 실제 자산 기준)",
+                        source="seed",
+                        confirmed=True,
+                    )
+                    sess.add(seed)
+                    await sess.flush()
+                    logger.info("bithumb_seed_deposit_created",
+                                amount=round(seed_amount, 0),
+                                cash=round(portfolio_mgr.cash_balance, 0),
+                                invested=round(actual_invested, 0))
+
+                await portfolio_mgr.load_initial_balance_from_db(sess)
+                await sess.commit()
+
+        # ── 4. 빗썸 AI 에이전트 ───────────────────────────────
+        from agents.trade_review import TradeReviewAgent
+        from agents.performance_analytics import PerformanceAnalyticsAgent
+        from agents.strategy_advisor import StrategyAdvisorAgent
+        market_agent = MarketAnalysisAgent(market_data, exchange_name="bithumb")
+        risk_agent = RiskManagementAgent(config.risk, market_data, exchange_name="bithumb")
+        trade_review_agent = TradeReviewAgent(review_window_hours=24, exchange_name="bithumb")
+        perf_agent = PerformanceAnalyticsAgent(exchange_name="bithumb")
+        strategy_advisor = StrategyAdvisorAgent(exchange_name="bithumb")
+        coordinator = AgentCoordinator(
+            market_agent, risk_agent, combiner, trade_review_agent,
+            exchange_name="bithumb",
+            performance_agent=perf_agent,
+            strategy_advisor=strategy_advisor,
+        )
+
+        # ── 5. 빗썸 트레이딩 엔진 ─────────────────────────────
+        trading_engine = TradingEngine(
+            config=config,
+            exchange=exchange,
+            market_data=market_data,
+            order_manager=order_mgr,
+            portfolio_manager=portfolio_mgr,
+            combiner=combiner,
+            agent_coordinator=coordinator,
+            exchange_name="bithumb",
+        )
+        coordinator.set_engine(trading_engine)
+        await trading_engine.initialize()
+        _engine_instance = trading_engine
+        trading_engine.set_broadcast_callback(ws_manager.broadcast)
+
+        # Self-healing: RecoveryManager + DiagnosticAgent 주입 (빗썸)
+        from engine.recovery import RecoveryManager
+        from engine.health_monitor import HealthMonitor
+        from agents.diagnostic_agent import DiagnosticAgent
+
+        bithumb_recovery = RecoveryManager(
+            engine=trading_engine,
+            portfolio_manager=portfolio_mgr,
+            exchange_adapter=exchange,
+            exchange_name="bithumb",
+            tracked_coins=config.trading.tracked_coins,
+        )
+        bithumb_diagnostic = DiagnosticAgent(
+            engine=trading_engine,
+            portfolio_manager=portfolio_mgr,
+            exchange_adapter=exchange,
+            exchange_name="bithumb",
+            tracked_coins=config.trading.tracked_coins,
+        )
+        bithumb_recovery.set_diagnostic_agent(bithumb_diagnostic)
+        trading_engine.set_recovery_manager(bithumb_recovery)
+
+        bithumb_health = HealthMonitor(
+            engine=trading_engine,
+            portfolio_manager=portfolio_mgr,
+            exchange_adapter=exchange,
+            market_data=market_data,
+            exchange_name="bithumb",
+            tracked_coins=config.trading.tracked_coins,
+        )
+
+        # EngineRegistry 등록 (빗썸)
+        engine_registry.register("bithumb", trading_engine, portfolio_mgr, combiner, coordinator)
+    else:
+        logger.info("bithumb_disabled")
 
     # ── 7. 바이낸스 선물 (조건부) ──────────────────────────────
     futures_health = None
@@ -551,12 +553,13 @@ async def lifespan(app: FastAPI):
 
     # ── 8. 스케줄러 시작 ─────────────────────────────────────
     session_factory = get_session_factory()
+    bithumb_coord = engine_registry.get_coordinator("bithumb")
+    bithumb_pm = engine_registry.get_portfolio_manager("bithumb")
     _scheduler = setup_scheduler(
-        engine=trading_engine,
-        coordinator=coordinator,
-        portfolio_manager=portfolio_mgr,
         config=config,
         session_factory=session_factory,
+        coordinator=bithumb_coord,
+        portfolio_manager=bithumb_pm,
     )
 
     # 바이낸스 스케줄 잡 추가
@@ -622,7 +625,7 @@ async def lifespan(app: FastAPI):
                 seconds=1800,
             )
 
-    if not is_paper:
+    if config.exchange.enabled and config.trading.mode != "paper":
         async def capital_detect_bithumb():
             sf = get_session_factory()
             async with sf() as sess:
@@ -700,11 +703,12 @@ async def lifespan(app: FastAPI):
     )
 
     # ── 헬스체크 스케줄러 (120초) ─────────────────────────────
-    _scheduler.add_job(
-        _wrap(bithumb_health.run_health_checks),
-        name="bithumb_health_check",
-        seconds=120,
-    )
+    if bithumb_health:
+        _scheduler.add_job(
+            _wrap(bithumb_health.run_health_checks),
+            name="bithumb_health_check",
+            seconds=120,
+        )
     if _binance_engine and futures_health:
         _scheduler.add_job(
             _wrap(futures_health.run_health_checks),
@@ -721,7 +725,8 @@ async def lifespan(app: FastAPI):
     _scheduler.start()
 
     # 최초 시장 분석 실행
-    asyncio.create_task(_run_initial_analysis(coordinator, portfolio_mgr, config))
+    if bithumb_coord and bithumb_pm:
+        asyncio.create_task(_run_initial_analysis(bithumb_coord, bithumb_pm, config))
 
     # 바이낸스 최초 시장 분석
     if config.binance.enabled and _binance_engine:
@@ -745,8 +750,12 @@ async def lifespan(app: FastAPI):
     positions_summary = await _build_positions_summary(engine_registry)
 
     logger.info("startup_complete")
-    bithumb_active = config.trading.mode == "live" and spot_coins
-    startup_parts = [f"{config.trading.mode} 모드"]
+    bithumb_active = config.exchange.enabled and config.trading.mode == "live" and spot_coins
+    startup_parts = []
+    if not config.exchange.enabled:
+        startup_parts.append("빗썸 비활성")
+    else:
+        startup_parts.append(f"빗썸 {config.trading.mode}")
     if bithumb_active:
         startup_parts.append(f"빗썸 현물: {', '.join(spot_coins)}")
     if config.binance.enabled:
@@ -806,7 +815,8 @@ async def lifespan(app: FastAPI):
         await _binance_engine.stop()
     if _binance_spot_engine:
         await _binance_spot_engine.stop()
-    await exchange.close()
+    if exchange:
+        await exchange.close()
     if binance_exchange:
         await binance_exchange.close()
     if binance_spot_exchange:

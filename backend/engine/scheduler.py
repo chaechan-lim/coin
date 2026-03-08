@@ -83,46 +83,58 @@ class TradingScheduler:
 
 
 def setup_scheduler(
-    engine,
-    coordinator,
-    portfolio_manager,
     config,
     session_factory,
+    coordinator=None,
+    portfolio_manager=None,
 ) -> TradingScheduler:
     """
     Create and configure the trading scheduler.
 
-    Scheduled jobs:
-    - market_analysis:  every 15 min (AI agent)
-    - risk_check:       every 5 min (risk agent)
-    - trade_review:     every 1 hour
-
-    NOTE: evaluation_cycle은 engine.start() 루프에서 직접 실행.
-    스케줄러에서 중복 등록하지 않음.
+    coordinator/portfolio_manager가 None이면 빗썸 관련 잡 생략.
     """
     scheduler = TradingScheduler()
 
-    # Market analysis agent
-    scheduler.add_job(
-        _wrap(coordinator.run_market_analysis),
-        name="market_analysis",
-        seconds=900,  # 15 minutes
-    )
+    # 빗썸 관련 잡 (coordinator가 있을 때만)
+    if coordinator:
+        scheduler.add_job(
+            _wrap(coordinator.run_market_analysis),
+            name="market_analysis",
+            seconds=900,
+        )
 
-    # Risk management agent
-    async def risk_check():
-        await coordinator.run_risk_evaluation(portfolio_manager.cash_balance)
+        if portfolio_manager:
+            async def risk_check():
+                await coordinator.run_risk_evaluation(portfolio_manager.cash_balance)
+            scheduler.add_job(
+                _wrap(risk_check),
+                name="risk_check",
+                seconds=300,
+            )
 
-    scheduler.add_job(
-        _wrap(risk_check),
-        name="risk_check",
-        seconds=300,  # 5 minutes
-    )
+        from config import get_config
+        llm_config = get_config().llm
+        if llm_config.enabled and llm_config.daily_review_enabled and llm_config.api_key:
+            scheduler.add_job(
+                _wrap(coordinator.run_trade_review),
+                name="daily_llm_review",
+                seconds=86400,
+            )
+            logger.info("daily_llm_review_scheduled")
 
-    # Trade review: 매도 5회마다 엔진에서 직접 트리거 (engine._on_sell_completed)
-    # 시간 기반 스케줄러 제거 → 매매 없으면 안 돌고, 매매 많으면 자주 돔
+        scheduler.add_cron_job(
+            _wrap(coordinator.run_performance_analysis),
+            name="performance_analytics",
+            hour=12, minute=30,
+        )
 
-    # 서버 이벤트 7일 자동 정리 (24시간마다)
+        scheduler.add_weekly_cron_job(
+            _wrap(coordinator.run_strategy_advice),
+            name="strategy_advice",
+            day_of_week="sun", hour=13, minute=0,
+        )
+
+    # 서버 이벤트 7일 자동 정리 (24시간마다) — 공통
     async def cleanup_old_events():
         from core.models import ServerEvent
         from db.session import get_session_factory
@@ -136,32 +148,7 @@ def setup_scheduler(
     scheduler.add_job(
         _wrap(cleanup_old_events),
         name="event_cleanup",
-        seconds=86400,  # 24 hours
-    )
-
-    # LLM 기반 일일 매매 회고 (24시간 간격)
-    from config import get_config
-    llm_config = get_config().llm
-    if llm_config.enabled and llm_config.daily_review_enabled and llm_config.api_key:
-        scheduler.add_job(
-            _wrap(coordinator.run_trade_review),
-            name="daily_llm_review",
-            seconds=86400,  # 24 hours
-        )
-        logger.info("daily_llm_review_scheduled")
-
-    # 성과 분석 에이전트 (매일 12:30 UTC = 21:30 KST)
-    scheduler.add_cron_job(
-        _wrap(coordinator.run_performance_analysis),
-        name="performance_analytics",
-        hour=12, minute=30,
-    )
-
-    # 전략 어드바이저 (매주 일요일 13:00 UTC = 22:00 KST)
-    scheduler.add_weekly_cron_job(
-        _wrap(coordinator.run_strategy_advice),
-        name="strategy_advice",
-        day_of_week="sun", hour=13, minute=0,
+        seconds=86400,
     )
 
     return scheduler

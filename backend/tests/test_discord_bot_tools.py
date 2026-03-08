@@ -39,11 +39,11 @@ def mock_registry():
     # portfolio managers
     bithumb_pm = MagicMock()
     bithumb_pm.cash_balance = 500_000
-    bithumb_pm.initial_balance = 1_000_000
+    bithumb_pm._initial_balance = 1_000_000
 
     binance_pm = MagicMock()
     binance_pm.cash_balance = 800.0
-    binance_pm.initial_balance = 1000.0
+    binance_pm._initial_balance = 1000.0
 
     def get_pm(name):
         return {"bithumb": bithumb_pm, "binance_futures": binance_pm}.get(name)

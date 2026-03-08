@@ -87,7 +87,12 @@ class TradingBot:
     def _setup_events(self):
         @self._client.event
         async def on_ready():
-            logger.info("discord_bot_ready", user=str(self._client.user))
+            guilds = self._client.guilds
+            guild_names = [g.name for g in guilds]
+            logger.info("discord_bot_ready",
+                        user=str(self._client.user),
+                        guild_count=len(guilds),
+                        guilds=guild_names)
 
         @self._client.event
         async def on_message(message: discord.Message):
@@ -95,6 +100,13 @@ class TradingBot:
 
     async def _on_message(self, message: discord.Message):
         """메시지 수신 처리."""
+        # 메시지 수신 디버그 로깅 (봇 자신 제외)
+        if message.author != self._client.user:
+            logger.debug("discord_bot_raw_message",
+                         author=str(message.author),
+                         channel=message.channel.id,
+                         content_len=len(message.content))
+
         # 자기 메시지 무시
         if message.author == self._client.user:
             return

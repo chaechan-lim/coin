@@ -265,14 +265,15 @@ async def _handle_portfolio_summary(ctx: ToolContext, input_data: dict) -> dict:
             invested = sum(p.total_invested for p in positions)
             unrealized = sum(p.unrealized_pnl for p in positions)
 
+        initial = pm._initial_balance
+        total_value = pm.cash_balance + invested + unrealized
         result[ex] = {
             "cash_balance": round(pm.cash_balance, 2),
             "invested": round(invested, 2),
-            "total_value": round(pm.cash_balance + invested + unrealized, 2),
+            "total_value": round(total_value, 2),
             "unrealized_pnl": round(unrealized, 2),
-            "initial_balance": round(pm.initial_balance, 2),
-            "return_pct": round((pm.cash_balance + invested + unrealized - pm.initial_balance)
-                                / pm.initial_balance * 100, 2) if pm.initial_balance > 0 else 0,
+            "initial_balance": round(initial, 2),
+            "return_pct": round((total_value - initial) / initial * 100, 2) if initial > 0 else 0,
             "position_count": len(positions),
             "currency": currency,
         }
