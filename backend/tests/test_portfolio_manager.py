@@ -1319,6 +1319,37 @@ async def test_snapshot_allowed_small_total_change(session):
 
 
 @pytest.mark.asyncio
+async def test_snapshot_blocked_invested_zero_spike(session):
+    """invested가 0으로 급락 (sync 실패) → 스냅샷 차단."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+    pm._peak_value = 330
+    pm._cash_balance = 30
+    pm._last_total_value = 330
+
+    # baseline 스냅샷: total=330, cash=30, invested=300
+    snap_prev = PortfolioSnapshot(
+        exchange="binance_futures",
+        total_value_krw=330,
+        cash_balance_krw=30,
+        invested_value_krw=300,
+    )
+    session.add(snap_prev)
+    await session.flush()
+
+    # sync 실패: 포지션이 사라져 invested=0, cash는 거의 불변
+    # total = cash(30) = 30, invested=0
+    # cash spike: |30-30|/30 = 0% → 통과
+    # total spike: |30-330|/330 = 91% > 10%, but cash_delta = 0% < 3% → 기존에는 통과
+    # invested zero check: prev_invested=300 > 10, new_invested=0 < 1 → 차단!
+    snap = await pm.take_snapshot(session)
+    assert snap is None  # invested→0 스파이크 차단
+
+
+@pytest.mark.asyncio
 async def test_snapshot_uses_median_baseline(session):
     """3개 이전 스냅샷의 중앙값을 baseline으로 사용."""
     pm = PortfolioManager(

@@ -359,6 +359,23 @@ class PortfolioManager:
                                     skip_count=self._snapshot_skip_count + 1,
                                 )
 
+            # 3) Invested → 0 스파이크 (sync 실패로 포지션이 순간 사라짐)
+            #    이전에 invested > 0이었는데 갑자기 0이 되면 sync 오류
+            if not is_spike:
+                new_invested = summary["invested_value_krw"]
+                prev_invested_vals = [r[2] for r in prev_rows if r[2] is not None]
+                if prev_invested_vals:
+                    prev_invested = prev_invested_vals[0]
+                    if prev_invested > 10 and new_invested < 1:
+                        is_spike = True
+                        logger.warning(
+                            "snapshot_skipped_invested_zero",
+                            exchange=self._exchange_name,
+                            prev_invested=round(prev_invested, 2),
+                            new_invested=round(new_invested, 2),
+                            skip_count=self._snapshot_skip_count + 1,
+                        )
+
             if is_spike:
                 self._snapshot_skip_count += 1
                 if self._snapshot_skip_count < 3:
