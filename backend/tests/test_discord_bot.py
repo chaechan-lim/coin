@@ -239,3 +239,24 @@ def test_split_text_no_newline(bot):
     chunks = bot._split_text(text, 2000)
     assert len(chunks) == 3
     assert len(chunks[0]) == 2000
+
+
+def test_build_system_prompt_no_memories(bot):
+    """메모리 없을 때 기본 프롬프트만."""
+    with patch("services.discord_bot.bot.load_memories", return_value=[]):
+        prompt = bot._build_system_prompt()
+    assert "암호화폐 자동매매" in prompt
+    # 메모리 항목이 추가되지 않음
+    assert "- 빗썸" not in prompt
+
+
+def test_build_system_prompt_with_memories(bot):
+    """메모리 있을 때 프롬프트에 포함."""
+    memories = [
+        {"content": "빗썸은 비활성화됨", "created_at": "2026-03-08T00:00:00"},
+        {"content": "선물 레버리지 3x", "created_at": "2026-03-08T00:00:00"},
+    ]
+    with patch("services.discord_bot.bot.load_memories", return_value=memories):
+        prompt = bot._build_system_prompt()
+    assert "빗썸은 비활성화됨" in prompt
+    assert "선물 레버리지 3x" in prompt

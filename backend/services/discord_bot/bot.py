@@ -19,6 +19,7 @@ from services.discord_bot.tools import (
     WRITE_TOOLS,
     ToolContext,
     execute_tool,
+    load_memories,
 )
 
 logger = structlog.get_logger(__name__)
@@ -39,6 +40,11 @@ SYSTEM_PROMPT = """\
 - 숫자는 읽기 쉽게 천 단위 구분자를 사용하세요.
 - 엔진 시작/중지 같은 위험한 작업은 사용자에게 확인 후 실행하세요.
 - 답변은 Discord에 표시되므로 마크다운 형식으로 작성하세요.
+
+메모리:
+- 사용자가 '기억해', '메모해', '잊지마' 등 요청하면 save_memory 도구로 저장하세요.
+- 저장된 메모리는 아래에 표시됩니다. 이미 알고 있는 사실처럼 자연스럽게 활용하세요.
+- 사용자가 '잊어', '삭제해' 등 요청하면 delete_memory 도구를 사용하세요.
 """
 
 # Discord embed character limits
@@ -152,9 +158,18 @@ class TradingBot:
             except Exception:
                 pass
 
+    def _build_system_prompt(self) -> str:
+        """시스템 프롬프트 + 저장된 메모리 결합."""
+        memories = load_memories()
+        if not memories:
+            return SYSTEM_PROMPT
+        memory_lines = [f"- {m['content']}" for m in memories]
+        return SYSTEM_PROMPT + "\n저장된 메모리:\n" + "\n".join(memory_lines) + "\n"
+
     async def _process_message(self, text: str, user_id: int) -> str:
         """사용자 메시지 → LLM API → tool_use 루프 → 최종 텍스트."""
         messages = [{"role": "user", "content": text}]
+        system = self._build_system_prompt()
 
         logger.info("discord_bot_processing", text=text[:100], user_id=user_id)
 
@@ -162,7 +177,7 @@ class TradingBot:
             messages=messages,
             tools=TOOL_DEFINITIONS,
             max_tokens=self._max_tokens,
-            system=SYSTEM_PROMPT,
+            system=system,
             model=self._model,
         )
 
@@ -203,7 +218,7 @@ class TradingBot:
                 messages=messages,
                 tools=TOOL_DEFINITIONS,
                 max_tokens=self._max_tokens,
-                system=SYSTEM_PROMPT,
+                system=system,
                 model=self._model,
             )
 

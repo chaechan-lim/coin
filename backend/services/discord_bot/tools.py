@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -194,9 +195,69 @@ TOOL_DEFINITIONS = [
             "required": ["analysis_type"],
         },
     },
+    {
+        "name": "save_memory",
+        "description": "중요한 정보를 영구 메모리에 저장. 사용자가 '기억해', '메모해', '잊지마' 등 요청 시 사용. 시스템 상태 변경이나 운영 방침도 저장 가능.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "저장할 내용 (간결하게)",
+                },
+            },
+            "required": ["content"],
+        },
+    },
+    {
+        "name": "delete_memory",
+        "description": "저장된 메모리 삭제. 사용자가 '잊어', '삭제해' 등 요청 시 사용.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "memory_index": {
+                    "type": "integer",
+                    "description": "삭제할 메모리 번호 (0부터)",
+                },
+            },
+            "required": ["memory_index"],
+        },
+    },
+    {
+        "name": "list_memories",
+        "description": "저장된 모든 메모리 목록 조회.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
-WRITE_TOOLS = {"start_engine", "stop_engine", "trigger_analysis"}
+WRITE_TOOLS = {"start_engine", "stop_engine", "trigger_analysis", "save_memory", "delete_memory"}
+
+
+# ── Bot Memory ─────────────────────────────────────────────────
+
+MEMORY_FILE = Path(__file__).parent.parent.parent / "data" / "bot_memories.json"
+
+
+def load_memories() -> list[dict]:
+    """저장된 메모리 목록 로드."""
+    if MEMORY_FILE.exists():
+        try:
+            return json.loads(MEMORY_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+    return []
+
+
+def _save_memories(memories: list[dict]):
+    """메모리 목록을 파일에 저장."""
+    MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MEMORY_FILE.write_text(
+        json.dumps(memories, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 # ── Tool Context ───────────────────────────────────────────────
@@ -503,6 +564,42 @@ async def _handle_trigger_analysis(ctx: ToolContext, input_data: dict) -> dict:
     return results
 
 
+async def _handle_save_memory(ctx: ToolContext, input_data: dict) -> dict:
+    content = input_data["content"].strip()
+    if not content:
+        return {"error": "내용이 비어있습니다."}
+    memories = load_memories()
+    memories.append({
+        "content": content,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    _save_memories(memories)
+    logger.info("bot_memory_saved", content=content[:80], total=len(memories))
+    return {"status": "saved", "total_memories": len(memories)}
+
+
+async def _handle_delete_memory(ctx: ToolContext, input_data: dict) -> dict:
+    idx = input_data["memory_index"]
+    memories = load_memories()
+    if idx < 0 or idx >= len(memories):
+        return {"error": f"유효하지 않은 번호: {idx} (총 {len(memories)}개)"}
+    removed = memories.pop(idx)
+    _save_memories(memories)
+    logger.info("bot_memory_deleted", content=removed["content"][:80])
+    return {"status": "deleted", "removed": removed["content"], "remaining": len(memories)}
+
+
+async def _handle_list_memories(ctx: ToolContext, input_data: dict) -> dict:
+    memories = load_memories()
+    return {
+        "total": len(memories),
+        "memories": [
+            {"index": i, "content": m["content"], "created_at": m["created_at"]}
+            for i, m in enumerate(memories)
+        ],
+    }
+
+
 # ── Handler Dispatch Map ───────────────────────────────────────
 
 _HANDLERS = {
@@ -517,4 +614,7 @@ _HANDLERS = {
     "start_engine": _handle_start_engine,
     "stop_engine": _handle_stop_engine,
     "trigger_analysis": _handle_trigger_analysis,
+    "save_memory": _handle_save_memory,
+    "delete_memory": _handle_delete_memory,
+    "list_memories": _handle_list_memories,
 }

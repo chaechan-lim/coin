@@ -286,3 +286,56 @@ def test_write_tools_subset():
     defined = {t["name"] for t in TOOL_DEFINITIONS}
     for wt in WRITE_TOOLS:
         assert wt in defined
+
+
+# ── memory tools ──────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_save_and_list_memory(ctx, tmp_path):
+    """메모리 저장 + 조회."""
+    from services.discord_bot import tools
+    original = tools.MEMORY_FILE
+    tools.MEMORY_FILE = tmp_path / "bot_memories.json"
+    try:
+        result = await execute_tool(ctx, "save_memory", {"content": "빗썸은 의도적으로 비활성화됨"})
+        assert result["status"] == "saved"
+        assert result["total_memories"] == 1
+
+        result = await execute_tool(ctx, "list_memories", {})
+        assert result["total"] == 1
+        assert "빗썸" in result["memories"][0]["content"]
+    finally:
+        tools.MEMORY_FILE = original
+
+
+@pytest.mark.asyncio
+async def test_delete_memory(ctx, tmp_path):
+    """메모리 삭제."""
+    from services.discord_bot import tools
+    original = tools.MEMORY_FILE
+    tools.MEMORY_FILE = tmp_path / "bot_memories.json"
+    try:
+        await execute_tool(ctx, "save_memory", {"content": "메모1"})
+        await execute_tool(ctx, "save_memory", {"content": "메모2"})
+
+        result = await execute_tool(ctx, "delete_memory", {"memory_index": 0})
+        assert result["status"] == "deleted"
+        assert result["remaining"] == 1
+
+        result = await execute_tool(ctx, "list_memories", {})
+        assert result["memories"][0]["content"] == "메모2"
+    finally:
+        tools.MEMORY_FILE = original
+
+
+@pytest.mark.asyncio
+async def test_delete_memory_invalid_index(ctx, tmp_path):
+    """유효하지 않은 인덱스 삭제 시도."""
+    from services.discord_bot import tools
+    original = tools.MEMORY_FILE
+    tools.MEMORY_FILE = tmp_path / "bot_memories.json"
+    try:
+        result = await execute_tool(ctx, "delete_memory", {"memory_index": 99})
+        assert "error" in result
+    finally:
+        tools.MEMORY_FILE = original
