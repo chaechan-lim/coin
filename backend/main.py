@@ -37,6 +37,9 @@ from engine.scheduler import setup_scheduler
 from agents.market_analysis import MarketAnalysisAgent
 from agents.risk_management import RiskManagementAgent
 from agents.coordinator import AgentCoordinator
+from agents.trade_review import TradeReviewAgent
+from agents.performance_analytics import PerformanceAnalyticsAgent
+from agents.strategy_advisor import StrategyAdvisorAgent
 
 from api.router import create_api_router, get_ws_router
 from api.websocket import ws_manager
@@ -174,9 +177,6 @@ async def lifespan(app: FastAPI):
                 await sess.commit()
 
         # ── 4. 빗썸 AI 에이전트 ───────────────────────────────
-        from agents.trade_review import TradeReviewAgent
-        from agents.performance_analytics import PerformanceAnalyticsAgent
-        from agents.strategy_advisor import StrategyAdvisorAgent
         market_agent = MarketAnalysisAgent(market_data, exchange_name="bithumb")
         risk_agent = RiskManagementAgent(config.risk, market_data, exchange_name="bithumb")
         trade_review_agent = TradeReviewAgent(review_window_hours=24, exchange_name="bithumb")
