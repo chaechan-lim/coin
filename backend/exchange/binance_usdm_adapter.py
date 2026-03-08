@@ -266,6 +266,39 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         )
         return float(data.get("fundingRate", 0) or 0)
 
+    async def fetch_income(
+        self,
+        income_type: str | None = None,
+        start_time: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict]:
+        """Income API 조회 (펀딩비, 수수료, 실현손익 등).
+
+        Args:
+            income_type: "FUNDING_FEE", "COMMISSION" 등. None=전체.
+            start_time: 시작 타임스탬프(ms).
+            limit: 최대 레코드 수 (바이낸스 최대 1000).
+        """
+        params: dict = {"limit": limit}
+        if income_type:
+            params["incomeType"] = income_type
+        if start_time:
+            params["startTime"] = start_time
+
+        data = await self._call(
+            self._exchange.fapiPrivateGetIncome, params
+        )
+        return [
+            {
+                "income_type": r.get("incomeType", ""),
+                "income": float(r.get("income", 0)),
+                "asset": r.get("asset", "USDT"),
+                "time": int(r.get("time", 0)),
+                "symbol": r.get("symbol", ""),
+            }
+            for r in data
+        ]
+
     # ── WebSocket (ccxt.pro) ──────────────────────────────────────
 
     async def create_ws_exchange(self) -> None:

@@ -543,8 +543,8 @@ async def test_first_run_withdrawal_adjusts_peak(session):
 
 
 @pytest.mark.asyncio
-async def test_futures_sync_cash_excludes_unrealized_pnl(session):
-    """선물 sync에서 cash_balance는 walletBalance - margin (unrealizedPnL 제외)."""
+async def test_futures_sync_does_not_overwrite_cash(session):
+    """선물 sync는 cash를 덮어쓰지 않음 (내부 장부 기반)."""
     from exchange.base import Balance
 
     pm = PortfolioManager(
@@ -555,12 +555,9 @@ async def test_futures_sync_cash_excludes_unrealized_pnl(session):
 
     # Mock exchange adapter
     adapter = AsyncMock()
-    # Binance USDT: free=280 (wallet+unPnl-margin), used=30 (margin), total=320 (wallet+unPnl)
-    # wallet=300, unPnl=20, margin=40
     adapter.fetch_balance = AsyncMock(return_value={
         "USDT": Balance(currency="USDT", free=280, used=40, total=320),
     })
-    # Mock futures positions: 1 position with 20 USDT unrealized PnL
     adapter._exchange = AsyncMock()
     adapter._exchange.fetch_positions = AsyncMock(return_value=[
         {
@@ -576,7 +573,6 @@ async def test_futures_sync_cash_excludes_unrealized_pnl(session):
         }
     ])
 
-    # DB에 이미 포지션 존재
     pos = Position(
         exchange="binance_futures", symbol="BTC/USDT",
         quantity=0.001, average_buy_price=95000,
@@ -588,7 +584,39 @@ async def test_futures_sync_cash_excludes_unrealized_pnl(session):
 
     await pm.sync_exchange_positions(session, adapter, ["BTC/USDT"])
 
-    # cash = wallet(300) - margin(40) = 260, NOT 280 (which includes unPnL)
+    # 선물 sync는 cash를 변경하지 않음 → 초기값 유지
+    assert pm.cash_balance == pytest.approx(300, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_futures_initialize_cash_from_exchange(session):
+    """initialize_cash_from_exchange로 cash = wallet - margin 설정."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"BTC/USDT": 100_000}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+
+    adapter = AsyncMock()
+    # wallet=300, unPnl=20, margin=40 → total=320
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=280, used=40, total=320),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[
+        {
+            "symbol": "BTC/USDT:USDT",
+            "contracts": 0.001,
+            "initialMargin": 40,
+            "unrealizedPnl": 20,
+        }
+    ])
+
+    await pm.initialize_cash_from_exchange(adapter)
+
+    # cash = wallet(300) - margin(40) = 260
     assert pm.cash_balance == pytest.approx(260, abs=1)
 
 
@@ -633,7 +661,8 @@ async def test_futures_total_value_no_double_unrealized_pnl(session):
     session.add(pos)
     await session.flush()
 
-    await pm.sync_exchange_positions(session, adapter, ["ETH/USDT"])
+    # initialize_cash_from_exchange로 cash 설정
+    await pm.initialize_cash_from_exchange(adapter)
 
     # cash = wallet(300) - margin(50) = 250
     assert pm.cash_balance == pytest.approx(250, abs=1)
@@ -645,8 +674,8 @@ async def test_futures_total_value_no_double_unrealized_pnl(session):
 
 
 @pytest.mark.asyncio
-async def test_futures_sync_no_positions_cash_equals_wallet(session):
-    """선물 포지션 없을 때 cash = wallet balance 전체."""
+async def test_futures_sync_no_positions_cash_unchanged(session):
+    """선물 포지션 없을 때 sync는 cash를 변경하지 않음."""
     from exchange.base import Balance
 
     pm = PortfolioManager(
@@ -656,7 +685,6 @@ async def test_futures_sync_no_positions_cash_equals_wallet(session):
     )
 
     adapter = AsyncMock()
-    # No positions: free=300, used=0, total=300 (wallet=300, unPnl=0)
     adapter.fetch_balance = AsyncMock(return_value={
         "USDT": Balance(currency="USDT", free=300, used=0, total=300),
     })
@@ -665,8 +693,90 @@ async def test_futures_sync_no_positions_cash_equals_wallet(session):
 
     await pm.sync_exchange_positions(session, adapter, [])
 
+    # 선물 sync는 cash를 변경하지 않음 → 초기값 유지
+    assert pm.cash_balance == pytest.approx(300, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_futures_initialize_cash_no_positions(session):
+    """initialize_cash_from_exchange 포지션 없을 때 cash = wallet 전체."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=100,
+        exchange_name="binance_futures",
+    )
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=300, used=0, total=300),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+
+    await pm.initialize_cash_from_exchange(adapter)
+
     # cash = wallet(300) - margin(0) = 300
     assert pm.cash_balance == pytest.approx(300, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_apply_income_funding_fee(session):
+    """apply_income으로 펀딩비가 cash에 반영된다."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="binance_futures",
+    )
+
+    adapter = AsyncMock()
+    adapter.fetch_income = AsyncMock(return_value=[
+        {"income_type": "FUNDING_FEE", "income": -0.5, "asset": "USDT",
+         "time": 1709900000000, "symbol": "BTCUSDT"},
+        {"income_type": "FUNDING_FEE", "income": 0.3, "asset": "USDT",
+         "time": 1709928800000, "symbol": "ETHUSDT"},
+    ])
+
+    result = await pm.apply_income(adapter)
+
+    assert result == pytest.approx(-0.2, abs=0.01)
+    assert pm.cash_balance == pytest.approx(299.8, abs=0.01)
+    # _last_income_time_ms 업데이트 확인
+    assert pm._last_income_time_ms == 1709928800000
+
+
+@pytest.mark.asyncio
+async def test_apply_income_not_futures(session):
+    """현물 엔진에서는 apply_income이 아무것도 하지 않는다."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="bithumb",
+    )
+
+    adapter = AsyncMock()
+    result = await pm.apply_income(adapter)
+
+    assert result == 0.0
+    assert pm.cash_balance == 300
+    adapter.fetch_income.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_initialize_cash_not_futures(session):
+    """현물 엔진에서는 initialize_cash_from_exchange가 아무것도 하지 않는다."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=300,
+        exchange_name="bithumb",
+    )
+
+    adapter = AsyncMock()
+    await pm.initialize_cash_from_exchange(adapter)
+
+    assert pm.cash_balance == 300
+    adapter.fetch_balance.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -297,6 +297,8 @@ async def lifespan(app: FastAPI):
                     await binance_portfolio_mgr.sync_exchange_positions(
                         sess, binance_adapter, config.binance.tracked_coins,
                     )
+                    # 선물: 거래소 실잔고로 cash 1회 초기화 (이후 내부 장부 기반)
+                    await binance_portfolio_mgr.initialize_cash_from_exchange(binance_adapter)
                     await binance_portfolio_mgr.restore_state_from_db(sess)
                     spike_fixed = await PortfolioManager.cleanup_spike_snapshots(sess, "binance_futures")
                     if spike_fixed:

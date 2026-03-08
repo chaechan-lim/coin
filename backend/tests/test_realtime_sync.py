@@ -219,15 +219,12 @@ class TestWebSocketBalanceSync:
     """선물 WebSocket 잔고 동기화 테스트."""
 
     @pytest.mark.asyncio
-    async def test_ws_balance_updates_pm_cash(self, futures_engine, mock_exchange):
-        """WebSocket 잔고 수신 시 PM cash_balance 즉시 갱신."""
+    async def test_ws_balance_audit_only(self, futures_engine, mock_exchange):
+        """WebSocket 잔고 수신 시 cash 갱신 안 함 (감사 로그만)."""
         futures_engine._is_running = True
-        mock_exchange.watch_balance = AsyncMock(return_value={
-            "USDT": {"total": 500.0, "used": 100.0, "free": 400.0},
-        })
+        old_cash = futures_engine._portfolio_manager.cash_balance
 
         call_count = 0
-        original_sleep = asyncio.sleep
 
         async def mock_watch_balance():
             nonlocal call_count
@@ -241,12 +238,12 @@ class TestWebSocketBalanceSync:
 
         await futures_engine._ws_balance_loop()
 
-        # cash = total - used = 500 - 100 = 400
-        assert futures_engine._portfolio_manager.cash_balance == 400.0
+        # WS는 감사 전용 → cash 변경 없음
+        assert futures_engine._portfolio_manager.cash_balance == old_cash
 
     @pytest.mark.asyncio
-    async def test_ws_balance_negative_cash_ignored(self, futures_engine, mock_exchange):
-        """음수 현금은 무시."""
+    async def test_ws_balance_negative_cash_no_update(self, futures_engine, mock_exchange):
+        """음수 현금이든 양수든 WS는 cash를 갱신하지 않는다."""
         futures_engine._is_running = True
         old_cash = futures_engine._portfolio_manager.cash_balance
 
@@ -264,7 +261,7 @@ class TestWebSocketBalanceSync:
 
         await futures_engine._ws_balance_loop()
 
-        # cash = 50 - 100 = -50 → 무시 (조건: cash >= 0)
+        # WS는 감사 전용 → cash 변경 없음
         assert futures_engine._portfolio_manager.cash_balance == old_cash
 
     @pytest.mark.asyncio
@@ -670,6 +667,7 @@ class TestFuturesStartOverride:
              patch.object(futures_engine, '_price_monitor_loop', new_callable=AsyncMock), \
              patch.object(futures_engine, '_balance_monitor_loop', new_callable=AsyncMock), \
              patch.object(futures_engine, '_strategy_eval_loop', new_callable=AsyncMock), \
+             patch.object(futures_engine, '_income_poll_loop', new_callable=AsyncMock), \
              patch("engine.futures_engine.emit_event", new_callable=AsyncMock):
             await futures_engine.start()
             mock_exchange.create_ws_exchange.assert_called_once()
@@ -682,6 +680,7 @@ class TestFuturesStartOverride:
         with patch.object(futures_engine, '_restore_trade_timestamps', new_callable=AsyncMock), \
              patch.object(futures_engine, '_strategy_eval_loop', new_callable=AsyncMock), \
              patch.object(futures_engine, '_fast_stop_check_loop', new_callable=AsyncMock), \
+             patch.object(futures_engine, '_income_poll_loop', new_callable=AsyncMock), \
              patch("engine.futures_engine.emit_event", new_callable=AsyncMock):
             await futures_engine.start()
 

@@ -163,9 +163,15 @@ class BinanceFuturesEngine(TradingEngine):
             self._strategy_eval_loop(), name="futures_strategy_eval"
         )
 
+        # Income API 펀딩비 폴링 (8시간 + 시작 시 즉시)
+        self._income_task = asyncio.create_task(
+            self._income_poll_loop(), name="futures_income_poll"
+        )
+
         # 모든 태스크 대기
         tasks = [t for t in (self._monitor_task, self._eval_task,
-                             self._balance_task, self._fast_sl_task) if t]
+                             self._balance_task, self._fast_sl_task,
+                             self._income_task) if t]
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _strategy_eval_loop(self) -> None:
@@ -237,6 +243,24 @@ class BinanceFuturesEngine(TradingEngine):
             except Exception as e:
                 logger.warning("futures_fast_stop_loop_error", error=str(e))
 
+    _INCOME_POLL_INTERVAL = 8 * 3600  # 8시간마다 펀딩비 폴링
+
+    async def _income_poll_loop(self) -> None:
+        """Income API로 펀딩비를 주기적으로 가져와 내부 장부에 반영."""
+        await asyncio.sleep(30)  # 엔진 초기화 대기
+        try:
+            await self._portfolio_manager.apply_income(self._exchange)
+        except Exception as e:
+            logger.warning("income_initial_fetch_error", error=str(e))
+        while self._is_running:
+            try:
+                await asyncio.sleep(self._INCOME_POLL_INTERVAL)
+                await self._portfolio_manager.apply_income(self._exchange)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("income_poll_error", error=str(e))
+
     async def _balance_monitor_loop(self) -> None:
         """WebSocket으로 선물 잔고+포지션 실시간 수신."""
         await asyncio.gather(
@@ -246,33 +270,27 @@ class BinanceFuturesEngine(TradingEngine):
         )
 
     async def _ws_balance_loop(self) -> None:
-        """잔고 실시간 수신 → PM cash_balance 즉시 갱신."""
+        """잔고 실시간 감사 — 내부 장부 vs 거래소 잔고 차이 모니터링 (cash 갱신 안 함)."""
         while self._is_running:
             try:
                 balance = await self._exchange.watch_balance()
                 usdt = balance.get("USDT", {})
                 wallet_total = float(usdt.get("total", 0) or 0)
                 margin_used = float(usdt.get("used", 0) or 0)
-                cash = wallet_total - margin_used
-                if cash >= 0:
-                    old = self._portfolio_manager.cash_balance
-                    # 바이낸스 4시간 정각 margin=0 스파이크 방어
-                    # cash가 300% 이상 급증하면 무시 (정상 거래는 이 범위 초과 불가)
-                    if old > 1 and cash > old * 4:
-                        logger.warning("ws_balance_spike_ignored",
-                                       old=round(old, 2), new=round(cash, 2),
-                                       margin=round(margin_used, 2))
-                        continue
-                    self._portfolio_manager.cash_balance = cash
-                    if abs(old - cash) > 0.5:
-                        logger.debug("ws_balance_updated",
-                                     old=round(old, 2), new=round(cash, 2),
-                                     wallet=round(wallet_total, 2),
-                                     margin=round(margin_used, 2))
+                exchange_cash = wallet_total - margin_used
+                internal_cash = self._portfolio_manager.cash_balance
+
+                if exchange_cash > 0:
+                    diff = abs(exchange_cash - internal_cash)
+                    if diff > 5.0 or (internal_cash > 0 and diff / internal_cash > 0.02):
+                        logger.warning("ws_balance_discrepancy",
+                                       internal=round(internal_cash, 2),
+                                       exchange=round(exchange_cash, 2),
+                                       diff=round(diff, 2))
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning("ws_balance_error", error=str(e))
+                logger.warning("ws_balance_audit_error", error=str(e))
                 await asyncio.sleep(5)
 
     async def _ws_position_loop(self) -> None:
@@ -436,7 +454,9 @@ class BinanceFuturesEngine(TradingEngine):
         """Graceful stop — 모니터/평가 태스크 종료 + WebSocket 정리."""
         # 모니터/평가 태스크 취소
         for task in (self._monitor_task, self._eval_task,
-                     getattr(self, '_fast_sl_task', None)):
+                     getattr(self, '_fast_sl_task', None),
+                     getattr(self, '_balance_task', None),
+                     getattr(self, '_income_task', None)):
             if task and not task.done():
                 task.cancel()
                 try:
@@ -446,6 +466,8 @@ class BinanceFuturesEngine(TradingEngine):
         self._monitor_task = None
         self._eval_task = None
         self._fast_sl_task = None
+        self._balance_task = None
+        self._income_task = None
 
         # WebSocket 정리
         try:

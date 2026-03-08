@@ -32,6 +32,7 @@ class PortfolioManager:
         self._sync_lock = asyncio.Lock()  # eval 중 sync 차단
         self._last_total_value: float | None = None  # 스파이크 감지용
         self._snapshot_skip_count = 0  # 연속 스킵 → 실제 변화 강제 기록
+        self._last_income_time_ms: int = 0  # Income API 페이지네이션 마커
 
     @property
     def cash_balance(self) -> float:
@@ -321,19 +322,22 @@ class PortfolioManager:
             is_spike = False
 
             # 1) Cash spike check (직전 1개)
-            prev_cash = prev_rows[0][1]
-            if prev_cash is not None and prev_cash > 0:
-                cash_change_pct = abs(new_cash - prev_cash) / prev_cash * 100
-                if cash_change_pct > 20:
-                    is_spike = True
-                    logger.warning(
-                        "snapshot_skipped_cash_spike",
-                        exchange=self._exchange_name,
-                        prev_cash=round(prev_cash, 2),
-                        new_cash=round(new_cash, 2),
-                        cash_change_pct=round(cash_change_pct, 1),
-                        skip_count=self._snapshot_skip_count + 1,
-                    )
+            #    선물: 내부 장부 기반이므로 cash는 매매로만 변동 → 스킵
+            #    현물: 거래소 sync 기반이므로 여전히 필요
+            if "futures" not in self._exchange_name:
+                prev_cash = prev_rows[0][1]
+                if prev_cash is not None and prev_cash > 0:
+                    cash_change_pct = abs(new_cash - prev_cash) / prev_cash * 100
+                    if cash_change_pct > 20:
+                        is_spike = True
+                        logger.warning(
+                            "snapshot_skipped_cash_spike",
+                            exchange=self._exchange_name,
+                            prev_cash=round(prev_cash, 2),
+                            new_cash=round(new_cash, 2),
+                            cash_change_pct=round(cash_change_pct, 1),
+                            skip_count=self._snapshot_skip_count + 1,
+                        )
 
             # 2) Total value spike check (중앙값 기준 10% 이상 변동)
             #    시장 변동: cash 불변 + invested/total 변동 → 허용
@@ -519,6 +523,79 @@ class PortfolioManager:
                 new=round(self._cash_balance, 2),
                 diff=round(old_cash - self._cash_balance, 2),
             )
+
+    async def apply_income(self, exchange_adapter) -> float:
+        """Income API에서 펀딩비를 가져와 _cash_balance에 반영 (선물 전용).
+
+        COMMISSION은 _parse_order에서 이미 추정 차감되므로 FUNDING_FEE만 반영.
+        """
+        if "futures" not in self._exchange_name:
+            return 0.0
+
+        try:
+            from datetime import timedelta
+            start_time = self._last_income_time_ms
+            if start_time == 0:
+                start_time = int(
+                    (datetime.now(timezone.utc) - timedelta(hours=8)).timestamp() * 1000
+                )
+
+            records = await exchange_adapter.fetch_income(
+                income_type="FUNDING_FEE",
+                start_time=start_time + 1,
+                limit=1000,
+            )
+            if not records:
+                return 0.0
+
+            total_applied = 0.0
+            for rec in records:
+                amount = rec["income"]
+                rec_time = rec["time"]
+                total_applied += amount
+                if rec_time > self._last_income_time_ms:
+                    self._last_income_time_ms = rec_time
+
+            if abs(total_applied) > 0.001:
+                self._cash_balance += total_applied
+                logger.info(
+                    "income_applied",
+                    exchange=self._exchange_name,
+                    total=round(total_applied, 4),
+                    records=len(records),
+                    cash_after=round(self._cash_balance, 2),
+                )
+            return total_applied
+        except Exception as e:
+            logger.warning("income_fetch_failed", exchange=self._exchange_name, error=str(e))
+            return 0.0
+
+    async def initialize_cash_from_exchange(self, exchange_adapter) -> None:
+        """서버 시작 시 거래소 실잔고에서 cash 초기화 (선물, 1회성)."""
+        if "futures" not in self._exchange_name:
+            return
+        try:
+            balances = await exchange_adapter.fetch_balance()
+            cash_bal = balances.get("USDT")
+            if not cash_bal:
+                return
+            raw_positions = await exchange_adapter._exchange.fetch_positions()
+            total_margin = 0.0
+            total_unrealized = 0.0
+            for fp in raw_positions:
+                if float(fp.get("contracts", 0) or 0) > 0:
+                    total_margin += float(fp.get("initialMargin", 0) or 0)
+                    total_unrealized += float(fp.get("unrealizedPnl", 0) or 0)
+            wallet = cash_bal.total - total_unrealized
+            self._cash_balance = wallet - total_margin
+            logger.info(
+                "futures_cash_initialized",
+                cash=round(self._cash_balance, 2),
+                wallet=round(wallet, 2),
+                margin=round(total_margin, 2),
+            )
+        except Exception as e:
+            logger.warning("futures_cash_init_failed", error=str(e))
 
     async def sync_exchange_positions(
         self, session: AsyncSession, exchange_adapter, tracked_coins: list[str]
@@ -815,21 +892,28 @@ class PortfolioManager:
 
         await session.flush()
 
-        # 실제 현금 기준으로 cash_balance 재설정 (initial_balance는 고정 원금 유지)
+        # 현금 잔고 처리
         old_cash = self._cash_balance
 
         if is_futures:
-            # 바이낸스 선물: USDT.free = walletBalance + unrealizedPnL - initialMargin
-            # get_portfolio_summary에서 position value = margin + unrealizedPnL을 더하므로
-            # cash_balance에 unrealizedPnL이 포함되면 이중 계산됨
-            # 수정: cash = walletBalance - totalMargin (unrealizedPnL 제외)
+            # 선물: 내부 장부 + Income API가 권위적 → cash 덮어쓰기 안 함
+            # 감사 로그만 출력 (불일치 모니터링)
             total_unrealized_exchange = sum(
                 float(fp.get("unrealizedPnl", 0) or 0)
                 for fp in futures_positions.values()
             )
             cash_total = cash_bal.total if cash_bal else 0
             wallet_balance = cash_total - total_unrealized_exchange
-            self._cash_balance = wallet_balance - total_invested
+            exchange_cash = wallet_balance - total_invested
+            diff = abs(exchange_cash - self._cash_balance)
+            if diff > 1.0:
+                logger.info(
+                    "futures_cash_audit",
+                    exchange=self._exchange_name,
+                    internal_cash=round(self._cash_balance, 2),
+                    exchange_cash=round(exchange_cash, 2),
+                    diff=round(diff, 2),
+                )
         else:
             self._cash_balance = actual_cash
 
