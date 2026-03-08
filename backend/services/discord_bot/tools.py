@@ -231,9 +231,57 @@ TOOL_DEFINITIONS = [
             "properties": {},
         },
     },
+    {
+        "name": "get_health_status",
+        "description": "시스템 헬스체크 결과 조회 (현금 일관성, 포지션 정합성, API 상태, 에러율). exchange 미지정 시 전체.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "exchange": {
+                    "type": "string",
+                    "enum": ["bithumb", "binance_futures", "binance_spot"],
+                },
+            },
+        },
+    },
+    {
+        "name": "get_funding_rates",
+        "description": "바이낸스 선물 현재 펀딩비율 조회. 보유 포지션 코인 대상.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "get_system_stats",
+        "description": "시스템 리소스 현황 (메모리, CPU, 업타임, DB 크기, 엔진 상태 요약).",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "close_position",
+        "description": "특정 코인 포지션 즉시 청산 (시장가 매도). 위험한 작업이므로 사용자 확인 후 실행.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "exchange": {
+                    "type": "string",
+                    "enum": ["bithumb", "binance_futures", "binance_spot"],
+                    "description": "거래소",
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "코인 심볼 (예: BTC/USDT)",
+                },
+            },
+            "required": ["exchange", "symbol"],
+        },
+    },
 ]
 
-WRITE_TOOLS = {"start_engine", "stop_engine", "trigger_analysis", "save_memory", "delete_memory"}
+WRITE_TOOLS = {"start_engine", "stop_engine", "trigger_analysis", "save_memory", "delete_memory", "close_position"}
 
 
 # ── Bot Memory ─────────────────────────────────────────────────
@@ -600,6 +648,157 @@ async def _handle_list_memories(ctx: ToolContext, input_data: dict) -> dict:
     }
 
 
+async def _handle_health_status(ctx: ToolContext, input_data: dict) -> dict:
+    exchanges = _get_exchanges(ctx, input_data.get("exchange"))
+    if not exchanges:
+        return {"error": "등록된 거래소가 없습니다."}
+
+    result = {}
+    for ex in exchanges:
+        eng = ctx.engine_registry.get_engine(ex)
+        if not eng:
+            continue
+        health_monitor = getattr(eng, '_health_monitor', None)
+        if not health_monitor:
+            result[ex] = {"status": "no_health_monitor"}
+            continue
+        try:
+            checks = await health_monitor.run_checks()
+            result[ex] = {
+                "total_checks": len(checks),
+                "healthy": sum(1 for c in checks if c.healthy),
+                "unhealthy": sum(1 for c in checks if not c.healthy),
+                "details": [
+                    {"name": c.name, "healthy": c.healthy, "detail": c.detail, "auto_fixed": c.auto_fixed}
+                    for c in checks
+                ],
+            }
+        except Exception as e:
+            result[ex] = {"error": str(e)}
+    return result
+
+
+async def _handle_funding_rates(ctx: ToolContext, input_data: dict) -> dict:
+    eng = ctx.engine_registry.get_engine("binance_futures")
+    if not eng:
+        return {"error": "선물 엔진이 등록되지 않았습니다."}
+
+    adapter = eng._exchange
+    results = {}
+    # 보유 포지션 코인의 펀딩비 조회
+    async with ctx.session_factory() as session:
+        pos_result = await session.execute(
+            select(Position).where(
+                Position.exchange == "binance_futures",
+                Position.quantity > 0,
+            )
+        )
+        positions = pos_result.scalars().all()
+
+    symbols = [p.symbol for p in positions] or eng.tracked_coins[:5]
+    for symbol in symbols:
+        try:
+            rate = await adapter.fetch_funding_rate(symbol)
+            results[symbol] = {
+                "funding_rate": round(rate * 100, 4),
+                "annualized": round(rate * 3 * 365 * 100, 2),
+            }
+        except Exception as e:
+            results[symbol] = {"error": str(e)}
+    return results
+
+
+async def _handle_system_stats(ctx: ToolContext, input_data: dict) -> dict:
+    import os
+    import psutil
+
+    process = psutil.Process(os.getpid())
+    mem = process.memory_info()
+
+    # DB 크기
+    db_size = "unknown"
+    try:
+        async with ctx.session_factory() as session:
+            result = await session.execute(
+                select(func.count()).select_from(Order)
+            )
+            order_count = result.scalar() or 0
+            result2 = await session.execute(
+                select(func.count()).select_from(Position)
+            )
+            pos_count = result2.scalar() or 0
+    except Exception:
+        order_count = 0
+        pos_count = 0
+
+    # 엔진 상태 요약
+    engines = {}
+    for ex in ctx.engine_registry.available_exchanges:
+        eng = ctx.engine_registry.get_engine(ex)
+        if eng:
+            engines[ex] = {
+                "running": eng.is_running,
+                "mode": eng._ec.mode if hasattr(eng, '_ec') else "unknown",
+                "positions": len(getattr(eng, '_position_trackers', {})),
+            }
+
+    return {
+        "memory_rss_mb": round(mem.rss / 1024 / 1024, 1),
+        "memory_vms_mb": round(mem.vms / 1024 / 1024, 1),
+        "cpu_percent": process.cpu_percent(),
+        "uptime_hours": round((datetime.now(timezone.utc).timestamp() - process.create_time()) / 3600, 1),
+        "db_orders": order_count,
+        "db_positions": pos_count,
+        "engines": engines,
+    }
+
+
+async def _handle_close_position(ctx: ToolContext, input_data: dict) -> dict:
+    exchange = input_data["exchange"]
+    symbol = input_data["symbol"]
+
+    eng = ctx.engine_registry.get_engine(exchange)
+    if not eng:
+        return {"error": f"거래소 '{exchange}'가 등록되지 않았습니다."}
+    if not eng.is_running:
+        return {"error": f"'{exchange}' 엔진이 실행 중이 아닙니다."}
+
+    # DB에서 포지션 확인
+    async with ctx.session_factory() as session:
+        result = await session.execute(
+            select(Position).where(
+                Position.symbol == symbol,
+                Position.exchange == exchange,
+                Position.quantity > 0,
+            )
+        )
+        position = result.scalar_one_or_none()
+        if not position:
+            return {"error": f"'{symbol}' 포지션이 없습니다."}
+
+        qty = position.quantity
+        direction = position.direction or "long"
+
+    # 시장가 청산
+    try:
+        adapter = eng._exchange
+        if direction == "short":
+            order = await adapter.create_market_buy(symbol, qty)
+        else:
+            order = await adapter.create_market_sell(symbol, qty)
+        logger.info("bot_close_position", exchange=exchange, symbol=symbol,
+                     direction=direction, qty=qty)
+        return {
+            "status": "closed",
+            "symbol": symbol,
+            "direction": direction,
+            "quantity": qty,
+            "order_id": order.order_id,
+        }
+    except Exception as e:
+        return {"error": f"청산 실패: {str(e)}"}
+
+
 # ── Handler Dispatch Map ───────────────────────────────────────
 
 _HANDLERS = {
@@ -617,4 +816,8 @@ _HANDLERS = {
     "save_memory": _handle_save_memory,
     "delete_memory": _handle_delete_memory,
     "list_memories": _handle_list_memories,
+    "get_health_status": _handle_health_status,
+    "get_funding_rates": _handle_funding_rates,
+    "get_system_stats": _handle_system_stats,
+    "close_position": _handle_close_position,
 }

@@ -13,6 +13,7 @@ logger = structlog.get_logger(__name__)
 
 _broadcast_fn: Callable[..., Coroutine] | None = None
 _notification_fn: Callable[..., Coroutine] | None = None
+_bot_alert_fn: Callable[..., Coroutine] | None = None
 
 
 def set_broadcast(callback: Callable[..., Coroutine]) -> None:
@@ -25,6 +26,12 @@ def set_notification(callback: Callable[..., Coroutine]) -> None:
     """Discord/Telegram 등 알림 콜백 등록 (main.py lifespan에서 1회 호출)."""
     global _notification_fn
     _notification_fn = callback
+
+
+def set_bot_alert(callback: Callable[..., Coroutine]) -> None:
+    """Discord 봇 선제 알림 콜백 등록."""
+    global _bot_alert_fn
+    _bot_alert_fn = callback
 
 
 async def emit_event(
@@ -77,6 +84,15 @@ async def emit_event(
                         )
                     except (TypeError, RuntimeError) as e:
                         logger.debug("notification_dispatch_error", error=str(e))
+
+                # Discord 봇 선제 알림 — fire-and-forget
+                if _bot_alert_fn:
+                    try:
+                        asyncio.create_task(
+                            _bot_alert_fn(level, category, title, detail or "")
+                        )
+                    except (TypeError, RuntimeError):
+                        pass
                 return
         except Exception as e:
             if attempt < 2 and "database is locked" in str(e):

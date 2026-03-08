@@ -7,6 +7,7 @@ load_dotenv()
 import asyncio
 import gc
 import sys
+from datetime import datetime, timezone
 import structlog
 from contextlib import asynccontextmanager
 
@@ -785,6 +786,9 @@ async def lifespan(app: FastAPI):
                 session_factory=session_factory,
             )
             _discord_bot_task = asyncio.create_task(_discord_bot_instance.start())
+            # 선제 알림: 이벤트 버스에 봇 알림 콜백 추가
+            from core.event_bus import set_bot_alert
+            set_bot_alert(_discord_bot_instance.send_alert)
             logger.info("discord_bot_started")
         except Exception as e:
             logger.warning("discord_bot_init_failed", error=str(e))
@@ -918,17 +922,45 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health():
+        import os
+        import psutil
+        process = psutil.Process(os.getpid())
+        mem = process.memory_info()
+
         engines = {}
         for name in engine_registry.available_exchanges:
             eng = engine_registry.get_engine(name)
+            if not eng:
+                engines[name] = {"running": False}
+                continue
+            ws_status = "n/a"
+            if hasattr(eng, '_monitor_task') and eng._monitor_task:
+                ws_status = "fallback" if (getattr(eng, '_fast_sl_task', None)
+                                           and not eng._fast_sl_task.done()) else "connected"
             engines[name] = {
-                "running": eng.is_running if eng else False,
-                "mode": eng._ec.mode if eng and hasattr(eng, '_ec') else "unknown",
+                "running": eng.is_running,
+                "mode": eng._ec.mode if hasattr(eng, '_ec') else "unknown",
+                "tracked_coins": len(eng.tracked_coins) if hasattr(eng, 'tracked_coins') else 0,
+                "positions": len(getattr(eng, '_position_trackers', {})),
+                "ws_status": ws_status,
             }
+
+        db_ok = True
+        try:
+            sf = get_session_factory()
+            async with sf() as session:
+                await session.execute(select(1))
+        except Exception:
+            db_ok = False
+
         return {
-            "status": "ok",
+            "status": "ok" if db_ok else "degraded",
             "engines": engines,
             "exchanges": engine_registry.available_exchanges,
+            "memory_rss_mb": round(mem.rss / 1024 / 1024, 1),
+            "uptime_hours": round((datetime.now(timezone.utc).timestamp() - process.create_time()) / 3600, 1),
+            "db_connected": db_ok,
+            "scheduler_running": scheduler.running if scheduler else False,
         }
 
     return app

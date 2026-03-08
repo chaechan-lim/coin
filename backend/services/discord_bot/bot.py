@@ -92,6 +92,9 @@ class TradingBot:
         # 채널별 대화 히스토리: channel_id → deque of (timestamp, messages)
         self._conversations: dict[int, deque] = {}
 
+        # 선제 알림 설정
+        self._alert_channel_id = bot_cfg.channel_id  # 알림 전송 채널
+
         # Discord client
         intents = discord.Intents.default()
         intents.message_content = True
@@ -298,6 +301,43 @@ class TradingBot:
             chunks.append(text[:split_at])
             text = text[split_at:].lstrip("\n")
         return chunks
+
+    # ── 선제 알림 ──────────────────────────────────────────────
+
+    # 알림 대상 이벤트: (level, category) 쌍
+    _ALERT_EVENTS = {
+        ("warning", "health"),
+        ("critical", "health"),
+        ("warning", "engine"),
+        ("critical", "engine"),
+        ("error", "engine"),
+        ("warning", "risk"),
+        ("info", "recovery"),
+    }
+
+    async def send_alert(self, level: str, category: str, title: str,
+                         detail: str = "", **kwargs) -> None:
+        """이벤트 버스에서 호출 — 중요 이벤트를 채널에 선제 알림."""
+        if not self._alert_channel_id:
+            return
+        if (level, category) not in self._ALERT_EVENTS:
+            return
+        if self._client.is_closed() or not self._client.is_ready():
+            return
+
+        icons = {"critical": "🚨", "error": "❌", "warning": "⚠️", "info": "ℹ️"}
+        icon = icons.get(level, "📢")
+
+        msg = f"{icon} **[{category.upper()}]** {title}"
+        if detail:
+            msg += f"\n```\n{detail[:500]}\n```"
+
+        try:
+            channel = self._client.get_channel(self._alert_channel_id)
+            if channel:
+                await channel.send(msg[:MAX_MESSAGE])
+        except Exception as e:
+            logger.debug("bot_alert_send_error", error=str(e))
 
     async def start(self):
         """봇 시작 (이벤트 루프에서 실행)."""

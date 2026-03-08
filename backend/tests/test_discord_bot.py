@@ -390,3 +390,41 @@ def test_context_expiry(bot):
 
     ctx = bot._get_context(100)
     assert len(ctx) == 0  # 만료됨
+
+
+# ── Proactive alerts tests ───────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_send_alert_warning_health(bot):
+    """헬스 경고 이벤트가 채널에 전송됨."""
+    bot._alert_channel_id = 12345
+    bot._client.is_closed = MagicMock(return_value=False)
+    bot._client.is_ready = MagicMock(return_value=True)
+    mock_channel = AsyncMock()
+    bot._client.get_channel = MagicMock(return_value=mock_channel)
+
+    await bot.send_alert("warning", "health", "Cash 불일치", "내부 vs 거래소 차이")
+    mock_channel.send.assert_awaited_once()
+    sent = mock_channel.send.call_args[0][0]
+    assert "HEALTH" in sent
+    assert "Cash 불일치" in sent
+
+
+@pytest.mark.asyncio
+async def test_send_alert_ignored_for_non_target_events(bot):
+    """대상이 아닌 이벤트는 무시됨."""
+    bot._alert_channel_id = 12345
+    bot._client.is_closed = MagicMock(return_value=False)
+    bot._client.is_ready = MagicMock(return_value=True)
+    mock_channel = AsyncMock()
+    bot._client.get_channel = MagicMock(return_value=mock_channel)
+
+    await bot.send_alert("info", "trade", "BTC 매수 완료")
+    mock_channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_alert_no_channel(bot):
+    """채널 미설정 시 무시."""
+    bot._alert_channel_id = 0
+    await bot.send_alert("warning", "health", "테스트")  # 에러 없이 종료

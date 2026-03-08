@@ -339,3 +339,67 @@ async def test_delete_memory_invalid_index(ctx, tmp_path):
         assert "error" in result
     finally:
         tools.MEMORY_FILE = original
+
+
+# ── New tools tests ──────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_system_stats(ctx):
+    """시스템 통계 도구 실행."""
+    result = await execute_tool(ctx, "get_system_stats", {})
+    assert "memory_rss_mb" in result
+    assert "uptime_hours" in result
+    assert "engines" in result
+    assert "bithumb" in result["engines"]
+
+
+@pytest.mark.asyncio
+async def test_health_status_no_monitor(ctx):
+    """헬스 모니터 없는 엔진은 no_health_monitor 반환."""
+    eng = ctx.engine_registry.get_engine("bithumb")
+    eng._health_monitor = None  # 명시적으로 None 설정
+    result = await execute_tool(ctx, "get_health_status", {"exchange": "bithumb"})
+    assert result["bithumb"]["status"] == "no_health_monitor"
+
+
+@pytest.mark.asyncio
+async def test_funding_rates_no_futures(ctx):
+    """선물 엔진 미등록 시 에러."""
+    ctx.engine_registry.available_exchanges = ["bithumb"]
+    ctx.engine_registry.get_engine = lambda name: None if name == "binance_futures" else MagicMock()
+    result = await execute_tool(ctx, "get_funding_rates", {})
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_close_position_no_position(ctx, session_factory):
+    """포지션 없으면 에러."""
+    result = await execute_tool(ctx, "close_position", {
+        "exchange": "bithumb",
+        "symbol": "BTC/KRW",
+    })
+    assert "error" in result
+    assert "없습니다" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_close_position_engine_not_running(ctx):
+    """엔진 정지 상태면 에러."""
+    eng = ctx.engine_registry.get_engine("bithumb")
+    eng.is_running = False
+    result = await execute_tool(ctx, "close_position", {
+        "exchange": "bithumb",
+        "symbol": "BTC/KRW",
+    })
+    assert "error" in result
+    eng.is_running = True  # 원복
+
+
+def test_tool_definitions_count():
+    """도구 정의 수 확인 (18개)."""
+    assert len(TOOL_DEFINITIONS) == 18
+
+
+def test_write_tools_include_close_position():
+    """close_position은 write 도구."""
+    assert "close_position" in WRITE_TOOLS
