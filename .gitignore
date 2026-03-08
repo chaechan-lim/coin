@@ -46,3 +46,4 @@ build/
 
 # Claude Code (session-specific)
 .claude/
+backend/nohup.out
