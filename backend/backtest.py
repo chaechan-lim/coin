@@ -4574,6 +4574,20 @@ async def main():
         if fut_cooldown == 12:  # CLI 기본값 = 현물용
             fut_cooldown = 6
 
+        # 선물 기본값 보정: CLI 기본값(현물용)이면 라이브 선물 설정으로 교체
+        if args.stop_loss == 5.0:
+            args.stop_loss = 8.0
+        if args.take_profit == 10.0:
+            args.take_profit = 16.0
+        if args.trailing_activation == 3.0:
+            args.trailing_activation = 5.0
+        if args.trailing_stop == 3.0:
+            args.trailing_stop = 3.5
+        if args.position_pct == 0.30:
+            args.position_pct = 0.35
+        if args.min_confidence == 0.50:
+            args.min_confidence = 0.55
+
         # ── 선물 + 포트폴리오 결합 모드 ──────────────────────
         if args.portfolio:
             portfolio_coins = args.portfolio_coins
