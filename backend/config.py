@@ -23,9 +23,9 @@ class TradingConfig(BaseSettings):
         "SOL/KRW",
         "ADA/KRW",
     ]
-    min_trade_interval_sec: int = 3600  # 1 hour per coin
-    cooldown_after_sell_sec: int = 14400  # 매도 후 재매수 대기 (4시간, 당일 왕복 방지)
-    cooldown_after_buy_sec: int = 1800  # 30 min
+    min_trade_interval_sec: int = 518400  # 6일 (cd36, 백테스트 최적)
+    cooldown_after_sell_sec: int = 518400  # 6일 (cd36)
+    cooldown_after_buy_sec: int = 518400  # 6일 (cd36)
     daily_buy_limit: int = 20          # 일일 매수 상한 (매도는 무제한)
     max_daily_coin_buys: int = 3       # 코인당 일일 매수 상한 (왕복 3회)
     daily_trade_limit: int = 10        # (레거시, 미사용) 하위 호환용
@@ -126,8 +126,8 @@ class BinanceSpotTradingConfig(BaseSettings):
     max_trade_size_pct: float = 0.30
     daily_buy_limit: int = 20
     max_daily_coin_buys: int = 3
-    cooldown_after_sell_sec: int = 14400
-    cooldown_after_buy_sec: int = 1800
+    cooldown_after_sell_sec: int = 518400  # 6일 (cd36)
+    cooldown_after_buy_sec: int = 518400  # 6일 (cd36)
     rotation_enabled: bool = True
 
     model_config = {"env_prefix": "BINANCE_SPOT_TRADING_"}
