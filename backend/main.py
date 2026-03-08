@@ -40,6 +40,9 @@ from agents.coordinator import AgentCoordinator
 from agents.trade_review import TradeReviewAgent
 from agents.performance_analytics import PerformanceAnalyticsAgent
 from agents.strategy_advisor import StrategyAdvisorAgent
+from engine.recovery import RecoveryManager
+from engine.health_monitor import HealthMonitor
+from agents.diagnostic_agent import DiagnosticAgent
 
 from api.router import create_api_router, get_ws_router
 from api.websocket import ws_manager
@@ -206,10 +209,6 @@ async def lifespan(app: FastAPI):
         trading_engine.set_broadcast_callback(ws_manager.broadcast)
 
         # Self-healing: RecoveryManager + DiagnosticAgent 주입 (빗썸)
-        from engine.recovery import RecoveryManager
-        from engine.health_monitor import HealthMonitor
-        from agents.diagnostic_agent import DiagnosticAgent
-
         bithumb_recovery = RecoveryManager(
             engine=trading_engine,
             portfolio_manager=portfolio_mgr,
