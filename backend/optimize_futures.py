@@ -81,7 +81,8 @@ def suggest_params(trial: optuna.Trial) -> dict:
         "trailing_activation":  trial.suggest_float("trailing_activation",  3.0, 10.0, step=0.5),
         "trailing_stop":        trial.suggest_float("trailing_stop",        2.0, 7.0, step=0.5),
         "position_pct":         trial.suggest_float("position_pct",         0.20, 0.45, step=0.05),
-        "trade_cooldown":       trial.suggest_int("trade_cooldown",         4, 18, step=2),
+        "trade_cooldown":       trial.suggest_int("trade_cooldown",         24, 48, step=6),
+        "short_all":            trial.suggest_categorical("short_all", [True, False]),
     }
 
 
@@ -105,6 +106,7 @@ async def run_backtest_with_params(
         trade_cooldown=params["trade_cooldown"],
         leverage=LEVERAGE,
         position_pct=params["position_pct"],
+        short_all=params.get("short_all", False),
     )
     # 가중치 오버라이드
     bt._combiner = SignalCombiner(
@@ -244,7 +246,7 @@ def print_best(study: optuna.Study):
     print(f"\n  파라미터:")
     for key in ["min_confidence", "stop_loss_pct", "take_profit_pct",
                  "trailing_activation", "trailing_stop", "position_pct",
-                 "trade_cooldown"]:
+                 "trade_cooldown", "short_all"]:
         if key in best.params:
             print(f"    {key:25s}: {best.params[key]}")
 
@@ -271,7 +273,9 @@ def print_best(study: optuna.Study):
             f"{k[:3]}={v:.2f}" for k, v in sorted(w.items(), key=lambda x: -x[1])
         )
         liq = t.user_attrs.get("total_liquidations", t.user_attrs.get("liquidations", "?"))
-        print(f"    #{t.number:3d}  score={t.value:+7.2f}  liq={liq}  {w_str}")
+        cd = t.params.get("trade_cooldown", "?")
+        sa = t.params.get("short_all", "?")
+        print(f"    #{t.number:3d}  score={t.value:+7.2f}  liq={liq}  cd={cd}  short_all={sa}  {w_str}")
 
     # 적용 코드
     print(f"\n  적용 코드 (combiner.py DEFAULT_WEIGHTS):")
@@ -282,7 +286,8 @@ def print_best(study: optuna.Study):
     print()
     print(f"  적용 코드 (config.py / engine):")
     for key in ["stop_loss_pct", "take_profit_pct", "trailing_activation",
-                 "trailing_stop", "position_pct", "min_confidence"]:
+                 "trailing_stop", "position_pct", "min_confidence",
+                 "trade_cooldown", "short_all"]:
         if key in best.params:
             print(f"    {key}: {best.params[key]}")
     print(f"{'='*60}")
