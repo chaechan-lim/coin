@@ -29,7 +29,10 @@
 - P1 최적화, 현물 4h 전환, 현물 4전략 전환, 비대칭 전략
 - 자기 치유 엔진 (ErrorClassifier → RecoveryManager → DiagnosticAgent)
 - EngineConfig 거래소 추상화, Order PnL 기록
-- 519+ 유닛 테스트
+- 숏 가중치 최적화: ADAPTIVE_PROFILES downtrend/crash에서 MA+MACD 가중치 상향
+- 백테스트 개선: 동적 포트폴리오, 롱/숏 PnL 분리, 선물 4h 자동보정
+- 선물 cash 스파이크 근본 수정 (notional→margin+PnL 정산)
+- 548 유닛 테스트
 
 ---
 
@@ -67,3 +70,4 @@
 | v0.29 | 2026-03-05 | 자기 치유 엔진 (에러 분류 → 자동 복구 → LLM 진단) |
 | v0.30 | 2026-03-05 | 크리티컬 버그 수정 (현물 SL 무력화, 시장감지 하드코딩) |
 | v0.31 | 2026-03-06 | EngineConfig 거래소 추상화, Order PnL 기록 |
+| v0.32 | 2026-03-08 | 숏 가중치 최적화 (ADAPTIVE_PROFILES), 동적 포트폴리오 백테스트, 롱/숏 PnL 표시 |
