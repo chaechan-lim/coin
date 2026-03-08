@@ -871,7 +871,7 @@ def create_app() -> FastAPI:
     async def health():
         engines = {}
         for name in engine_registry.available_exchanges:
-            eng = engine_registry.get(name)
+            eng = engine_registry.get_engine(name)
             engines[name] = {
                 "running": eng.is_running if eng else False,
                 "mode": eng._ec.mode if eng and hasattr(eng, '_ec') else "unknown",
