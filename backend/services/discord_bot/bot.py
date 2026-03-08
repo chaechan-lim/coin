@@ -126,11 +126,32 @@ class TradingBot:
             await self._send_response(message, response_text)
         except Exception as e:
             logger.error("discord_bot_message_error", error=str(e), exc_info=True)
-            await message.reply(f"오류가 발생했습니다: {str(e)[:200]}")
+            try:
+                await message.reply(f"오류가 발생했습니다: {str(e)[:200]}")
+            except Exception:
+                pass  # 에러 응답도 실패하면 무시
+
+    @staticmethod
+    def _serialize_content(content) -> list[dict]:
+        """Anthropic 응답 content 블록을 dict 리스트로 변환."""
+        result = []
+        for block in content:
+            if block.type == "text":
+                result.append({"type": "text", "text": block.text})
+            elif block.type == "tool_use":
+                result.append({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
+        return result
 
     async def _process_message(self, text: str, user_id: int) -> str:
         """사용자 메시지 → Claude API → tool_use 루프 → 최종 텍스트."""
         messages = [{"role": "user", "content": text}]
+
+        logger.info("discord_bot_processing", text=text[:100], user_id=user_id)
 
         response = await self._anthropic.messages.create(
             model=self._model,
@@ -149,6 +170,8 @@ class TradingBot:
 
             for block in response.content:
                 if block.type == "tool_use":
+                    logger.debug("discord_bot_tool_call", tool=block.name, input=block.input)
+
                     # write 도구 권한 체크
                     if block.name in WRITE_TOOLS:
                         if self._allowed_users and user_id not in self._allowed_users:
@@ -169,7 +192,8 @@ class TradingBot:
                         "content": json.dumps(result, ensure_ascii=False, default=str),
                     })
 
-            messages.append({"role": "assistant", "content": response.content})
+            # content를 직렬화 가능한 dict로 변환
+            messages.append({"role": "assistant", "content": self._serialize_content(response.content)})
             messages.append({"role": "user", "content": tool_results})
 
             response = await self._anthropic.messages.create(
@@ -185,7 +209,10 @@ class TradingBot:
         for block in response.content:
             if hasattr(block, "text"):
                 text_parts.append(block.text)
-        return "\n".join(text_parts) or "응답을 생성할 수 없습니다."
+
+        result = "\n".join(text_parts) or "응답을 생성할 수 없습니다."
+        logger.info("discord_bot_response", length=len(result), iterations=iteration)
+        return result
 
     async def _send_response(self, message: discord.Message, text: str):
         """응답을 Discord embed 또는 일반 메시지로 전송."""
