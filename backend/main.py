@@ -65,6 +65,137 @@ _discord_bot_task: asyncio.Task | None = None
 _discord_bot_instance = None
 
 
+def _create_agent_stack(
+    market_data: MarketDataService,
+    config,
+    exchange_name: str,
+    market_symbol: str = "BTC/KRW",
+) -> AgentCoordinator:
+    """AI 에이전트 5종 + Coordinator 생성."""
+    market_agent = MarketAnalysisAgent(market_data, market_symbol=market_symbol, exchange_name=exchange_name)
+    risk_agent = RiskManagementAgent(config.risk, market_data, exchange_name=exchange_name)
+    trade_review = TradeReviewAgent(review_window_hours=24, exchange_name=exchange_name)
+    perf_agent = PerformanceAnalyticsAgent(exchange_name=exchange_name)
+    strategy_advisor = StrategyAdvisorAgent(exchange_name=exchange_name)
+    combiner = SignalCombiner(
+        min_confidence=_get_min_confidence(config, exchange_name),
+        exchange_name=exchange_name,
+    )
+    coordinator = AgentCoordinator(
+        market_agent, risk_agent, combiner, trade_review,
+        exchange_name=exchange_name,
+        performance_agent=perf_agent,
+        strategy_advisor=strategy_advisor,
+    )
+    return combiner, coordinator
+
+
+def _get_min_confidence(config, exchange_name: str) -> float:
+    if exchange_name == "bithumb":
+        return config.trading.min_combined_confidence
+    elif exchange_name == "binance_futures":
+        return config.binance_trading.min_combined_confidence
+    else:
+        return config.binance_spot_trading.min_combined_confidence
+
+
+async def _sync_live_state(
+    portfolio_mgr: PortfolioManager,
+    adapter,
+    tracked_coins: list[str],
+    exchange_name: str,
+    currency: str,
+    initial_balance: float,
+    *,
+    is_futures: bool = False,
+) -> None:
+    """라이브 모드 초기화: 포지션 동기화 + DB 복원 + 시드 입금."""
+    from core.models import CapitalTransaction, Position as PositionModel
+
+    sf = get_session_factory()
+    async with sf() as sess:
+        await portfolio_mgr.sync_exchange_positions(sess, adapter, tracked_coins)
+
+        if is_futures:
+            await portfolio_mgr.initialize_cash_from_exchange(adapter)
+
+        await portfolio_mgr.restore_state_from_db(sess)
+        spike_fixed = await PortfolioManager.cleanup_spike_snapshots(sess, exchange_name)
+        if spike_fixed:
+            logger.info("spike_cleanup", exchange=exchange_name, fixed=spike_fixed)
+
+        # 시드 입금 자동 생성 (CapitalTransaction 0건이면)
+        cnt_result = await sess.execute(
+            select(func.count()).select_from(CapitalTransaction)
+            .where(CapitalTransaction.exchange == exchange_name)
+        )
+        if cnt_result.scalar() == 0:
+            pos_result = await sess.execute(
+                select(func.coalesce(func.sum(PositionModel.total_invested), 0))
+                .where(PositionModel.exchange == exchange_name, PositionModel.quantity > 0)
+            )
+            actual_invested = float(pos_result.scalar())
+            actual_total = portfolio_mgr.cash_balance + actual_invested
+            seed_amount = actual_total if actual_total > 0 else initial_balance
+            rounding = 0 if currency == "KRW" else 2
+
+            seed = CapitalTransaction(
+                exchange=exchange_name,
+                tx_type="deposit",
+                amount=round(seed_amount, rounding),
+                currency=currency,
+                note="초기 원금 (자동 생성, 실제 자산 기준)",
+                source="seed",
+                confirmed=True,
+            )
+            sess.add(seed)
+            await sess.flush()
+            logger.info("seed_deposit_created",
+                        exchange=exchange_name,
+                        amount=round(seed_amount, rounding),
+                        cash=round(portfolio_mgr.cash_balance, rounding),
+                        invested=round(actual_invested, rounding))
+
+        await portfolio_mgr.load_initial_balance_from_db(sess)
+        await sess.commit()
+
+
+def _create_self_healing(
+    engine,
+    portfolio_mgr: PortfolioManager,
+    adapter,
+    market_data: MarketDataService,
+    exchange_name: str,
+    tracked_coins: list[str],
+) -> HealthMonitor:
+    """RecoveryManager + DiagnosticAgent + HealthMonitor 생성 및 연결."""
+    recovery = RecoveryManager(
+        engine=engine,
+        portfolio_manager=portfolio_mgr,
+        exchange_adapter=adapter,
+        exchange_name=exchange_name,
+        tracked_coins=tracked_coins,
+    )
+    diagnostic = DiagnosticAgent(
+        engine=engine,
+        portfolio_manager=portfolio_mgr,
+        exchange_adapter=adapter,
+        exchange_name=exchange_name,
+        tracked_coins=tracked_coins,
+    )
+    recovery.set_diagnostic_agent(diagnostic)
+    engine.set_recovery_manager(recovery)
+
+    return HealthMonitor(
+        engine=engine,
+        portfolio_manager=portfolio_mgr,
+        exchange_adapter=adapter,
+        market_data=market_data,
+        exchange_name=exchange_name,
+        tracked_coins=tracked_coins,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
@@ -72,8 +203,6 @@ async def lifespan(app: FastAPI):
     config = get_config()
 
     logger.info("startup_begin", mode=config.trading.mode)
-
-    from core.models import CapitalTransaction, Position as PositionModel
 
     # ── 1. DB 초기화 ─────────────────────────────────────────
     engine = get_engine()
@@ -126,9 +255,8 @@ async def lifespan(app: FastAPI):
 
         # ── 3. 빗썸 핵심 서비스 ───────────────────────────────
         initial_krw = config.trading.initial_balance_krw
-
         market_data = MarketDataService(exchange)
-        combiner = SignalCombiner(min_confidence=config.trading.min_combined_confidence, exchange_name="bithumb")
+        combiner, coordinator = _create_agent_stack(market_data, config, "bithumb")
         order_mgr = OrderManager(exchange, is_paper=is_paper, exchange_name="bithumb")
         portfolio_mgr = PortfolioManager(
             market_data=market_data,
@@ -137,64 +265,13 @@ async def lifespan(app: FastAPI):
             exchange_name="bithumb",
         )
 
-        # 라이브 모드: 거래소 실제 잔고 동기화 + DB 스냅샷 복원 + 원금 관리
         if not is_paper:
-            session_factory = get_session_factory()
-            async with session_factory() as sess:
-                await portfolio_mgr.sync_exchange_positions(
-                    sess, exchange, config.trading.tracked_coins,
-                )
-                await portfolio_mgr.restore_state_from_db(sess)
-                spike_fixed = await PortfolioManager.cleanup_spike_snapshots(sess, "bithumb")
-                if spike_fixed:
-                    logger.info("bithumb_spike_cleanup", fixed=spike_fixed)
+            await _sync_live_state(
+                portfolio_mgr, exchange, config.trading.tracked_coins,
+                "bithumb", "KRW", initial_krw,
+            )
 
-                count_result = await sess.execute(
-                    select(func.count()).select_from(CapitalTransaction)
-                    .where(CapitalTransaction.exchange == "bithumb")
-                )
-                if count_result.scalar() == 0:
-                    pos_result = await sess.execute(
-                        select(func.coalesce(func.sum(PositionModel.total_invested), 0))
-                        .where(PositionModel.exchange == "bithumb", PositionModel.quantity > 0)
-                    )
-                    actual_invested = float(pos_result.scalar())
-                    actual_total = portfolio_mgr.cash_balance + actual_invested
-                    seed_amount = actual_total if actual_total > 0 else initial_krw
-
-                    seed = CapitalTransaction(
-                        exchange="bithumb",
-                        tx_type="deposit",
-                        amount=round(seed_amount, 0),
-                        currency="KRW",
-                        note=f"초기 원금 (자동 생성, 실제 자산 기준)",
-                        source="seed",
-                        confirmed=True,
-                    )
-                    sess.add(seed)
-                    await sess.flush()
-                    logger.info("bithumb_seed_deposit_created",
-                                amount=round(seed_amount, 0),
-                                cash=round(portfolio_mgr.cash_balance, 0),
-                                invested=round(actual_invested, 0))
-
-                await portfolio_mgr.load_initial_balance_from_db(sess)
-                await sess.commit()
-
-        # ── 4. 빗썸 AI 에이전트 ───────────────────────────────
-        market_agent = MarketAnalysisAgent(market_data, exchange_name="bithumb")
-        risk_agent = RiskManagementAgent(config.risk, market_data, exchange_name="bithumb")
-        trade_review_agent = TradeReviewAgent(review_window_hours=24, exchange_name="bithumb")
-        perf_agent = PerformanceAnalyticsAgent(exchange_name="bithumb")
-        strategy_advisor = StrategyAdvisorAgent(exchange_name="bithumb")
-        coordinator = AgentCoordinator(
-            market_agent, risk_agent, combiner, trade_review_agent,
-            exchange_name="bithumb",
-            performance_agent=perf_agent,
-            strategy_advisor=strategy_advisor,
-        )
-
-        # ── 5. 빗썸 트레이딩 엔진 ─────────────────────────────
+        # ── 4. 빗썸 트레이딩 엔진 ─────────────────────────────
         trading_engine = TradingEngine(
             config=config,
             exchange=exchange,
@@ -210,34 +287,11 @@ async def lifespan(app: FastAPI):
         _engine_instance = trading_engine
         trading_engine.set_broadcast_callback(ws_manager.broadcast)
 
-        # Self-healing: RecoveryManager + DiagnosticAgent 주입 (빗썸)
-        bithumb_recovery = RecoveryManager(
-            engine=trading_engine,
-            portfolio_manager=portfolio_mgr,
-            exchange_adapter=exchange,
-            exchange_name="bithumb",
-            tracked_coins=config.trading.tracked_coins,
-        )
-        bithumb_diagnostic = DiagnosticAgent(
-            engine=trading_engine,
-            portfolio_manager=portfolio_mgr,
-            exchange_adapter=exchange,
-            exchange_name="bithumb",
-            tracked_coins=config.trading.tracked_coins,
-        )
-        bithumb_recovery.set_diagnostic_agent(bithumb_diagnostic)
-        trading_engine.set_recovery_manager(bithumb_recovery)
-
-        bithumb_health = HealthMonitor(
-            engine=trading_engine,
-            portfolio_manager=portfolio_mgr,
-            exchange_adapter=exchange,
-            market_data=market_data,
-            exchange_name="bithumb",
-            tracked_coins=config.trading.tracked_coins,
+        bithumb_health = _create_self_healing(
+            trading_engine, portfolio_mgr, exchange, market_data,
+            "bithumb", config.trading.tracked_coins,
         )
 
-        # EngineRegistry 등록 (빗썸)
         engine_registry.register("bithumb", trading_engine, portfolio_mgr, combiner, coordinator)
     else:
         logger.info("bithumb_disabled")
@@ -262,33 +316,21 @@ async def lifespan(app: FastAPI):
             binance_market_data = MarketDataService(binance_adapter)
             bt = config.binance_trading
             binance_is_paper = bt.mode == "paper"
+            initial_usdt = bt.initial_balance_usdt
             logger.info("binance_mode", mode=bt.mode, is_paper=binance_is_paper)
 
-            # 원금은 항상 config에서 고정 (서버 재시작마다 재계산 방지)
-            initial_usdt = bt.initial_balance_usdt
-
-            binance_combiner = SignalCombiner(min_confidence=bt.min_combined_confidence, exchange_name="binance_futures")
+            binance_combiner, binance_coordinator = _create_agent_stack(
+                binance_market_data, config, "binance_futures", market_symbol="BTC/USDT",
+            )
             binance_order_mgr = OrderManager(
                 binance_adapter, is_paper=binance_is_paper,
                 exchange_name="binance_futures", fee_currency="USDT",
             )
             binance_portfolio_mgr = PortfolioManager(
                 market_data=binance_market_data,
-                initial_balance_krw=initial_usdt,  # USDT 기준
+                initial_balance_krw=initial_usdt,
                 is_paper=binance_is_paper,
                 exchange_name="binance_futures",
-            )
-
-            binance_market_agent = MarketAnalysisAgent(binance_market_data, market_symbol="BTC/USDT", exchange_name="binance_futures")
-            binance_risk_agent = RiskManagementAgent(config.risk, binance_market_data, exchange_name="binance_futures")
-            binance_trade_review = TradeReviewAgent(review_window_hours=24, exchange_name="binance_futures")
-            binance_perf_agent = PerformanceAnalyticsAgent(exchange_name="binance_futures")
-            binance_strategy_advisor = StrategyAdvisorAgent(exchange_name="binance_futures")
-            binance_coordinator = AgentCoordinator(
-                binance_market_agent, binance_risk_agent, binance_combiner, binance_trade_review,
-                exchange_name="binance_futures",
-                performance_agent=binance_perf_agent,
-                strategy_advisor=binance_strategy_advisor,
             )
 
             binance_engine = BinanceFuturesEngine(
@@ -305,84 +347,20 @@ async def lifespan(app: FastAPI):
             binance_engine.set_broadcast_callback(ws_manager.broadcast)
             _binance_engine = binance_engine
 
-            # 라이브 모드: 거래소 실제 잔고 동기화 + DB 스냅샷 복원 + 원금 관리
             if not binance_is_paper:
-                sf = get_session_factory()
-                async with sf() as sess:
-                    await binance_portfolio_mgr.sync_exchange_positions(
-                        sess, binance_adapter, config.binance.tracked_coins,
-                    )
-                    # 선물: 거래소 실잔고로 cash 1회 초기화 (이후 내부 장부 기반)
-                    await binance_portfolio_mgr.initialize_cash_from_exchange(binance_adapter)
-                    await binance_portfolio_mgr.restore_state_from_db(sess)
-                    spike_fixed = await PortfolioManager.cleanup_spike_snapshots(sess, "binance_futures")
-                    if spike_fixed:
-                        logger.info("futures_spike_cleanup", fixed=spike_fixed)
+                await _sync_live_state(
+                    binance_portfolio_mgr, binance_adapter, config.binance.tracked_coins,
+                    "binance_futures", "USDT", initial_usdt, is_futures=True,
+                )
 
-                    # 시드 입금 자동 생성 (CapitalTransaction 0건이면)
-                    cnt_result = await sess.execute(
-                        select(func.count()).select_from(CapitalTransaction)
-                        .where(CapitalTransaction.exchange == "binance_futures")
-                    )
-                    if cnt_result.scalar() == 0:
-                        pos_result = await sess.execute(
-                            select(func.coalesce(func.sum(PositionModel.total_invested), 0))
-                            .where(PositionModel.exchange == "binance_futures", PositionModel.quantity > 0)
-                        )
-                        actual_invested = float(pos_result.scalar())
-                        actual_total = binance_portfolio_mgr.cash_balance + actual_invested
-                        seed_amount = actual_total if actual_total > 0 else initial_usdt
-
-                        seed = CapitalTransaction(
-                            exchange="binance_futures",
-                            tx_type="deposit",
-                            amount=round(seed_amount, 2),
-                            currency="USDT",
-                            note=f"초기 원금 (자동 생성, 실제 자산 기준)",
-                            source="seed",
-                            confirmed=True,
-                        )
-                        sess.add(seed)
-                        await sess.flush()
-                        logger.info("binance_seed_deposit_created",
-                                    amount=round(seed_amount, 2),
-                                    cash=round(binance_portfolio_mgr.cash_balance, 2),
-                                    invested=round(actual_invested, 2))
-
-                    await binance_portfolio_mgr.load_initial_balance_from_db(sess)
-                    await sess.commit()
-
-            # EngineRegistry 등록 (바이낸스)
             engine_registry.register(
                 "binance_futures", binance_engine, binance_portfolio_mgr,
                 binance_combiner, binance_coordinator,
             )
 
-            # Self-healing: RecoveryManager + DiagnosticAgent + HealthMonitor (선물)
-            futures_recovery = RecoveryManager(
-                engine=binance_engine,
-                portfolio_manager=binance_portfolio_mgr,
-                exchange_adapter=binance_adapter,
-                exchange_name="binance_futures",
-                tracked_coins=config.binance.tracked_coins,
-            )
-            futures_diagnostic = DiagnosticAgent(
-                engine=binance_engine,
-                portfolio_manager=binance_portfolio_mgr,
-                exchange_adapter=binance_adapter,
-                exchange_name="binance_futures",
-                tracked_coins=config.binance.tracked_coins,
-            )
-            futures_recovery.set_diagnostic_agent(futures_diagnostic)
-            binance_engine.set_recovery_manager(futures_recovery)
-
-            futures_health = HealthMonitor(
-                engine=binance_engine,
-                portfolio_manager=binance_portfolio_mgr,
-                exchange_adapter=binance_adapter,
-                market_data=binance_market_data,
-                exchange_name="binance_futures",
-                tracked_coins=config.binance.tracked_coins,
+            futures_health = _create_self_healing(
+                binance_engine, binance_portfolio_mgr, binance_adapter,
+                binance_market_data, "binance_futures", config.binance.tracked_coins,
             )
 
             logger.info("binance_futures_engine_ready",
@@ -426,7 +404,9 @@ async def lifespan(app: FastAPI):
                 spot_exchange = spot_adapter
 
             spot_market_data = MarketDataService(spot_exchange)
-            spot_combiner = SignalCombiner(min_confidence=bst.min_combined_confidence, exchange_name="binance_spot")
+            spot_combiner, spot_coordinator = _create_agent_stack(
+                spot_market_data, config, "binance_spot", market_symbol="BTC/USDT",
+            )
             spot_order_mgr = OrderManager(
                 spot_exchange, is_paper=spot_is_paper,
                 exchange_name="binance_spot", fee_currency="USDT",
@@ -436,18 +416,6 @@ async def lifespan(app: FastAPI):
                 initial_balance_krw=initial_spot_usdt,
                 is_paper=spot_is_paper,
                 exchange_name="binance_spot",
-            )
-
-            spot_market_agent = MarketAnalysisAgent(spot_market_data, market_symbol="BTC/USDT", exchange_name="binance_spot")
-            spot_risk_agent = RiskManagementAgent(config.risk, spot_market_data, exchange_name="binance_spot")
-            spot_trade_review = TradeReviewAgent(review_window_hours=24, exchange_name="binance_spot")
-            spot_perf_agent = PerformanceAnalyticsAgent(exchange_name="binance_spot")
-            spot_strategy_advisor = StrategyAdvisorAgent(exchange_name="binance_spot")
-            spot_coordinator = AgentCoordinator(
-                spot_market_agent, spot_risk_agent, spot_combiner, spot_trade_review,
-                exchange_name="binance_spot",
-                performance_agent=spot_perf_agent,
-                strategy_advisor=spot_strategy_advisor,
             )
 
             spot_engine = TradingEngine(
@@ -467,81 +435,20 @@ async def lifespan(app: FastAPI):
             spot_engine.set_broadcast_callback(ws_manager.broadcast)
             _binance_spot_engine = spot_engine
 
-            # 라이브 모드: 거래소 실제 잔고 동기화 + DB 스냅샷 복원 + 원금 관리
             if not spot_is_paper:
-                sf = get_session_factory()
-                async with sf() as sess:
-                    await spot_portfolio_mgr.sync_exchange_positions(
-                        sess, spot_adapter, config.binance.tracked_coins,
-                    )
-                    await spot_portfolio_mgr.restore_state_from_db(sess)
-                    spike_fixed = await PortfolioManager.cleanup_spike_snapshots(sess, "binance_spot")
-                    if spike_fixed:
-                        logger.info("spot_spike_cleanup", fixed=spike_fixed)
-
-                    # 시드 입금 자동 생성
-                    cnt_result = await sess.execute(
-                        select(func.count()).select_from(CapitalTransaction)
-                        .where(CapitalTransaction.exchange == "binance_spot")
-                    )
-                    if cnt_result.scalar() == 0:
-                        pos_result = await sess.execute(
-                            select(func.coalesce(func.sum(PositionModel.total_invested), 0))
-                            .where(PositionModel.exchange == "binance_spot", PositionModel.quantity > 0)
-                        )
-                        actual_invested = float(pos_result.scalar())
-                        actual_total = spot_portfolio_mgr.cash_balance + actual_invested
-                        seed_amount = actual_total if actual_total > 0 else initial_spot_usdt
-
-                        seed = CapitalTransaction(
-                            exchange="binance_spot",
-                            tx_type="deposit",
-                            amount=round(seed_amount, 2),
-                            currency="USDT",
-                            note="초기 원금 (자동 생성, 실제 자산 기준)",
-                            source="seed",
-                            confirmed=True,
-                        )
-                        sess.add(seed)
-                        await sess.flush()
-                        logger.info("binance_spot_seed_deposit_created",
-                                    amount=round(seed_amount, 2),
-                                    cash=round(spot_portfolio_mgr.cash_balance, 2),
-                                    invested=round(actual_invested, 2))
-
-                    await spot_portfolio_mgr.load_initial_balance_from_db(sess)
-                    await sess.commit()
+                await _sync_live_state(
+                    spot_portfolio_mgr, spot_adapter, config.binance.tracked_coins,
+                    "binance_spot", "USDT", initial_spot_usdt,
+                )
 
             engine_registry.register(
                 "binance_spot", spot_engine, spot_portfolio_mgr,
                 spot_combiner, spot_coordinator,
             )
 
-            # Self-healing: RecoveryManager + DiagnosticAgent + HealthMonitor (현물)
-            spot_recovery = RecoveryManager(
-                engine=spot_engine,
-                portfolio_manager=spot_portfolio_mgr,
-                exchange_adapter=spot_exchange,
-                exchange_name="binance_spot",
-                tracked_coins=config.binance.tracked_coins,
-            )
-            spot_diagnostic = DiagnosticAgent(
-                engine=spot_engine,
-                portfolio_manager=spot_portfolio_mgr,
-                exchange_adapter=spot_exchange,
-                exchange_name="binance_spot",
-                tracked_coins=config.binance.tracked_coins,
-            )
-            spot_recovery.set_diagnostic_agent(spot_diagnostic)
-            spot_engine.set_recovery_manager(spot_recovery)
-
-            spot_health = HealthMonitor(
-                engine=spot_engine,
-                portfolio_manager=spot_portfolio_mgr,
-                exchange_adapter=spot_exchange,
-                market_data=spot_market_data,
-                exchange_name="binance_spot",
-                tracked_coins=config.binance.tracked_coins,
+            spot_health = _create_self_healing(
+                spot_engine, spot_portfolio_mgr, spot_exchange,
+                spot_market_data, "binance_spot", config.binance.tracked_coins,
             )
 
             logger.info("binance_spot_engine_ready",
@@ -960,7 +867,7 @@ def create_app() -> FastAPI:
             "memory_rss_mb": round(mem.rss / 1024 / 1024, 1),
             "uptime_hours": round((datetime.now(timezone.utc).timestamp() - process.create_time()) / 3600, 1),
             "db_connected": db_ok,
-            "scheduler_running": scheduler.running if scheduler else False,
+            "scheduler_running": _scheduler.running if _scheduler else False,
         }
 
     return app
