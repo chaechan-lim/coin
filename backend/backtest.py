@@ -472,7 +472,7 @@ async def fetch_history(
 
     # ── 페이지네이션 루프 ─────────────────────────────────────
     all_new: list[Candle] = []
-    page_limit = 1500
+    page_limit = 1000  # 바이낸스 선물 최대 1000개/요청
     cursor = fetch_since
 
     while cursor < now_ms:
@@ -486,8 +486,8 @@ async def fetch_history(
         if last_ts <= cursor:
             break  # 더 이상 새 데이터 없음
         cursor = last_ts + tf_ms
-        if len(raw) < page_limit:
-            break  # 마지막 페이지
+        if len(raw) < page_limit * 0.9:
+            break  # 마지막 페이지 (거래소별 반환 개수 오차 허용)
 
     # ── 새 데이터를 DataFrame으로 ─────────────────────────────
     if all_new:
@@ -4630,6 +4630,8 @@ async def main():
                         help="선물: 시장 상태별 동적 포지션 사이징")
     parser.add_argument("--dynamic-portfolio", action="store_true", default=False,
                         help="선물: 거래량 기반 동적 코인 선택 (라이브와 동일)")
+    parser.add_argument("--dynamic-max-coins", type=int, default=10,
+                        help="동적 포트폴리오 상위 코인 수 (기본 10)")
     # 포트폴리오 모드
     parser.add_argument("--portfolio",       action="store_true",
                         help="멀티코인 포트폴리오 모드")
@@ -4758,6 +4760,7 @@ async def main():
                 trade_daily_buy_limit=args.daily_buy_limit,
                 trade_max_coin_buys=args.max_coin_buys,
                 dynamic_portfolio=args.dynamic_portfolio,
+                dynamic_max_coins=args.dynamic_max_coins,
             )
             result = await bt.run(args.timeframe, args.days)
             print_futures_portfolio_result(result)
