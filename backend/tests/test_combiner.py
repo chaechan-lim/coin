@@ -155,9 +155,9 @@ class TestAdaptiveWeights:
         combiner = SignalCombiner()
         original_rsi = combiner.weights["rsi"]
         combiner.apply_market_state("crash")
-        # crash 프로필에서 rsi는 0.28
-        assert combiner.weights["rsi"] == 0.28
-        assert combiner.weights["rsi"] != original_rsi or original_rsi == 0.28
+        # crash 프로필에서 rsi는 0.22 (숏 강화: MA+MACD 가중치 상향)
+        assert combiner.weights["rsi"] == 0.22
+        assert combiner.weights["rsi"] != original_rsi or original_rsi == 0.22
 
     def test_apply_unknown_market_state_no_change(self):
         combiner = SignalCombiner()
