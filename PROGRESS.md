@@ -10,7 +10,7 @@
 빗썸(현물, paper) + 바이낸스 현물(live) + 바이낸스 USDM 선물(live, 3x) **트리플 엔진** 24시간 자동 트레이딩 시스템.
 가중 투표 (HOLD=기권) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰 + 성과 분석 + 전략 조언), React 대시보드(8탭, 거래소 전환).
 **현물 4전략** (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + **선물 6전략** (MA, RSI, MACD, 볼린저RSI, 스토캐스틱RSI, OBV).
-**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **646 유닛 테스트**.
+**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **675 유닛 테스트**.
 
 ---
 
@@ -69,6 +69,16 @@ coin/
 | 구조화된 /health | 엔진 상세, 메모리, uptime, DB 연결 상태, WS 상태 |
 | lifespan() 리팩토링 | _create_agent_stack, _sync_live_state, _create_self_healing 추출 (-93줄) |
 | 포지션 상세 모달 | 가격 분포 시각화, SL/TP/트레일링 상세, 선물 청산 거리 |
+| API 타임아웃+서킷브레이커 | 30초 타임아웃, 5회 연속 실패 → 60초 차단, 바이낸스 양쪽 어댑터 |
+| 스케줄러 작업 타임아웃 | 5분 제한, hung job 방지 |
+| 전략 루프 에러 추적 | 연속 5회 에러 → 60초 일시 중지 + 이벤트 알림 |
+| 마켓 데이터 재시도+LRU | 지수 백오프 3회 재시도, LRU 캐시 (OHLCV 100, ticker 50) |
+| N+1 쿼리 최적화 | _fast_stop_check_loop 배치 DB 조회 |
+| 엔진 종료 태스크 정리 | stop() 시 task cancel + await (graceful shutdown) |
+| Config 검증 | Pydantic field_validator (mode, confidence, pct 범위) |
+| API exchange 검증 | validate_exchange() 유효 거래소 이름 검증 |
+| create_task 이름 부여 | 전체 asyncio.create_task에 name= 파라미터 적용 |
+| 평가 사이클 타이밍 로그 | elapsed_ms 구조화 로깅 |
 
 ### 낮은 우선순위
 
