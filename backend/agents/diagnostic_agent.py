@@ -15,7 +15,6 @@ LLM 진단 에이전트 — 규칙 기반 복구 실패 시 LLM이 에러 진단
 """
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -90,10 +89,8 @@ class DiagnosticAgent:
             config = get_config()
             self._llm_config = config.llm
             if self._llm_config.enabled and self._llm_config.api_key:
-                import anthropic
-                self._llm_client = anthropic.AsyncAnthropic(
-                    api_key=self._llm_config.api_key,
-                )
+                from services.llm import LLMClient
+                self._llm_client = LLMClient(self._llm_config)
                 logger.info("diagnostic_agent_llm_enabled",
                             model=self._llm_config.model,
                             exchange=self._exchange_name)
@@ -248,32 +245,17 @@ DIAGNOSIS: <1-2줄 진단 요약>"""
 
     async def _call_llm(self, prompt: str) -> tuple[str, str]:
         """LLM 호출 → (action, diagnosis) 반환."""
-        models = [self._llm_config.model]
-        if self._llm_config.fallback_model:
-            models.append(self._llm_config.fallback_model)
-
-        for model in models:
-            for attempt in range(2):  # 모델당 2회 시도
-                try:
-                    response = await self._llm_client.messages.create(
-                        model=model,
-                        max_tokens=self._llm_config.diagnostic_max_tokens,
-                        messages=[{"role": "user", "content": prompt}],
-                    )
-                    text = response.content[0].text
-                    return self._parse_response(text)
-                except Exception as e:
-                    wait = 2 ** attempt * 2
-                    logger.warning(
-                        "diagnostic_llm_failed",
-                        model=model, attempt=attempt + 1,
-                        error=str(e), exchange=self._exchange_name,
-                    )
-                    if attempt < 1:
-                        await asyncio.sleep(wait)
-
-        logger.error("diagnostic_llm_all_failed", exchange=self._exchange_name)
-        return "skip", "LLM 호출 실패 — 기본 skip"
+        try:
+            response = await self._llm_client.generate(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=self._llm_config.diagnostic_max_tokens,
+                retries=2,
+            )
+            return self._parse_response(response.text or "")
+        except Exception as e:
+            logger.error("diagnostic_llm_all_failed",
+                         exchange=self._exchange_name, error=str(e))
+            return "skip", "LLM 호출 실패 — 기본 skip"
 
     def _parse_response(self, text: str) -> tuple[str, str]:
         """LLM 응답에서 ACTION과 DIAGNOSIS 파싱."""

@@ -1,5 +1,4 @@
 """성과 분석 에이전트 — 롤링 윈도우 성과 추적 + 전략/코인별 기여도 분석."""
-import asyncio
 import structlog
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -94,8 +93,8 @@ class PerformanceAnalyticsAgent:
             config = get_config()
             self._llm_config = config.llm
             if self._llm_config.enabled and self._llm_config.api_key:
-                import anthropic
-                self._llm_client = anthropic.AsyncAnthropic(api_key=self._llm_config.api_key)
+                from services.llm import LLMClient
+                self._llm_client = LLMClient(self._llm_config)
                 logger.info("performance_analytics_llm_enabled", model=self._llm_config.model)
             else:
                 logger.info("performance_analytics_llm_disabled")
@@ -354,28 +353,16 @@ class PerformanceAnalyticsAgent:
         """LLM으로 심층 인사이트 생성."""
         prompt = self._build_llm_prompt(report)
 
-        models = [self._llm_config.model]
-        if self._llm_config.fallback_model:
-            models.append(self._llm_config.fallback_model)
-
-        for model in models:
-            for attempt in range(3):
-                try:
-                    response = await self._llm_client.messages.create(
-                        model=model,
-                        max_tokens=self._llm_config.max_tokens,
-                        messages=[{"role": "user", "content": prompt}],
-                    )
-                    text = response.content[0].text
-                    insights, recs = self._parse_llm_response(text)
-                    if insights or recs:
-                        return insights, recs
-                    break
-                except Exception as e:
-                    wait = 2 ** attempt * 3
-                    logger.warning("perf_llm_failed", model=model, attempt=attempt + 1, error=str(e))
-                    if attempt < 2:
-                        await asyncio.sleep(wait)
+        try:
+            response = await self._llm_client.generate(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=self._llm_config.max_tokens,
+            )
+            insights, recs = self._parse_llm_response(response.text or "")
+            if insights or recs:
+                return insights, recs
+        except Exception as e:
+            logger.warning("perf_llm_failed", error=str(e))
 
         return self._generate_rule_based_insights(report)
 

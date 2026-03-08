@@ -1,7 +1,8 @@
 """
-Discord 트레이딩 봇 — 자연어 → Claude tool_use → 응답.
+Discord 트레이딩 봇 — 자연어 → LLM tool_use → 응답.
 
 discord.py Client가 FastAPI와 같은 이벤트 루프에서 동작.
+Multi-provider LLM (Anthropic + Gemini fallback) 지원.
 """
 from __future__ import annotations
 
@@ -11,8 +12,8 @@ from typing import Any
 
 import discord
 import structlog
-from anthropic import AsyncAnthropic
 
+from services.llm import LLMClient
 from services.discord_bot.tools import (
     TOOL_DEFINITIONS,
     WRITE_TOOLS,
@@ -66,9 +67,9 @@ class TradingBot:
         self._allowed_users = set(bot_cfg.allowed_user_ids) if bot_cfg.allowed_user_ids else set()
         self._max_tokens = bot_cfg.max_response_tokens
 
-        # Claude API
+        # LLM client (multi-provider)
         llm_cfg = config.llm
-        self._anthropic = AsyncAnthropic(api_key=llm_cfg.api_key)
+        self._llm = LLMClient(llm_cfg)
         self._model = bot_cfg.model or llm_cfg.model
 
         # Tool context
@@ -131,34 +132,18 @@ class TradingBot:
             except Exception:
                 pass  # 에러 응답도 실패하면 무시
 
-    @staticmethod
-    def _serialize_content(content) -> list[dict]:
-        """Anthropic 응답 content 블록을 dict 리스트로 변환."""
-        result = []
-        for block in content:
-            if block.type == "text":
-                result.append({"type": "text", "text": block.text})
-            elif block.type == "tool_use":
-                result.append({
-                    "type": "tool_use",
-                    "id": block.id,
-                    "name": block.name,
-                    "input": block.input,
-                })
-        return result
-
     async def _process_message(self, text: str, user_id: int) -> str:
-        """사용자 메시지 → Claude API → tool_use 루프 → 최종 텍스트."""
+        """사용자 메시지 → LLM API → tool_use 루프 → 최종 텍스트."""
         messages = [{"role": "user", "content": text}]
 
         logger.info("discord_bot_processing", text=text[:100], user_id=user_id)
 
-        response = await self._anthropic.messages.create(
-            model=self._model,
+        response = await self._llm.generate_with_tools(
+            messages=messages,
+            tools=TOOL_DEFINITIONS,
             max_tokens=self._max_tokens,
             system=SYSTEM_PROMPT,
-            tools=TOOL_DEFINITIONS,
-            messages=messages,
+            model=self._model,
         )
 
         # tool_use 루프
@@ -168,49 +153,42 @@ class TradingBot:
             iteration += 1
             tool_results = []
 
-            for block in response.content:
-                if block.type == "tool_use":
-                    logger.debug("discord_bot_tool_call", tool=block.name, input=block.input)
+            for tc in response.tool_calls:
+                logger.debug("discord_bot_tool_call", tool=tc.name, input=tc.arguments)
 
-                    # write 도구 권한 체크
-                    if block.name in WRITE_TOOLS:
-                        if self._allowed_users and user_id not in self._allowed_users:
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": json.dumps(
-                                    {"error": "권한 없음: 이 작업은 허가된 사용자만 실행할 수 있습니다."},
-                                    ensure_ascii=False,
-                                ),
-                            })
-                            continue
+                # write 도구 권한 체크
+                if tc.name in WRITE_TOOLS:
+                    if self._allowed_users and user_id not in self._allowed_users:
+                        tool_results.append({
+                            "tool_call_id": tc.id,
+                            "content": json.dumps(
+                                {"error": "권한 없음: 이 작업은 허가된 사용자만 실행할 수 있습니다."},
+                                ensure_ascii=False,
+                            ),
+                        })
+                        continue
 
-                    result = await execute_tool(self._tool_ctx, block.name, block.input)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": json.dumps(result, ensure_ascii=False, default=str),
-                    })
+                result = await execute_tool(self._tool_ctx, tc.name, tc.arguments)
+                tool_results.append({
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                })
 
-            # content를 직렬화 가능한 dict로 변환
-            messages.append({"role": "assistant", "content": self._serialize_content(response.content)})
-            messages.append({"role": "user", "content": tool_results})
+            # Build messages for next turn
+            asst_msg, user_msg = self._llm.format_tool_loop_messages(response, tool_results)
+            messages.append(asst_msg)
+            messages.append(user_msg)
 
-            response = await self._anthropic.messages.create(
-                model=self._model,
+            response = await self._llm.generate_with_tools(
+                messages=messages,
+                tools=TOOL_DEFINITIONS,
                 max_tokens=self._max_tokens,
                 system=SYSTEM_PROMPT,
-                tools=TOOL_DEFINITIONS,
-                messages=messages,
+                model=self._model,
             )
 
         # 최종 텍스트 추출
-        text_parts = []
-        for block in response.content:
-            if hasattr(block, "text"):
-                text_parts.append(block.text)
-
-        result = "\n".join(text_parts) or "응답을 생성할 수 없습니다."
+        result = response.text or "응답을 생성할 수 없습니다."
         logger.info("discord_bot_response", length=len(result), iterations=iteration)
         return result
 

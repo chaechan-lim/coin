@@ -756,8 +756,8 @@ class TradeReviewAgent:
             config = get_config()
             self._llm_config = config.llm
             if self._llm_config.enabled and self._llm_config.api_key:
-                import anthropic
-                self._llm_client = anthropic.AsyncAnthropic(api_key=self._llm_config.api_key)
+                from services.llm import LLMClient
+                self._llm_client = LLMClient(self._llm_config)
                 logger.info("llm_trade_review_enabled", model=self._llm_config.model)
             else:
                 logger.info("llm_trade_review_disabled")
@@ -932,60 +932,45 @@ INSIGHTS:
 RECOMMENDATIONS:
 - (3개 실행 가능한 추천, 각각 한 줄)"""
 
-        import asyncio
+        try:
+            response = await self._llm_client.generate(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=self._llm_config.max_tokens,
+            )
 
-        models = [self._llm_config.model]
-        if self._llm_config.fallback_model:
-            models.append(self._llm_config.fallback_model)
+            text = response.text or ""
+            if response.stop_reason == "max_tokens":
+                logger.warning("llm_response_truncated",
+                               model=response.model, tokens=self._llm_config.max_tokens)
+            insights = []
+            recommendations = []
+            section = None
 
-        for model in models:
-            for attempt in range(3):
-                try:
-                    response = await self._llm_client.messages.create(
-                        model=model,
-                        max_tokens=self._llm_config.max_tokens,
-                        messages=[{"role": "user", "content": prompt}],
-                    )
+            for line in text.split("\n"):
+                line = line.strip()
+                if "INSIGHTS:" in line.upper():
+                    section = "insights"
+                    continue
+                elif "RECOMMENDATIONS:" in line.upper():
+                    section = "recommendations"
+                    continue
 
-                    text = response.content[0].text
-                    if response.stop_reason == "max_tokens":
-                        logger.warning("llm_response_truncated",
-                                       model=model, tokens=self._llm_config.max_tokens)
-                    insights = []
-                    recommendations = []
-                    section = None
+                if line.startswith("- ") or line.startswith("* "):
+                    item = line[2:].strip()
+                    if item:
+                        if section == "insights":
+                            insights.append(item)
+                        elif section == "recommendations":
+                            recommendations.append(item)
 
-                    for line in text.split("\n"):
-                        line = line.strip()
-                        if "INSIGHTS:" in line.upper():
-                            section = "insights"
-                            continue
-                        elif "RECOMMENDATIONS:" in line.upper():
-                            section = "recommendations"
-                            continue
+            if insights or recommendations:
+                logger.info("llm_insights_generated",
+                            model=response.model, insights=len(insights),
+                            recommendations=len(recommendations))
+                return insights, recommendations
 
-                        if line.startswith("- ") or line.startswith("* "):
-                            item = line[2:].strip()
-                            if item:
-                                if section == "insights":
-                                    insights.append(item)
-                                elif section == "recommendations":
-                                    recommendations.append(item)
-
-                    if insights or recommendations:
-                        logger.info("llm_insights_generated",
-                                    model=model, insights=len(insights), recommendations=len(recommendations))
-                        return insights, recommendations
-                    break  # 응답은 받았지만 파싱 실패 — 다음 모델 시도
-
-                except Exception as e:
-                    wait = 2 ** attempt * 3  # 3s, 6s, 12s
-                    logger.warning("llm_insights_failed", model=model, error=str(e),
-                                   attempt=attempt + 1, retry_in=wait)
-                    if attempt < 2:
-                        await asyncio.sleep(wait)
-            else:
-                logger.warning("llm_model_exhausted", model=model)
+        except Exception as e:
+            logger.warning("llm_insights_failed", error=str(e))
 
         return [], []
 

@@ -1,5 +1,4 @@
 """전략 어드바이저 에이전트 — 전략 상관관계 분석 + 파라미터 민감도 + LLM 제안."""
-import asyncio
 import structlog
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -59,8 +58,8 @@ class StrategyAdvisorAgent:
             config = get_config()
             self._llm_config = config.llm
             if self._llm_config.enabled and self._llm_config.api_key:
-                import anthropic
-                self._llm_client = anthropic.AsyncAnthropic(api_key=self._llm_config.api_key)
+                from services.llm import LLMClient
+                self._llm_client = LLMClient(self._llm_config)
                 logger.info("strategy_advisor_llm_enabled", model=self._llm_config.model)
             else:
                 logger.info("strategy_advisor_llm_disabled")
@@ -314,28 +313,16 @@ class StrategyAdvisorAgent:
         """LLM 종합 분석."""
         prompt = self._build_llm_prompt(advice, perf, market_context)
 
-        models = [self._llm_config.model]
-        if self._llm_config.fallback_model:
-            models.append(self._llm_config.fallback_model)
-
-        for model in models:
-            for attempt in range(3):
-                try:
-                    response = await self._llm_client.messages.create(
-                        model=model,
-                        max_tokens=self._llm_config.max_tokens,
-                        messages=[{"role": "user", "content": prompt}],
-                    )
-                    text = response.content[0].text
-                    summary, suggestions = self._parse_llm_response(text)
-                    if summary or suggestions:
-                        return summary, suggestions
-                    break
-                except Exception as e:
-                    wait = 2 ** attempt * 3
-                    logger.warning("advisor_llm_failed", model=model, attempt=attempt + 1, error=str(e))
-                    if attempt < 2:
-                        await asyncio.sleep(wait)
+        try:
+            response = await self._llm_client.generate(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=self._llm_config.max_tokens,
+            )
+            summary, suggestions = self._parse_llm_response(response.text or "")
+            if summary or suggestions:
+                return summary, suggestions
+        except Exception as e:
+            logger.warning("advisor_llm_failed", error=str(e))
 
         return self._generate_rule_based(advice, perf)
 

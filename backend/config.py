@@ -138,6 +138,8 @@ class LLMConfig(BaseSettings):
     api_key: str = ""
     model: str = "claude-haiku-4-5-20251001"
     fallback_model: str = "claude-sonnet-4-6"
+    gemini_api_key: str = ""                         # Google Gemini API key
+    gemini_fallback_model: str = "gemini-2.5-flash"  # cross-provider fallback
     max_tokens: int = 4096  # LLM 응답 최대 토큰 (회고 짤림 방지)
     diagnostic_max_tokens: int = 512  # 진단 에이전트 응답 토큰
     daily_review_enabled: bool = True
