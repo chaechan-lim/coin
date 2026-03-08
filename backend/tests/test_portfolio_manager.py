@@ -1938,3 +1938,125 @@ async def test_snapshot_total_spike_also_counts_skip(session):
     snap = await pm.take_snapshot(session)
     assert snap is not None
     assert pm._snapshot_skip_count == 0
+
+
+# ── 선물 매도 cash 정산 ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_futures_sell_returns_margin_not_notional(session):
+    """선물 매도 시 margin + leveraged PnL만 반환 (notional이 아님)."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=1000,
+        exchange_name="binance_futures",
+    )
+    # 롱 포지션: margin 100, 3x 레버리지, entry 50000
+    pos = Position(
+        exchange="binance_futures", symbol="BTC/USDT",
+        quantity=0.006, average_buy_price=50000,
+        total_invested=100, is_paper=False,
+        direction="long", leverage=3, margin_used=100,
+    )
+    session.add(pos)
+    await session.flush()
+
+    pm._cash_balance = 900  # 1000 - 100 margin
+
+    # 10% 가격 상승 → 55000
+    await pm.update_position_on_sell(
+        session, "BTC/USDT", 0.006, 55000,
+        0.006 * 55000, 0.13,  # cost=notional (330), fee=0.13
+    )
+    # 반환: margin(100) + leveraged_pnl(100 * 3 * 0.10 = 30) - fee(0.13) = 129.87
+    assert pm.cash_balance == pytest.approx(900 + 129.87, abs=0.1)
+    assert pm.realized_pnl == pytest.approx(30 - 0.13, abs=0.1)
+
+
+@pytest.mark.asyncio
+async def test_futures_short_sell_returns_margin_plus_pnl(session):
+    """선물 숏 청산 시 하락 수익이 cash에 올바르게 반영."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=1000,
+        exchange_name="binance_futures",
+    )
+    # 숏 포지션: margin 100, 3x, entry 50000
+    pos = Position(
+        exchange="binance_futures", symbol="ETH/USDT",
+        quantity=0.006, average_buy_price=50000,
+        total_invested=100, is_paper=False,
+        direction="short", leverage=3, margin_used=100,
+    )
+    session.add(pos)
+    await session.flush()
+
+    pm._cash_balance = 900
+
+    # 10% 가격 하락 → 45000 (숏 수익)
+    await pm.update_position_on_sell(
+        session, "ETH/USDT", 0.006, 45000,
+        0.006 * 45000, 0.11,
+    )
+    # 숏 PnL: 100 * 3 * (50000-45000)/50000 = 30
+    # 반환: 100 + 30 - 0.11 = 129.89
+    assert pm.cash_balance == pytest.approx(900 + 129.89, abs=0.1)
+    assert pm.realized_pnl == pytest.approx(30 - 0.11, abs=0.1)
+
+
+@pytest.mark.asyncio
+async def test_futures_sell_loss_returns_less_than_margin(session):
+    """선물 손절 시 margin에서 손실분 차감."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=1000,
+        exchange_name="binance_futures",
+    )
+    pos = Position(
+        exchange="binance_futures", symbol="SOL/USDT",
+        quantity=1.0, average_buy_price=100,
+        total_invested=100, is_paper=False,
+        direction="long", leverage=3, margin_used=100,
+    )
+    session.add(pos)
+    await session.flush()
+
+    pm._cash_balance = 900
+
+    # 5% 하락 → 95 (손실)
+    await pm.update_position_on_sell(
+        session, "SOL/USDT", 1.0, 95,
+        1.0 * 95, 0.04,
+    )
+    # PnL: 100 * 3 * (-0.05) = -15
+    # 반환: 100 + (-15) - 0.04 = 84.96
+    assert pm.cash_balance == pytest.approx(900 + 84.96, abs=0.1)
+    assert pm.realized_pnl == pytest.approx(-15 - 0.04, abs=0.1)
+
+
+@pytest.mark.asyncio
+async def test_spot_sell_unchanged_notional_based(session):
+    """현물 매도는 기존 notional 기반 그대로 동작."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=500000,
+        exchange_name="bithumb",
+        is_paper=True,
+    )
+    pos = Position(
+        exchange="bithumb", symbol="BTC/KRW",
+        quantity=0.001, average_buy_price=50_000_000,
+        total_invested=50000, is_paper=True,
+    )
+    session.add(pos)
+    await session.flush()
+
+    pm._cash_balance = 450000
+
+    # 10% 상승
+    await pm.update_position_on_sell(
+        session, "BTC/KRW", 0.001, 55_000_000,
+        0.001 * 55_000_000, 137.5,
+    )
+    # 현물: proceeds = 55000 - 137.5 = 54862.5
+    assert pm.cash_balance == pytest.approx(450000 + 54862.5, abs=1)

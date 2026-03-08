@@ -109,13 +109,34 @@ class PortfolioManager:
             logger.warning("sell_exceeds_position", symbol=symbol, quantity=quantity)
             return
 
-        # Calculate realized P&L
-        sell_proceeds = cost - fee
-        buy_cost = position.average_buy_price * quantity
-        realized = sell_proceeds - buy_cost
+        old_quantity = position.quantity
+        sell_ratio = quantity / old_quantity if old_quantity > 0 else 1.0
+        is_futures = "futures" in self._exchange_name
+
+        if is_futures and position.leverage and position.leverage > 1:
+            # 선물: margin 기반 정산 — notional이 아닌 마진+레버리지 PnL 반환
+            margin_returned = position.total_invested * sell_ratio
+            direction = position.direction or "long"
+            entry = position.average_buy_price
+            if entry and entry > 0:
+                if direction == "long":
+                    pnl_pct = (price - entry) / entry
+                else:
+                    pnl_pct = (entry - price) / entry
+                leveraged_pnl = margin_returned * position.leverage * pnl_pct
+            else:
+                leveraged_pnl = 0.0
+            realized = leveraged_pnl - fee
+            cash_returned = margin_returned + leveraged_pnl - fee
+        else:
+            # 현물: 기존 방식 (notional 기반)
+            sell_proceeds = cost - fee
+            buy_cost = position.average_buy_price * quantity
+            realized = sell_proceeds - buy_cost
+            cash_returned = sell_proceeds
+
         self._realized_pnl += realized
 
-        old_quantity = position.quantity
         position.quantity -= quantity
         now = utcnow()
         if position.quantity <= 0.0001:  # Effectively zero
@@ -132,15 +153,17 @@ class PortfolioManager:
         position.last_trade_at = now
         position.last_sell_at = now
 
-        self._cash_balance += sell_proceeds
+        self._cash_balance += cash_returned
         await session.flush()
 
         logger.info(
             "position_updated_sell",
             symbol=symbol,
             quantity_sold=quantity,
-            realized_pnl=realized,
+            realized_pnl=round(realized, 4),
+            cash_returned=round(cash_returned, 4),
             remaining_quantity=position.quantity,
+            is_futures=is_futures,
         )
 
     async def get_portfolio_summary(self, session: AsyncSession) -> dict:
