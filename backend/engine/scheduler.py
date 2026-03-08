@@ -54,6 +54,21 @@ class TradingScheduler:
         self._scheduler.shutdown(wait=wait)
         logger.info("scheduler_stopped")
 
+    def add_weekly_cron_job(self, func, name: str, day_of_week: str, hour: int, minute: int = 0, **kwargs) -> None:
+        """Add a weekly cron job (UTC)."""
+        job = self._scheduler.add_job(
+            func,
+            trigger=CronTrigger(day_of_week=day_of_week, hour=hour, minute=minute, timezone="UTC"),
+            id=name,
+            name=name,
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            **kwargs,
+        )
+        self._jobs[name] = job.id
+        logger.info("scheduler_weekly_cron_added", name=name, day=day_of_week, hour=hour, minute=minute)
+
     def pause_job(self, name: str) -> None:
         if name in self._jobs:
             self._scheduler.pause_job(name)
@@ -134,6 +149,20 @@ def setup_scheduler(
             seconds=86400,  # 24 hours
         )
         logger.info("daily_llm_review_scheduled")
+
+    # 성과 분석 에이전트 (매일 12:30 UTC = 21:30 KST)
+    scheduler.add_cron_job(
+        _wrap(coordinator.run_performance_analysis),
+        name="performance_analytics",
+        hour=12, minute=30,
+    )
+
+    # 전략 어드바이저 (매주 일요일 13:00 UTC = 22:00 KST)
+    scheduler.add_weekly_cron_job(
+        _wrap(coordinator.run_strategy_advice),
+        name="strategy_advice",
+        day_of_week="sun", hour=13, minute=0,
+    )
 
     return scheduler
 

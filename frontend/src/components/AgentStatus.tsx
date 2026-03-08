@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getMarketAnalysis, getRiskAlerts, getTradeReview, triggerTradeReview } from '../api/client'
+import { getMarketAnalysis, getRiskAlerts, getTradeReview, triggerTradeReview, getPerformanceAnalytics, triggerPerformanceAnalysis, getStrategyAdvice, triggerStrategyAdvice } from '../api/client'
 import type { RiskAlert, ExchangeName } from '../types'
 import { fmtPrice } from '../utils/format'
 
@@ -101,6 +101,30 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
   const reviewMut = useMutation({
     mutationFn: () => triggerTradeReview(exchange),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['agents', 'trade-review'] }),
+  })
+
+  const { data: perfData } = useQuery({
+    queryKey: ['agents', 'performance', exchange],
+    queryFn: () => getPerformanceAnalytics(exchange),
+    refetchInterval: 300_000,
+    staleTime: 120_000,
+  })
+
+  const perfMut = useMutation({
+    mutationFn: () => triggerPerformanceAnalysis(exchange),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['agents', 'performance'] }),
+  })
+
+  const { data: adviceData } = useQuery({
+    queryKey: ['agents', 'strategy-advice', exchange],
+    queryFn: () => getStrategyAdvice(exchange),
+    refetchInterval: 600_000,
+    staleTime: 300_000,
+  })
+
+  const adviceMut = useMutation({
+    mutationFn: () => triggerStrategyAdvice(exchange),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['agents', 'strategy-advice'] }),
   })
 
   const dotColor = analysis ? STATE_COLORS[analysis.state] ?? 'bg-gray-500' : 'bg-gray-600'
@@ -323,6 +347,160 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
               {review?.insights?.[0] ?? '매매 회고 데이터 없음'}
             </div>
             <div className="text-gray-600 text-xs mt-1">매시간 자동 분석 실행 / 위 버튼으로 수동 실행 가능</div>
+          </div>
+        )}
+      </div>
+
+      {/* Performance Analytics */}
+      <div className="bg-gray-800 rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-white text-sm font-semibold">성과 분석</h3>
+          <button
+            onClick={() => perfMut.mutate()}
+            disabled={perfMut.isPending}
+            className="text-xs px-2 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600 disabled:opacity-50"
+          >
+            {perfMut.isPending ? '분석 중...' : '수동 실행'}
+          </button>
+        </div>
+
+        {perfData && !perfData.status ? (
+          <div className="space-y-3">
+            {/* 롤링 윈도우 */}
+            <div className="grid grid-cols-3 gap-2">
+              {['7d', '14d', '30d'].map((key) => {
+                const w = perfData.windows?.[key]
+                if (!w || w.total_trades === 0) return (
+                  <div key={key} className="bg-gray-900 rounded-lg p-2 text-center">
+                    <div className="text-gray-500 text-xs">{key}</div>
+                    <div className="text-gray-600 text-xs">데이터 없음</div>
+                  </div>
+                )
+                const pfColor = w.profit_factor >= 1.5 ? 'text-green-400' : w.profit_factor >= 1.0 ? 'text-yellow-400' : 'text-red-400'
+                return (
+                  <div key={key} className="bg-gray-900 rounded-lg p-2">
+                    <div className="text-gray-400 text-xs font-medium mb-1">{key}</div>
+                    <div className="text-white text-sm font-bold">{w.total_trades}건</div>
+                    <div className={`text-xs ${w.win_rate >= 0.5 ? 'text-green-400' : 'text-red-400'}`}>
+                      승률 {(w.win_rate * 100).toFixed(0)}%
+                    </div>
+                    <div className={`text-xs ${pfColor}`}>PF {w.profit_factor.toFixed(2)}</div>
+                    <div className={`text-xs ${w.total_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {fmt(w.total_pnl)}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* 성과 저하 경고 */}
+            {perfData.degradation_alerts?.length > 0 && (
+              <div className="space-y-1">
+                {perfData.degradation_alerts.map((alert: string, i: number) => (
+                  <div key={i} className="bg-red-900/30 border border-red-800 rounded px-2 py-1 text-red-300 text-xs">
+                    {alert}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* 인사이트 + 추천 */}
+            {(perfData.insights?.length > 0 || perfData.recommendations?.length > 0) && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="bg-gray-900 rounded-lg p-2">
+                  <div className="text-blue-400 text-xs font-medium mb-1">인사이트</div>
+                  <ul className="space-y-1">
+                    {perfData.insights?.map((s: string, i: number) => (
+                      <li key={i} className="text-gray-300 text-xs leading-relaxed">• {renderMd(s)}</li>
+                    ))}
+                  </ul>
+                </div>
+                <div className="bg-gray-900 rounded-lg p-2">
+                  <div className="text-yellow-400 text-xs font-medium mb-1">추천</div>
+                  <ul className="space-y-1">
+                    {perfData.recommendations?.map((s: string, i: number) => (
+                      <li key={i} className="text-gray-300 text-xs leading-relaxed">• {renderMd(s)}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="text-center py-4 text-gray-500 text-xs">
+            매일 21:30 자동 분석 / 수동 실행 가능
+          </div>
+        )}
+      </div>
+
+      {/* Strategy Advisor */}
+      <div className="bg-gray-800 rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-white text-sm font-semibold">전략 어드바이저</h3>
+          <button
+            onClick={() => adviceMut.mutate()}
+            disabled={adviceMut.isPending}
+            className="text-xs px-2 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600 disabled:opacity-50"
+          >
+            {adviceMut.isPending ? '분석 중...' : '수동 실행'}
+          </button>
+        </div>
+
+        {adviceData && !adviceData.status ? (
+          <div className="space-y-3">
+            {/* 종합 분석 */}
+            {adviceData.analysis_summary && (
+              <div className="bg-gray-900 rounded-lg p-2">
+                <div className="text-purple-400 text-xs font-medium mb-1">종합 분석</div>
+                <p className="text-gray-300 text-xs leading-relaxed">{renderMd(adviceData.analysis_summary)}</p>
+              </div>
+            )}
+
+            {/* 청산 사유 분석 */}
+            {adviceData.exit_analysis && Object.keys(adviceData.exit_analysis).length > 0 && (
+              <div className="bg-gray-900 rounded-lg p-2">
+                <div className="text-cyan-400 text-xs font-medium mb-1">청산 사유 (90일)</div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
+                  {Object.entries(adviceData.exit_analysis).map(([type, stats]: [string, any]) => {
+                    const label = { stop_loss: '손절', take_profit: '익절', trailing: '트레일링', signal: '시그널', other: '기타' }[type] || type
+                    return (
+                      <div key={type} className="text-xs text-gray-400">
+                        {label}: <span className="text-white">{stats.count}회</span>{' '}
+                        <span className={stats.win_rate >= 0.5 ? 'text-green-400' : 'text-red-400'}>
+                          ({(stats.win_rate * 100).toFixed(0)}%)
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* 파라미터 민감도 */}
+            {adviceData.param_sensitivities?.length > 0 && (
+              <div className="bg-gray-900 rounded-lg p-2">
+                <div className="text-orange-400 text-xs font-medium mb-1">파라미터 분석</div>
+                {adviceData.param_sensitivities.map((ps: any, i: number) => (
+                  <div key={i} className="text-gray-300 text-xs mb-1">• {ps.improvement}</div>
+                ))}
+              </div>
+            )}
+
+            {/* 제안 */}
+            {adviceData.suggestions?.length > 0 && (
+              <div className="bg-gray-900 rounded-lg p-2">
+                <div className="text-yellow-400 text-xs font-medium mb-1">제안</div>
+                <ul className="space-y-1">
+                  {adviceData.suggestions.map((s: string, i: number) => (
+                    <li key={i} className="text-gray-300 text-xs leading-relaxed">• {renderMd(s)}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="text-center py-4 text-gray-500 text-xs">
+            매주 일요일 22:00 자동 분석 / 수동 실행 가능
           </div>
         )}
       </div>

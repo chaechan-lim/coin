@@ -309,3 +309,98 @@ async def get_risk_history(
         )
         for l in logs
     ]
+
+
+# ── Performance Analytics ─────────────────────────────────────
+
+@router.get("/agents/performance/latest")
+async def get_performance_latest(
+    exchange: str = Query("bithumb"),
+    session: AsyncSession = Depends(get_db),
+):
+    coord = _get_coordinator(exchange)
+    if coord and coord.last_performance_report:
+        r = coord.last_performance_report
+        return {
+            "exchange": r.exchange,
+            "generated_at": r.generated_at,
+            "windows": {k: vars(v) for k, v in r.windows.items()},
+            "by_strategy": {k: vars(v) for k, v in r.by_strategy.items()},
+            "by_symbol": {k: vars(v) for k, v in r.by_symbol.items()},
+            "degradation_alerts": r.degradation_alerts,
+            "insights": r.insights,
+            "recommendations": r.recommendations,
+        }
+    # DB fallback
+    result = await session.execute(
+        select(AgentAnalysisLog)
+        .where(AgentAnalysisLog.agent_name == "performance_analytics", AgentAnalysisLog.exchange == exchange)
+        .order_by(desc(AgentAnalysisLog.analyzed_at))
+        .limit(1)
+    )
+    log = result.scalar_one_or_none()
+    if log:
+        return {"generated_at": log.analyzed_at.isoformat(), **(log.result or {})}
+    return {"status": "no_data"}
+
+
+@router.post("/agents/performance/run")
+async def trigger_performance_analysis(exchange: str = Query("bithumb")):
+    coord = _get_coordinator(exchange)
+    if coord:
+        report = await coord.run_performance_analysis()
+        if report:
+            w30 = report.windows.get("30d")
+            return {
+                "status": "completed",
+                "trades_30d": w30.total_trades if w30 else 0,
+                "degradation_alerts": report.degradation_alerts,
+                "insights": report.insights,
+            }
+    return {"status": "error", "message": "coordinator not found"}
+
+
+# ── Strategy Advisor ──────────────────────────────────────────
+
+@router.get("/agents/strategy-advice/latest")
+async def get_strategy_advice_latest(
+    exchange: str = Query("bithumb"),
+    session: AsyncSession = Depends(get_db),
+):
+    coord = _get_coordinator(exchange)
+    if coord and coord.last_strategy_advice:
+        a = coord.last_strategy_advice
+        return {
+            "exchange": a.exchange,
+            "generated_at": a.generated_at,
+            "exit_analysis": a.exit_analysis,
+            "param_sensitivities": [vars(p) for p in a.param_sensitivities],
+            "direction_analysis": a.direction_analysis,
+            "analysis_summary": a.analysis_summary,
+            "suggestions": a.suggestions,
+        }
+    # DB fallback
+    result = await session.execute(
+        select(AgentAnalysisLog)
+        .where(AgentAnalysisLog.agent_name == "strategy_advisor", AgentAnalysisLog.exchange == exchange)
+        .order_by(desc(AgentAnalysisLog.analyzed_at))
+        .limit(1)
+    )
+    log = result.scalar_one_or_none()
+    if log:
+        return {"generated_at": log.analyzed_at.isoformat(), **(log.result or {})}
+    return {"status": "no_data"}
+
+
+@router.post("/agents/strategy-advice/run")
+async def trigger_strategy_advice(exchange: str = Query("bithumb")):
+    coord = _get_coordinator(exchange)
+    if coord:
+        advice = await coord.run_strategy_advice()
+        if advice:
+            return {
+                "status": "completed",
+                "analysis_summary": advice.analysis_summary,
+                "suggestions": advice.suggestions,
+            }
+    return {"status": "error", "message": "coordinator not found"}

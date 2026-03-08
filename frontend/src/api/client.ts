@@ -115,6 +115,20 @@ export const triggerTradeReview = (exchange: ExchangeName = 'bithumb') =>
 export const getTradeReviewHistory = (limit = 50, exchange: ExchangeName = 'bithumb') =>
   api.get<AgentLog[]>('/agents/trade-review/history', { params: { limit, exchange } }).then((r) => r.data)
 
+// ── Performance Analytics ────────────────────────────────────
+export const getPerformanceAnalytics = (exchange: ExchangeName = 'bithumb') =>
+  api.get('/agents/performance/latest', { params: { exchange } }).then((r) => r.data)
+
+export const triggerPerformanceAnalysis = (exchange: ExchangeName = 'bithumb') =>
+  api.post('/agents/performance/run', null, { params: { exchange } }).then((r) => r.data)
+
+// ── Strategy Advisor ────────────────────────────────────────
+export const getStrategyAdvice = (exchange: ExchangeName = 'bithumb') =>
+  api.get('/agents/strategy-advice/latest', { params: { exchange } }).then((r) => r.data)
+
+export const triggerStrategyAdvice = (exchange: ExchangeName = 'bithumb') =>
+  api.post('/agents/strategy-advice/run', null, { params: { exchange } }).then((r) => r.data)
+
 // ── Server Events ───────────────────────────────────────────
 export const getServerEvents = (params?: {
   page?: number

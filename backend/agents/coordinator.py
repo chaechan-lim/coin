@@ -8,6 +8,8 @@ from core.event_bus import emit_event
 from agents.market_analysis import MarketAnalysisAgent, MarketAnalysis, SPOT_WEIGHT_PROFILES, FUTURES_WEIGHT_PROFILES
 from agents.risk_management import RiskManagementAgent, RiskAlert
 from agents.trade_review import TradeReviewAgent, TradeReview
+from agents.performance_analytics import PerformanceAnalyticsAgent, PerformanceReport
+from agents.strategy_advisor import StrategyAdvisorAgent, StrategyAdvice
 from strategies.combiner import SignalCombiner
 from db.session import get_session_factory
 
@@ -28,17 +30,23 @@ class AgentCoordinator:
         combiner: SignalCombiner,
         trade_review_agent: TradeReviewAgent | None = None,
         exchange_name: str = "bithumb",
+        performance_agent: PerformanceAnalyticsAgent | None = None,
+        strategy_advisor: StrategyAdvisorAgent | None = None,
     ):
         self._market_agent = market_agent
         self._risk_agent = risk_agent
         self._combiner = combiner
         self._trade_review_agent = trade_review_agent
+        self._performance_agent = performance_agent
+        self._strategy_advisor = strategy_advisor
         self._exchange_name = exchange_name
         self._engine = None  # Set after engine creation
         self._weight_profiles = FUTURES_WEIGHT_PROFILES if "futures" in exchange_name else SPOT_WEIGHT_PROFILES
         self._last_market_analysis: MarketAnalysis | None = None
         self._last_risk_alerts: list[RiskAlert] = []
         self._last_trade_review: TradeReview | None = None
+        self._last_performance_report: PerformanceReport | None = None
+        self._last_strategy_advice: StrategyAdvice | None = None
 
     def set_engine(self, engine) -> None:
         """Set reference to trading engine for control operations."""
@@ -237,6 +245,85 @@ class AgentCoordinator:
             logger.error("trade_review_failed", error=str(e))
             return self._last_trade_review
 
+    async def run_performance_analysis(self) -> PerformanceReport | None:
+        """일일 성과 분석 실행."""
+        if not self._performance_agent:
+            return None
+        try:
+            session_factory = get_session_factory()
+            async with session_factory() as session:
+                report = await self._performance_agent.analyze(session)
+                self._last_performance_report = report
+
+                log = AgentAnalysisLog(
+                    exchange=self._exchange_name,
+                    agent_name="performance_analytics",
+                    analysis_type="performance_report",
+                    result={
+                        "windows": {k: vars(v) for k, v in report.windows.items()},
+                        "by_strategy": {k: vars(v) for k, v in report.by_strategy.items()},
+                        "by_symbol": {k: vars(v) for k, v in report.by_symbol.items()},
+                        "degradation_alerts": report.degradation_alerts,
+                        "insights": report.insights,
+                        "recommendations": report.recommendations,
+                    },
+                )
+                session.add(log)
+                await session.commit()
+
+                alert_str = f", 경고 {len(report.degradation_alerts)}건" if report.degradation_alerts else ""
+                w30 = report.windows.get("30d")
+                pnl_str = ""
+                if w30 and w30.total_trades > 0:
+                    pnl_str = f", 30일 PF {w30.profit_factor:.2f}"
+                await emit_event(
+                    "info", "strategy",
+                    f"성과 분석 완료{pnl_str}{alert_str}",
+                    metadata={"exchange": self._exchange_name},
+                )
+                return report
+        except Exception as e:
+            logger.error("performance_analysis_failed", error=str(e))
+            return self._last_performance_report
+
+    async def run_strategy_advice(self) -> StrategyAdvice | None:
+        """전략 어드바이저 실행."""
+        if not self._strategy_advisor:
+            return None
+        try:
+            session_factory = get_session_factory()
+            async with session_factory() as session:
+                advice = await self._strategy_advisor.advise(
+                    session, self._last_performance_report
+                )
+                self._last_strategy_advice = advice
+
+                log = AgentAnalysisLog(
+                    exchange=self._exchange_name,
+                    agent_name="strategy_advisor",
+                    analysis_type="strategy_advice",
+                    result={
+                        "exit_analysis": advice.exit_analysis,
+                        "param_sensitivities": [vars(p) for p in advice.param_sensitivities],
+                        "direction_analysis": advice.direction_analysis,
+                        "analysis_summary": advice.analysis_summary,
+                        "suggestions": advice.suggestions,
+                    },
+                )
+                session.add(log)
+                await session.commit()
+
+                n_suggestions = len(advice.suggestions)
+                await emit_event(
+                    "info", "strategy",
+                    f"전략 어드바이저: {n_suggestions}개 제안",
+                    metadata={"exchange": self._exchange_name},
+                )
+                return advice
+        except Exception as e:
+            logger.error("strategy_advice_failed", error=str(e))
+            return self._last_strategy_advice
+
     @property
     def last_market_analysis(self) -> MarketAnalysis | None:
         return self._last_market_analysis
@@ -248,3 +335,11 @@ class AgentCoordinator:
     @property
     def last_trade_review(self) -> TradeReview | None:
         return self._last_trade_review
+
+    @property
+    def last_performance_report(self) -> PerformanceReport | None:
+        return self._last_performance_report
+
+    @property
+    def last_strategy_advice(self) -> StrategyAdvice | None:
+        return self._last_strategy_advice

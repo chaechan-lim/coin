@@ -222,7 +222,7 @@ export function DailyPnLStats({ exchange = 'bithumb' }: { exchange?: ExchangeNam
                       {r.daily_pnl_pct >= 0 ? '+' : ''}{r.daily_pnl_pct.toFixed(2)}%
                     </td>
                     <td className="py-1 text-right text-gray-400">
-                      {r.trade_count} ({r.win_count}W/{r.loss_count}L)
+                      {r.win_count + r.loss_count} ({r.win_count}W/{r.loss_count}L)
                     </td>
                     <td className="py-1 text-right text-gray-500">
                       {isUsdt ? r.total_fees.toFixed(2) : r.total_fees.toLocaleString()}

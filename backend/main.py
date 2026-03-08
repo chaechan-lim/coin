@@ -155,12 +155,18 @@ async def lifespan(app: FastAPI):
 
     # ── 4. 빗썸 AI 에이전트 ───────────────────────────────────
     from agents.trade_review import TradeReviewAgent
+    from agents.performance_analytics import PerformanceAnalyticsAgent
+    from agents.strategy_advisor import StrategyAdvisorAgent
     market_agent = MarketAnalysisAgent(market_data, exchange_name="bithumb")
     risk_agent = RiskManagementAgent(config.risk, market_data, exchange_name="bithumb")
     trade_review_agent = TradeReviewAgent(review_window_hours=24, exchange_name="bithumb")
+    perf_agent = PerformanceAnalyticsAgent(exchange_name="bithumb")
+    strategy_advisor = StrategyAdvisorAgent(exchange_name="bithumb")
     coordinator = AgentCoordinator(
         market_agent, risk_agent, combiner, trade_review_agent,
         exchange_name="bithumb",
+        performance_agent=perf_agent,
+        strategy_advisor=strategy_advisor,
     )
 
     # ── 5. 빗썸 트레이딩 엔진 ─────────────────────────────────
@@ -271,9 +277,13 @@ async def lifespan(app: FastAPI):
             binance_market_agent = MarketAnalysisAgent(binance_market_data, market_symbol="BTC/USDT", exchange_name="binance_futures")
             binance_risk_agent = RiskManagementAgent(config.risk, binance_market_data, exchange_name="binance_futures")
             binance_trade_review = TradeReviewAgent(review_window_hours=24, exchange_name="binance_futures")
+            binance_perf_agent = PerformanceAnalyticsAgent(exchange_name="binance_futures")
+            binance_strategy_advisor = StrategyAdvisorAgent(exchange_name="binance_futures")
             binance_coordinator = AgentCoordinator(
                 binance_market_agent, binance_risk_agent, binance_combiner, binance_trade_review,
                 exchange_name="binance_futures",
+                performance_agent=binance_perf_agent,
+                strategy_advisor=binance_strategy_advisor,
             )
 
             binance_engine = BinanceFuturesEngine(
@@ -426,9 +436,13 @@ async def lifespan(app: FastAPI):
             spot_market_agent = MarketAnalysisAgent(spot_market_data, market_symbol="BTC/USDT", exchange_name="binance_spot")
             spot_risk_agent = RiskManagementAgent(config.risk, spot_market_data, exchange_name="binance_spot")
             spot_trade_review = TradeReviewAgent(review_window_hours=24, exchange_name="binance_spot")
+            spot_perf_agent = PerformanceAnalyticsAgent(exchange_name="binance_spot")
+            spot_strategy_advisor = StrategyAdvisorAgent(exchange_name="binance_spot")
             spot_coordinator = AgentCoordinator(
                 spot_market_agent, spot_risk_agent, spot_combiner, spot_trade_review,
                 exchange_name="binance_spot",
+                performance_agent=spot_perf_agent,
+                strategy_advisor=spot_strategy_advisor,
             )
 
             spot_engine = TradingEngine(

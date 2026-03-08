@@ -1114,7 +1114,7 @@ class PortfolioManager:
         )
         trade_count, buy_count, sell_count, total_fees = order_stats.one()
 
-        # 3) 실현 손익 + 승/패 카운트 (매도 주문 기준)
+        # 3) 실현 손익 + 승/패 카운트 (매도 주문의 realized_pnl 기준)
         sell_orders_result = await session.execute(
             select(Order).where(
                 Order.exchange == exchange_name,
@@ -1130,8 +1130,14 @@ class PortfolioManager:
         win_count = 0
         loss_count = 0
         for sell_order in sell_orders:
-            if sell_order.executed_price and sell_order.executed_quantity:
-                # 해당 심볼의 매수 평균가 조회
+            if sell_order.realized_pnl is not None:
+                realized_pnl += sell_order.realized_pnl
+                if sell_order.realized_pnl >= 0:
+                    win_count += 1
+                else:
+                    loss_count += 1
+            elif sell_order.executed_price and sell_order.executed_quantity:
+                # fallback: realized_pnl 없으면 Position에서 계산
                 pos_result = await session.execute(
                     select(Position.average_buy_price).where(
                         Position.symbol == sell_order.symbol,
@@ -1141,7 +1147,6 @@ class PortfolioManager:
                 avg_buy = pos_result.scalar_one_or_none()
                 if avg_buy and avg_buy > 0:
                     pnl = (sell_order.executed_price - avg_buy) * sell_order.executed_quantity
-                    # 선물 숏: 방향 반전
                     if sell_order.direction == "short":
                         pnl = -pnl
                     pnl -= sell_order.fee or 0
