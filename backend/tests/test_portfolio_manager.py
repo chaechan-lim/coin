@@ -858,7 +858,7 @@ async def test_save_tracker_to_db(session):
 
     tracker = PositionTracker(
         entry_price=50_000_000,
-        highest_price=52_000_000,
+        extreme_price=52_000_000,
         stop_loss_pct=6.5,
         take_profit_pct=12.0,
         trailing_activation_pct=4.0,
@@ -901,7 +901,7 @@ async def test_tracker_restore_from_db(session):
     # Simulate tracker restoration logic (from _check_stop_conditions)
     tracker = PositionTracker(
         entry_price=pos.average_buy_price,
-        highest_price=pos.highest_price or pos.average_buy_price,
+        extreme_price=pos.highest_price or pos.average_buy_price,
         stop_loss_pct=pos.stop_loss_pct,
         take_profit_pct=pos.take_profit_pct or 10.0,
         trailing_activation_pct=pos.trailing_activation_pct or 3.0,
@@ -916,7 +916,7 @@ async def test_tracker_restore_from_db(session):
     assert tracker.trailing_activation_pct == pytest.approx(5.0)
     assert tracker.trailing_stop_pct == pytest.approx(4.0)
     assert tracker.trailing_active is True
-    assert tracker.highest_price == pytest.approx(4_500_000)
+    assert tracker.extreme_price == pytest.approx(4_500_000)
 
 
 @pytest.mark.asyncio
@@ -2060,3 +2060,62 @@ async def test_spot_sell_unchanged_notional_based(session):
     )
     # 현물: proceeds = 55000 - 137.5 = 54862.5
     assert pm.cash_balance == pytest.approx(450000 + 54862.5, abs=1)
+
+
+# ── 일일 매수 카운터 DB 복원 테스트 ───────────────────────
+
+@pytest.mark.asyncio
+async def test_daily_buy_count_restored_from_orders(session):
+    """재시작 시 오늘 Order로부터 일일 매수 카운터가 복원되는지 확인."""
+    from unittest.mock import MagicMock, patch
+    from engine.trading_engine import TradingEngine
+
+    # 오늘 buy 주문 3개 생성
+    now = datetime.now(timezone.utc)
+    for i, sym in enumerate(["BTC/KRW", "BTC/KRW", "ETH/KRW"]):
+        order = Order(
+            exchange="bithumb", symbol=sym, side="buy",
+            order_type="market", status="filled",
+            requested_price=50_000_000,
+            executed_price=50_000_000,
+            requested_quantity=0.001, executed_quantity=0.001,
+            strategy_name="test",
+            created_at=now - timedelta(minutes=i),
+        )
+        session.add(order)
+    await session.flush()
+
+    # 엔진 생성 (최소 mock)
+    config = MagicMock()
+    config.trading.mode = "paper"
+    config.trading.evaluation_interval_sec = 300
+    config.trading.tracked_coins = ["BTC/KRW"]
+    config.trading.rotation_enabled = False
+    config.trading.min_combined_confidence = 0.5
+    config.trading.daily_buy_limit = 20
+    config.trading.max_daily_coin_buys = 3
+    config.trading.min_trade_interval_sec = 3600
+    config.risk.max_trade_size_pct = 0.2
+
+    engine = TradingEngine(
+        config=config,
+        exchange=MagicMock(),
+        market_data=MagicMock(),
+        order_manager=MagicMock(),
+        portfolio_manager=MagicMock(),
+        combiner=MagicMock(),
+    )
+
+    # session fixture는 이미 모든 테이블이 생성된 상태
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def mock_session_ctx():
+        yield session
+
+    with patch("db.session.get_session_factory", return_value=mock_session_ctx):
+        await engine._restore_trade_timestamps()
+
+    assert engine._daily_buy_count == 3
+    assert engine._daily_coin_buy_count.get("BTC/KRW") == 2
+    assert engine._daily_coin_buy_count.get("ETH/KRW") == 1

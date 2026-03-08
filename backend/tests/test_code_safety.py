@@ -377,17 +377,17 @@ class TestPositionTrackerDefaults:
     """PositionTracker가 올바른 기본값을 갖는지 검증."""
 
     def test_default_sl_tp(self):
-        tracker = PositionTracker(entry_price=100, highest_price=100)
+        tracker = PositionTracker(entry_price=100, extreme_price=100)
         assert tracker.stop_loss_pct == 3.0
         assert tracker.take_profit_pct == 8.0
         assert tracker.trailing_activation_pct == 5.0
         assert tracker.trailing_stop_pct == 4.0
         assert tracker.trailing_active is False
-        assert tracker.highest_price == 100
+        assert tracker.extreme_price == 100
 
-    def test_highest_price_tracks_entry(self):
-        tracker = PositionTracker(entry_price=50000, highest_price=60000)
-        assert tracker.highest_price == 60000
+    def test_extreme_price_tracks_entry(self):
+        tracker = PositionTracker(entry_price=50000, extreme_price=60000)
+        assert tracker.extreme_price == 60000
 
 
 # ── 11. 거래소별 최소 주문금액 검증 ────────────────────────────

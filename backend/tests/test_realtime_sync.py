@@ -148,7 +148,7 @@ class TestFastStopCheckLoop:
     async def test_fast_stop_checks_tracked_positions(self, spot_engine, mock_market_data):
         """포지션 트래커가 있으면 가격 조회 후 SL/TP 체크."""
         spot_engine._position_trackers = {
-            "BTC/KRW": PositionTracker(entry_price=50_000_000, highest_price=51_000_000),
+            "BTC/KRW": PositionTracker(entry_price=50_000_000, extreme_price=51_000_000),
         }
         spot_engine._is_running = True
 
@@ -181,7 +181,7 @@ class TestFastStopCheckLoop:
     async def test_fast_stop_handles_price_error_gracefully(self, spot_engine, mock_market_data):
         """가격 조회 실패 시 에러 전파 안 함."""
         spot_engine._position_trackers = {
-            "BTC/KRW": PositionTracker(entry_price=50_000_000, highest_price=51_000_000),
+            "BTC/KRW": PositionTracker(entry_price=50_000_000, extreme_price=51_000_000),
         }
         spot_engine._is_running = True
         mock_market_data.get_current_price = AsyncMock(side_effect=Exception("API error"))
@@ -729,7 +729,7 @@ class TestPositionTrackerState:
 
     def test_tracker_defaults(self):
         """기본값 확인."""
-        t = PositionTracker(entry_price=100, highest_price=100)
+        t = PositionTracker(entry_price=100, extreme_price=100)
         assert t.stop_loss_pct == 3.0
         assert t.take_profit_pct == 8.0
         assert t.trailing_activation_pct == 5.0
@@ -742,7 +742,7 @@ class TestPositionTrackerState:
         """서지 코인 트래커 설정."""
         t = PositionTracker(
             entry_price=100,
-            highest_price=100,
+            extreme_price=100,
             stop_loss_pct=4.0,
             take_profit_pct=8.0,
             trailing_activation_pct=1.5,
@@ -756,7 +756,7 @@ class TestPositionTrackerState:
 
     def test_position_trackers_dict_operations(self, spot_engine):
         """트래커 딕셔너리 추가/삭제."""
-        t = PositionTracker(entry_price=100, highest_price=100)
+        t = PositionTracker(entry_price=100, extreme_price=100)
         spot_engine._position_trackers["TEST/KRW"] = t
         assert "TEST/KRW" in spot_engine._position_trackers
 
@@ -935,7 +935,7 @@ class TestFastStopCheckSignature:
     async def test_fast_stop_calls_check_stop_with_correct_args(self, spot_engine, mock_market_data):
         """_fast_stop_check_loop가 _check_stop_conditions를 올바른 인자로 호출."""
         spot_engine._position_trackers = {
-            "BTC/KRW": PositionTracker(entry_price=50_000_000, highest_price=51_000_000),
+            "BTC/KRW": PositionTracker(entry_price=50_000_000, extreme_price=51_000_000),
         }
         spot_engine._is_running = True
 
