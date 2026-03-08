@@ -381,11 +381,12 @@ async def _handle_market_analysis(ctx: ToolContext, input_data: dict) -> dict:
         analysis = coord.last_market_analysis
         if analysis:
             result[ex] = {
-                "market_state": analysis.market_state,
-                "trend": analysis.trend,
-                "volatility": analysis.volatility,
-                "summary": analysis.summary,
-                "analyzed_at": analysis.analyzed_at.isoformat() if hasattr(analysis, 'analyzed_at') and analysis.analyzed_at else None,
+                "market_state": analysis.state.value if hasattr(analysis.state, 'value') else str(analysis.state),
+                "confidence": analysis.confidence,
+                "volatility": analysis.volatility_level,
+                "reasoning": analysis.reasoning,
+                "recommended_weights": analysis.recommended_weights,
+                "indicators": analysis.indicators,
             }
         else:
             # DB fallback
