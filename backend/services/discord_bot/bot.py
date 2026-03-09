@@ -48,9 +48,10 @@ SYSTEM_PROMPT = """\
 
 대화 맥락:
 - 이전 대화 내역이 함께 전달됩니다. 후속 질문에는 이전 맥락을 적극 활용하세요.
-- "그거", "아까", "위에서", "자세히" 등의 표현은 이전 대화를 참조합니다.
+- "그거", "아까", "위에서", "자세히", "이거 뭐야" 등의 표현은 이전 대화를 참조합니다.
 - 이전에 조회한 데이터가 있으면 불필요하게 다시 조회하지 마세요.
 - 대화 흐름을 자연스럽게 이어가며, 이전 질문과 연결된 답변을 하세요.
+- "[시스템 알림 발송]"으로 시작하는 메시지는 시스템이 자동 발송한 알림입니다. 사용자가 알림에 대해 질문하면 해당 내용을 기반으로 상세히 설명하세요.
 
 메모리:
 - 사용자가 '기억해', '메모해', '잊지마' 등 요청하면 save_memory 도구로 저장하세요.
@@ -348,6 +349,10 @@ class TradingBot:
             channel = self._client.get_channel(self._alert_channel_id)
             if channel:
                 await channel.send(msg[:MAX_MESSAGE])
+                # 알림을 대화 컨텍스트에 저장 — 후속 질문 대응
+                self._save_context(self._alert_channel_id, [
+                    {"role": "assistant", "content": f"[시스템 알림 발송] {msg}"},
+                ])
         except Exception as e:
             logger.debug("bot_alert_send_error", error=str(e))
 

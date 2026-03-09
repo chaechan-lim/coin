@@ -505,6 +505,54 @@ async def test_send_alert_ignored_for_non_target_events(bot):
 
 
 @pytest.mark.asyncio
+async def test_send_alert_saved_to_context(bot):
+    """알림 발송 시 대화 컨텍스트에 저장."""
+    bot._alert_channel_id = 12345
+    bot._client.is_closed = MagicMock(return_value=False)
+    bot._client.is_ready = MagicMock(return_value=True)
+    mock_channel = AsyncMock()
+    bot._client.get_channel = MagicMock(return_value=mock_channel)
+
+    await bot.send_alert("warning", "risk", "MDD 25% 도달", "현재 드로다운 주의")
+
+    # 컨텍스트에 알림 저장됨
+    ctx = bot._get_context(12345)
+    assert len(ctx) == 1
+    assert ctx[0]["role"] == "assistant"
+    assert "[시스템 알림 발송]" in ctx[0]["content"]
+    assert "MDD 25% 도달" in ctx[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_alert_context_available_for_followup(bot):
+    """알림 후 사용자 질문 시 컨텍스트에 알림 내용 포함."""
+    bot._alert_channel_id = 12345
+    bot._client.is_closed = MagicMock(return_value=False)
+    bot._client.is_ready = MagicMock(return_value=True)
+    mock_channel = AsyncMock()
+    bot._client.get_channel = MagicMock(return_value=mock_channel)
+
+    # 알림 발송
+    await bot.send_alert("warning", "health", "Cash 불일치 감지")
+
+    # 사용자 후속 질문
+    bot._llm.generate_with_tools = AsyncMock(
+        return_value=LLMResponse(
+            text="Cash 불일치는 내부 장부와 거래소 잔고 차이입니다.",
+            stop_reason="end_turn",
+            model="claude-haiku-4-5-20251001",
+        )
+    )
+    await bot._process_message("이게 뭐야?", user_id=123, channel_id=12345)
+
+    # LLM에 전달된 messages에 알림 내용 포함
+    call_args = bot._llm.generate_with_tools.call_args
+    messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
+    # 알림(assistant) + 질문(user) = 최소 2개
+    assert any("[시스템 알림 발송]" in m.get("content", "") for m in messages if isinstance(m.get("content"), str))
+
+
+@pytest.mark.asyncio
 async def test_send_alert_no_channel(bot):
     """채널 미설정 시 무시."""
     bot._alert_channel_id = 0
