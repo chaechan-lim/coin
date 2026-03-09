@@ -836,6 +836,106 @@ async def test_sync_clears_position_not_on_exchange(session):
     pos = result.scalar_one()
     assert pos.quantity == 0
 
+    # _cleared_positions에 기록됨
+    assert len(pm._cleared_positions) == 1
+    cp = pm._cleared_positions[0]
+    assert cp["symbol"] == "MOCA/KRW"
+    assert cp["direction"] == "long"
+    assert cp["invested"] == 1007
+
+
+@pytest.mark.asyncio
+async def test_sync_cleared_position_futures_liquidation(session):
+    """선물 포지션이 거래소에서 사라지면 _cleared_positions에 기록."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"ETH/USDT": 1300.0}),
+        initial_balance_krw=500,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # DB에 ETH/USDT long 포지션 (entry 2000, 현재가 1300, lev 3 → -105% = 강제청산)
+    session.add(Position(
+        exchange="binance_futures", symbol="ETH/USDT",
+        quantity=0.1, average_buy_price=2000.0,
+        total_invested=66.7, is_paper=False,
+        direction="long", leverage=3, margin_used=66.7,
+    ))
+    await session.flush()
+
+    # 거래소: USDT만 있고 ETH 포지션 없음 (청산됨)
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=200, used=0, total=200),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["ETH/USDT"])
+    await session.flush()
+
+    # DB 포지션 0으로 정리됨
+    result = await session.execute(
+        select(Position).where(Position.symbol == "ETH/USDT", Position.exchange == "binance_futures")
+    )
+    pos = result.scalar_one()
+    assert pos.quantity == 0
+    assert pos.last_sell_at is not None
+
+    # _cleared_positions에 기록됨 (큰 손실 → 강제청산 추정)
+    assert len(pm._cleared_positions) == 1
+    cp = pm._cleared_positions[0]
+    assert cp["symbol"] == "ETH/USDT"
+    assert cp["direction"] == "long"
+    assert cp["leverage"] == 3
+    assert "청산" in cp["reason"]
+
+
+@pytest.mark.asyncio
+async def test_downtime_stops_check(session):
+    """_check_downtime_stops: 시작 시 보유 포지션의 SL/TP 즉시 체크."""
+    from engine.trading_engine import TradingEngine
+    from unittest.mock import patch
+    from contextlib import asynccontextmanager
+
+    # 엔진 최소 셋업
+    engine = TradingEngine.__new__(TradingEngine)
+    engine._exchange_name = "binance_spot"
+    engine._is_running = True
+    engine._position_trackers = {}
+
+    # mock _check_stop_conditions
+    checked_symbols = []
+
+    async def mock_check(sess, sym, pos):
+        checked_symbols.append(sym)
+        return False
+
+    engine._check_stop_conditions = mock_check
+
+    # DB에 보유 포지션 2개 추가
+    session.add(Position(
+        exchange="binance_spot", symbol="BTC/USDT",
+        quantity=0.01, average_buy_price=60000, total_invested=600, is_paper=False,
+    ))
+    session.add(Position(
+        exchange="binance_spot", symbol="ETH/USDT",
+        quantity=0.1, average_buy_price=2000, total_invested=200, is_paper=False,
+    ))
+    await session.flush()
+
+    @asynccontextmanager
+    async def mock_session_ctx():
+        yield session
+
+    with patch("db.session.get_session_factory", return_value=mock_session_ctx):
+        await engine._check_downtime_stops()
+
+    assert "BTC/USDT" in checked_symbols
+    assert "ETH/USDT" in checked_symbols
+
 
 # ── PositionTracker DB Persistence Tests ──
 

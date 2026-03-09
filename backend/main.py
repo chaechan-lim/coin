@@ -657,6 +657,32 @@ async def lifespan(app: FastAPI):
     # 현재 포지션 요약
     positions_summary = await _build_positions_summary(engine_registry)
 
+    # ── 다운타임 포지션 감사 ────────────────────────────────
+    cleared_all = []
+    for ex_name in engine_registry.available_exchanges:
+        pm = engine_registry.get_portfolio_manager(ex_name)
+        if pm and pm._cleared_positions:
+            for cp in pm._cleared_positions:
+                cp["exchange"] = ex_name
+            cleared_all.extend(pm._cleared_positions)
+            pm._cleared_positions.clear()
+    if cleared_all:
+        lines = []
+        for cp in cleared_all:
+            lines.append(
+                f"  {cp['exchange']} {cp['symbol']} "
+                f"({cp['direction']}, {cp['leverage']}x, 투자={cp['invested']:.2f}): "
+                f"{cp['reason']}"
+            )
+        detail = "\n".join(lines)
+        logger.warning("downtime_positions_cleared", count=len(cleared_all), positions=cleared_all)
+        await emit_event(
+            "warning", "system",
+            f"다운타임 중 {len(cleared_all)}개 포지션 종료 감지",
+            detail=detail,
+            metadata={"cleared_positions": cleared_all},
+        )
+
     logger.info("startup_complete")
     bithumb_active = config.exchange.enabled and config.trading.mode == "live" and spot_coins
     startup_parts = []

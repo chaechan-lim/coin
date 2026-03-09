@@ -426,6 +426,49 @@ class TradingEngine:
 
     _FAST_SL_INTERVAL = 30  # 현물 빠른 SL/TP 체크 간격 (초)
 
+    async def _check_downtime_stops(self) -> None:
+        """서버 시작 직후 다운타임 중 SL/TP 초과 포지션 즉시 체크 및 처리."""
+        from db.session import get_session_factory
+        try:
+            sf = get_session_factory()
+            async with sf() as session:
+                result = await session.execute(
+                    select(Position).where(
+                        Position.quantity > 0,
+                        Position.exchange == self._exchange_name,
+                    )
+                )
+                positions = list(result.scalars().all())
+                if not positions:
+                    return
+
+                triggered = 0
+                for pos in positions:
+                    try:
+                        sold = await self._check_stop_conditions(session, pos.symbol, pos)
+                        if sold:
+                            triggered += 1
+                            logger.warning("downtime_stop_triggered",
+                                         symbol=pos.symbol, exchange=self._exchange_name)
+                        await session.commit()
+                    except Exception as e:
+                        logger.debug("downtime_stop_check_error",
+                                   symbol=pos.symbol, error=str(e))
+
+                if triggered:
+                    logger.warning("downtime_stops_executed",
+                                 exchange=self._exchange_name, count=triggered)
+                    await emit_event(
+                        "warning", "engine",
+                        f"다운타임 SL/TP 도달 포지션 {triggered}건 처리",
+                        metadata={"exchange": self._exchange_name, "count": triggered},
+                    )
+                else:
+                    logger.info("downtime_stops_all_clear",
+                              exchange=self._exchange_name, positions=len(positions))
+        except Exception as e:
+            logger.warning("downtime_stop_check_failed", error=str(e))
+
     async def start(self) -> None:
         """Start the trading engine main loop."""
         self._is_running = True
@@ -433,6 +476,9 @@ class TradingEngine:
         await self._restore_trade_timestamps()
         logger.info("engine_started")
         await emit_event("info", "engine", f"{self._exchange_name} 엔진 시작", metadata={"mode": self._ec.mode, "exchange": self._exchange_name})
+
+        # 다운타임 중 SL/TP 초과 포지션 즉시 체크
+        await self._check_downtime_stops()
 
         # 전략 평가 루프 + 빠른 SL/TP 체크 루프 병렬 실행
         self._tasks = [

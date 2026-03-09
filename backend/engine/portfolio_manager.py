@@ -33,6 +33,7 @@ class PortfolioManager:
         self._last_total_value: float | None = None  # 스파이크 감지용
         self._snapshot_skip_count = 0  # 연속 스킵 → 실제 변화 강제 기록
         self._last_income_time_ms: int = 0  # Income API 페이지네이션 마커
+        self._cleared_positions: list[dict] = []  # 다운타임 중 사라진 포지션 기록
 
     @property
     def cash_balance(self) -> float:
@@ -904,7 +905,7 @@ class PortfolioManager:
                     entry_price=entry_price,
                 )
 
-        # DB에 있지만 거래소에 없는 포지션 → 수동 매도 등으로 사라진 경우 quantity=0 처리
+        # DB에 있지만 거래소에 없는 포지션 → 청산/수동매도로 사라진 경우
         exchange_symbols = set()
         for symbol, bal in balances.items():
             if symbol == cash_symbol or bal.total <= 0:
@@ -915,12 +916,43 @@ class PortfolioManager:
                 exchange_symbols.add(fp_sym.replace(":USDT", ""))
         for db_sym, db_pos in db_positions.items():
             if db_pos.quantity > 0 and db_sym not in exchange_symbols:
-                logger.info(
+                # 추정 PnL 계산
+                entry = db_pos.average_buy_price or 0
+                invested = db_pos.total_invested or 0
+                direction = getattr(db_pos, "direction", "long")
+                leverage = getattr(db_pos, "leverage", 1) or 1
+                try:
+                    current_price = await self._market_data.get_current_price(db_sym)
+                except Exception:
+                    current_price = entry  # 가격 조회 실패 시 entry로 추정
+
+                if direction == "short":
+                    pnl_pct = (entry - current_price) / entry * leverage * 100 if entry else 0
+                else:
+                    pnl_pct = (current_price - entry) / entry * leverage * 100 if entry else 0
+
+                is_likely_liquidation = is_futures and pnl_pct < -80
+                reason = "강제청산(추정)" if is_likely_liquidation else "다운타임 중 포지션 종료"
+
+                logger.warning(
                     "position_cleared_not_on_exchange",
                     symbol=db_sym, old_qty=db_pos.quantity,
+                    entry_price=entry, direction=direction,
+                    leverage=leverage, invested=round(invested, 2),
+                    reason=reason,
                 )
                 db_pos.quantity = 0
+                db_pos.last_sell_at = datetime.now(timezone.utc)
                 synced_count += 1
+                self._cleared_positions.append({
+                    "symbol": db_sym,
+                    "quantity": db_pos.quantity,
+                    "entry_price": entry,
+                    "direction": direction,
+                    "leverage": leverage,
+                    "invested": invested,
+                    "reason": reason,
+                })
 
         await session.flush()
 

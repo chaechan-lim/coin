@@ -132,6 +132,9 @@ class BinanceFuturesEngine(TradingEngine):
         await emit_event("info", "engine", "선물 엔진 시작",
                          metadata={"mode": self._config.binance_trading.mode})
 
+        # 다운타임 중 SL/TP 초과 포지션 즉시 체크
+        await self._check_downtime_stops()
+
         # WebSocket 가격 모니터 + 잔고 모니터 초기화
         ws_enabled = self._config.binance_trading.ws_price_monitor
         self._balance_task = None
