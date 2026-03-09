@@ -62,11 +62,14 @@ class SignalCombiner:
         min_confidence: float = 0.50,
         directional_weights: bool = False,
         exchange_name: str = "",
+        min_sell_active_weight: float = 0.0,
     ):
         self.weights = strategy_weights or self.DEFAULT_WEIGHTS.copy()
         self.min_confidence = min_confidence
         self.directional_weights = directional_weights
         self.exchange_name = exchange_name
+        if min_sell_active_weight > 0:
+            self.MIN_SELL_ACTIVE_WEIGHT = min_sell_active_weight
 
     # 시장 상태별 적응형 가중치 프로필 (8전략)
     ADAPTIVE_PROFILES: dict[str, dict[str, float]] = {
@@ -109,6 +112,8 @@ class SignalCombiner:
     # HOLD = 기권. BUY/SELL만 경쟁하고, 참여 전략 가중치로 정규화.
     # 참여 가중치가 너무 낮으면 (소수 약한 전략만 의견) → HOLD.
     MIN_ACTIVE_WEIGHT = 0.12
+    # SELL(숏) 전용 최소 참여 가중치 — 단일 전략 숏 진입 방지 (0이면 비활성)
+    MIN_SELL_ACTIVE_WEIGHT = 0.0
 
     def combine(self, signals: list[Signal], market_state: str | None = None, symbol: str | None = None) -> CombinedDecision:
         """
@@ -179,6 +184,18 @@ class SignalCombiner:
         else:
             winning_type = SignalType.SELL
             winning_score = sell_norm
+
+        # SELL 전용 최소 참여 가중치 체크 (단일 전략 숏 진입 방지)
+        min_sell_w = self.MIN_SELL_ACTIVE_WEIGHT
+        if min_sell_w > 0 and winning_type == SignalType.SELL:
+            sell_min_eff = 0.06 if market_state == MarketState.CRASH.value else min_sell_w
+            if sell_active < sell_min_eff:
+                return CombinedDecision(
+                    action=SignalType.HOLD,
+                    combined_confidence=winning_score,
+                    contributing_signals=signals,
+                    final_reason=f"Sell active weight {sell_active:.2f} below {sell_min_eff} (weak sell consensus)",
+                )
 
         # Collect contributing signals for the winning type
         contributors = [s for s in signals if s.signal_type == winning_type]

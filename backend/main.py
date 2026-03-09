@@ -459,6 +459,12 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("binance_spot_init_failed", error=str(e), exc_info=True)
 
+    # ── 7.5 교차 거래소 포지션 전환을 위한 엔진 레지스트리 주입 ────────
+    for ex_name in engine_registry.available_exchanges:
+        eng = engine_registry.get_engine(ex_name)
+        if eng:
+            eng.set_engine_registry(engine_registry)
+
     # ── 8. 스케줄러 시작 ─────────────────────────────────────
     session_factory = get_session_factory()
     bithumb_coord = engine_registry.get_coordinator("bithumb")

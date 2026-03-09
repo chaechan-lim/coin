@@ -277,6 +277,9 @@ class TradingEngine:
         # Self-healing recovery manager (main.py에서 set_recovery_manager()로 주입)
         self._recovery_manager = None
 
+        # 교차 거래소 포지션 전환용 (main.py에서 set_engine_registry()로 주입)
+        self._engine_registry = None
+
     @property
     def tracked_coins(self) -> list[str]:
         """추적 코인 목록 (외부 접근용)."""
@@ -296,6 +299,46 @@ class TradingEngine:
 
     def set_broadcast_callback(self, callback) -> None:
         self._broadcast_callback = callback
+
+    def set_engine_registry(self, registry) -> None:
+        """교차 거래소 포지션 전환을 위한 엔진 레지스트리 주입."""
+        self._engine_registry = registry
+
+    # 교차 거래소 포지션 전환 최소 신뢰도
+    CROSS_FLIP_MIN_CONFIDENCE = 0.65
+
+    async def close_position_for_cross_exchange(self, symbol: str, reason: str) -> bool:
+        """다른 엔진의 요청으로 포지션 청산. 자체 세션 사용. 성공 시 True."""
+        sf = get_session_factory()
+        try:
+            async with sf() as session:
+                result = await session.execute(
+                    select(Position).where(
+                        Position.symbol == symbol,
+                        Position.quantity > 0,
+                        Position.exchange == self._exchange_name,
+                    )
+                )
+                position = result.scalar_one_or_none()
+                if not position:
+                    return False
+
+                price = await self._market_data.get_current_price(symbol)
+                if price <= 0:
+                    logger.warning("cross_close_no_price", symbol=symbol)
+                    return False
+
+                await self._execute_stop_sell(session, symbol, position, price, reason)
+                await session.commit()
+                logger.info(
+                    "cross_exchange_position_closed",
+                    symbol=symbol, exchange=self._exchange_name,
+                    price=price, reason=reason,
+                )
+                return True
+        except Exception as e:
+            logger.error("cross_exchange_close_failed", symbol=symbol, error=str(e))
+            return False
 
     async def _on_sell_completed(self) -> None:
         """매도 완료 시 카운터 증가 → N회마다 매매 회고 트리거."""
@@ -1835,19 +1878,37 @@ class TradingEngine:
             )
             cross_pos = cross_result.scalars().first()
             if cross_pos:
-                logger.warning(
-                    "cross_exchange_conflict_blocked",
-                    symbol=symbol,
-                    cross_exchange=cross_pos.exchange,
-                    cross_direction="short",
-                    cross_qty=cross_pos.quantity,
-                )
-                await emit_event(
-                    "warning", "risk",
-                    f"교차 거래소 충돌: {symbol} 매수 차단 (선물 숏 보유 중)",
-                    metadata={"symbol": symbol, "cross_qty": cross_pos.quantity},
-                )
-                return
+                # 높은 신뢰도면 반대 포지션 청산 후 진행 (포지션 방향 전환)
+                flipped = False
+                if (decision.combined_confidence >= self.CROSS_FLIP_MIN_CONFIDENCE
+                        and self._engine_registry):
+                    cross_engine = self._engine_registry.get_engine(cross_pos.exchange)
+                    if cross_engine:
+                        cross_symbol = f"{base}/{cross_engine._ec.quote_currency}"
+                        flipped = await cross_engine.close_position_for_cross_exchange(
+                            cross_symbol,
+                            f"교차 전환: {self._exchange_name} BUY(conf={decision.combined_confidence:.2f}) → 숏 청산",
+                        )
+                        if flipped:
+                            await emit_event(
+                                "info", "risk",
+                                f"교차 포지션 전환: {cross_pos.exchange} {base} 숏 청산 → {self._exchange_name} 매수 진행",
+                                metadata={"symbol": symbol, "confidence": round(decision.combined_confidence, 2)},
+                            )
+                if not flipped:
+                    logger.warning(
+                        "cross_exchange_conflict_blocked",
+                        symbol=symbol,
+                        cross_exchange=cross_pos.exchange,
+                        cross_direction="short",
+                        cross_qty=cross_pos.quantity,
+                    )
+                    await emit_event(
+                        "warning", "risk",
+                        f"교차 거래소 충돌: {symbol} 매수 차단 (선물 숏 보유 중)",
+                        metadata={"symbol": symbol, "cross_qty": cross_pos.quantity},
+                    )
+                    return
 
             # 포지션 사이징 (잔고 부족 시 복구 시도)
             cash = self._portfolio_manager.cash_balance

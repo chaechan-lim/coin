@@ -392,6 +392,130 @@ class TestBuyBlocking:
         mock_order_mgr.create_order.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_cross_exchange_flip_high_confidence(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """교차 거래소 충돌 + 높은 신뢰도 → 반대 포지션 청산 후 매수 진행."""
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        decision = _make_buy_decision(confidence=0.70)  # >= CROSS_FLIP_MIN_CONFIDENCE (0.65)
+
+        # 교차 엔진 mock
+        cross_engine = AsyncMock()
+        cross_engine._ec = MagicMock()
+        cross_engine._ec.quote_currency = "USDT"
+        cross_engine.close_position_for_cross_exchange = AsyncMock(return_value=True)
+
+        # EngineRegistry mock
+        registry = MagicMock()
+        registry.get_engine = MagicMock(return_value=cross_engine)
+        engine.set_engine_registry(registry)
+
+        cross_pos = MagicMock()
+        cross_pos.exchange = "binance_futures"
+        cross_pos.direction = "short"
+        cross_pos.quantity = 0.5
+
+        session = _make_session_no_position()
+        call_count = [0]
+
+        async def cross_execute(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 2:
+                result = MagicMock()
+                result.scalars = MagicMock(return_value=MagicMock(first=MagicMock(return_value=cross_pos)))
+                return result
+            result = MagicMock()
+            result.scalar_one_or_none = MagicMock(return_value=None)
+            return result
+
+        session.execute = AsyncMock(side_effect=cross_execute)
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._process_decision(session, "ETH/KRW", decision)
+
+        # 교차 포지션 청산 호출됨
+        cross_engine.close_position_for_cross_exchange.assert_called_once()
+        # 매수 주문이 실행됨 (차단되지 않음)
+        mock_order_mgr.create_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cross_exchange_flip_low_confidence_blocked(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """교차 거래소 충돌 + 낮은 신뢰도 → 기존처럼 차단."""
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        decision = _make_buy_decision(confidence=0.60)  # < CROSS_FLIP_MIN_CONFIDENCE (0.65)
+
+        registry = MagicMock()
+        engine.set_engine_registry(registry)
+
+        cross_pos = MagicMock()
+        cross_pos.exchange = "binance_futures"
+        cross_pos.direction = "short"
+        cross_pos.quantity = 0.5
+
+        session = _make_session_no_position()
+        call_count = [0]
+
+        async def cross_execute(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 2:
+                result = MagicMock()
+                result.scalars = MagicMock(return_value=MagicMock(first=MagicMock(return_value=cross_pos)))
+                return result
+            result = MagicMock()
+            result.scalar_one_or_none = MagicMock(return_value=None)
+            return result
+
+        session.execute = AsyncMock(side_effect=cross_execute)
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._process_decision(session, "ETH/KRW", decision)
+
+        # 차단됨 — 교차 엔진 close 호출 안 됨
+        registry.get_engine.assert_not_called()
+        mock_order_mgr.create_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cross_exchange_flip_failed_still_blocks(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """교차 청산 실패 시 기존처럼 차단."""
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        decision = _make_buy_decision(confidence=0.70)
+
+        cross_engine = AsyncMock()
+        cross_engine._ec = MagicMock()
+        cross_engine._ec.quote_currency = "USDT"
+        cross_engine.close_position_for_cross_exchange = AsyncMock(return_value=False)  # 실패
+
+        registry = MagicMock()
+        registry.get_engine = MagicMock(return_value=cross_engine)
+        engine.set_engine_registry(registry)
+
+        cross_pos = MagicMock()
+        cross_pos.exchange = "binance_futures"
+        cross_pos.direction = "short"
+        cross_pos.quantity = 0.5
+
+        session = _make_session_no_position()
+        call_count = [0]
+
+        async def cross_execute(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 2:
+                result = MagicMock()
+                result.scalars = MagicMock(return_value=MagicMock(first=MagicMock(return_value=cross_pos)))
+                return result
+            result = MagicMock()
+            result.scalar_one_or_none = MagicMock(return_value=None)
+            return result
+
+        session.execute = AsyncMock(side_effect=cross_execute)
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._process_decision(session, "ETH/KRW", decision)
+
+        # 청산 시도됨
+        cross_engine.close_position_for_cross_exchange.assert_called_once()
+        # 실패했으므로 매수 차단
+        mock_order_mgr.create_order.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_zero_cash_blocked(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
         """현금 0원 → 매수 차단 (바로 return)."""
         mock_pm.cash_balance = 0
@@ -937,3 +1061,54 @@ class TestBithumbTickerFallback:
         call_args = mock_order_mgr.create_order.call_args
         amount = call_args[0][3]
         assert amount > 0  # amount = amount_krw / price > 0
+
+
+# ── 테스트: close_position_for_cross_exchange ─────────────────
+
+class TestClosePositionForCrossExchange:
+    """교차 거래소 포지션 청산 메서드 검증."""
+
+    @pytest.mark.asyncio
+    async def test_close_position_success(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """포지션 있으면 청산 후 True 반환."""
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+
+        pos = MagicMock()
+        pos.symbol = "ETH/KRW"
+        pos.quantity = 1.0
+        pos.average_buy_price = 45000
+        pos.exchange = "bithumb"
+
+        mock_session = AsyncMock()
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none = MagicMock(return_value=pos)
+        mock_session.execute = AsyncMock(return_value=result_mock)
+        mock_session.commit = AsyncMock()
+
+        mock_sf = MagicMock()
+        mock_sf.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_sf.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("engine.trading_engine.get_session_factory", return_value=mock_sf), \
+             patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            result = await engine.close_position_for_cross_exchange("ETH/KRW", "교차 전환 테스트")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_close_position_no_position(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """포지션 없으면 False 반환."""
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+
+        mock_session = AsyncMock()
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none = MagicMock(return_value=None)
+        mock_session.execute = AsyncMock(return_value=result_mock)
+
+        mock_sf = MagicMock()
+        mock_sf.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_sf.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("engine.trading_engine.get_session_factory", return_value=mock_sf):
+            result = await engine.close_position_for_cross_exchange("ETH/KRW", "교차 전환 테스트")
+        assert result is False
+        mock_order_mgr.create_order.assert_not_called()

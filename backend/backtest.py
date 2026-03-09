@@ -4564,6 +4564,8 @@ async def main():
     parser.add_argument("--use-8",          action="store_true",
                         help="8전략 전체 사용 (비교용)")
     parser.add_argument("--min-confidence", type=float, default=0.50, help="최소 신뢰도 임계값 (기본 0.50)")
+    parser.add_argument("--min-sell-weight", type=float, default=0.0,
+                        help="SELL 전용 최소 참여 가중치 (0=비활성, 0.20=2전략 이상 필요)")
     parser.add_argument("--trade-cooldown", type=int, default=12,
                         help="매매 간 최소 캔들 수 (기본 12)")
     parser.add_argument("--stop-loss",      type=float, default=5.0,  help="손절 %% (0=비활성, 기본 5)")
@@ -4773,6 +4775,8 @@ async def main():
                 dynamic_portfolio=args.dynamic_portfolio,
                 dynamic_max_coins=args.dynamic_max_coins,
             )
+            if args.min_sell_weight > 0:
+                bt._combiner.MIN_SELL_ACTIVE_WEIGHT = args.min_sell_weight
             result = await bt.run(args.timeframe, args.days)
             print_futures_portfolio_result(result)
             await exchange.close()
@@ -4810,6 +4814,9 @@ async def main():
             trade_daily_buy_limit=args.daily_buy_limit,
             trade_max_coin_buys=args.max_coin_buys,
         )
+
+        if args.min_sell_weight > 0:
+            bt._combiner.MIN_SELL_ACTIVE_WEIGHT = args.min_sell_weight
 
         # 선물 심볼 자동 변환: BTC/KRW → BTC/USDT
         symbol = args.symbol

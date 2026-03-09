@@ -1074,6 +1074,39 @@ class BinanceFuturesEngine(TradingEngine):
                              })
             await self._on_sell_completed()
 
+    async def close_position_for_cross_exchange(self, symbol: str, reason: str) -> bool:
+        """다른 엔진의 요청으로 선물 포지션 청산. 자체 세션 사용."""
+        sf = get_session_factory()
+        try:
+            async with sf() as session:
+                result = await session.execute(
+                    select(Position).where(
+                        Position.symbol == symbol,
+                        Position.quantity > 0,
+                        Position.exchange == self._exchange_name,
+                    )
+                )
+                position = result.scalar_one_or_none()
+                if not position:
+                    return False
+
+                price = await self._market_data.get_current_price(symbol)
+                if price <= 0:
+                    logger.warning("cross_close_no_price", symbol=symbol)
+                    return False
+
+                await self._close_position(session, symbol, position, price, reason)
+                await session.commit()
+                logger.info(
+                    "cross_exchange_position_closed",
+                    symbol=symbol, exchange=self._exchange_name,
+                    price=price, reason=reason,
+                )
+                return True
+        except Exception as e:
+            logger.error("cross_exchange_close_failed", symbol=symbol, error=str(e))
+            return False
+
     async def _execute_rebalancing_sell(
         self, session: AsyncSession, symbol: str, qty: float, price: float
     ) -> None:
@@ -1380,19 +1413,37 @@ class BinanceFuturesEngine(TradingEngine):
         )
         cross_pos = cross_result.scalars().first()
         if cross_pos:
-            logger.warning(
-                "cross_exchange_conflict_blocked",
-                symbol=symbol,
-                cross_exchange=cross_pos.exchange,
-                cross_direction="long",
-                cross_qty=cross_pos.quantity,
-            )
-            await emit_event(
-                "warning", "risk",
-                f"교차 거래소 충돌: {symbol} 숏 차단 (현물 롱 보유 중)",
-                metadata={"symbol": symbol, "cross_qty": cross_pos.quantity},
-            )
-            return
+            # 높은 신뢰도면 현물 롱 청산 후 숏 진행 (포지션 방향 전환)
+            flipped = False
+            if (decision.combined_confidence >= self.CROSS_FLIP_MIN_CONFIDENCE
+                    and self._engine_registry):
+                cross_engine = self._engine_registry.get_engine(cross_pos.exchange)
+                if cross_engine:
+                    cross_symbol = f"{base}/{cross_engine._ec.quote_currency}"
+                    flipped = await cross_engine.close_position_for_cross_exchange(
+                        cross_symbol,
+                        f"교차 전환: {self._exchange_name} SHORT(conf={decision.combined_confidence:.2f}) → 롱 청산",
+                    )
+                    if flipped:
+                        await emit_event(
+                            "info", "risk",
+                            f"교차 포지션 전환: {cross_pos.exchange} {base} 롱 청산 → {self._exchange_name} 숏 진행",
+                            metadata={"symbol": symbol, "confidence": round(decision.combined_confidence, 2)},
+                        )
+            if not flipped:
+                logger.warning(
+                    "cross_exchange_conflict_blocked",
+                    symbol=symbol,
+                    cross_exchange=cross_pos.exchange,
+                    cross_direction="long",
+                    cross_qty=cross_pos.quantity,
+                )
+                await emit_event(
+                    "warning", "risk",
+                    f"교차 거래소 충돌: {symbol} 숏 차단 (현물 롱 보유 중)",
+                    metadata={"symbol": symbol, "cross_qty": cross_pos.quantity},
+                )
+                return
 
         # ATR 적응형 리스크 조절
         atr_pct = self._get_atr_pct(symbol)
