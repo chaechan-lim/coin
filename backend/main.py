@@ -607,7 +607,7 @@ async def lifespan(app: FastAPI):
     _scheduler.add_job(
         _wrap(position_sync_job),
         name="position_sync",
-        seconds=60,
+        seconds=120,
     )
 
     # ── 헬스체크 스케줄러 (120초) ─────────────────────────────

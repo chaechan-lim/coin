@@ -553,6 +553,12 @@ class TradingEngine:
                 except asyncio.CancelledError:
                     pass
         self._tasks = []
+        # stale 인메모리 dict 정리 (tracked_coins에 없는 항목)
+        live_coins = set(self._ec.tracked_coins)
+        for d in (self._eval_error_counts, self._last_sell_time, self._last_trade_time):
+            stale = [k for k in d if k not in live_coins]
+            for k in stale:
+                d.pop(k, None)
         logger.info("engine_stopping")
         await emit_event("info", "engine", f"{self._exchange_name} 엔진 중지", metadata={"exchange": self._exchange_name})
 
@@ -1467,10 +1473,12 @@ class TradingEngine:
             min_vol = self._ec.min_quote_volume
 
             ranked = []
+            # 이전 스캔에서 "마켓 없음" 에러 난 심볼 제외
+            failed_syms = {k for k, v in self._eval_error_counts.items() if v >= 3}
             for sym, t in tickers.items():
                 if not sym.endswith(suffix):
                     continue
-                if sym in tracked or sym in stables:
+                if sym in tracked or sym in stables or sym in failed_syms:
                     continue
                 vol = t.get("quoteVolume") or 0
                 if vol >= min_vol:

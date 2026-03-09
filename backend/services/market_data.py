@@ -63,7 +63,11 @@ class MarketDataService:
                 last_err = e
                 if attempt < _MAX_RETRIES - 1:
                     wait = _RETRY_BASE_SEC * (2 ** attempt)
-                    logger.warning("market_data_retry", attempt=attempt + 1, wait=wait, error=str(e))
+                    err_str = str(e)
+                    # 삭제된 심볼은 재시도 없이 즉시 실패
+                    if "does not have market symbol" in err_str:
+                        raise e
+                    logger.warning("market_data_retry", attempt=attempt + 1, wait=wait, error=err_str)
                     await asyncio.sleep(wait)
         raise last_err
 
