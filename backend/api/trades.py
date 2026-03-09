@@ -97,7 +97,7 @@ async def get_trade_summary(
     else:
         start = None
 
-    # 전체 체결 주문 시간순 (매수 원가 계산용)
+    # 전체 체결 주문 시간순
     result = await session.execute(
         select(Order)
         .where(Order.status == "filled", Order.exchange == exchange)
@@ -108,8 +108,8 @@ async def get_trade_summary(
     from collections import defaultdict
     positions: dict[str, dict] = defaultdict(lambda: {"qty": 0.0, "cost": 0.0})
 
-    buy_count = 0
-    sell_count = 0
+    open_count = 0
+    close_count = 0
     winning = 0
     losing = 0
     total_pnl = 0.0
@@ -124,38 +124,58 @@ async def get_trade_summary(
         if not price or not qty:
             continue
 
-        if order.side == "buy":
-            positions[sym]["cost"] += price * qty + fee
-            positions[sym]["qty"] += qty
+        # 선물: realized_pnl이 있으면 청산 주문 (롱 sell / 숏 buy 모두 처리)
+        if order.realized_pnl is not None:
             if in_period:
-                buy_count += 1
-        elif order.side == "sell":
-            pos = positions[sym]
-            if pos["qty"] > 0:
-                avg_buy = pos["cost"] / pos["qty"]
-                sell_qty = min(qty, pos["qty"])
-                pnl = (price - avg_buy) * sell_qty - fee
+                close_count += 1
+                total_pnl += order.realized_pnl
+                if order.realized_pnl > 0:
+                    winning += 1
+                else:
+                    losing += 1
+        else:
+            # 진입 주문 또는 PnL 미계산 현물 매도
+            is_opening = (order.side == "buy" and order.direction != "short") or \
+                         (order.side == "sell" and order.direction == "short")
+            is_spot_sell = order.side == "sell" and not order.direction
 
+            if is_opening or (order.side == "buy" and not order.direction):
+                # 현물 매수 또는 선물 진입
+                positions[sym]["cost"] += price * qty + fee
+                positions[sym]["qty"] += qty
                 if in_period:
-                    sell_count += 1
-                    total_pnl += pnl
-                    if pnl > 0:
-                        winning += 1
-                    else:
-                        losing += 1
+                    open_count += 1
+            elif is_spot_sell:
+                # 현물 매도 (realized_pnl 없는 경우 FIFO 계산)
+                pos = positions[sym]
+                if pos["qty"] > 0:
+                    avg_buy = pos["cost"] / pos["qty"]
+                    sell_qty = min(qty, pos["qty"])
+                    pnl = (price - avg_buy) * sell_qty - fee
 
-                pos["cost"] -= avg_buy * sell_qty
-                pos["qty"] -= sell_qty
+                    if in_period:
+                        close_count += 1
+                        total_pnl += pnl
+                        if pnl > 0:
+                            winning += 1
+                        else:
+                            losing += 1
+
+                    pos["cost"] -= avg_buy * sell_qty
+                    pos["qty"] -= sell_qty
+            else:
+                if in_period:
+                    open_count += 1
 
     return {
         "period": period,
-        "total_trades": buy_count + sell_count,
-        "buy_count": buy_count,
-        "sell_count": sell_count,
+        "total_trades": open_count + close_count,
+        "buy_count": open_count,
+        "sell_count": close_count,
         "winning_trades": winning,
         "losing_trades": losing,
         "win_rate": round(winning / (winning + losing) * 100, 1) if (winning + losing) > 0 else 0,
-        "total_pnl": round(total_pnl, 0),
+        "total_pnl": round(total_pnl, 2),
     }
 
 

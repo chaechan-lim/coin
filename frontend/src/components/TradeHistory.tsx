@@ -47,7 +47,8 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
   const isFutures = !!order.direction
   const dirLabel = order.direction === 'short' ? 'SHORT' : 'LONG'
   const dirColor = order.direction === 'short' ? 'text-sell' : 'text-buy'
-  const hasPnl = order.side === 'sell' && order.realized_pnl_pct != null
+  // 청산 주문: 롱→sell, 숏→buy(close). realized_pnl이 있으면 청산 주문
+  const hasPnl = order.realized_pnl_pct != null
 
   return (
     <div className="border-b border-gray-700/50">
