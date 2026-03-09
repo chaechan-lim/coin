@@ -2746,7 +2746,7 @@ def print_futures_result(r: FuturesBacktestResult):
 
 # ── 선물 포트폴리오 백테스터 ──────────────────────────────────────────
 
-DEFAULT_FUTURES_PORTFOLIO_COINS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"]
+DEFAULT_FUTURES_PORTFOLIO_COINS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT"]
 
 # 동적 포트폴리오 후보군 — 바이낸스 선물 주요 코인 (라이브와 유사한 유니버스)
 DEFAULT_FUTURES_CANDIDATE_COINS = [
