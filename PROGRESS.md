@@ -84,6 +84,8 @@ coin/
 | PostgreSQL 메모리 제한 | shared_buffers=128MB, max_conn=30, Docker 512MB 제한 |
 | 프론트엔드 조건부 빌드 | src 변경 시만 npm build (506MB 피크 메모리 절감) |
 | delisted 심볼 필터 | JEX 등 삭제 심볼 즉시 실패 + rotation 제외, position_sync 60→120초 |
+| 교차 거래소 포지션 전환 | 높은 신뢰도(>=0.65) 반대 신호 시 기존 포지션 청산 후 새 방향 진입 |
+| MIN_SELL_ACTIVE_WEIGHT | 단일 전략 숏 진입 방지 옵션 (기본 0.0=비활성, backtest --min-sell-weight) |
 
 ### 낮은 우선순위
 
@@ -143,7 +145,7 @@ coin/
 | 매매 쿨다운 | 6일 (cd36) — 현물/선물 동일 |
 | 매도 후 재매수 대기 | 6일 (현물/선물 동일) |
 | 선물 숏 허용 | 전체 시장 상태 (short-all) |
-| 교차 거래소 충돌 | 현물 롱↔선물 숏 동시 진입 차단 |
+| 교차 거래소 충돌 | 현물 롱↔선물 숏: 낮은 신뢰도→차단, 높은 신뢰도(>=0.65)→방향 전환 |
 | 현물 비대칭 | crash/downtrend 매수 차단, uptrend 공격적 매수 |
 
 ### 서지 로테이션
