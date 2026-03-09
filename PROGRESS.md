@@ -80,6 +80,10 @@ coin/
 | create_task 이름 부여 | 전체 asyncio.create_task에 name= 파라미터 적용 |
 | 평가 사이클 타이밍 로그 | elapsed_ms 구조화 로깅 |
 | 다운타임 포지션 감사 | 서버 재시작 시 사라진 포지션 감지(청산 추정), 즉시 SL/TP 체크, emit_event 알림 |
+| systemd 안정성 개선 | RestartSec=20, StartLimitBurst=10/600s, pg_isready 대기, ExecStopPost fuser |
+| PostgreSQL 메모리 제한 | shared_buffers=128MB, max_conn=30, Docker 512MB 제한 |
+| 프론트엔드 조건부 빌드 | src 변경 시만 npm build (506MB 피크 메모리 절감) |
+| delisted 심볼 필터 | JEX 등 삭제 심볼 즉시 실패 + rotation 제외, position_sync 60→120초 |
 
 ### 낮은 우선순위
 
