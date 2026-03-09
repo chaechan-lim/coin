@@ -46,6 +46,12 @@ SYSTEM_PROMPT = """\
 - 엔진 시작/중지 같은 위험한 작업은 사용자에게 확인 후 실행하세요.
 - 답변은 Discord에 표시되므로 마크다운 형식으로 작성하세요.
 
+대화 맥락:
+- 이전 대화 내역이 함께 전달됩니다. 후속 질문에는 이전 맥락을 적극 활용하세요.
+- "그거", "아까", "위에서", "자세히" 등의 표현은 이전 대화를 참조합니다.
+- 이전에 조회한 데이터가 있으면 불필요하게 다시 조회하지 마세요.
+- 대화 흐름을 자연스럽게 이어가며, 이전 질문과 연결된 답변을 하세요.
+
 메모리:
 - 사용자가 '기억해', '메모해', '잊지마' 등 요청하면 save_memory 도구로 저장하세요.
 - 저장된 메모리는 아래에 표시됩니다. 이미 알고 있는 사실처럼 자연스럽게 활용하세요.
@@ -221,12 +227,14 @@ class TradingBot:
         # tool_use 루프
         max_iterations = 10
         iteration = 0
+        tools_used: list[str] = []
         while response.stop_reason == "tool_use" and iteration < max_iterations:
             iteration += 1
             tool_results = []
 
             for tc in response.tool_calls:
                 logger.debug("discord_bot_tool_call", tool=tc.name, input=tc.arguments)
+                tools_used.append(tc.name)
 
                 # write 도구 권한 체크
                 if tc.name in WRITE_TOOLS:
@@ -263,11 +271,15 @@ class TradingBot:
         result = response.text or "응답을 생성할 수 없습니다."
         logger.info("discord_bot_response", length=len(result), iterations=iteration)
 
-        # 대화 컨텍스트 저장 (user 질문 + assistant 최종 응답만, tool 루프 중간 과정 제외)
+        # 대화 컨텍스트 저장 — 도구 호출 요약 포함으로 후속 대화 맥락 강화
         if channel_id:
+            assistant_context = result
+            if tools_used:
+                tool_summary = ", ".join(dict.fromkeys(tools_used))  # 중복 제거, 순서 유지
+                assistant_context = f"[조회: {tool_summary}]\n{result}"
             self._save_context(channel_id, [
                 {"role": "user", "content": text},
-                {"role": "assistant", "content": result},
+                {"role": "assistant", "content": assistant_context},
             ])
 
         return result

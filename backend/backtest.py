@@ -2850,6 +2850,8 @@ class FuturesPortfolioBacktester:
         dual_timeframe: bool = False,
         directional_weights: bool = False,
         max_positions: int = 5,
+        long_block_states: set | None = None,
+        long_sizing_states: dict | None = None,
         dynamic_portfolio: bool = False,
         dynamic_max_coins: int = 10,
         dynamic_refresh_candles: int = 6,  # 4h에서 6캔들=24시간
@@ -2884,6 +2886,8 @@ class FuturesPortfolioBacktester:
         self._dual_timeframe = dual_timeframe
         self._directional_weights = directional_weights
         self._max_positions = max_positions
+        self._long_block_states = long_block_states or set()
+        self._long_sizing_states = long_sizing_states or {}
         self._base_position_pct = position_pct
         self._dynamic_portfolio = dynamic_portfolio
         self._dynamic_max_coins = dynamic_max_coins
@@ -3413,6 +3417,9 @@ class FuturesPortfolioBacktester:
                 decision = self._combiner.combine(signals, market_state=current_market_state)
 
                 if decision.action == SignalType.BUY:
+                    # 롱 시장 게이팅 — 지정 상태에서 차단
+                    if current_market_state in self._long_block_states:
+                        continue
                     buy_threshold = self._min_confidence
                     if market_confidence < 0.35:
                         buy_threshold = self._min_confidence + 0.10
@@ -3452,6 +3459,10 @@ class FuturesPortfolioBacktester:
                     eff_position_pct = self._base_position_pct * dyn_mult / lev_sqrt
                 else:
                     eff_position_pct = self._position_pct
+
+                # 롱 사이징 조절 (시장 상태별)
+                if side == "long" and current_market_state in self._long_sizing_states:
+                    eff_position_pct *= self._long_sizing_states[current_market_state]
 
                 # 리스크 관리자 체크
                 if self._risk_manager:

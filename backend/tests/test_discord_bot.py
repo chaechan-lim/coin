@@ -392,6 +392,87 @@ def test_context_expiry(bot):
     assert len(ctx) == 0  # 만료됨
 
 
+@pytest.mark.asyncio
+async def test_context_includes_tool_summary(bot):
+    """도구 사용 시 컨텍스트에 조회 요약이 포함되는지 확인."""
+    tool_response = LLMResponse(
+        text=None,
+        tool_calls=[ToolCall(id="tc_1", name="get_portfolio_summary", arguments={"exchange": "binance_futures"})],
+        stop_reason="tool_use",
+        model="claude-haiku-4-5-20251001",
+    )
+    final_response = LLMResponse(
+        text="선물 포트폴리오: BTC +3.2%",
+        stop_reason="end_turn",
+        model="claude-haiku-4-5-20251001",
+    )
+    bot._llm.generate_with_tools = AsyncMock(
+        side_effect=[tool_response, final_response]
+    )
+    bot._llm.format_tool_loop_messages = MagicMock(
+        return_value=(
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "tc_1", "name": "get_portfolio_summary", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tc_1", "content": "{}"}]},
+        )
+    )
+
+    await bot._process_message("포트폴리오", user_id=123, channel_id=100)
+
+    ctx = bot._get_context(100)
+    assert len(ctx) == 2
+    # assistant 컨텍스트에 도구 요약 포함
+    assert "[조회: get_portfolio_summary]" in ctx[1]["content"]
+    assert "BTC +3.2%" in ctx[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_context_no_tool_summary_when_no_tools(bot):
+    """도구 미사용 시 조회 요약 없음."""
+    bot._llm.generate_with_tools = AsyncMock(
+        return_value=LLMResponse(
+            text="안녕하세요!",
+            stop_reason="end_turn",
+            model="claude-haiku-4-5-20251001",
+        )
+    )
+    await bot._process_message("안녕", user_id=123, channel_id=100)
+
+    ctx = bot._get_context(100)
+    assert ctx[1]["content"] == "안녕하세요!"
+    assert "[조회:" not in ctx[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_context_dedup_tool_names(bot):
+    """같은 도구를 여러 번 호출해도 요약에서 중복 제거."""
+    tool_resp_1 = LLMResponse(
+        text=None,
+        tool_calls=[
+            ToolCall(id="tc_1", name="get_portfolio_summary", arguments={"exchange": "binance_futures"}),
+            ToolCall(id="tc_2", name="get_portfolio_summary", arguments={"exchange": "binance_spot"}),
+        ],
+        stop_reason="tool_use",
+        model="claude-haiku-4-5-20251001",
+    )
+    final_response = LLMResponse(
+        text="선물: +3%, 현물: +1%",
+        stop_reason="end_turn",
+        model="claude-haiku-4-5-20251001",
+    )
+    bot._llm.generate_with_tools = AsyncMock(
+        side_effect=[tool_resp_1, final_response]
+    )
+    bot._llm.format_tool_loop_messages = MagicMock(
+        return_value=({"role": "assistant", "content": []}, {"role": "user", "content": []})
+    )
+
+    await bot._process_message("전체 포트폴리오", user_id=123, channel_id=100)
+
+    ctx = bot._get_context(100)
+    # 중복 제거됨
+    assert ctx[1]["content"].count("get_portfolio_summary") == 1
+
+
 # ── Proactive alerts tests ───────────────────────────────────
 
 @pytest.mark.asyncio
