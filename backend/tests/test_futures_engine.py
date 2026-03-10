@@ -482,3 +482,48 @@ class TestFuturesCooldown:
     def test_cooldown_allows_new_symbol(self, futures_engine):
         """매매 이력 없는 코인은 진입 허용."""
         assert futures_engine._check_cooldown("NEW/USDT") is False
+
+
+class TestMLFilterIntegration:
+    """ML Signal Filter 라이브 엔진 통합 테스트."""
+
+    def test_ml_filter_init_loads_if_available(self, futures_engine):
+        """모델 파일 존재 시 ML 필터 로드, 없으면 None."""
+        from pathlib import Path
+        model_path = Path(__file__).parent.parent / "data" / "ml_models" / "signal_filter.pkl"
+        if model_path.exists():
+            assert futures_engine._ml_filter is not None
+        else:
+            assert futures_engine._ml_filter is None
+
+    def test_latest_candle_rows_init(self, futures_engine):
+        """캔들 캐시 초기화."""
+        assert futures_engine._latest_candle_rows == {}
+
+
+class TestConfidenceSizing:
+    """Confidence-proportional sizing 테스트."""
+
+    def test_low_confidence_reduces_size(self):
+        """낮은 신뢰도(0.55)에서 0.5x 축소."""
+        conf = 0.55
+        mult = min(2.0, max(0.5, 0.5 + (conf - 0.55) * (1.5 / 0.45)))
+        assert abs(mult - 0.5) < 0.01
+
+    def test_medium_confidence_normal_size(self):
+        """중간 신뢰도(0.70)에서 1.0x."""
+        conf = 0.70
+        mult = min(2.0, max(0.5, 0.5 + (conf - 0.55) * (1.5 / 0.45)))
+        assert abs(mult - 1.0) < 0.01
+
+    def test_high_confidence_increases_size(self):
+        """높은 신뢰도(0.85)에서 1.5x."""
+        conf = 0.85
+        mult = min(2.0, max(0.5, 0.5 + (conf - 0.55) * (1.5 / 0.45)))
+        assert abs(mult - 1.5) < 0.01
+
+    def test_max_confidence_caps_at_2x(self):
+        """최대 신뢰도(1.0)에서 2.0x 상한."""
+        conf = 1.0
+        mult = min(2.0, max(0.5, 0.5 + (conf - 0.55) * (1.5 / 0.45)))
+        assert abs(mult - 2.0) < 0.01

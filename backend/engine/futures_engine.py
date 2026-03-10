@@ -10,6 +10,7 @@ TradingEngine 서브클래스 — 70% 코드 재사용, 선물 전용 로직만 
 import asyncio
 import math
 import structlog
+import pandas as pd
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -98,6 +99,21 @@ class BinanceFuturesEngine(TradingEngine):
         # 연속 평가 오류 카운터 — N회 연속 실패 시 포지션 강제 청산
         self._eval_error_counts: dict[str, int] = {}
         self._MAX_EVAL_ERRORS = 3  # 3회 연속 (~15분) → 강제 청산
+
+        # ML Signal Filter용 캔들 캐시
+        self._latest_candle_rows: dict[str, pd.Series] = {}
+
+        # ML Signal Filter (선택적 — 모델 파일 존재 시 활성)
+        self._ml_filter = None
+        try:
+            from strategies.ml_filter import MLSignalFilter, MODEL_DIR
+            model_path = MODEL_DIR / "signal_filter.pkl"
+            if model_path.exists():
+                self._ml_filter = MLSignalFilter(min_win_prob=0.60)
+                self._ml_filter.load(str(model_path))
+                logger.info("ml_filter_loaded", model_path=str(model_path))
+        except Exception as e:
+            logger.warning("ml_filter_load_failed", error=str(e))
 
         # WebSocket 가격 모니터
         self._monitor_task: asyncio.Task | None = None
@@ -1222,6 +1238,30 @@ class BinanceFuturesEngine(TradingEngine):
                              atr_pct=round(atr_pct, 1))
                 return
 
+        # ML Signal Filter: 신규 진입만 필터링 (청산은 허용)
+        if self._ml_filter and not position:
+            _ml_row = self._latest_candle_rows.get(symbol)
+            if _ml_row is not None:
+                try:
+                    from strategies.ml_filter import MLSignalFilter
+                    _ml_features = MLSignalFilter.extract_features(
+                        signals=signals,
+                        row=_ml_row,
+                        price=price,
+                        market_state=self._market_state,
+                        combined_confidence=decision.combined_confidence,
+                    )
+                    _ml_pred = self._ml_filter.predict(_ml_features)
+                    if not _ml_pred.should_trade:
+                        logger.info("ml_filter_blocked", symbol=symbol,
+                                    win_prob=round(_ml_pred.win_probability, 3),
+                                    action=decision.action.value)
+                        return
+                    logger.info("ml_filter_passed", symbol=symbol,
+                                win_prob=round(_ml_pred.win_probability, 3))
+                except Exception as e:
+                    logger.warning("ml_filter_error", symbol=symbol, error=str(e))
+
         direction = position.direction if position else None
 
         if decision.action == SignalType.BUY:
@@ -1332,6 +1372,11 @@ class BinanceFuturesEngine(TradingEngine):
         cash = self._portfolio_manager.cash_balance
         bt = self._config.binance_trading
         size_pct = bt.max_trade_size_pct * margin_mult  # ATR에 따른 마진 축소
+
+        # Confidence-proportional sizing: conf 0.55→0.7x, 0.70→1.0x, 0.85→1.5x, 1.0→2.0x
+        conf = decision.combined_confidence
+        conf_mult = min(2.0, max(0.5, 0.5 + (conf - 0.55) * (1.5 / 0.45)))
+        size_pct *= conf_mult
 
         # 시장 상태별 사이징
         if self._market_state == MarketState.CRASH.value:
@@ -1507,6 +1552,11 @@ class BinanceFuturesEngine(TradingEngine):
         cash = self._portfolio_manager.cash_balance
         bt = self._config.binance_trading
         size_pct = bt.max_trade_size_pct * margin_mult  # ATR에 따른 마진 축소
+
+        # Confidence-proportional sizing: conf 0.55→0.7x, 0.70→1.0x, 0.85→1.5x, 1.0→2.0x
+        conf = decision.combined_confidence
+        conf_mult = min(2.0, max(0.5, 0.5 + (conf - 0.55) * (1.5 / 0.45)))
+        size_pct *= conf_mult
 
         margin = cash * size_pct
         notional = margin * effective_lev
@@ -1728,6 +1778,7 @@ class BinanceFuturesEngine(TradingEngine):
         except Exception as e:
             logger.warning("ticker_fetch_failed", symbol=symbol, error=str(e))
             return signals  # 티커 조회 실패 시 빈 시그널 반환 (eval_error 대신 graceful)
+        last_row = None
         for name, strategy in self._strategies.items():
             try:
                 timeframe = _FUTURES_TIMEFRAME  # 4h 고정 (P1 최적화)
@@ -1735,11 +1786,16 @@ class BinanceFuturesEngine(TradingEngine):
                 df = await self._market_data.get_candles(symbol, timeframe, candles)
                 if df is None or len(df) < 20:
                     continue
+                if last_row is None:
+                    last_row = df.iloc[-1]
                 signal = await strategy.analyze(df, ticker)
                 if signal:
                     signals.append(signal)
             except Exception as e:
                 logger.debug("strategy_signal_error", strategy=name, symbol=symbol, error=str(e))
+        # ML 필터용 최신 캔들 저장
+        if last_row is not None:
+            self._latest_candle_rows[symbol] = last_row
         return signals
 
     @property
