@@ -1,0 +1,1 @@
+nohup: '.venv/bin/uvicorn' 명령 실행 실패: 그런 파일이나 디렉터리가 없습니다
