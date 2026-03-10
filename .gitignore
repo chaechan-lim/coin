@@ -28,6 +28,9 @@ node_modules/
 backend/.cache/
 .pytest_cache/
 
+# Data (ML models, funding cache, OHLCV cache)
+backend/data/
+
 # IDE
 .vscode/
 .idea/
