@@ -93,3 +93,66 @@ def test_portfolio_history_point_schema():
         drawdown_pct=0.5,
     )
     assert pt.total_value == 500000
+
+
+@pytest.mark.asyncio
+async def test_merge_surge_positions_into_futures(session):
+    """선물 포트폴리오 요약에 서지 포지션이 병합됨."""
+    from unittest.mock import MagicMock
+    from core.models import Position
+    from api.portfolio import _merge_surge_positions
+    from api.dependencies import engine_registry as reg
+
+    # 서지 포지션 생성
+    pos = Position(
+        exchange="binance_surge",
+        symbol="SOL/USDT",
+        quantity=1.0,
+        average_buy_price=100.0,
+        total_invested=33.33,
+        direction="long",
+        leverage=3,
+        is_surge=True,
+        entered_at=datetime.now(timezone.utc),
+    )
+    session.add(pos)
+    await session.flush()
+
+    # 기본 선물 요약
+    summary = {
+        "exchange": "binance_futures",
+        "total_value_krw": 300.0,
+        "cash_balance_krw": 250.0,
+        "invested_value_krw": 50.0,
+        "unrealized_pnl": 0.0,
+        "positions": [],
+    }
+
+    # engine_registry mock — 서지 엔진 없음 (가격 fallback)
+    original_get = reg.get_engine
+    reg.get_engine = MagicMock(return_value=None)
+    try:
+        result = await _merge_surge_positions(summary, session)
+    finally:
+        reg.get_engine = original_get
+
+    assert len(result["positions"]) == 1
+    assert result["positions"][0]["symbol"] == "SOL/USDT"
+    assert result["positions"][0]["is_surge"] is True
+    assert result["invested_value_krw"] > 50.0  # 서지 투자금 합산
+
+
+@pytest.mark.asyncio
+async def test_merge_surge_no_positions(session):
+    """서지 포지션 없으면 요약 변경 없음."""
+    from api.portfolio import _merge_surge_positions
+
+    summary = {
+        "exchange": "binance_futures",
+        "total_value_krw": 300.0,
+        "positions": [],
+    }
+
+    result = await _merge_surge_positions(summary, session)
+    assert len(result["positions"]) == 0
+    assert result["total_value_krw"] == 300.0

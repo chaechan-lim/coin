@@ -5,7 +5,7 @@ from datetime import timedelta
 from core.utils import utcnow
 
 from db.session import get_db
-from core.models import PortfolioSnapshot, DailyPnL
+from core.models import PortfolioSnapshot, DailyPnL, Position
 from core.schemas import PortfolioSummaryResponse, PortfolioHistoryPoint, DailyPnLResponse
 from api.dependencies import engine_registry
 
@@ -14,6 +14,95 @@ router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
 def _get_pm(exchange: str):
     return engine_registry.get_portfolio_manager(exchange)
+
+
+async def _merge_surge_positions(summary: dict, session: AsyncSession) -> dict:
+    """선물 포트폴리오 요약에 서지 포지션을 병합."""
+    result = await session.execute(
+        select(Position).where(
+            Position.exchange == "binance_surge",
+            Position.quantity > 0,
+        )
+    )
+    surge_positions = result.scalars().all()
+    if not surge_positions:
+        return summary
+
+    # 서지 엔진에서 최신 가격 가져오기
+    surge_eng = engine_registry.get_engine("binance_surge")
+
+    for pos in surge_positions:
+        entry = pos.average_buy_price
+        invested = pos.total_invested or 0
+        direction = pos.direction or "long"
+        leverage = pos.leverage or 3
+
+        # 인메모리 최신 가격 우선, 없으면 진입가 사용
+        current = entry
+        if surge_eng:
+            sym_state = surge_eng._symbol_states.get(pos.symbol)
+            if sym_state and sym_state.last_price > 0:
+                current = sym_state.last_price
+
+        if entry > 0:
+            if direction == "short":
+                raw_pnl_pct = (entry - current) / entry
+            else:
+                raw_pnl_pct = (current - entry) / entry
+            unrealized = invested * leverage * raw_pnl_pct
+        else:
+            raw_pnl_pct = 0.0
+            unrealized = 0.0
+
+        current_value = invested + unrealized
+        pnl_pct = raw_pnl_pct * leverage * 100 if entry > 0 else 0.0
+
+        # SL/TP 가격 계산 (DB에는 % 만 저장)
+        sl_price = None
+        tp_price = None
+        if entry > 0 and pos.stop_loss_pct:
+            if direction == "short":
+                sl_price = entry * (1 + pos.stop_loss_pct / 100 / leverage)
+            else:
+                sl_price = entry * (1 - pos.stop_loss_pct / 100 / leverage)
+        if entry > 0 and pos.take_profit_pct:
+            if direction == "short":
+                tp_price = entry * (1 - pos.take_profit_pct / 100 / leverage)
+            else:
+                tp_price = entry * (1 + pos.take_profit_pct / 100 / leverage)
+
+        summary["positions"].append({
+            "symbol": pos.symbol,
+            "quantity": pos.quantity,
+            "average_buy_price": entry,
+            "current_price": current,
+            "current_value": round(current_value, 4),
+            "unrealized_pnl": round(unrealized, 4),
+            "unrealized_pnl_pct": round(pnl_pct, 2),
+            "total_invested": round(invested, 4),
+            "margin_used": round(invested, 4),
+            "entered_at": pos.entered_at.isoformat() if pos.entered_at else None,
+            "direction": direction,
+            "leverage": leverage,
+            "liquidation_price": pos.liquidation_price,
+            "stop_loss_price": sl_price,
+            "take_profit_price": tp_price,
+            "stop_loss_pct": pos.stop_loss_pct,
+            "take_profit_pct": pos.take_profit_pct,
+            "trailing_activation_pct": pos.trailing_activation_pct,
+            "trailing_stop_pct": pos.trailing_stop_pct,
+            "trailing_active": pos.trailing_active,
+            "highest_price": pos.highest_price,
+            "max_hold_hours": pos.max_hold_hours,
+            "is_surge": True,
+        })
+
+        # 합산 수치 갱신
+        summary["invested_value_krw"] = round(summary.get("invested_value_krw", 0) + invested, 2)
+        summary["unrealized_pnl"] = round(summary.get("unrealized_pnl", 0) + unrealized, 2)
+        summary["total_value_krw"] = round(summary.get("total_value_krw", 0) + unrealized, 2)
+
+    return summary
 
 
 @router.get("/summary", response_model=PortfolioSummaryResponse)
@@ -32,6 +121,11 @@ async def get_portfolio_summary(
             peak_value=0, drawdown_pct=0, positions=[],
         )
     summary = await pm.get_portfolio_summary(session)
+
+    # 선물 조회 시 서지 포지션 병합
+    if exchange == "binance_futures":
+        summary = await _merge_surge_positions(summary, session)
+
     return PortfolioSummaryResponse(**summary)
 
 

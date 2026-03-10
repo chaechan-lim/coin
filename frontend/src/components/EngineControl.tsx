@@ -4,11 +4,20 @@ import type { ExchangeName } from '../types'
 
 export function EngineControl({ liveEvents, exchange = 'bithumb' }: { liveEvents: string[]; exchange?: ExchangeName }) {
   const qc = useQueryClient()
+  const isFutures = exchange === 'binance_futures'
 
   const { data: status } = useQuery({
     queryKey: ['engine', 'status', exchange],
     queryFn: () => getEngineStatus(exchange),
     refetchInterval: 10_000,
+  })
+
+  // 선물 탭에서 서지 엔진 상태도 표시
+  const { data: surgeStatus } = useQuery({
+    queryKey: ['engine', 'status', 'binance_surge'],
+    queryFn: () => getEngineStatus('binance_surge' as ExchangeName),
+    refetchInterval: 10_000,
+    enabled: isFutures,
   })
 
   const startMut = useMutation({
@@ -72,6 +81,22 @@ export function EngineControl({ liveEvents, exchange = 'bithumb' }: { liveEvents
             <div className="text-gray-500 text-xs">추적 코인</div>
             <div className="text-white font-medium">{status.tracked_coins.length}종</div>
           </div>
+        </div>
+      )}
+
+      {/* 선물 탭에서 서지 엔진 상태 표시 */}
+      {isFutures && surgeStatus && (
+        <div className="flex items-center gap-2 mb-3 px-2 py-1.5 bg-gray-900/50 rounded-lg">
+          <div className={`w-2 h-2 rounded-full shrink-0 ${surgeStatus.is_running ? 'bg-cyan-500 animate-pulse' : 'bg-gray-600'}`} />
+          <span className="text-xs text-gray-400">서지 엔진</span>
+          <span className={`text-xs font-medium ${surgeStatus.is_running ? 'text-cyan-400' : 'text-gray-500'}`}>
+            {surgeStatus.is_running ? '활성' : '비활성'}
+          </span>
+          {surgeStatus.is_running && (
+            <span className="text-xs text-gray-500">
+              · {surgeStatus.tracked_coins?.length ?? 0}종 스캔
+            </span>
+          )}
         </div>
       )}
 

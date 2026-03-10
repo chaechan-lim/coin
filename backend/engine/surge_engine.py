@@ -15,11 +15,10 @@ from datetime import datetime, timezone, timedelta
 import numpy as np
 import structlog
 
-from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from config import AppConfig, SurgeTradingConfig
-from core.models import Position, Order, PortfolioSnapshot
+from core.models import Position
 from core.event_bus import emit_event
 from db.session import get_session_factory
 from exchange.base import ExchangeAdapter
@@ -111,7 +110,6 @@ class SurgeEngine:
         self._scan_interval = sc.scan_interval_sec
         self._mode = sc.mode
         self._scan_symbols = self.DEFAULT_SCAN_SYMBOLS[:sc.scan_symbols_count]
-        self._initial_allocation = sc.initial_balance_usdt
 
         # Runtime state
         self._running = False
@@ -119,10 +117,6 @@ class SurgeEngine:
         self._positions: dict[str, SurgePositionState] = {}
         self._symbol_states: dict[str, SymbolState] = {}
         self._cooldowns: dict[str, datetime] = {}  # symbol -> next allowed time
-
-        # Surge PnL tracking (DB에서 복원됨)
-        self._surge_realized_pnl = 0.0
-        self._last_snapshot_time: float = 0.0
 
         # Daily counters (reset at 00:00 UTC)
         self._daily_trades = 0
@@ -428,19 +422,12 @@ class SurgeEngine:
                 return True
         return False
 
-    def _surge_available_cash(self) -> float:
-        """서지 할당 중 사용 가능한 금액."""
-        used = sum(p.margin for p in self._positions.values())
-        surge_available = self._initial_allocation + self._surge_realized_pnl - used
-        # 선물 PM의 실제 현금도 초과 불가
-        return min(max(0, surge_available), max(0, self._futures_pm.cash_balance))
-
     async def _enter_position(
         self, symbol: str, direction: str, score: float, ticker: dict,
     ) -> None:
         """Execute a surge entry."""
         price = ticker["last"]
-        cash = self._surge_available_cash()
+        cash = self._futures_pm.cash_balance
 
         # Position sizing with surge strength scaling
         size_usdt = cash * self._position_pct
@@ -718,9 +705,8 @@ class SurgeEngine:
 
                 await session.commit()
 
-            # 선물 PM cash 조정 + 서지 realized PnL 추적
+            # 선물 PM cash 조정
             self._futures_pm.cash_balance += cost_return
-            self._surge_realized_pnl += pnl_usdt
 
             # Update counters
             if net_pnl_pct < 0:
@@ -775,11 +761,10 @@ class SurgeEngine:
         pass
 
     async def initialize(self) -> None:
-        """Initialize engine state — restore positions and realized PnL from DB."""
+        """Initialize engine state — restore open positions from DB."""
         try:
             sf = get_session_factory()
             async with sf() as session:
-                # 포지션 복원
                 result = await session.execute(
                     select(Position).where(
                         Position.exchange == EXCHANGE_NAME,
@@ -802,173 +787,6 @@ class SurgeEngine:
                     )
                 if positions:
                     logger.info("surge_positions_restored", count=len(positions))
-
-                # realized PnL 복원 (완료된 매도 주문의 realized_pnl 합계)
-                pnl_result = await session.execute(
-                    select(func.coalesce(func.sum(Order.realized_pnl), 0.0)).where(
-                        Order.exchange == EXCHANGE_NAME,
-                        Order.realized_pnl.isnot(None),
-                    )
-                )
-                self._surge_realized_pnl = float(pnl_result.scalar() or 0.0)
-                if self._surge_realized_pnl != 0:
-                    logger.info("surge_realized_pnl_restored",
-                                pnl=round(self._surge_realized_pnl, 2))
         except Exception as e:
             logger.warning("surge_init_restore_failed", error=str(e))
 
-    # ── Portfolio summary (API용) ─────────────────────────────────
-
-    async def get_portfolio_summary(self, session: AsyncSession) -> dict:
-        """DB 기반 서지 포트폴리오 요약. 선물 PM 거치지 않고 직접 계산."""
-        result = await session.execute(
-            select(Position).where(
-                Position.exchange == EXCHANGE_NAME,
-                Position.quantity > 0,
-            )
-        )
-        positions = list(result.scalars().all())
-
-        total_invested = 0.0
-        total_unrealized = 0.0
-        pos_list = []
-
-        for pos in positions:
-            invested = pos.total_invested or 0
-            total_invested += invested
-
-            entry = pos.average_buy_price
-            # 인메모리 최신 가격 우선, 없으면 DB
-            sym_state = self._symbol_states.get(pos.symbol)
-            current = sym_state.last_price if sym_state and sym_state.last_price > 0 else (pos.current_price or entry)
-            direction = pos.direction or "long"
-            leverage = pos.leverage or self._leverage
-
-            if entry > 0:
-                if direction == "short":
-                    raw_pnl_pct = (entry - current) / entry
-                else:
-                    raw_pnl_pct = (current - entry) / entry
-                unrealized = invested * leverage * raw_pnl_pct
-            else:
-                unrealized = 0.0
-
-            current_value = invested + unrealized
-            pnl_pct = raw_pnl_pct * leverage * 100 if entry > 0 else 0.0
-
-            total_unrealized += unrealized
-
-            pos_list.append({
-                "symbol": pos.symbol,
-                "quantity": pos.quantity,
-                "average_buy_price": entry,
-                "current_price": current,
-                "current_value": round(current_value, 4),
-                "unrealized_pnl": round(unrealized, 4),
-                "unrealized_pnl_pct": round(pnl_pct, 2),
-                "total_invested": round(invested, 4),
-                "margin_used": round(invested, 4),
-                "entered_at": pos.entered_at.isoformat() if pos.entered_at else None,
-                "direction": direction,
-                "leverage": leverage,
-                "liquidation_price": pos.liquidation_price,
-                "stop_loss_price": pos.stop_loss_price,
-                "take_profit_price": pos.take_profit_price,
-                "stop_loss_pct": pos.stop_loss_pct,
-                "take_profit_pct": pos.take_profit_pct,
-                "trailing_activation_pct": pos.trailing_activation_pct,
-                "trailing_stop_pct": pos.trailing_stop_pct,
-                "trailing_active": pos.trailing_active,
-                "highest_price": pos.highest_price,
-                "max_hold_hours": pos.max_hold_hours,
-                "is_surge": True,
-            })
-
-        # 거래 횟수/수수료
-        trade_result = await session.execute(
-            select(func.count(Order.id)).where(Order.exchange == EXCHANGE_NAME)
-        )
-        trade_count = trade_result.scalar() or 0
-
-        fee_result = await session.execute(
-            select(func.coalesce(func.sum(Order.fee), 0.0)).where(
-                Order.exchange == EXCHANGE_NAME
-            )
-        )
-        total_fees = float(fee_result.scalar() or 0.0)
-
-        available_cash = self._initial_allocation + self._surge_realized_pnl - total_invested
-        total_value = self._initial_allocation + self._surge_realized_pnl + total_unrealized
-        total_pnl = self._surge_realized_pnl + total_unrealized
-        pnl_pct = (total_pnl / self._initial_allocation * 100) if self._initial_allocation > 0 else 0
-
-        return {
-            "exchange": EXCHANGE_NAME,
-            "total_value_krw": round(total_value, 2),
-            "cash_balance_krw": round(max(available_cash, 0), 2),
-            "invested_value_krw": round(total_invested, 2),
-            "initial_balance_krw": self._initial_allocation,
-            "realized_pnl": round(self._surge_realized_pnl, 2),
-            "unrealized_pnl": round(total_unrealized, 2),
-            "total_pnl": round(total_pnl, 2),
-            "total_pnl_pct": round(pnl_pct, 2),
-            "total_fees": round(total_fees, 2),
-            "trade_count": trade_count,
-            "peak_value": round(max(total_value, self._initial_allocation), 2),
-            "drawdown_pct": 0.0,
-            "positions": pos_list,
-        }
-
-
-# ── SurgePortfolioView (EngineRegistry PM 호환) ──────────────────
-
-class SurgePortfolioView:
-    """서지 엔진용 경량 포트폴리오 뷰.
-
-    EngineRegistry에 PM으로 등록. sync/reconcile는 no-op.
-    실제 데이터는 SurgeEngine.get_portfolio_summary()에서 DB 기반으로 생성.
-    """
-
-    def __init__(self, surge_engine: SurgeEngine):
-        self._engine = surge_engine
-        self._exchange_name = EXCHANGE_NAME
-        self._cleared_positions: list = []
-        self._snapshot_skip_count = 0
-
-    @property
-    def cash_balance(self) -> float:
-        return self._engine._surge_available_cash()
-
-    @cash_balance.setter
-    def cash_balance(self, value: float) -> None:
-        pass  # no-op — cash는 선물 PM에서 관리
-
-    async def get_portfolio_summary(self, session: AsyncSession) -> dict:
-        return await self._engine.get_portfolio_summary(session)
-
-    async def sync_exchange_positions(self, session, exchange, coins):
-        """No-op: 서지 엔진이 직접 포지션 관리."""
-        pass
-
-    async def take_snapshot(self, session: AsyncSession):
-        """서지 포트폴리오 스냅샷 저장."""
-        summary = await self._engine.get_portfolio_summary(session)
-        snap = PortfolioSnapshot(
-            exchange=EXCHANGE_NAME,
-            total_value_krw=summary["total_value_krw"],
-            cash_balance_krw=summary["cash_balance_krw"],
-            invested_value_krw=summary["invested_value_krw"],
-            unrealized_pnl=summary["unrealized_pnl"],
-            drawdown_pct=summary["drawdown_pct"],
-        )
-        session.add(snap)
-        return snap
-
-    async def initialize_cash_from_exchange(self, adapter):
-        pass  # no-op
-
-    async def apply_income(self, *args, **kwargs):
-        pass  # no-op
-
-    async def reconcile_cash_from_db(self, *args, **kwargs):
-        pass  # no-op

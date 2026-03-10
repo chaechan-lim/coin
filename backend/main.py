@@ -484,10 +484,9 @@ async def lifespan(app: FastAPI):
     # ── 7c. 서지 엔진 (조건부) — 선물 PM 잔고 통합 ─────────────
     if config.surge_trading.enabled and config.binance.enabled and binance_exchange:
         try:
-            from engine.surge_engine import SurgeEngine, SurgePortfolioView
+            from engine.surge_engine import SurgeEngine
 
             surge_is_paper = config.surge_trading.mode == "paper"
-            surge_initial = config.surge_trading.initial_balance_usdt
 
             # 선물 PM 공유 (별도 PM 생성 안 함)
             binance_pm = engine_registry.get_portfolio_manager("binance_futures")
@@ -507,17 +506,15 @@ async def lifespan(app: FastAPI):
             await surge_eng.initialize()
             _surge_engine = surge_eng
 
-            # SurgePortfolioView: API 호환용 경량 PM 래퍼
-            surge_pv = SurgePortfolioView(surge_eng)
+            # PM=None — 서지 잔고는 선물 PM과 통합, 프론트에서도 선물 탭에 통합 표시
             engine_registry.register(
-                "binance_surge", surge_eng, surge_pv,
+                "binance_surge", surge_eng, None,
                 None, None,
             )
 
             logger.info("surge_engine_ready",
                          mode=config.surge_trading.mode,
-                         leverage=config.surge_trading.leverage,
-                         initial_usdt=surge_initial)
+                         leverage=config.surge_trading.leverage)
         except Exception as e:
             logger.error("surge_engine_init_failed", error=str(e), exc_info=True)
 

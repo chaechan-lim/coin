@@ -31,12 +31,10 @@ type TabId = (typeof TABS)[number]['id']
 const EXCHANGE_LABELS: Partial<Record<ExchangeName, string>> = {
   binance_futures: 'Binance',
   binance_spot: 'Binance',
-  binance_surge: 'Surge',
 }
 
 const SPOT_EXCHANGES: ExchangeName[] = ['binance_spot']
 const FUTURES_EXCHANGES: ExchangeName[] = ['binance_futures']
-const SURGE_EXCHANGES: ExchangeName[] = ['binance_surge']
 
 export function Dashboard() {
   const [tab, setTab] = useState<TabId>('overview')
@@ -53,7 +51,7 @@ export function Dashboard() {
     staleTime: 60_000,
   })
 
-  const exchanges = exchangeInfo?.exchanges?.filter((e: ExchangeName) => e !== 'bithumb') ?? ['binance_spot']
+  const exchanges = exchangeInfo?.exchanges?.filter((e: ExchangeName) => e !== 'bithumb' && e !== 'binance_surge') ?? ['binance_spot']
 
   const onMessage = useCallback(
     (event: WsEvent) => {
@@ -121,7 +119,6 @@ export function Dashboard() {
       {exchanges.length > 1 && (() => {
         const spotExs = exchanges.filter((e) => SPOT_EXCHANGES.includes(e))
         const futuresExs = exchanges.filter((e) => FUTURES_EXCHANGES.includes(e))
-        const surgeExs = exchanges.filter((e) => SURGE_EXCHANGES.includes(e))
         const ExBtn = ({ ex }: { ex: ExchangeName }) => (
           <button
             onClick={() => setExchange(ex)}
@@ -149,15 +146,6 @@ export function Dashboard() {
               <>
                 <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">선물</span>
                 {futuresExs.map((ex) => <ExBtn key={ex} ex={ex} />)}
-              </>
-            )}
-            {surgeExs.length > 0 && (
-              <>
-                {(spotExs.length > 0 || futuresExs.length > 0) && (
-                  <div className="w-px h-5 bg-gray-700 mx-1" />
-                )}
-                <span className="text-[10px] text-yellow-500 font-medium uppercase tracking-wider">서지</span>
-                {surgeExs.map((ex) => <ExBtn key={ex} ex={ex} />)}
               </>
             )}
           </div>
