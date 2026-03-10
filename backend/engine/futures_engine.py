@@ -86,15 +86,8 @@ class BinanceFuturesEngine(TradingEngine):
         self._futures_fee = config.binance.futures_fee
         self._funding_rates: dict[str, float] = {}
         self._last_funding_update: datetime | None = None
-        # 동적 종목 선정
+        # 동적 종목 선정 (비활성 — 추적 코인만 사용)
         self._dynamic_coins: list[str] = []
-        self._last_coin_refresh: datetime | None = None
-        self._COIN_REFRESH_SEC = 6 * 3600  # 6시간마다 갱신
-        self._MAX_DYNAMIC_COINS = 10
-        self._MIN_QUOTE_VOLUME = 50_000_000  # 24h 거래대금 5천만 USDT 이상
-        self._MIN_ORDERBOOK_DEPTH = 50_000  # 오더북 1% 이내 bid 깊이 최소 5만 USDT
-        # 스테이블코인/레버리지 토큰 제외
-        self._EXCLUDED_BASES = {"USDC", "BUSD", "DAI", "TUSD", "FDUSD", "USDP"}
 
         # 연속 평가 오류 카운터 — N회 연속 실패 시 포지션 강제 청산
         self._eval_error_counts: dict[str, int] = {}
@@ -133,8 +126,6 @@ class BinanceFuturesEngine(TradingEngine):
             except Exception as e:
                 logger.warning("leverage_set_failed", symbol=symbol, error=str(e))
 
-        # 동적 종목 초기 로드
-        await self._refresh_dynamic_coins()
 
     # ── 듀얼 루프 시작/중지 ─────────────────────────────────────
 
@@ -621,90 +612,9 @@ class BinanceFuturesEngine(TradingEngine):
 
     @property
     def tracked_coins(self) -> list[str]:
-        """설정 코인 + 동적 거래량 상위 코인 합집합."""
-        base = set(self._config.binance.tracked_coins)
-        return list(base | set(self._dynamic_coins))
+        """설정 코인 목록."""
+        return list(self._config.binance.tracked_coins)
 
-    async def _refresh_dynamic_coins(self) -> None:
-        """바이낸스 선물 24h 거래대금 상위 종목 자동 선정."""
-        now = datetime.now(timezone.utc)
-        if (self._last_coin_refresh
-                and (now - self._last_coin_refresh).total_seconds() < self._COIN_REFRESH_SEC):
-            return
-        try:
-            tickers = await self._exchange.fetch_tickers()
-            candidates = []
-            for sym, data in tickers.items():
-                # USDT 무기한 선물만 ("BTC/USDT:USDT" 형식)
-                if ":USDT" not in sym or "/USDT" not in sym:
-                    continue
-                # USDC 페어 제외
-                if ":USDC" in sym or "/USDC" in sym:
-                    continue
-                clean_sym = sym.split(":")[0]  # "BTC/USDT:USDT" → "BTC/USDT"
-                base = clean_sym.split("/")[0]
-                # 스테이블코인/레버리지 토큰 제외
-                if base in self._EXCLUDED_BASES:
-                    continue
-                if any(c.isdigit() for c in base[-2:]):  # BTC2X 등
-                    continue
-                quote_vol = float(data.get("quoteVolume", 0) or 0)
-                if quote_vol < self._MIN_QUOTE_VOLUME:
-                    continue
-                # 24h 변동률 > 30% 코인 제외 (POWER 사례 방지)
-                pct_change = abs(float(data.get("percentage", 0) or 0))
-                if pct_change > 30:
-                    logger.info("dynamic_coin_excluded_high_volatility",
-                                symbol=clean_sym, pct_24h=round(pct_change, 1))
-                    continue
-                candidates.append((clean_sym, quote_vol))
-
-            # 거래대금 상위 후보 → 오더북 깊이 필터
-            candidates.sort(key=lambda x: x[1], reverse=True)
-            # 상위 20개만 오더북 조회 (API 부담 최소화)
-            shortlist = candidates[:self._MAX_DYNAMIC_COINS * 2]
-            filtered = []
-            for sym, vol in shortlist:
-                if len(filtered) >= self._MAX_DYNAMIC_COINS:
-                    break
-                # 고정 추적 코인은 깊이 체크 스킵
-                if sym in self._config.binance.tracked_coins:
-                    filtered.append(sym)
-                    continue
-                try:
-                    ob = await self._exchange.fetch_orderbook(sym, limit=20)
-                    mid = (ob.bids[0][0] + ob.asks[0][0]) / 2 if ob.bids and ob.asks else 0
-                    if mid <= 0:
-                        continue
-                    depth = sum(p * q for p, q in ob.bids if p >= mid * 0.99)
-                    if depth < self._MIN_ORDERBOOK_DEPTH:
-                        logger.info("dynamic_coin_excluded_shallow_orderbook",
-                                    symbol=sym, depth_usdt=round(depth),
-                                    min_required=self._MIN_ORDERBOOK_DEPTH)
-                        continue
-                    filtered.append(sym)
-                except Exception:
-                    filtered.append(sym)  # 조회 실패 시 통과 (거래대금 필터만 적용)
-            new_coins = filtered
-
-            # 새로 추가된 코인 레버리지 설정
-            old_set = set(self._dynamic_coins)
-            for sym in new_coins:
-                if sym not in old_set and sym not in self._config.binance.tracked_coins:
-                    try:
-                        await self._exchange.set_leverage(sym, self._leverage)
-                    except Exception as e:
-                        logger.warning("leverage_set_failed", symbol=sym, error=str(e))
-
-            self._dynamic_coins = new_coins
-            self._last_coin_refresh = now
-            logger.info(
-                "futures_dynamic_coins_refreshed",
-                count=len(new_coins),
-                coins=new_coins,
-            )
-        except Exception as e:
-            logger.warning("futures_dynamic_coins_failed", error=str(e))
 
     async def _evaluation_cycle(self) -> None:
         """선물 평가 루프 — 동적 종목 + 펀딩비 업데이트."""
@@ -716,9 +626,6 @@ class BinanceFuturesEngine(TradingEngine):
             session_factory = get_session_factory()
             async with session_factory() as session:
                 try:
-                    # 동적 종목 갱신 (6시간마다)
-                    await self._refresh_dynamic_coins()
-
                     # 시장 상태 업데이트 (BTC/USDT 기준)
                     await self._maybe_update_market_state(session)
 
@@ -1810,16 +1717,16 @@ class BinanceFuturesEngine(TradingEngine):
 
     @property
     def rotation_status(self) -> dict:
-        """선물 엔진 — 동적 종목 정보 포함."""
+        """선물 엔진 상태."""
         return {
             "rotation_enabled": False,
             "surge_threshold": 0,
             "market_state": self._market_state,
             "current_surge_symbol": None,
             "last_rotation_time": None,
-            "last_scan_time": self._last_coin_refresh,
+            "last_scan_time": None,
             "rotation_cooldown_sec": 0,
             "tracked_coins": self.tracked_coins,
-            "rotation_coins": self._dynamic_coins,
+            "rotation_coins": [],
             "all_surge_scores": {},
         }
