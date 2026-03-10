@@ -29,6 +29,8 @@
 포트폴리오 백테스트 (멀티코인):
   python backtest.py --portfolio --days 90
   python backtest.py --portfolio --days 540 --risk --trade-limits --asymmetric
+  python backtest.py --portfolio --days 540 --asymmetric --strategy-sell voting
+  python backtest.py --portfolio --days 540 --asymmetric --strategy-sell paired
   python backtest.py --portfolio --portfolio-coins BTC ETH SOL --max-positions 3
 
 리스크/매매제한 (기존 모드에도 적용):
@@ -1337,6 +1339,8 @@ class PortfolioBacktester:
         trade_limit_enabled: bool = False,
         daily_buy_limit: int = 20,
         max_coin_buys: int = 3,
+        # 전략 매도 모드
+        strategy_sell_mode: str = "none",  # "none" | "voting" | "paired"
     ):
         self._exchange = exchange
         self._initial_balance = initial_balance
@@ -1353,6 +1357,7 @@ class PortfolioBacktester:
         self._asymmetric = asymmetric
         self._max_positions = max_positions
         self._max_trade_size_pct = max_trade_size_pct
+        self._strategy_sell_mode = strategy_sell_mode
         self._symbols = symbols or DEFAULT_PORTFOLIO_COINS
 
         # 리스크 관리자
@@ -1402,8 +1407,9 @@ class PortfolioBacktester:
     ) -> dict[str, pd.DataFrame]:
         """전 코인 + BTC 레퍼런스 데이터 프리페치."""
         all_data: dict[str, pd.DataFrame] = {}
-        # BTC 먼저 (시장 상태용)
-        all_syms = list(dict.fromkeys(["BTC/KRW"] + list(self._symbols)))
+        # BTC 먼저 (시장 상태용) — USDT/KRW 자동 판별
+        btc_ref = "BTC/USDT" if any(s.endswith("/USDT") for s in self._symbols) else "BTC/KRW"
+        all_syms = list(dict.fromkeys([btc_ref] + list(self._symbols)))
         total = len(all_syms)
         for idx, sym in enumerate(all_syms, 1):
             try:
@@ -1459,7 +1465,8 @@ class PortfolioBacktester:
         limit_str = "ON" if self._trade_limiter else "OFF"
         print(f"  최대 동시 포지션: {self._max_positions} | 코인당 자금: {self._max_trade_size_pct*100:.0f}%")
         print(f"  손절: {sl_str} | 익절: {tp_str} | 트레일링: {trail_str}")
-        print(f"  비대칭: {asym_str} | 쿨다운: {self._trade_cooldown}캔들")
+        sell_mode_str = {"none": "OFF", "voting": "투표", "paired": "페어링"}.get(self._strategy_sell_mode, "OFF")
+        print(f"  비대칭: {asym_str} | 쿨다운: {self._trade_cooldown}캔들 | 전략매도: {sell_mode_str}")
         print(f"  리스크 관리: {risk_str} | 매매 제한: {limit_str}")
         print(f"{'='*60}")
 
@@ -1474,7 +1481,8 @@ class PortfolioBacktester:
             self._trade_limiter.min_interval_candles = BacktestTradeLimiter.calc_min_interval(timeframe)
 
         # BTC B&H + 균등배분 B&H
-        btc_df = all_data.get("BTC/KRW")
+        btc_ref = "BTC/USDT" if any(s.endswith("/USDT") for s in self._symbols) else "BTC/KRW"
+        btc_df = all_data.get(btc_ref)
         portfolio_syms = [s for s in self._symbols if s in all_data]
 
         # 2. 유니온 타임스탬프
@@ -1623,6 +1631,85 @@ class PortfolioBacktester:
 
             for sym in to_close:
                 del positions[sym]
+
+            # 4f-2. 전략 신호 기반 매도 (voting/paired 모드)
+            if self._strategy_sell_mode != "none":
+                strat_sell_list: list[str] = []
+                for sym, pos in positions.items():
+                    if sym not in all_data or ts not in all_data[sym].index:
+                        continue
+                    sym_df = all_data[sym]
+                    sym_iloc = sym_df.index.get_loc(ts)
+                    if isinstance(sym_iloc, slice):
+                        sym_iloc = sym_iloc.start
+                    cur_price = float(sym_df.loc[ts, "close"])
+                    slice_df = sym_df.iloc[max(0, sym_iloc - 200):sym_iloc + 1]
+                    row = sym_df.iloc[sym_iloc]
+                    ticker = Ticker(
+                        symbol=sym, last=cur_price,
+                        bid=cur_price * 0.9995, ask=cur_price * 1.0005,
+                        high=float(row["high"]), low=float(row["low"]),
+                        volume=float(row.get("volume", 0)), timestamp=ts,
+                    )
+
+                    should_sell = False
+                    sell_strategy = ""
+                    sell_confidence = 0.0
+                    sell_reason = ""
+
+                    if self._strategy_sell_mode == "paired":
+                        entry_strat = self._strategies.get(pos.entry_strategy)
+                        if entry_strat is None:
+                            continue
+                        try:
+                            sig = await entry_strat.analyze(slice_df.copy(), ticker)
+                            if sig.signal_type == SignalType.SELL:
+                                should_sell = True
+                                sell_strategy = pos.entry_strategy
+                                sell_confidence = sig.confidence
+                                sell_reason = f"페어링 매도 ({sym}) {sig.reason}"
+                        except Exception:
+                            pass
+
+                    elif self._strategy_sell_mode == "voting":
+                        signals: list[Signal] = []
+                        for name, strategy in self._strategies.items():
+                            try:
+                                sig = await strategy.analyze(slice_df.copy(), ticker)
+                                signals.append(sig)
+                            except Exception:
+                                pass
+                        if signals:
+                            decision = self._combiner.combine(signals, market_state=current_market_state)
+                            if decision.action == SignalType.SELL:
+                                sell_sigs = [s for s in signals if s.signal_type == SignalType.SELL]
+                                best_sig = max(sell_sigs, key=lambda s: s.confidence) if sell_sigs else signals[0]
+                                should_sell = True
+                                sell_strategy = best_sig.strategy_name
+                                sell_confidence = float(decision.combined_confidence)
+                                sell_reason = f"투표 매도 ({sym}) {best_sig.reason}"
+
+                    if should_sell:
+                        proceeds, pnl, pnl_pct, t = self._execute_sell(
+                            ts, cur_price, pos, "sell(strat)", sell_strategy,
+                            sell_confidence, sell_reason,
+                        )
+                        cash += proceeds
+                        trades.append(t)
+                        coin_stats[sym]["trades"] += 1
+                        coin_stats[sym]["pnl"] += pnl
+                        if pnl > 0:
+                            win_count += 1
+                            total_win_pct += abs(pnl_pct)
+                            coin_stats[sym]["wins"] += 1
+                        else:
+                            loss_count += 1
+                            total_loss_pct += abs(pnl_pct)
+                            coin_stats[sym]["losses"] += 1
+                        strat_sell_list.append(sym)
+
+                for sym in strat_sell_list:
+                    del positions[sym]
 
             # 4g. 미보유 코인 순회: 전략 시그널 → 매수 후보 수집
             buy_candidates: list[tuple[str, float, Signal, object]] = []  # (sym, confidence, best_signal, decision)
@@ -4753,6 +4840,12 @@ async def main():
     # 듀얼 타임프레임
     parser.add_argument("--dual-timeframe",  action="store_true", default=False,
                         help="선물 듀얼 타임프레임 ON (4h+1h)")
+    # 전략 매도 모드 (현물 포트폴리오)
+    parser.add_argument("--strategy-sell",   choices=["none", "voting", "paired"], default="none",
+                        help="전략 매도 모드: none=SL/TP만, voting=투표, paired=진입전략만 (기본 none)")
+    # 바이낸스 현물 데이터 사용 (빗썸 불가 시)
+    parser.add_argument("--use-binance",     action="store_true", default=False,
+                        help="현물 백테스트에 바이낸스 현물 데이터 사용 (빗썸 대신)")
 
     args = parser.parse_args()
 
@@ -4915,9 +5008,15 @@ async def main():
         await exchange.close()
         return
 
-    print("빗썸 연결 중...")
-    exchange = BithumbAdapter(api_key="", api_secret="")
-    await exchange.initialize()
+    if args.use_binance:
+        from exchange.binance_spot_adapter import BinanceSpotAdapter
+        print("바이낸스 현물 연결 중...")
+        exchange = BinanceSpotAdapter(api_key="", api_secret="")
+        await exchange.initialize()
+    else:
+        print("빗썸 연결 중...")
+        exchange = BithumbAdapter(api_key="", api_secret="")
+        await exchange.initialize()
 
     # ── 로테이션 모드 ─────────────────────────────────────────
     if args.rotation:
@@ -4986,8 +5085,11 @@ async def main():
     # ── 포트폴리오 모드 ──────────────────────────────────────
     if args.portfolio:
         portfolio_coins = args.portfolio_coins
+        quote = "USDT" if args.use_binance else "KRW"
         if portfolio_coins:
-            portfolio_coins = [c if "/" in c else f"{c}/KRW" for c in portfolio_coins]
+            portfolio_coins = [c if "/" in c else f"{c}/{quote}" for c in portfolio_coins]
+        elif args.use_binance:
+            portfolio_coins = [c.replace("/KRW", "/USDT") for c in DEFAULT_PORTFOLIO_COINS]
 
         bt = PortfolioBacktester(
             exchange=exchange,
@@ -5014,6 +5116,7 @@ async def main():
             trade_limit_enabled=args.trade_limits,
             daily_buy_limit=args.daily_buy_limit,
             max_coin_buys=args.max_coin_buys,
+            strategy_sell_mode=args.strategy_sell,
         )
         result = await bt.run(args.timeframe, args.days)
         print_portfolio_result(result)
