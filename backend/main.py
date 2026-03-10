@@ -481,39 +481,37 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("binance_spot_init_failed", error=str(e), exc_info=True)
 
-    # ── 7c. 서지 엔진 (조건부) ──────────────────────────────────
+    # ── 7c. 서지 엔진 (조건부) — 선물 PM 잔고 통합 ─────────────
     if config.surge_trading.enabled and config.binance.enabled and binance_exchange:
         try:
-            from engine.surge_engine import SurgeEngine
+            from engine.surge_engine import SurgeEngine, SurgePortfolioView
 
             surge_is_paper = config.surge_trading.mode == "paper"
             surge_initial = config.surge_trading.initial_balance_usdt
 
-            surge_market_data = MarketDataService(binance_exchange)
+            # 선물 PM 공유 (별도 PM 생성 안 함)
+            binance_pm = engine_registry.get_portfolio_manager("binance_futures")
+
             surge_order_mgr = OrderManager(
                 binance_exchange, is_paper=surge_is_paper,
                 exchange_name="binance_surge", fee_currency="USDT",
-            )
-            surge_portfolio_mgr = PortfolioManager(
-                market_data=surge_market_data,
-                initial_balance_krw=surge_initial,
-                is_paper=surge_is_paper,
-                exchange_name="binance_surge",
             )
 
             surge_eng = SurgeEngine(
                 config=config,
                 exchange=binance_exchange,
-                portfolio_manager=surge_portfolio_mgr,
+                futures_pm=binance_pm,
                 order_manager=surge_order_mgr,
                 engine_registry=engine_registry,
             )
             await surge_eng.initialize()
             _surge_engine = surge_eng
 
+            # SurgePortfolioView: API 호환용 경량 PM 래퍼
+            surge_pv = SurgePortfolioView(surge_eng)
             engine_registry.register(
-                "binance_surge", surge_eng, surge_portfolio_mgr,
-                None, None,  # no combiner/coordinator for surge engine
+                "binance_surge", surge_eng, surge_pv,
+                None, None,
             )
 
             logger.info("surge_engine_ready",

@@ -12,6 +12,7 @@ from collections import deque
 from core.models import Position
 from engine.surge_engine import (
     SurgeEngine,
+    SurgePortfolioView,
     SurgePositionState,
     SymbolState,
     EXCHANGE_NAME,
@@ -46,10 +47,9 @@ def mock_exchange():
 
 @pytest.fixture
 def mock_portfolio():
+    """Mock futures PM (shared cash)."""
     pm = MagicMock()
-    pm.cash_balance = 150.0
-    pm.update_position_on_buy = AsyncMock()
-    pm.update_position_on_sell = AsyncMock()
+    pm.cash_balance = 300.0  # 선물 전체 잔고
     return pm
 
 
@@ -77,7 +77,7 @@ def surge_engine(mock_config, mock_exchange, mock_portfolio, mock_order_manager,
     engine = SurgeEngine(
         config=mock_config,
         exchange=mock_exchange,
-        portfolio_manager=mock_portfolio,
+        futures_pm=mock_portfolio,
         order_manager=mock_order_manager,
         engine_registry=mock_registry,
     )
@@ -594,3 +594,100 @@ class TestEntryExecution:
         assert "BTC/USDT" in surge_engine._positions
         assert surge_engine._daily_trades == 1
         assert "BTC/USDT" in surge_engine._cooldowns
+
+    @pytest.mark.asyncio
+    async def test_entry_deducts_futures_pm_cash(self, surge_engine, session):
+        """서지 진입 시 선물 PM cash가 차감됨."""
+        initial_cash = surge_engine._futures_pm.cash_balance
+
+        mock_factory = MagicMock()
+        mock_session_ctx = MagicMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_session_ctx
+
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._enter_position(
+                    "ETH/USDT", "long", 0.75,
+                    {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
+                )
+
+        assert surge_engine._futures_pm.cash_balance < initial_cash
+
+
+# ── Test: Cash integration ───────────────────────────────────────
+
+class TestCashIntegration:
+    def test_surge_available_cash_respects_allocation(self, surge_engine):
+        """Available cash capped by initial allocation."""
+        surge_engine._futures_pm.cash_balance = 500.0  # plenty of futures cash
+        surge_engine._surge_realized_pnl = 0.0
+        # No positions → available = min(150, 500) = 150
+        available = surge_engine._surge_available_cash()
+        assert available == surge_engine._initial_allocation  # 150
+
+    def test_surge_available_cash_reduces_with_positions(self, surge_engine):
+        """Open positions reduce available cash."""
+        surge_engine._futures_pm.cash_balance = 500.0
+        surge_engine._positions["BTC/USDT"] = SurgePositionState(
+            symbol="BTC/USDT", direction="long",
+            entry_price=65000.0, quantity=0.01, margin=50.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=65000.0, trough_price=65000.0,
+        )
+        available = surge_engine._surge_available_cash()
+        assert available == 100.0  # 150 - 50
+
+    def test_surge_available_cash_limited_by_futures(self, surge_engine):
+        """Cannot exceed actual futures PM cash."""
+        surge_engine._futures_pm.cash_balance = 50.0  # futures almost out of cash
+        available = surge_engine._surge_available_cash()
+        assert available == 50.0  # min(150, 50) = 50
+
+    def test_realized_pnl_increases_allocation(self, surge_engine):
+        """Positive realized PnL increases available allocation."""
+        surge_engine._futures_pm.cash_balance = 500.0
+        surge_engine._surge_realized_pnl = 30.0
+        available = surge_engine._surge_available_cash()
+        assert available == 180.0  # 150 + 30
+
+    def test_realized_pnl_loss_decreases_allocation(self, surge_engine):
+        """Negative realized PnL decreases available allocation."""
+        surge_engine._futures_pm.cash_balance = 500.0
+        surge_engine._surge_realized_pnl = -50.0
+        available = surge_engine._surge_available_cash()
+        assert available == 100.0  # 150 - 50
+
+
+# ── Test: SurgePortfolioView ─────────────────────────────────────
+
+class TestSurgePortfolioView:
+    def test_cash_balance_property(self, surge_engine):
+        """cash_balance delegates to engine."""
+        surge_engine._futures_pm.cash_balance = 500.0
+        view = SurgePortfolioView(surge_engine)
+        assert view.cash_balance == surge_engine._surge_available_cash()
+
+    def test_cash_balance_setter_noop(self, surge_engine):
+        """Setting cash_balance is a no-op."""
+        view = SurgePortfolioView(surge_engine)
+        view.cash_balance = 9999  # should not crash
+        # Still returns computed value
+        assert view.cash_balance == surge_engine._surge_available_cash()
+
+    @pytest.mark.asyncio
+    async def test_sync_is_noop(self, surge_engine):
+        """sync_exchange_positions does nothing."""
+        view = SurgePortfolioView(surge_engine)
+        await view.sync_exchange_positions(None, None, [])  # should not crash
+
+    @pytest.mark.asyncio
+    async def test_get_portfolio_summary(self, surge_engine, session):
+        """Portfolio summary returns correct structure."""
+        view = SurgePortfolioView(surge_engine)
+        summary = await view.get_portfolio_summary(session)
+        assert summary["exchange"] == "binance_surge"
+        assert "total_value_krw" in summary
+        assert "positions" in summary
+        assert summary["initial_balance_krw"] == 150.0
