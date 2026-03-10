@@ -2880,6 +2880,8 @@ class FuturesPortfolioBacktester:
         # 선택적 거래
         confidence_sizing: bool = False,
         volatility_filter: bool = False,
+        ml_filter_path: str | None = None,
+        ml_min_win_prob: float = 0.55,
         # 리스크 관리
         risk_enabled: bool = False,
         risk_max_drawdown: float = 0.10,
@@ -2919,6 +2921,14 @@ class FuturesPortfolioBacktester:
         self._dynamic_refresh_candles = dynamic_refresh_candles
         self._confidence_sizing = confidence_sizing
         self._volatility_filter = volatility_filter
+        self._ml_filter = None
+        if ml_filter_path:
+            from strategies.ml_filter import MLSignalFilter
+            self._ml_filter = MLSignalFilter(
+                min_win_prob=ml_min_win_prob,
+                model_path=ml_filter_path,
+            )
+        self._ml_min_win_prob = ml_min_win_prob
         if dynamic_portfolio:
             # 후보 전체 프리페치 — 기본 코인 + 후보군 합집합
             base = list(symbols or DEFAULT_FUTURES_PORTFOLIO_COINS)
@@ -3444,6 +3454,18 @@ class FuturesPortfolioBacktester:
                     continue
 
                 decision = self._combiner.combine(signals, market_state=current_market_state)
+
+                # ML 필터: 수익 확률이 낮은 시그널 차단
+                if self._ml_filter and decision.action != SignalType.HOLD:
+                    from strategies.ml_filter import MLSignalFilter
+                    _ml_features = MLSignalFilter.extract_features(
+                        signals=signals, row=row, price=cur_price,
+                        market_state=current_market_state,
+                        combined_confidence=decision.combined_confidence,
+                    )
+                    _ml_pred = self._ml_filter.predict(_ml_features)
+                    if not _ml_pred.should_trade:
+                        continue
 
                 if decision.action == SignalType.BUY:
                     # 롱 시장 게이팅 — 지정 상태에서 차단
@@ -4697,6 +4719,10 @@ async def main():
                         help="신뢰도 비례 포지션 사이징 (높은 확신 → 큰 포지션)")
     parser.add_argument("--volatility-filter", action="store_true", default=False,
                         help="변동성 필터 (ATR 높은데 신뢰도 낮으면 스킵)")
+    parser.add_argument("--ml-filter", type=str, default=None,
+                        help="ML 시그널 필터 모델 경로 (예: data/ml_models/signal_filter.pkl)")
+    parser.add_argument("--ml-min-win-prob", type=float, default=0.55,
+                        help="ML 필터 최소 수익 확률 (기본 0.55)")
     parser.add_argument("--dynamic-max-coins", type=int, default=10,
                         help="동적 포트폴리오 상위 코인 수 (기본 10)")
     # 포트폴리오 모드
@@ -4832,6 +4858,8 @@ async def main():
                 dynamic_max_coins=args.dynamic_max_coins,
                 confidence_sizing=args.confidence_sizing,
                 volatility_filter=args.volatility_filter,
+                ml_filter_path=args.ml_filter,
+                ml_min_win_prob=args.ml_min_win_prob,
             )
             if args.min_sell_weight > 0:
                 bt._combiner.MIN_SELL_ACTIVE_WEIGHT = args.min_sell_weight
