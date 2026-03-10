@@ -157,8 +157,8 @@ class EngineConfig:
                 min_combined_confidence=bt.min_combined_confidence,
                 daily_buy_limit=bt.daily_buy_limit,
                 max_daily_coin_buys=bt.max_daily_coin_buys,
-                min_trade_interval_sec=518400,      # 6일 (백테스트 cd36 최적)
-                cooldown_after_sell_sec=518400,      # 6일
+                min_trade_interval_sec=bt.min_trade_interval_sec,
+                cooldown_after_sell_sec=bt.min_trade_interval_sec,
                 min_order_amount=5.0,
                 fee_margin=1.002,
                 min_fallback_amount=10.0,

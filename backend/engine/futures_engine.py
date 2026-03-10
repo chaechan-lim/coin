@@ -797,6 +797,10 @@ class BinanceFuturesEngine(TradingEngine):
                 if sold:
                     return
 
+        # 쿨다운 중이고 포지션 없으면 전략 평가 스킵 (CPU 절약)
+        if not position and self._check_cooldown(symbol):
+            return
+
         # 전략 시그널 수집 + 결합
         signals = await self._collect_signals(symbol)
         if not signals:
