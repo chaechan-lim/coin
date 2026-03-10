@@ -343,6 +343,8 @@ class BinanceFuturesEngine(TradingEngine):
                                        diff=round(diff, 2))
             except asyncio.CancelledError:
                 break
+            except asyncio.TimeoutError:
+                continue  # 잔고 변동 없음 — 정상 (watch_balance는 변동 시에만 반환)
             except Exception as e:
                 consecutive_errors += 1
                 logger.warning("ws_balance_audit_error", error=str(e),
@@ -415,6 +417,8 @@ class BinanceFuturesEngine(TradingEngine):
                 backoff = self._WS_RECONNECT_MIN
             except asyncio.CancelledError:
                 break
+            except asyncio.TimeoutError:
+                continue  # 포지션 변동 없음 — 정상 (watch_positions는 변동 시에만 반환)
             except Exception as e:
                 consecutive_errors += 1
                 logger.warning("ws_position_error", error=str(e),
