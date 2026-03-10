@@ -60,13 +60,22 @@ class TestRSIStrategy:
 
     @pytest.mark.asyncio
     async def test_extreme_oversold_buy(self, strategy):
-        """RSI < 20 → BUY with high confidence."""
+        """RSI < 20 + RSI 반등 중 → BUY with high confidence."""
         df = _make_df(30)
         df["rsi_14"] = 15.0  # extreme oversold
-        df.iloc[-2, df.columns.get_loc("rsi_14")] = 16.0  # prev
+        df.iloc[-2, df.columns.get_loc("rsi_14")] = 13.0  # prev lower → rising
         signal = await strategy.analyze(df, _ticker())
         assert signal.signal_type == SignalType.BUY
         assert signal.confidence >= 0.80
+
+    @pytest.mark.asyncio
+    async def test_extreme_oversold_still_falling_hold(self, strategy):
+        """RSI < 20 + RSI 하락 중 → HOLD (나이프캐치 방지)."""
+        df = _make_df(30)
+        df["rsi_14"] = 15.0  # extreme oversold
+        df.iloc[-2, df.columns.get_loc("rsi_14")] = 16.0  # prev higher → falling
+        signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.HOLD
 
     @pytest.mark.asyncio
     async def test_oversold_buy(self, strategy):
@@ -581,7 +590,7 @@ class TestBollingerRSIFreefallGuard:
 
     @pytest.mark.asyncio
     async def test_extreme_bandwidth_blocks_buy(self, strategy):
-        """밴드폭 > 50% → HOLD (극단적 변동성, POWER -89% 같은 케이스)."""
+        """밴드폭 > 25% → HOLD (고변동성 필터)."""
         df = _make_df(30, close_base=100)
         # 밴드폭 60%: upper=130, lower=70, middle=100
         df["BBL_20_2.0"] = 70
@@ -590,7 +599,7 @@ class TestBollingerRSIFreefallGuard:
         df["rsi_14"] = 20.0  # oversold
         signal = await strategy.analyze(df, _ticker(65))
         assert signal.signal_type == SignalType.HOLD
-        assert "급락 방어" in signal.reason
+        assert "변동성 필터" in signal.reason
 
     @pytest.mark.asyncio
     async def test_normal_bandwidth_allows_buy(self, strategy):

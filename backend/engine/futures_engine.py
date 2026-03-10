@@ -1193,6 +1193,14 @@ class BinanceFuturesEngine(TradingEngine):
         if decision.combined_confidence < min_conf:
             return
 
+        # 변동성 게이트: ATR% 극단적이면 신규 진입 차단 (기존 포지션 청산은 허용)
+        if not position:
+            atr_pct = self._get_atr_pct(symbol)
+            if atr_pct is not None and atr_pct > 12.0:
+                logger.debug("volatility_gate_blocked", symbol=symbol,
+                             atr_pct=round(atr_pct, 1))
+                return
+
         direction = position.direction if position else None
 
         if decision.action == SignalType.BUY:

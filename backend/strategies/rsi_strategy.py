@@ -102,28 +102,39 @@ class RSIStrategy(BaseStrategy):
             and sma20_val < sma50_val
         )
 
-        # Extreme oversold
+        # Extreme oversold — RSI 반등 시작일 때만 매수 (하락 중 나이프캐치 방지)
         if current_rsi <= self._extreme_oversold:
+            if not rsi_rising:
+                # RSI가 계속 떨어지는 중 → 아직 바닥 아님
+                return Signal(
+                    signal_type=SignalType.HOLD,
+                    confidence=0.3,
+                    strategy_name=self.name,
+                    reason=f"극과매도 대기: RSI={current_rsi:.1f}↓ (반등 미확인, 진입 보류)",
+                    indicators=indicators,
+                )
             confidence = 0.85
             if _in_downtrend and sma50_val > 0:
                 sma_gap = (sma50_val - sma20_val) / sma50_val
-                if sma_gap > 0.03:  # 갭 3% 이상이면 강한 하락 추세
+                if sma_gap > 0.03:
                     confidence *= 0.5
             return Signal(
                 signal_type=SignalType.BUY,
                 confidence=round(confidence, 2),
                 strategy_name=self.name,
-                reason=f"극심한 과매도: RSI={current_rsi:.1f} (임계값: {self._extreme_oversold}). "
-                f"반등 가능성 높음{' [역추세 할인]' if _in_downtrend else ''}",
+                reason=f"극과매도 반등: RSI={current_rsi:.1f}↑ (임계값: {self._extreme_oversold}). "
+                f"반등 확인{' [역추세 할인]' if _in_downtrend else ''}",
                 suggested_price=ticker.last,
                 indicators=indicators,
             )
 
-        # Oversold
+        # Oversold — RSI 방향이 핵심: 반등 시작이면 강하게, 하락 중이면 약하게
         if current_rsi <= self._oversold:
             confidence = 0.5 + (self._oversold - current_rsi) / self._oversold * 0.3
             if rsi_rising:
-                confidence += 0.1  # RSI turning up from oversold is stronger signal
+                confidence += 0.15  # RSI 반등 확인 → 강한 시그널
+            else:
+                confidence -= 0.15  # RSI 계속 하락 → 약한 시그널
             if _in_downtrend and sma50_val > 0:
                 sma_gap = (sma50_val - sma20_val) / sma50_val
                 if sma_gap > 0.03:  # 갭 3% 이상이면 강한 하락 추세

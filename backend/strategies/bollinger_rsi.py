@@ -109,13 +109,13 @@ class BollingerRSIStrategy(BaseStrategy):
             "price_position": round((current_price - bb_lower) / (bb_upper - bb_lower) * 100, 1) if bb_upper != bb_lower else 50,
         }
 
-        # Freefall guard: 밴드폭이 극단적으로 넓으면 급락 중 — 매수 차단
-        if band_width > 0.50:  # 50% 이상이면 비정상 변동성
+        # Freefall guard: 밴드폭이 넓으면 변동성 과다 — 매수 차단
+        if band_width > 0.25:  # 25% 이상이면 고변동성 (기존 50% → 25% 강화)
             return Signal(
                 signal_type=SignalType.HOLD,
                 confidence=0.2,
                 strategy_name=self.name,
-                reason=f"급락 방어: 밴드폭 {band_width*100:.1f}% > 50% (극단적 변동성)",
+                reason=f"변동성 필터: 밴드폭 {band_width*100:.1f}% > 25% (신호 불안정)",
                 indicators=indicators,
             )
 
@@ -136,13 +136,28 @@ class BollingerRSIStrategy(BaseStrategy):
             and sma20_val < sma50_val
         )
 
+        # RSI 방향 체크 (반등 확인)
+        prev_rsi = df[rsi_col].iloc[-2] if len(df) >= 2 else current_rsi
+        rsi_rising = current_rsi > prev_rsi if not pd.isna(prev_rsi) else False
+
         # BUY: price at or below lower band AND RSI oversold
         price_near_lower = current_price <= bb_lower * 1.005  # within 0.5% of lower band
         rsi_oversold = current_rsi < self._rsi_oversold
 
         if price_near_lower and rsi_oversold:
+            # RSI가 계속 하락 중이면 매수 보류 (나이프캐치 방지)
+            if not rsi_rising and current_rsi < 25:
+                return Signal(
+                    signal_type=SignalType.HOLD,
+                    confidence=0.35,
+                    strategy_name=self.name,
+                    reason=f"볼린저 하단 + RSI↓: 반등 미확인 (RSI={current_rsi:.1f}↓, 진입 보류)",
+                    indicators=indicators,
+                )
             # Double confirmation - high confidence
             confidence = 0.75
+            if rsi_rising:
+                confidence += 0.05  # RSI 반등 보너스
             # Even stronger when RSI is very low
             if current_rsi < 25:
                 confidence += 0.1

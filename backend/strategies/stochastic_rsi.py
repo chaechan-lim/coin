@@ -83,6 +83,17 @@ class StochasticRSIStrategy(BaseStrategy):
             "current_price": ticker.last,
         }
 
+        # 추세 확인: SMA50 기반 — 하락추세에서 매수 신뢰도 할인
+        sma50_col = next((c for c in df.columns if c.lower() in ("sma_50", "sma50")), None)
+        if sma50_col is None:
+            df["_sma50"] = ta.sma(df["close"], length=50)
+            sma50_col = "_sma50"
+        sma50_val = df[sma50_col].iloc[-1] if sma50_col in df.columns else None
+        _price_below_sma50 = (
+            sma50_val is not None and not pd.isna(sma50_val)
+            and ticker.last < sma50_val
+        )
+
         # 골든크로스: K가 D를 상향 돌파
         bullish_cross = k_prev <= d_prev and k_now > d_now
         # 데드크로스: K가 D를 하향 돌파
@@ -91,11 +102,15 @@ class StochasticRSIStrategy(BaseStrategy):
         # 과매도 구간에서 골든크로스 → 강한 BUY
         if bullish_cross and d_now < self._oversold:
             confidence = 0.75 + (self._oversold - d_now) / self._oversold * 0.15
+            # 가격이 SMA50 아래면 하락추세 → 신뢰도 할인
+            if _price_below_sma50:
+                confidence *= 0.6
             return Signal(
                 signal_type=SignalType.BUY,
                 confidence=round(min(confidence, 0.9), 2),
                 strategy_name=self.name,
-                reason=f"StochRSI 골든크로스 (과매도): K={k_now:.1f} > D={d_now:.1f}, 구간 < {self._oversold}",
+                reason=f"StochRSI 골든크로스 (과매도): K={k_now:.1f} > D={d_now:.1f}, 구간 < {self._oversold}"
+                f"{' [추세할인]' if _price_below_sma50 else ''}",
                 suggested_price=ticker.last,
                 indicators=indicators,
             )
