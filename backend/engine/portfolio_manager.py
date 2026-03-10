@@ -186,6 +186,9 @@ class PortfolioManager:
         for pos in positions:
             try:
                 current_price = await self._market_data.get_current_price(pos.symbol)
+                if current_price <= 0:
+                    logger.warning("zero_price_skip", symbol=pos.symbol)
+                    continue
                 notional = pos.quantity * current_price
                 entry_notional = pos.average_buy_price * pos.quantity
 

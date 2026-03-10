@@ -57,6 +57,11 @@ class OBVDivergenceStrategy(BaseStrategy):
         # 가격 변화
         current_price = df["close"].iloc[-1]
         prev_price = df["close"].iloc[-self._lookback]
+        if pd.isna(prev_price) or pd.isna(current_price) or prev_price <= 0:
+            return Signal(
+                signal_type=SignalType.HOLD, confidence=0.0,
+                strategy_name=self.name, reason="가격 데이터 없음",
+            )
         price_change_pct = (current_price - prev_price) / prev_price * 100
 
         # OBV 변화 방향

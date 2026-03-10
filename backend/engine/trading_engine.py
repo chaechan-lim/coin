@@ -2106,12 +2106,14 @@ class TradingEngine:
             self._position_trackers.pop(symbol, None)
 
         # 매매 추적
-        self._last_trade_time[symbol] = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        self._last_trade_time[symbol] = now
         self._daily_trade_count += 1
         if decision.action == SignalType.BUY:
             self._daily_buy_count += 1
             self._daily_coin_buy_count[symbol] = self._daily_coin_buy_count.get(symbol, 0) + 1
         else:
+            self._last_sell_time[symbol] = now  # 매도 후 재매수 대기용
             await self._on_sell_completed()
 
         # 브로드캐스트

@@ -393,8 +393,9 @@ class BinanceFuturesEngine(TradingEngine):
                             db_pos.quantity = contracts
                             changed = True
                         if margin > 0 and abs((db_pos.margin_used or 0) - margin) > 0.1:
-                            db_pos.total_invested = margin
                             db_pos.margin_used = margin
+                            # total_invested는 진입 시 설정된 값 유지 (qty*entry_price)
+                            # margin_used만 갱신 (실제 담보금)
                             changed = True
                         if entry > 0 and abs(db_pos.average_buy_price - entry) > 0.0001:
                             db_pos.average_buy_price = entry
@@ -1007,6 +1008,7 @@ class BinanceFuturesEngine(TradingEngine):
         await session.commit()
         self._position_trackers.pop(symbol, None)
         self._eval_error_counts.pop(symbol, None)
+        self._last_sell_time.pop(symbol, None)  # 강제 청산은 쿨다운 면제
 
         logger.error(
             "force_close_db_cleanup",
@@ -1341,8 +1343,12 @@ class BinanceFuturesEngine(TradingEngine):
         if lev_override is not None and lev_override != self._leverage:
             try:
                 await self._exchange.set_leverage(symbol, effective_lev)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("leverage_override_failed_long", symbol=symbol,
+                               target=effective_lev, error=str(e))
+                effective_lev = self._leverage
+                notional = margin * effective_lev
+                amount = notional / price
 
         # 거래소 최소 수량 보정
         amount = self._adjust_amount(symbol, amount)
@@ -1506,8 +1512,12 @@ class BinanceFuturesEngine(TradingEngine):
         if lev_override is not None and lev_override != self._leverage:
             try:
                 await self._exchange.set_leverage(symbol, effective_lev)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("leverage_override_failed_short", symbol=symbol,
+                               target=effective_lev, error=str(e))
+                effective_lev = self._leverage
+                notional = margin * effective_lev
+                amount = notional / price
 
         # 거래소 최소 수량 보정
         amount = self._adjust_amount(symbol, amount)

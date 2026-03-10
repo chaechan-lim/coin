@@ -71,7 +71,7 @@ class SignalCombiner:
         if min_sell_active_weight > 0:
             self.MIN_SELL_ACTIVE_WEIGHT = min_sell_active_weight
 
-    # 시장 상태별 적응형 가중치 프로필 (8전략)
+    # 시장 상태별 적응형 가중치 프로필 (선물 6전략 전용, 현물은 SPOT_WEIGHTS 고정)
     ADAPTIVE_PROFILES: dict[str, dict[str, float]] = {
         MarketState.STRONG_UPTREND.value: {
             "ma_crossover": 0.12, "rsi": 0.18, "macd_crossover": 0.12,
@@ -101,11 +101,13 @@ class SignalCombiner:
         logger.info("weights_updated", weights=self.weights, source=source)
 
     def apply_market_state(self, market_state: str) -> None:
-        """시장 상태에 맞는 적응형 가중치 적용."""
+        """시장 상태에 맞는 적응형 가중치 적용 (선물 전용, 현물은 고정 가중치)."""
         profile = self.ADAPTIVE_PROFILES.get(market_state)
         if profile:
             # 현재 등록된 전략만 업데이트
             filtered = {k: v for k, v in profile.items() if k in self.weights}
+            if not filtered:
+                return  # 현물 combiner — 적응형 프로필 없음 (의도된 동작)
             self.weights.update(filtered)
             logger.info("adaptive_weights_applied", market_state=market_state)
 

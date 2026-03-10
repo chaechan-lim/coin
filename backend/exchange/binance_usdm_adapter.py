@@ -356,23 +356,31 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             self._ws_exchange.markets_by_id = getattr(self._exchange, 'markets_by_id', {})
         logger.info("binance_ws_exchange_created", testnet=self._testnet)
 
+    _WS_TIMEOUT = 60  # WebSocket 수신 타임아웃 (초)
+
     async def watch_tickers(self, symbols: list[str]) -> dict:
         """실시간 틱커 수신 (blocking — 새 데이터 올 때마다 반환)."""
         if not self._ws_exchange:
             raise ExchangeConnectionError("WebSocket exchange not initialized")
-        return await self._ws_exchange.watch_tickers(symbols)
+        return await asyncio.wait_for(
+            self._ws_exchange.watch_tickers(symbols), timeout=self._WS_TIMEOUT
+        )
 
     async def watch_balance(self) -> dict:
         """실시간 잔고 수신 (blocking — 잔고 변동 시 반환)."""
         if not self._ws_exchange:
             raise ExchangeConnectionError("WebSocket exchange not initialized")
-        return await self._ws_exchange.watch_balance()
+        return await asyncio.wait_for(
+            self._ws_exchange.watch_balance(), timeout=self._WS_TIMEOUT
+        )
 
     async def watch_positions(self) -> list[dict]:
         """실시간 포지션 수신 (blocking — 포지션 변동 시 반환)."""
         if not self._ws_exchange:
             raise ExchangeConnectionError("WebSocket exchange not initialized")
-        return await self._ws_exchange.watch_positions()
+        return await asyncio.wait_for(
+            self._ws_exchange.watch_positions(), timeout=self._WS_TIMEOUT
+        )
 
     async def close_ws(self) -> None:
         """WebSocket 연결 정리."""
