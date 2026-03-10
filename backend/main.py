@@ -77,6 +77,7 @@ _scheduler = None
 _engine_instance: TradingEngine | None = None
 _binance_engine = None
 _binance_spot_engine = None
+_surge_engine = None
 _notification_dispatcher: NotificationDispatcher | None = None
 _discord_bot_task: asyncio.Task | None = None
 _discord_bot_instance = None
@@ -220,7 +221,7 @@ def _create_self_healing(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
-    global _scheduler, _engine_instance, _binance_engine, _binance_spot_engine, _notification_dispatcher
+    global _scheduler, _engine_instance, _binance_engine, _binance_spot_engine, _surge_engine, _notification_dispatcher
     config = get_config()
 
     logger.info("startup_begin", mode=config.trading.mode)
@@ -479,6 +480,48 @@ async def lifespan(app: FastAPI):
                          tracked_coins=config.binance.tracked_coins)
         except Exception as e:
             logger.error("binance_spot_init_failed", error=str(e), exc_info=True)
+
+    # ── 7c. 서지 엔진 (조건부) ──────────────────────────────────
+    if config.surge_trading.enabled and config.binance.enabled and binance_exchange:
+        try:
+            from engine.surge_engine import SurgeEngine
+
+            surge_is_paper = config.surge_trading.mode == "paper"
+            surge_initial = config.surge_trading.initial_balance_usdt
+
+            surge_market_data = MarketDataService(binance_exchange)
+            surge_order_mgr = OrderManager(
+                binance_exchange, is_paper=surge_is_paper,
+                exchange_name="binance_surge", fee_currency="USDT",
+            )
+            surge_portfolio_mgr = PortfolioManager(
+                market_data=surge_market_data,
+                initial_balance_krw=surge_initial,
+                is_paper=surge_is_paper,
+                exchange_name="binance_surge",
+            )
+
+            surge_eng = SurgeEngine(
+                config=config,
+                exchange=binance_exchange,
+                portfolio_manager=surge_portfolio_mgr,
+                order_manager=surge_order_mgr,
+                engine_registry=engine_registry,
+            )
+            await surge_eng.initialize()
+            _surge_engine = surge_eng
+
+            engine_registry.register(
+                "binance_surge", surge_eng, surge_portfolio_mgr,
+                None, None,  # no combiner/coordinator for surge engine
+            )
+
+            logger.info("surge_engine_ready",
+                         mode=config.surge_trading.mode,
+                         leverage=config.surge_trading.leverage,
+                         initial_usdt=surge_initial)
+        except Exception as e:
+            logger.error("surge_engine_init_failed", error=str(e), exc_info=True)
 
     # ── 7.5 교차 거래소 포지션 전환을 위한 엔진 레지스트리 주입 ────────
     for ex_name in engine_registry.available_exchanges:
@@ -762,6 +805,8 @@ async def lifespan(app: FastAPI):
         auto_start_engines.append(("binance_futures", _binance_engine))
     if _binance_spot_engine and not _binance_spot_engine.is_running:
         auto_start_engines.append(("binance_spot", _binance_spot_engine))
+    if _surge_engine and not _surge_engine.is_running:
+        auto_start_engines.append(("binance_surge", _surge_engine))
     for name, eng in auto_start_engines:
         asyncio.create_task(eng.start(), name=f"engine_{name}")
         logger.info("engine_auto_started", exchange=name)
@@ -783,6 +828,8 @@ async def lifespan(app: FastAPI):
         await _binance_engine.stop()
     if _binance_spot_engine:
         await _binance_spot_engine.stop()
+    if _surge_engine:
+        await _surge_engine.stop()
     if exchange:
         await exchange.close()
     if binance_exchange:

@@ -206,6 +206,37 @@ class LLMConfig(BaseSettings):
     model_config = {"env_prefix": "LLM_"}
 
 
+class SurgeTradingConfig(BaseSettings):
+    """서지/모멘텀 트레이딩 전용 설정 (바이낸스 선물, 단기 매매)."""
+    enabled: bool = False
+    mode: str = "paper"  # "paper" or "live"
+    leverage: int = 3
+    initial_balance_usdt: float = 150.0
+    max_concurrent: int = 3
+    position_pct: float = 0.08
+    sl_pct: float = 2.0
+    tp_pct: float = 4.0
+    trail_activation_pct: float = 1.0
+    trail_stop_pct: float = 0.8
+    max_hold_minutes: int = 120
+    vol_threshold: float = 5.0           # 거래량 배수 임계값
+    price_threshold: float = 1.5         # 가격 변동 % 임계값
+    long_only: bool = True
+    daily_trade_limit: int = 15
+    scan_symbols_count: int = 30
+    cooldown_per_symbol_sec: int = 1800  # 30분
+    scan_interval_sec: int = 5
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v):
+        if v not in ("paper", "live"):
+            raise ValueError(f"mode must be 'paper' or 'live', got '{v}'")
+        return v
+
+    model_config = {"env_prefix": "SURGE_TRADING_"}
+
+
 class DiscordBotConfig(BaseSettings):
     """Discord 봇 설정 (자연어 명령)."""
     enabled: bool = False
@@ -223,6 +254,7 @@ class AppConfig(BaseSettings):
     binance: BinanceConfig = Field(default_factory=BinanceConfig)
     binance_trading: BinanceTradingConfig = Field(default_factory=BinanceTradingConfig)
     binance_spot_trading: BinanceSpotTradingConfig = Field(default_factory=BinanceSpotTradingConfig)
+    surge_trading: SurgeTradingConfig = Field(default_factory=SurgeTradingConfig)
     trading: TradingConfig = Field(default_factory=TradingConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
