@@ -527,3 +527,115 @@ class TestConfidenceSizing:
         conf = 1.0
         mult = min(2.0, max(0.5, 0.5 + (conf - 0.55) * (1.5 / 0.45)))
         assert abs(mult - 2.0) < 0.01
+
+
+class TestCooldownBypassOnClose:
+    """포지션 청산 시 쿨다운 면제 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_buy_signal_closes_short_despite_cooldown(self, futures_engine):
+        """숏 보유 중 BUY 시그널 → 쿨다운 무시하고 숏 청산."""
+        from core.enums import SignalType
+        from strategies.combiner import CombinedDecision, Signal
+        from datetime import timedelta
+
+        # 쿨다운 설정 (12일 전 매도 기록 → cd48 내)
+        futures_engine._last_sell_time["BTC/USDT"] = (
+            datetime.now(timezone.utc) - timedelta(days=2)
+        )
+        futures_engine._last_trade_time["BTC/USDT"] = (
+            datetime.now(timezone.utc) - timedelta(days=2)
+        )
+
+        position = MagicMock(spec=Position)
+        position.direction = "short"
+        position.quantity = 0.1
+        position.average_buy_price = 65000.0
+        position.symbol = "BTC/USDT"
+        position.leverage = 5
+
+        decision = MagicMock(spec=CombinedDecision)
+        decision.action = SignalType.BUY
+        decision.combined_confidence = 0.70
+        decision.active_weight = 0.30
+
+        signal = MagicMock(spec=Signal)
+        signal.signal_type = SignalType.BUY
+        signal.strategy_name = "test"
+        signal.confidence = 0.70
+        signal.reason = "test"
+
+        with patch.object(futures_engine, '_close_position', new_callable=AsyncMock) as mock_close:
+            session = AsyncMock()
+            await futures_engine._process_futures_decision(
+                session, "BTC/USDT", decision, [signal], position,
+            )
+            mock_close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_sell_signal_closes_long_despite_cooldown(self, futures_engine):
+        """롱 보유 중 SELL 시그널 → 쿨다운 무시하고 롱 청산."""
+        from core.enums import SignalType
+        from strategies.combiner import CombinedDecision, Signal
+        from datetime import timedelta
+
+        futures_engine._last_sell_time["ETH/USDT"] = (
+            datetime.now(timezone.utc) - timedelta(days=2)
+        )
+        futures_engine._last_trade_time["ETH/USDT"] = (
+            datetime.now(timezone.utc) - timedelta(days=2)
+        )
+
+        position = MagicMock(spec=Position)
+        position.direction = "long"
+        position.quantity = 1.0
+        position.average_buy_price = 3500.0
+        position.symbol = "ETH/USDT"
+        position.leverage = 5
+
+        decision = MagicMock(spec=CombinedDecision)
+        decision.action = SignalType.SELL
+        decision.combined_confidence = 0.65
+        decision.active_weight = 0.25
+
+        signal = MagicMock(spec=Signal)
+        signal.signal_type = SignalType.SELL
+        signal.strategy_name = "test"
+        signal.confidence = 0.65
+        signal.reason = "test"
+
+        with patch.object(futures_engine, '_close_position', new_callable=AsyncMock) as mock_close:
+            session = AsyncMock()
+            await futures_engine._process_futures_decision(
+                session, "ETH/USDT", decision, [signal], position,
+            )
+            mock_close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_new_entry_still_blocked_by_cooldown(self, futures_engine):
+        """신규 진입은 쿨다운에 의해 차단."""
+        from core.enums import SignalType
+        from strategies.combiner import CombinedDecision, Signal
+        from datetime import timedelta
+
+        futures_engine._last_trade_time["BTC/USDT"] = (
+            datetime.now(timezone.utc) - timedelta(days=2)
+        )
+
+        decision = MagicMock(spec=CombinedDecision)
+        decision.action = SignalType.BUY
+        decision.combined_confidence = 0.70
+        decision.active_weight = 0.30
+
+        signal = MagicMock(spec=Signal)
+        signal.signal_type = SignalType.BUY
+        signal.strategy_name = "test"
+        signal.confidence = 0.70
+        signal.reason = "test"
+
+        with patch.object(futures_engine, '_open_long', new_callable=AsyncMock) as mock_open:
+            session = AsyncMock()
+            await futures_engine._process_futures_decision(
+                session, "BTC/USDT", decision, [signal], None,
+            )
+            mock_open.assert_not_called()

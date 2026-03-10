@@ -1204,10 +1204,17 @@ class BinanceFuturesEngine(TradingEngine):
         position: Position | None,
     ) -> None:
         """선물 양방향 매매 처리."""
-        can, reason = self._can_trade(symbol, decision.action.value.lower())
-        if not can:
-            logger.debug("futures_trade_blocked", symbol=symbol, reason=reason)
-            return
+        # 포지션 청산(반대 시그널)은 쿨다운/제한 면제
+        direction = position.direction if position else None
+        is_closing = (
+            (decision.action == SignalType.BUY and direction == "short") or
+            (decision.action == SignalType.SELL and direction == "long")
+        )
+        if not is_closing:
+            can, reason = self._can_trade(symbol, decision.action.value.lower())
+            if not can:
+                logger.debug("futures_trade_blocked", symbol=symbol, reason=reason)
+                return
 
         primary_signal = next(
             (s for s in signals if s.signal_type == decision.action), None
@@ -1261,8 +1268,6 @@ class BinanceFuturesEngine(TradingEngine):
                                 win_prob=round(_ml_pred.win_probability, 3))
                 except Exception as e:
                     logger.warning("ml_filter_error", symbol=symbol, error=str(e))
-
-        direction = position.direction if position else None
 
         if decision.action == SignalType.BUY:
             if position and direction == "short":
