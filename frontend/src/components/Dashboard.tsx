@@ -31,10 +31,12 @@ type TabId = (typeof TABS)[number]['id']
 const EXCHANGE_LABELS: Partial<Record<ExchangeName, string>> = {
   binance_futures: 'Binance',
   binance_spot: 'Binance',
+  binance_surge: 'Surge',
 }
 
 const SPOT_EXCHANGES: ExchangeName[] = ['binance_spot']
 const FUTURES_EXCHANGES: ExchangeName[] = ['binance_futures']
+const SURGE_EXCHANGES: ExchangeName[] = ['binance_surge']
 
 export function Dashboard() {
   const [tab, setTab] = useState<TabId>('overview')
@@ -107,7 +109,7 @@ export function Dashboard() {
       <header className="border-b border-gray-700 px-3 md:px-6 py-2.5 md:py-3 flex items-center justify-between">
         <div className="flex items-center gap-2 md:gap-3 min-w-0">
           <span className="text-base md:text-xl font-bold whitespace-nowrap">🪙 코인 자동 매매</span>
-          <span className="text-xs text-gray-500 hidden md:block">트리플 엔진 트레이딩</span>
+          <span className="text-xs text-gray-500 hidden md:block">쿼드 엔진 트레이딩</span>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
           <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
@@ -119,6 +121,7 @@ export function Dashboard() {
       {exchanges.length > 1 && (() => {
         const spotExs = exchanges.filter((e) => SPOT_EXCHANGES.includes(e))
         const futuresExs = exchanges.filter((e) => FUTURES_EXCHANGES.includes(e))
+        const surgeExs = exchanges.filter((e) => SURGE_EXCHANGES.includes(e))
         const ExBtn = ({ ex }: { ex: ExchangeName }) => (
           <button
             onClick={() => setExchange(ex)}
@@ -146,6 +149,15 @@ export function Dashboard() {
               <>
                 <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">선물</span>
                 {futuresExs.map((ex) => <ExBtn key={ex} ex={ex} />)}
+              </>
+            )}
+            {surgeExs.length > 0 && (
+              <>
+                {(spotExs.length > 0 || futuresExs.length > 0) && (
+                  <div className="w-px h-5 bg-gray-700 mx-1" />
+                )}
+                <span className="text-[10px] text-yellow-500 font-medium uppercase tracking-wider">서지</span>
+                {surgeExs.map((ex) => <ExBtn key={ex} ex={ex} />)}
               </>
             )}
           </div>

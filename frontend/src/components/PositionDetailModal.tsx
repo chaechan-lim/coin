@@ -33,7 +33,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 export function PositionDetailModal({ position: pos, exchange, onClose }: Props) {
   const isUsdt = exchange.startsWith('binance')
-  const isFutures = exchange === 'binance_futures'
+  const isFutures = exchange === 'binance_futures' || exchange === 'binance_surge'
   const fmt = (n: number) => fmtPrice(n, isUsdt)
   const fmtN = (n: number) => fmtNum(n, isUsdt)
   const pnlColor = pos.unrealized_pnl >= 0 ? 'text-buy' : 'text-sell'

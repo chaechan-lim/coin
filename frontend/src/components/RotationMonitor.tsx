@@ -12,7 +12,7 @@ const MARKET_STATE_LABELS: Record<string, { label: string; color: string }> = {
 }
 
 export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
-  const isFutures = exchange === 'binance_futures'
+  const isFutures = exchange === 'binance_futures' || exchange === 'binance_surge'
   const { data, isLoading, error } = useQuery<RotationStatus>({
     queryKey: ['rotation-status', exchange],
     queryFn: () => getRotationStatus(exchange),
