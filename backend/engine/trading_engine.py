@@ -66,6 +66,7 @@ class EngineConfig:
 
     # 전략
     asymmetric_mode: bool = True
+    paired_exit: bool = True         # 페어링 매도: 진입 전략의 SELL만 허용
     max_single_coin_pct: float = 0.40
     rebalancing_enabled: bool = True
     rebalancing_target_pct: float = 0.35
@@ -108,6 +109,7 @@ class EngineConfig:
                 min_fallback_amount=10.0,
                 max_trade_size_pct=bst.max_trade_size_pct,
                 asymmetric_mode=app_config.trading.asymmetric_mode,
+                paired_exit=app_config.trading.paired_exit,
                 max_single_coin_pct=app_config.risk.max_single_coin_pct,
                 rebalancing_enabled=app_config.risk.rebalancing_enabled,
                 rebalancing_target_pct=app_config.risk.rebalancing_target_pct,
@@ -136,6 +138,7 @@ class EngineConfig:
                 min_fallback_amount=5000,
                 max_trade_size_pct=app_config.risk.max_trade_size_pct,
                 asymmetric_mode=tc.asymmetric_mode,
+                paired_exit=tc.paired_exit,
                 max_single_coin_pct=app_config.risk.max_single_coin_pct,
                 rebalancing_enabled=app_config.risk.rebalancing_enabled,
                 rebalancing_target_pct=app_config.risk.rebalancing_target_pct,
@@ -1431,10 +1434,48 @@ class TradingEngine:
             if tracker and tracker.is_surge:
                 return
 
-        # ── 2. 매수 가능 여부 체크 (매도는 항상 허용) ──
+        # ── 2. 페어링 매도: 포지션이 있으면 진입 전략만 체크 ──
+        has_position = position and position.quantity > 0
+        if has_position and self._ec.paired_exit and position.strategy_name:
+            entry_strat = self._strategies.get(position.strategy_name)
+            if entry_strat:
+                try:
+                    df = await self._market_data.get_candles(
+                        symbol, entry_strat.required_timeframe,
+                        max(entry_strat.min_candles_required + 50, 200),
+                    )
+                    ticker = await self._market_data.get_ticker(symbol)
+                    signal = await entry_strat.analyze(df, ticker)
+                    await self._order_manager.log_signal_only(session, signal, symbol)
+
+                    if signal.signal_type == SignalType.SELL:
+                        decision = CombinedDecision(
+                            action=SignalType.SELL,
+                            combined_confidence=signal.confidence,
+                            contributing_signals=[signal],
+                            final_reason=f"페어링 매도: {signal.reason}",
+                        )
+                        await emit_event(
+                            "info", "signal",
+                            f"시그널: {symbol} SELL (페어링: {position.strategy_name})",
+                            detail=decision.final_reason,
+                            metadata={
+                                "symbol": symbol, "action": "SELL",
+                                "confidence": round(signal.confidence, 2),
+                                "strategies": [f"{position.strategy_name}({signal.confidence:.0%})"],
+                                "market_state": self._market_state,
+                                "paired_exit": True,
+                            },
+                        )
+                        await self._process_decision(session, symbol, decision)
+                except Exception as e:
+                    logger.warning("paired_exit_error", symbol=symbol, strategy=position.strategy_name, error=str(e))
+            return  # 포지션 보유 중 — 추가 매수 불가, 페어링 체크 완료
+
+        # ── 3. 매수 가능 여부 체크 (매도는 항상 허용) ──
         can_buy, buy_block_reason = self._can_trade(symbol, side="buy")
 
-        # ── 3. 전략 시그널 수집 ──
+        # ── 4. 전략 시그널 수집 ──
         signals: list[Signal] = []
 
         for name, strategy in self._strategies.items():
@@ -1459,7 +1500,7 @@ class TradingEngine:
                     error=str(e),
                 )
 
-        # ── 4. 결합 판단 + 실행 ──
+        # ── 5. 결합 판단 + 실행 ──
         if signals:
             decision = self._combiner.combine(signals, market_state=self._market_state, symbol=symbol)
 
@@ -1483,6 +1524,13 @@ class TradingEngine:
                         "market_state": self._market_state,
                     },
                 )
+
+            # 페어링 미적용 포지션: 투표 SELL 허용 (strategy_name 없는 레거시 포지션)
+            if has_position and self._ec.paired_exit:
+                # paired_exit ON인데 strategy_name 없는 경우 — 투표 SELL 폴백
+                if decision.action == SignalType.SELL:
+                    await self._process_decision(session, symbol, decision)
+                return
 
             # can_buy=False → 매수만 차단, 매도는 항상 허용
             if can_buy or decision.action == SignalType.SELL:
@@ -2010,7 +2058,8 @@ class TradingEngine:
                 return
 
             await self._portfolio_manager.update_position_on_buy(
-                session, symbol, amount, price, amount_krw, order.fee
+                session, symbol, amount, price, amount_krw, order.fee,
+                strategy_name=primary_signal.strategy_name,
             )
 
             # 포지션 트래커 생성 (SL/TP/trailing 추적 시작)

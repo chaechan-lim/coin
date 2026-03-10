@@ -1112,3 +1112,132 @@ class TestClosePositionForCrossExchange:
             result = await engine.close_position_for_cross_exchange("ETH/KRW", "교차 전환 테스트")
         assert result is False
         mock_order_mgr.create_order.assert_not_called()
+
+
+# ── 테스트: 페어링 매도 ────────────────────────────────────
+
+def _make_session_with_position(strategy_name="donchian_channel", quantity=1.0):
+    """포지션 보유 중 (strategy_name 포함) mock session."""
+    pos = MagicMock(spec=Position)
+    pos.quantity = quantity
+    pos.average_buy_price = 50000
+    pos.strategy_name = strategy_name
+    pos.is_surge = False
+
+    session = AsyncMock()
+
+    def _execute_side_effect(*args, **kwargs):
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=pos)
+        result.scalars = MagicMock(return_value=MagicMock(
+            first=MagicMock(return_value=None),
+            all=MagicMock(return_value=[]),
+        ))
+        result.all = MagicMock(return_value=[])
+        return result
+
+    session.execute = AsyncMock(side_effect=_execute_side_effect)
+    session.commit = AsyncMock()
+    session.flush = AsyncMock()
+    session.rollback = AsyncMock()
+    return session, pos
+
+
+class TestPairedExit:
+    """페어링 매도: 진입 전략의 SELL만 허용."""
+
+    @pytest.mark.asyncio
+    async def test_paired_exit_entry_strategy_sell_triggers(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """페어링 ON + 진입 전략 SELL → 매도 실행."""
+        config.trading.paired_exit = True
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        engine._market_state = "uptrend"
+
+        # 진입 전략 mock
+        mock_strategy = AsyncMock()
+        mock_strategy.required_timeframe = "4h"
+        mock_strategy.min_candles_required = 50
+        mock_strategy.analyze = AsyncMock(return_value=_make_sell_signal(0.70, strategy="donchian_channel"))
+        engine._strategies = {"donchian_channel": mock_strategy}
+
+        session, pos = _make_session_with_position("donchian_channel")
+        # SL/TP 체크 통과 (stopped=False)
+        engine._check_stop_conditions = AsyncMock(return_value=False)
+        engine._position_trackers = {}
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._evaluate_coin(session, "ETH/KRW")
+
+        # 진입 전략 SELL → 매도 실행
+        mock_order_mgr.create_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_paired_exit_entry_strategy_hold_no_sell(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """페어링 ON + 진입 전략 HOLD → 매도 안 됨."""
+        config.trading.paired_exit = True
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        engine._market_state = "uptrend"
+
+        mock_strategy = AsyncMock()
+        mock_strategy.required_timeframe = "4h"
+        mock_strategy.min_candles_required = 50
+        hold_signal = Signal(signal_type=SignalType.HOLD, confidence=0.3, strategy_name="donchian_channel", reason="hold", indicators={})
+        mock_strategy.analyze = AsyncMock(return_value=hold_signal)
+        engine._strategies = {"donchian_channel": mock_strategy}
+
+        session, pos = _make_session_with_position("donchian_channel")
+        engine._check_stop_conditions = AsyncMock(return_value=False)
+        engine._position_trackers = {}
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._evaluate_coin(session, "ETH/KRW")
+
+        mock_order_mgr.create_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_paired_exit_off_combiner_sell_allowed(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """페어링 OFF → 투표 SELL 정상 작동."""
+        config.trading.paired_exit = False
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        engine._market_state = "uptrend"
+
+        mock_strategy = AsyncMock()
+        mock_strategy.required_timeframe = "4h"
+        mock_strategy.min_candles_required = 50
+        mock_strategy.analyze = AsyncMock(return_value=_make_sell_signal(0.70, strategy="rsi"))
+        engine._strategies = {"rsi": mock_strategy}
+
+        mock_combiner.combine = MagicMock(return_value=_make_sell_decision(0.70))
+        session, pos = _make_session_with_position("donchian_channel")
+        engine._check_stop_conditions = AsyncMock(return_value=False)
+        engine._position_trackers = {}
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._evaluate_coin(session, "ETH/KRW")
+
+        # 페어링 OFF → combiner SELL 허용
+        mock_order_mgr.create_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_paired_exit_no_strategy_name_fallback(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """페어링 ON + strategy_name 없는 레거시 포지션 → 투표 SELL 폴백."""
+        config.trading.paired_exit = True
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        engine._market_state = "uptrend"
+
+        mock_strategy = AsyncMock()
+        mock_strategy.required_timeframe = "4h"
+        mock_strategy.min_candles_required = 50
+        mock_strategy.analyze = AsyncMock(return_value=_make_sell_signal(0.70, strategy="rsi"))
+        engine._strategies = {"rsi": mock_strategy}
+
+        mock_combiner.combine = MagicMock(return_value=_make_sell_decision(0.70))
+        session, pos = _make_session_with_position(strategy_name=None)
+        engine._check_stop_conditions = AsyncMock(return_value=False)
+        engine._position_trackers = {}
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._evaluate_coin(session, "ETH/KRW")
+
+        # strategy_name=None → 투표 SELL 폴백
+        mock_order_mgr.create_order.assert_called_once()

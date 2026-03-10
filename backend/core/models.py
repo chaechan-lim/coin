@@ -138,6 +138,8 @@ class Position(Base):
     trailing_active = Column(Boolean, default=False)
     highest_price = Column(Float, nullable=True)
     max_hold_hours = Column(Float, nullable=True)
+    # 진입 전략 (페어링 매도: 진입 전략의 SELL만 허용)
+    strategy_name = Column(String(50), nullable=True)
     # 매매 타이밍 추적 (재시작 시 쿨다운/washout 복원)
     last_trade_at = Column(DateTime, nullable=True)
     last_sell_at = Column(DateTime, nullable=True)

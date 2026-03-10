@@ -33,6 +33,7 @@ class TradingConfig(BaseSettings):
     min_combined_confidence: float = 0.50
     min_profit_vs_fee_ratio: float = 2.0  # expected return > 2x round-trip fee
     asymmetric_mode: bool = True  # 비대칭 전략: 하락장 매수차단 + 상승장 공격
+    paired_exit: bool = True      # 페어링 매도: 진입 전략의 SELL만 허용 (투표 매도 비활성)
 
     # 거래량 급등 로테이션 설정 (tracked_coins와 별도 — 서지 전용)
     rotation_enabled: bool = True

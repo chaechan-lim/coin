@@ -45,7 +45,7 @@ class PortfolioManager:
 
     async def update_position_on_buy(
         self, session: AsyncSession, symbol: str, quantity: float, price: float, cost: float, fee: float,
-        is_surge: bool = False,
+        is_surge: bool = False, strategy_name: str | None = None,
     ) -> None:
         """Update position after a buy trade."""
         from datetime import datetime, timezone
@@ -66,6 +66,8 @@ class PortfolioManager:
             position.total_invested += cost + fee
             if is_surge:
                 position.is_surge = True
+            if strategy_name:
+                position.strategy_name = strategy_name
             if not position.entered_at:
                 position.entered_at = now
             position.last_trade_at = now
@@ -78,6 +80,7 @@ class PortfolioManager:
                 total_invested=cost + fee,
                 is_paper=self._is_paper,
                 is_surge=is_surge,
+                strategy_name=strategy_name,
                 entered_at=now,
                 last_trade_at=now,
             )

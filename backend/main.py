@@ -230,6 +230,14 @@ async def lifespan(app: FastAPI):
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # 신규 컬럼 마이그레이션 (이미 존재하면 무시)
+        from sqlalchemy import text, inspect as sa_inspect
+        def _add_columns(sync_conn):
+            insp = sa_inspect(sync_conn)
+            cols = {c["name"] for c in insp.get_columns("positions")}
+            if "strategy_name" not in cols:
+                sync_conn.execute(text("ALTER TABLE positions ADD COLUMN strategy_name VARCHAR(50)"))
+        await conn.run_sync(_add_columns)
     logger.info("db_tables_ready")
 
     # ── 알림 어댑터 등록 (엔진 독립) ─────────────────────────
