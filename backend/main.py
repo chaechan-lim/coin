@@ -4,9 +4,26 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+# numba/llvmlite mock — pandas_ta가 자동 import하지만 우리 함수(sma,rsi,bbands 등)는
+# numba 불필요. llvmlite.so 로드를 방지하여 ~50MB RSS 절감.
+import types as _types
+import sys
+_numba_mock = _types.ModuleType('numba')
+def _fake_njit(*args, **kwargs):
+    if args and callable(args[0]):
+        return args[0]
+    def decorator(func):
+        return func
+    return decorator
+_numba_mock.njit = _fake_njit
+_numba_mock.prange = range
+sys.modules['numba'] = _numba_mock
+sys.modules['llvmlite'] = _types.ModuleType('llvmlite')
+sys.modules['llvmlite.binding'] = _types.ModuleType('llvmlite.binding')
+del _types, _numba_mock, _fake_njit
+
 import asyncio
 import gc
-import sys
 from datetime import datetime, timezone
 import structlog
 from contextlib import asynccontextmanager
