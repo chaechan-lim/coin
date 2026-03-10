@@ -128,11 +128,15 @@ class StochasticRSIStrategy(BaseStrategy):
         # 과매수 구간에서 데드크로스 → 강한 SELL
         if bearish_cross and d_now > self._overbought:
             confidence = 0.75 + (d_now - self._overbought) / (100 - self._overbought) * 0.15
+            # 하락추세에서 숏 부스트
+            if _price_below_sma50:
+                confidence *= 1.15
             return Signal(
                 signal_type=SignalType.SELL,
-                confidence=round(min(confidence, 0.9), 2),
+                confidence=round(min(confidence, 0.95), 2),
                 strategy_name=self.name,
-                reason=f"StochRSI 데드크로스 (과매수): K={k_now:.1f} < D={d_now:.1f}, 구간 > {self._overbought}",
+                reason=f"StochRSI 데드크로스 (과매수): K={k_now:.1f} < D={d_now:.1f}, 구간 > {self._overbought}"
+                f"{' [추세부스트]' if _price_below_sma50 else ''}",
                 suggested_price=ticker.last,
                 indicators=indicators,
             )

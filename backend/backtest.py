@@ -2312,7 +2312,7 @@ class FuturesBacktester:
                         if high_price >= sl_price_level:
                             sl_triggered = True
                             sl_close_price = sl_price_level
-                    # close 기준 체크도 유지 (기존 호환)
+                    # close 기준 체크 (margin-relative fallback)
                     if not sl_triggered and unrealized_pct <= -dynamic_sl_pct:
                         sl_triggered = True
                         sl_close_price = current_price
@@ -3279,7 +3279,7 @@ class FuturesPortfolioBacktester:
                     last_trade_idx_per_coin[sym] = candle_idx
                     continue
 
-                # 미실현 손익
+                # 미실현 손익 (margin-relative)
                 unrealized_pnl = self._calc_unrealized_pnl(pos.side, pos.entry_price, cur_price, pos.quantity)
                 unrealized_pct = unrealized_pnl / pos.margin * 100 if pos.margin > 0 else 0
 

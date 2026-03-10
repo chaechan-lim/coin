@@ -152,12 +152,16 @@ class RSIStrategy(BaseStrategy):
 
         # Extreme overbought
         if current_rsi >= self._extreme_overbought:
+            confidence = 0.85
+            # 하락추세에서 숏 부스트
+            if _in_downtrend:
+                confidence = min(confidence * 1.12, 0.95)
             return Signal(
                 signal_type=SignalType.SELL,
-                confidence=0.85,
+                confidence=round(confidence, 2),
                 strategy_name=self.name,
                 reason=f"극심한 과매수: RSI={current_rsi:.1f} (임계값: {self._extreme_overbought}). "
-                f"조정 가능성 높음",
+                f"조정 가능성 높음{' [추세부스트]' if _in_downtrend else ''}",
                 suggested_price=ticker.last,
                 indicators=indicators,
             )
@@ -167,12 +171,16 @@ class RSIStrategy(BaseStrategy):
             confidence = 0.5 + (current_rsi - self._overbought) / (100 - self._overbought) * 0.3
             if not rsi_rising:
                 confidence += 0.1  # RSI turning down from overbought
+            # 하락추세에서 숏 부스트
+            if _in_downtrend:
+                confidence = min(confidence * 1.15, 0.95)
             return Signal(
                 signal_type=SignalType.SELL,
                 confidence=round(min(confidence, 0.9), 2),
                 strategy_name=self.name,
                 reason=f"과매수 구간: RSI={current_rsi:.1f} > {self._overbought}. "
-                f"{'RSI 하락 시작' if not rsi_rising else 'RSI 계속 상승 중'}",
+                f"{'RSI 하락 시작' if not rsi_rising else 'RSI 계속 상승 중'}"
+                f"{' [추세부스트]' if _in_downtrend else ''}",
                 suggested_price=ticker.last,
                 indicators=indicators,
             )

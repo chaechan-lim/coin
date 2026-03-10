@@ -99,16 +99,37 @@ class MACDCrossoverStrategy(BaseStrategy):
                 indicators=indicators,
             )
 
+        # 추세 확인: SMA20 vs SMA50
+        import pandas_ta as _ta
+        sma20_col = next((c for c in df.columns if c.lower() in ("sma_20", "sma20")), None)
+        sma50_col = next((c for c in df.columns if c.lower() in ("sma_50", "sma50")), None)
+        if sma20_col is None:
+            df["_sma20"] = _ta.sma(df["close"], length=20)
+            sma20_col = "_sma20"
+        if sma50_col is None:
+            df["_sma50"] = _ta.sma(df["close"], length=50)
+            sma50_col = "_sma50"
+        sma20_val = df[sma20_col].iloc[-1] if sma20_col in df.columns else None
+        sma50_val = df[sma50_col].iloc[-1] if sma50_col in df.columns else None
+        _in_downtrend = (
+            sma20_val is not None and sma50_val is not None
+            and not pd.isna(sma20_val) and not pd.isna(sma50_val)
+            and sma20_val < sma50_val
+        )
+
         if bearish_cross and current_hist < 0:
             confidence = 0.65
             if not hist_increasing:
                 confidence += 0.15
+            # 하락추세에서 숏 부스트
+            if _in_downtrend:
+                confidence = min(confidence * 1.15, 0.95)
             return Signal(
                 signal_type=SignalType.SELL,
                 confidence=round(min(confidence, 0.95), 2),
                 strategy_name=self.name,
                 reason=f"MACD 데드크로스: MACD({current_macd:.2f}) < 시그널({current_signal:.2f}), "
-                f"히스토그램 음수({current_hist:.2f})",
+                f"히스토그램 음수({current_hist:.2f}){' [추세부스트]' if _in_downtrend else ''}",
                 suggested_price=ticker.last,
                 indicators=indicators,
             )
@@ -130,12 +151,16 @@ class MACDCrossoverStrategy(BaseStrategy):
 
         if current_macd < current_signal and hist_decreasing:
             # MACD < Signal + 히스토그램 감소: 소프트 SELL
+            confidence = 0.4
+            if _in_downtrend:
+                confidence = min(confidence * 1.15, 0.55)
             return Signal(
                 signal_type=SignalType.SELL,
-                confidence=0.4,
+                confidence=round(confidence, 2),
                 strategy_name=self.name,
                 reason=f"하락 모멘텀 지속: MACD < 시그널, "
-                f"히스토그램 감소 ({prev_hist:.2f} → {current_hist:.2f})",
+                f"히스토그램 감소 ({prev_hist:.2f} → {current_hist:.2f})"
+                f"{' [추세부스트]' if _in_downtrend else ''}",
                 suggested_price=ticker.last,
                 indicators=indicators,
             )

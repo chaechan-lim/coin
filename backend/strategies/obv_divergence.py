@@ -88,18 +88,33 @@ class OBVDivergenceStrategy(BaseStrategy):
                 indicators=indicators,
             )
 
+        # 추세 확인: SMA50 기반
+        sma50_col = next((c for c in df.columns if c.lower() in ("sma_50", "sma50")), None)
+        if sma50_col is None:
+            df["_sma50"] = ta.sma(df["close"], length=50)
+            sma50_col = "_sma50"
+        sma50_val = df[sma50_col].iloc[-1] if sma50_col in df.columns else None
+        _in_downtrend = (
+            sma50_val is not None and not pd.isna(sma50_val)
+            and ticker.last < sma50_val
+        )
+
         # ── 약세 다이버전스: 가격 상승 + OBV 하락 ──
         if price_change_pct > 1.0 and not obv_rising:
             strength = min(price_change_pct / 5.0, 1.0)
             confidence = 0.55 + strength * 0.25
             if obv_above_sma is False:
                 confidence += 0.05
+            # 하락추세에서 숏 부스트
+            if _in_downtrend:
+                confidence *= 1.15
             return Signal(
                 signal_type=SignalType.SELL,
-                confidence=round(min(confidence, 0.85), 2),
+                confidence=round(min(confidence, 0.90), 2),
                 strategy_name=self.name,
                 reason=f"약세 다이버전스: 가격 {price_change_pct:+.1f}% but OBV 하락"
-                f"{' (SMA 아래)' if obv_above_sma is False else ''}",
+                f"{' (SMA 아래)' if obv_above_sma is False else ''}"
+                f"{' [추세부스트]' if _in_downtrend else ''}",
                 suggested_price=ticker.last,
                 indicators=indicators,
             )
@@ -116,11 +131,16 @@ class OBVDivergenceStrategy(BaseStrategy):
             )
 
         if price_change_pct < -0.5 and not obv_rising and obv_above_sma is False:
+            confidence = 0.4
+            # 하락추세에서 숏 부스트
+            if _in_downtrend:
+                confidence = min(confidence * 1.15, 0.55)
             return Signal(
                 signal_type=SignalType.SELL,
-                confidence=0.4,
+                confidence=round(confidence, 2),
                 strategy_name=self.name,
-                reason=f"OBV 추세 확인 (하락): 가격 {price_change_pct:+.1f}%, OBV↓ SMA 아래",
+                reason=f"OBV 추세 확인 (하락): 가격 {price_change_pct:+.1f}%, OBV↓ SMA 아래"
+                f"{' [추세부스트]' if _in_downtrend else ''}",
                 suggested_price=ticker.last,
                 indicators=indicators,
             )

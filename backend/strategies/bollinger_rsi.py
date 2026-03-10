@@ -186,13 +186,16 @@ class BollingerRSIStrategy(BaseStrategy):
             confidence = 0.75
             if current_rsi > 80:
                 confidence += 0.1
+            # 하락추세에서 숏 부스트
+            if _in_downtrend:
+                confidence = min(confidence * 1.15, 0.95)
             return Signal(
                 signal_type=SignalType.SELL,
                 confidence=round(min(confidence, 0.95), 2),
                 strategy_name=self.name,
                 reason=f"이중 확인 매도: 가격({current_price:,.0f}) ≥ 볼린저 상단({bb_upper:,.0f}) "
                 f"AND RSI({current_rsi:.1f}) > {self._rsi_overbought}. "
-                f"밴드폭: {band_width*100:.1f}%",
+                f"밴드폭: {band_width*100:.1f}%{' [추세부스트]' if _in_downtrend else ''}",
                 suggested_price=current_price,
                 indicators=indicators,
             )
