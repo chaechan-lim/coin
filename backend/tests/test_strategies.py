@@ -712,3 +712,103 @@ class TestRSIFreefallGuard:
         signal = await strategy.analyze(df, _ticker(50_000_000))
         assert signal.signal_type == SignalType.BUY
         assert signal.confidence >= 0.55  # no discount
+
+
+# ── Volatility Regime Strategy ─────────────────────────────
+
+
+class TestVolatilityRegimeStrategy:
+    @pytest.fixture
+    def strategy(self):
+        from strategies.volatility_regime import VolatilityRegimeStrategy
+        return VolatilityRegimeStrategy()
+
+    def _make_regime_df(self, atr_percentile_target: str, n: int = 60):
+        """ATR 분포를 조작하여 원하는 레짐을 만드는 헬퍼."""
+        close_base = 50000
+        df = _make_df(n, close_base=close_base)
+        # ATR 값 설정: 50개 캔들의 ATR 분포 조작
+        if atr_percentile_target == "low":
+            # 대부분 높은 ATR, 현재만 낮은 → percentile < 25
+            atr_vals = np.full(n, 3000.0)  # 높은 베이스
+            atr_vals[-1] = 500.0  # 현재 매우 낮음
+        elif atr_percentile_target == "high":
+            # 대부분 낮은 ATR, 현재만 높은 → percentile > 75
+            atr_vals = np.full(n, 500.0)  # 낮은 베이스
+            atr_vals[-1] = 3000.0  # 현재 매우 높음
+        else:  # normal
+            atr_vals = np.full(n, 1500.0)  # 중간
+        df["ATRr_14"] = atr_vals
+        df["rsi_14"] = 50.0
+        df["BBL_20_2.0"] = close_base * 0.96
+        df["BBM_20_2.0"] = close_base
+        df["BBU_20_2.0"] = close_base * 1.04
+        df["Volume_SMA_20"] = 50.0
+        return df
+
+    @pytest.mark.asyncio
+    async def test_low_vol_breakout_buy(self, strategy):
+        """저변동 + 가격 > 상단밴드 + 거래량 확인 → BUY."""
+        df = self._make_regime_df("low")
+        price = 52100  # > BBU (52000)
+        df["volume"] = 80.0  # > 50 * 1.3 = 65
+        signal = await strategy.analyze(df, _ticker(price))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.70
+
+    @pytest.mark.asyncio
+    async def test_low_vol_breakout_sell(self, strategy):
+        """저변동 + 가격 < 하단밴드 + 거래량 확인 → SELL."""
+        df = self._make_regime_df("low")
+        price = 47900  # < BBL (48000)
+        df["volume"] = 80.0
+        df["rsi_14"] = 40.0
+        signal = await strategy.analyze(df, _ticker(price))
+        assert signal.signal_type == SignalType.SELL
+        assert signal.confidence >= 0.70
+
+    @pytest.mark.asyncio
+    async def test_low_vol_no_volume_hold(self, strategy):
+        """저변동 + 가격 > 상단밴드 but 거래량 미확인 → HOLD."""
+        df = self._make_regime_df("low")
+        price = 52100
+        df["volume"] = 30.0  # < 50 * 1.3 = 65
+        signal = await strategy.analyze(df, _ticker(price))
+        assert signal.signal_type == SignalType.HOLD
+
+    @pytest.mark.asyncio
+    async def test_high_vol_mean_revert_buy(self, strategy):
+        """고변동 + RSI < 30 + 볼린저 하단 + RSI↑ → BUY."""
+        df = self._make_regime_df("high")
+        price = 48000  # ≤ BBL * 1.01
+        df["rsi_14"] = 25.0
+        df.iloc[-2, df.columns.get_loc("rsi_14")] = 23.0  # RSI rising
+        signal = await strategy.analyze(df, _ticker(price))
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.70
+
+    @pytest.mark.asyncio
+    async def test_high_vol_mean_revert_sell(self, strategy):
+        """고변동 + RSI > 70 + 볼린저 상단 + RSI↓ → SELL."""
+        df = self._make_regime_df("high")
+        price = 52100  # ≥ BBU * 0.99
+        df["rsi_14"] = 75.0
+        df.iloc[-2, df.columns.get_loc("rsi_14")] = 77.0  # RSI falling
+        signal = await strategy.analyze(df, _ticker(price))
+        assert signal.signal_type == SignalType.SELL
+        assert signal.confidence >= 0.70
+
+    @pytest.mark.asyncio
+    async def test_normal_vol_hold(self, strategy):
+        """중간 변동성 → HOLD (다른 전략에 위임)."""
+        df = self._make_regime_df("normal")
+        signal = await strategy.analyze(df, _ticker(50000))
+        assert signal.signal_type == SignalType.HOLD
+
+    @pytest.mark.asyncio
+    async def test_insufficient_data(self, strategy):
+        """데이터 부족 → HOLD."""
+        df = _make_df(10, close_base=50000)
+        signal = await strategy.analyze(df, _ticker(50000))
+        assert signal.signal_type == SignalType.HOLD
+        assert signal.confidence == 0.0

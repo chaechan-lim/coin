@@ -69,6 +69,7 @@ from strategies.bnf_deviation import BNFDeviationStrategy
 from strategies.cis_momentum import CISMomentumStrategy
 from strategies.larry_williams import LarryWilliamsStrategy
 from strategies.donchian_channel import DonchianChannelStrategy
+from strategies.volatility_regime import VolatilityRegimeStrategy
 from strategies.registry import StrategyRegistry
 from strategies.combiner import SignalCombiner
 from strategies.base import Signal
@@ -103,6 +104,9 @@ ALL_STRATEGIES_6 = [
     "bollinger_rsi", "stochastic_rsi", "obv_divergence",
 ]
 
+# 7전략 = 6전략 + 변동성 레짐
+ALL_STRATEGIES_7 = ALL_STRATEGIES_6 + ["volatility_regime"]
+
 # 10전략 = 기존 6 + 신규 4 (4대 트레이더)
 ALL_STRATEGIES_10 = ALL_STRATEGIES_6 + [
     "bnf_deviation", "cis_momentum", "larry_williams", "donchian_channel",
@@ -111,6 +115,7 @@ ALL_STRATEGIES_10 = ALL_STRATEGIES_6 + [
 # 전체 사용 가능 전략 (CLI 유효성 검사용)
 ALL_STRATEGIES = ALL_STRATEGIES_8 + [
     "bnf_deviation", "cis_momentum", "larry_williams", "donchian_channel",
+    "volatility_regime",
 ]
 
 # 5전략 가중치 (기존)
@@ -130,6 +135,17 @@ WEIGHTS_6 = {
     "bollinger_rsi":       0.31,
     "stochastic_rsi":      0.15,
     "obv_divergence":      0.13,
+}
+
+# 7전략 가중치 (6전략 + 변동성 레짐)
+WEIGHTS_7 = {
+    "ma_crossover":        0.07,
+    "rsi":                 0.22,
+    "macd_crossover":      0.07,
+    "bollinger_rsi":       0.27,
+    "stochastic_rsi":      0.13,
+    "obv_divergence":      0.11,
+    "volatility_regime":   0.13,
 }
 
 # 8전략 가중치 (역발상 중심 유지 + 신규 3종 배분)
@@ -604,6 +620,8 @@ class Backtester:
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
+        elif set(strategy_names) <= set(WEIGHTS_7.keys()):
+            base_weights = WEIGHTS_7
         elif set(strategy_names) <= set(WEIGHTS_8.keys()):
             base_weights = WEIGHTS_8
         else:
@@ -1364,6 +1382,8 @@ class PortfolioBacktester:
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
+        elif set(strategy_names) <= set(WEIGHTS_7.keys()):
+            base_weights = WEIGHTS_7
         elif set(strategy_names) <= set(WEIGHTS_8.keys()):
             base_weights = WEIGHTS_8
         else:
@@ -1995,6 +2015,8 @@ class FuturesBacktester:
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
+        elif set(strategy_names) <= set(WEIGHTS_7.keys()):
+            base_weights = WEIGHTS_7
         elif set(strategy_names) <= set(WEIGHTS_8.keys()):
             base_weights = WEIGHTS_8
         else:
@@ -2855,6 +2877,9 @@ class FuturesPortfolioBacktester:
         dynamic_portfolio: bool = False,
         dynamic_max_coins: int = 10,
         dynamic_refresh_candles: int = 6,  # 4h에서 6캔들=24시간
+        # 선택적 거래
+        confidence_sizing: bool = False,
+        volatility_filter: bool = False,
         # 리스크 관리
         risk_enabled: bool = False,
         risk_max_drawdown: float = 0.10,
@@ -2892,6 +2917,8 @@ class FuturesPortfolioBacktester:
         self._dynamic_portfolio = dynamic_portfolio
         self._dynamic_max_coins = dynamic_max_coins
         self._dynamic_refresh_candles = dynamic_refresh_candles
+        self._confidence_sizing = confidence_sizing
+        self._volatility_filter = volatility_filter
         if dynamic_portfolio:
             # 후보 전체 프리페치 — 기본 코인 + 후보군 합집합
             base = list(symbols or DEFAULT_FUTURES_PORTFOLIO_COINS)
@@ -2933,6 +2960,8 @@ class FuturesPortfolioBacktester:
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
+        elif set(strategy_names) <= set(WEIGHTS_7.keys()):
+            base_weights = WEIGHTS_7
         elif set(strategy_names) <= set(WEIGHTS_8.keys()):
             base_weights = WEIGHTS_8
         else:
@@ -3449,6 +3478,19 @@ class FuturesPortfolioBacktester:
                 if len(positions) >= self._max_positions:
                     break
 
+                # 변동성 필터: ATR 높은데 신뢰도 낮으면 스킵
+                if self._volatility_filter:
+                    _vf_row = all_data[sym].loc[ts]
+                    _vf_atr = _vf_row.get("ATRr_14")
+                    if _vf_atr and not pd.isna(_vf_atr):
+                        _vf_atr_pct = float(_vf_atr) / float(_vf_row["close"]) * 100
+                        # 고변동(ATR>5%) + 낮은 신뢰도 → 스킵
+                        if _vf_atr_pct > 5.0 and conf < 0.70:
+                            continue
+                        # 극고변동(ATR>10%) → 0.80 이상만 진입
+                        if _vf_atr_pct > 10.0 and conf < 0.80:
+                            continue
+
                 # 동적 포지션 사이징
                 if self._dynamic_position:
                     _dyn_pos_mult = {
@@ -3463,6 +3505,12 @@ class FuturesPortfolioBacktester:
                 # 롱 사이징 조절 (시장 상태별)
                 if side == "long" and current_market_state in self._long_sizing_states:
                     eff_position_pct *= self._long_sizing_states[current_market_state]
+
+                # 신뢰도 비례 포지션 사이징: 높은 확신 → 큰 포지션
+                if self._confidence_sizing:
+                    # conf 0.55→0.7x, 0.70→1.0x, 0.85→1.5x, 1.0→2.0x
+                    _cs_mult = min(2.0, max(0.5, 0.5 + (conf - 0.55) * (1.5 / 0.45)))
+                    eff_position_pct *= _cs_mult
 
                 # 리스크 관리자 체크
                 if self._risk_manager:
@@ -4561,6 +4609,8 @@ async def main():
                         help=f"사용할 전략 목록 (기본: 6전략)\n선택: {', '.join(ALL_STRATEGIES)}")
     parser.add_argument("--use-5",          action="store_true",
                         help="기존 5전략만 사용 (비교용)")
+    parser.add_argument("--use-7",          action="store_true",
+                        help="7전략 사용 (6전략 + 변동성 레짐)")
     parser.add_argument("--use-8",          action="store_true",
                         help="8전략 전체 사용 (비교용)")
     parser.add_argument("--min-confidence", type=float, default=0.50, help="최소 신뢰도 임계값 (기본 0.50)")
@@ -4643,6 +4693,10 @@ async def main():
                         help="선물: 시장 상태별 동적 포지션 사이징")
     parser.add_argument("--dynamic-portfolio", action="store_true", default=False,
                         help="선물: 거래량 기반 동적 코인 선택 (라이브와 동일)")
+    parser.add_argument("--confidence-sizing", action="store_true", default=False,
+                        help="신뢰도 비례 포지션 사이징 (높은 확신 → 큰 포지션)")
+    parser.add_argument("--volatility-filter", action="store_true", default=False,
+                        help="변동성 필터 (ATR 높은데 신뢰도 낮으면 스킵)")
     parser.add_argument("--dynamic-max-coins", type=int, default=10,
                         help="동적 포트폴리오 상위 코인 수 (기본 10)")
     # 포트폴리오 모드
@@ -4679,6 +4733,8 @@ async def main():
     # 전략 세트 선택
     if args.use_5:
         args.strategies = ALL_STRATEGIES_5
+    elif args.use_7:
+        args.strategies = ALL_STRATEGIES_7
     elif args.use_8:
         args.strategies = ALL_STRATEGIES_8
     elif args.strategies is None:
@@ -4774,6 +4830,8 @@ async def main():
                 trade_max_coin_buys=args.max_coin_buys,
                 dynamic_portfolio=args.dynamic_portfolio,
                 dynamic_max_coins=args.dynamic_max_coins,
+                confidence_sizing=args.confidence_sizing,
+                volatility_filter=args.volatility_filter,
             )
             if args.min_sell_weight > 0:
                 bt._combiner.MIN_SELL_ACTIVE_WEIGHT = args.min_sell_weight
