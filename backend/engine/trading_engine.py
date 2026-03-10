@@ -433,15 +433,22 @@ class TradingEngine:
                 select(Position).where(Position.exchange == self._exchange_name)
             )
             for pos in result.scalars().all():
-                # 청산된 포지션(qty=0)의 쿨다운은 복원하지 않음
                 if pos.quantity and pos.quantity > 0:
                     if pos.last_trade_at:
                         self._last_trade_time[pos.symbol] = pos.last_trade_at
                     if pos.last_sell_at:
                         self._last_sell_time[pos.symbol] = pos.last_sell_at
                 elif pos.last_sell_at:
-                    logger.debug("skip_closed_position_cooldown",
-                                 symbol=pos.symbol, last_sell_at=pos.last_sell_at)
+                    # 청산된 포지션도 쿨다운 내이면 복원 (재시작 시 쿨다운 유지)
+                    elapsed = (datetime.now(timezone.utc) - pos.last_sell_at).total_seconds()
+                    cooldown = getattr(self._ec, 'min_trade_interval_sec', 518400)
+                    if elapsed < cooldown:
+                        self._last_sell_time[pos.symbol] = pos.last_sell_at
+                        logger.debug("restored_closed_cooldown",
+                                     symbol=pos.symbol, remaining_h=round((cooldown - elapsed) / 3600, 1))
+                    else:
+                        logger.debug("skip_expired_cooldown",
+                                     symbol=pos.symbol, last_sell_at=pos.last_sell_at)
 
             # 일일 매수 카운터 복원: 오늘 buy 주문 수 (UTC 기준)
             today = datetime.now(timezone.utc).date()

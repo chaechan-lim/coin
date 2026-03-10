@@ -38,6 +38,8 @@ def mock_config():
     config.binance_trading.daily_buy_limit = 15
     config.binance_trading.max_daily_coin_buys = 3
     config.binance_trading.ws_price_monitor = True
+    config.binance_trading.min_trade_interval_sec = 1036800
+    config.binance_trading.min_sell_active_weight = 0.20
     config.trading.mode = "paper"
     config.trading.evaluation_interval_sec = 300
     config.trading.tracked_coins = ["BTC/USDT"]
@@ -460,3 +462,23 @@ class TestWSReconnection:
         assert futures_engine._WS_RECONNECT_MIN == 5
         assert futures_engine._WS_RECONNECT_MAX == 300
         assert futures_engine._WS_RECONNECT_FACTOR == 2
+
+
+class TestFuturesCooldown:
+    """선물 엔진 쿨다운 체크."""
+
+    def test_cooldown_blocks_recent_sell(self, futures_engine):
+        """최근 청산 코인은 쿨다운으로 진입 차단."""
+        from datetime import timedelta
+        futures_engine._last_sell_time["BTC/USDT"] = datetime.now(timezone.utc) - timedelta(hours=1)
+        assert futures_engine._check_cooldown("BTC/USDT") is True
+
+    def test_cooldown_allows_after_expiry(self, futures_engine):
+        """쿨다운 만료 후 진입 허용."""
+        from datetime import timedelta
+        futures_engine._last_sell_time["BTC/USDT"] = datetime.now(timezone.utc) - timedelta(days=13)
+        assert futures_engine._check_cooldown("BTC/USDT") is False
+
+    def test_cooldown_allows_new_symbol(self, futures_engine):
+        """매매 이력 없는 코인은 진입 허용."""
+        assert futures_engine._check_cooldown("NEW/USDT") is False

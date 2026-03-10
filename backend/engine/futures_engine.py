@@ -1043,7 +1043,8 @@ class BinanceFuturesEngine(TradingEngine):
 
         if order.status == "filled":
             # 워시아웃 먼저 설정 — 후속 처리 실패해도 재진입 방지 보장
-            self._last_sell_time[symbol] = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc)
+            self._last_sell_time[symbol] = now
             self._position_trackers.pop(symbol, None)
 
             try:
@@ -1051,6 +1052,16 @@ class BinanceFuturesEngine(TradingEngine):
                     session, symbol, position.quantity, price,
                     position.quantity * price, order.fee
                 )
+                # DB에 last_sell_at 기록 (재시작 시 쿨다운 복원용)
+                result = await session.execute(
+                    select(Position).where(
+                        Position.symbol == symbol,
+                        Position.exchange == self._exchange_name,
+                    )
+                )
+                pos_record = result.scalar_one_or_none()
+                if pos_record:
+                    pos_record.last_sell_at = now
             except Exception as e:
                 logger.error("futures_close_portfolio_update_failed",
                              symbol=symbol, error=str(e))
@@ -1281,11 +1292,28 @@ class BinanceFuturesEngine(TradingEngine):
                 return margin_mult, lev_override
         return 0.3, 1  # 극단 폴백
 
+    def _check_cooldown(self, symbol: str) -> bool:
+        """매매 후 쿨다운 체크. True이면 진입 차단."""
+        last_sell = self._last_sell_time.get(symbol)
+        if last_sell:
+            elapsed = (datetime.now(timezone.utc) - last_sell).total_seconds()
+            cooldown_sec = self._config.binance_trading.min_trade_interval_sec
+            if elapsed < cooldown_sec:
+                remaining_h = (cooldown_sec - elapsed) / 3600
+                logger.debug("futures_cooldown_blocked", symbol=symbol,
+                             remaining_hours=round(remaining_h, 1))
+                return True
+        return False
+
     async def _open_long(
         self, session: AsyncSession, symbol: str, price: float,
         signal: Signal, decision: CombinedDecision,
     ) -> None:
         """롱 포지션 진입."""
+        # 쿨다운 체크
+        if self._check_cooldown(symbol):
+            return
+
         # ATR 적응형 리스크 조절
         atr_pct = self._get_atr_pct(symbol)
         margin_mult, lev_override = self._atr_risk_adjust(symbol, atr_pct)
@@ -1409,6 +1437,10 @@ class BinanceFuturesEngine(TradingEngine):
         signal: Signal, decision: CombinedDecision,
     ) -> None:
         """숏 포지션 진입."""
+        # 쿨다운 체크
+        if self._check_cooldown(symbol):
+            return
+
         # 교차 거래소 포지션 충돌 체크 (선물 숏 vs 현물 롱 — 빗썸/바이낸스 현물 모두)
         base = symbol.split("/")[0]
         cross_result = await session.execute(

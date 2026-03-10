@@ -493,14 +493,14 @@ class TestRestoreTradeTimestamps:
         assert "BTC/KRW" in spot_engine._last_sell_time
 
     @pytest.mark.asyncio
-    async def test_closed_position_timestamps_skipped(self, spot_engine):
-        """청산된 포지션(qty=0)의 타임스탬프는 복원하지 않음."""
+    async def test_closed_position_expired_cooldown_skipped(self, spot_engine):
+        """청산 후 쿨다운 만료된 포지션은 복원하지 않음."""
         now = datetime.now(timezone.utc)
         position = MagicMock()
         position.symbol = "ETH/KRW"
         position.quantity = 0
-        position.last_trade_at = now - timedelta(hours=3)
-        position.last_sell_at = now - timedelta(hours=2)
+        position.last_trade_at = now - timedelta(days=30)
+        position.last_sell_at = now - timedelta(days=30)  # 30일 전 — 쿨다운 만료
         position.exchange = "bithumb"
 
         mock_result = MagicMock()
@@ -520,8 +520,35 @@ class TestRestoreTradeTimestamps:
         assert "ETH/KRW" not in spot_engine._last_sell_time
 
     @pytest.mark.asyncio
+    async def test_closed_position_recent_cooldown_restored(self, spot_engine):
+        """청산 후 쿨다운 내 포지션은 last_sell_time 복원."""
+        now = datetime.now(timezone.utc)
+        position = MagicMock()
+        position.symbol = "ETH/KRW"
+        position.quantity = 0
+        position.last_trade_at = now - timedelta(minutes=10)
+        position.last_sell_at = now - timedelta(minutes=10)  # 10분 전 — 쿨다운 내
+        position.exchange = "bithumb"
+
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [position]
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_session_factory = MagicMock(return_value=mock_ctx)
+
+        with patch("db.session.get_session_factory", return_value=mock_session_factory):
+            await spot_engine._restore_trade_timestamps()
+
+        assert "ETH/KRW" not in spot_engine._last_trade_time  # 청산이므로 trade_time 안 복원
+        assert "ETH/KRW" in spot_engine._last_sell_time  # 쿨다운 내이므로 sell_time 복원
+
+    @pytest.mark.asyncio
     async def test_mixed_positions_partial_restore(self, spot_engine):
-        """보유/청산 혼합 시 보유 포지션만 복원."""
+        """보유/청산 혼합 시: 보유는 전부 복원, 청산은 쿨다운 내 last_sell만 복원."""
         now = datetime.now(timezone.utc)
         open_pos = MagicMock()
         open_pos.symbol = "BTC/KRW"
@@ -530,15 +557,24 @@ class TestRestoreTradeTimestamps:
         open_pos.last_sell_at = None
         open_pos.exchange = "bithumb"
 
-        closed_pos = MagicMock()
-        closed_pos.symbol = "ETH/KRW"
-        closed_pos.quantity = 0
-        closed_pos.last_trade_at = now
-        closed_pos.last_sell_at = now
-        closed_pos.exchange = "bithumb"
+        # 최근 청산 — 쿨다운 내이므로 last_sell 복원됨
+        closed_recent = MagicMock()
+        closed_recent.symbol = "ETH/KRW"
+        closed_recent.quantity = 0
+        closed_recent.last_trade_at = now
+        closed_recent.last_sell_at = now - timedelta(minutes=10)
+        closed_recent.exchange = "bithumb"
+
+        # 오래전 청산 — 쿨다운 만료이므로 복원 안 됨
+        closed_old = MagicMock()
+        closed_old.symbol = "SOL/KRW"
+        closed_old.quantity = 0
+        closed_old.last_trade_at = now - timedelta(days=30)
+        closed_old.last_sell_at = now - timedelta(days=30)
+        closed_old.exchange = "bithumb"
 
         mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [open_pos, closed_pos]
+        mock_result.scalars.return_value.all.return_value = [open_pos, closed_recent, closed_old]
         mock_session = AsyncMock()
         mock_session.execute = AsyncMock(return_value=mock_result)
 
@@ -552,7 +588,8 @@ class TestRestoreTradeTimestamps:
 
         assert "BTC/KRW" in spot_engine._last_trade_time
         assert "ETH/KRW" not in spot_engine._last_trade_time
-        assert "ETH/KRW" not in spot_engine._last_sell_time
+        assert "ETH/KRW" in spot_engine._last_sell_time  # 최근 청산 쿨다운 복원
+        assert "SOL/KRW" not in spot_engine._last_sell_time  # 만료된 쿨다운은 안 복원
 
 
 # ── Reconcile Cash Paper-Only Guard Tests ─────────────────────

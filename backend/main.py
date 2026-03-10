@@ -77,9 +77,13 @@ def _create_agent_stack(
     trade_review = TradeReviewAgent(review_window_hours=24, exchange_name=exchange_name)
     perf_agent = PerformanceAnalyticsAgent(exchange_name=exchange_name)
     strategy_advisor = StrategyAdvisorAgent(exchange_name=exchange_name)
+    min_sell_wt = 0.0
+    if exchange_name == "binance_futures":
+        min_sell_wt = config.binance_trading.min_sell_active_weight
     combiner = SignalCombiner(
         min_confidence=_get_min_confidence(config, exchange_name),
         exchange_name=exchange_name,
+        min_sell_active_weight=min_sell_wt,
     )
     coordinator = AgentCoordinator(
         market_agent, risk_agent, combiner, trade_review,
