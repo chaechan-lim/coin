@@ -67,8 +67,11 @@ async def get_engine_status(
         mode = ec.mode
         eval_interval = ec.evaluation_interval_sec
     else:
-        mode = "paper"
-        eval_interval = 300
+        mode = getattr(eng, '_mode', 'paper')
+        eval_interval = getattr(eng, '_scan_interval', 300)
+
+    strategies = getattr(eng, 'strategies', None)
+    strategies_active = list(strategies.keys()) if strategies else []
 
     return EngineStatusResponse(
         exchange=exchange,
@@ -77,7 +80,7 @@ async def get_engine_status(
         evaluation_interval_sec=eval_interval,
         tracked_coins=getattr(eng, 'tracked_coins', []),
         daily_trade_count=daily_count,
-        strategies_active=list(eng.strategies.keys()),
+        strategies_active=strategies_active,
     )
 
 
