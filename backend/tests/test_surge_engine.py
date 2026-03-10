@@ -639,3 +639,77 @@ class TestCashIntegration:
         surge_engine._futures_pm.cash_balance = 2.0  # 5 USDT 미만
         # _enter_position에서 size_usdt < 5 체크로 리턴됨
         assert surge_engine._futures_pm.cash_balance * surge_engine._position_pct < 5
+
+
+# ── Test: Scan status ────────────────────────────────────────────
+
+class TestScanStatus:
+    def test_scan_status_returns_dict(self, surge_engine):
+        """scan_status() returns expected structure."""
+        result = surge_engine.scan_status()
+        assert result["scan_symbols_count"] == 30
+        assert result["open_positions"] == 0
+        assert result["daily_trades"] == 0
+        assert result["daily_limit"] == 15
+        assert result["leverage"] == 3
+        assert isinstance(result["scores"], list)
+        assert len(result["scores"]) == 30
+
+    def test_scan_status_with_data(self, surge_engine):
+        """scan_status() returns scores when symbol state exists."""
+        surge_engine._symbol_states["BTC/USDT"] = SymbolState()
+        state = surge_engine._symbol_states["BTC/USDT"]
+        for i in range(10):
+            state.volume_1m.append(100.0)
+            state.prices.append(65000.0 + i * 10)
+            state.rsi_closes.append(65000.0 + i * 10)
+        state.last_price = 65100.0
+
+        result = surge_engine.scan_status()
+        btc_score = next(s for s in result["scores"] if s["symbol"] == "BTC/USDT")
+        assert btc_score["last_price"] == 65100.0
+        assert btc_score["has_position"] is False
+
+    def test_scan_status_with_position(self, surge_engine):
+        """scan_status() marks positions correctly."""
+        surge_engine._positions["ETH/USDT"] = SurgePositionState(
+            symbol="ETH/USDT", direction="long",
+            entry_price=3500.0, quantity=0.1,
+            margin=50.0, entry_time=datetime.now(timezone.utc),
+            peak_price=3500.0, trough_price=3500.0,
+        )
+        surge_engine._symbol_states["ETH/USDT"] = SymbolState()
+        surge_engine._symbol_states["ETH/USDT"].last_price = 3550.0
+
+        result = surge_engine.scan_status()
+        eth_score = next(s for s in result["scores"] if s["symbol"] == "ETH/USDT")
+        assert eth_score["has_position"] is True
+        assert eth_score["direction"] == "long"
+        assert eth_score["pnl_pct"] is not None
+        assert eth_score["pnl_pct"] > 0  # 3550 > 3500
+
+    def test_calc_position_pnl_pct_long(self, surge_engine):
+        """PnL% calculation for long position."""
+        pos = SurgePositionState(
+            symbol="SOL/USDT", direction="long",
+            entry_price=100.0, quantity=1.0, margin=33.33,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=100.0, trough_price=100.0,
+        )
+        surge_engine._symbol_states["SOL/USDT"] = SymbolState()
+        surge_engine._symbol_states["SOL/USDT"].last_price = 103.0
+        # 3% * 3x leverage = 9%
+        assert abs(surge_engine._calc_position_pnl_pct(pos) - 9.0) < 0.01
+
+    def test_calc_position_pnl_pct_short(self, surge_engine):
+        """PnL% calculation for short position."""
+        pos = SurgePositionState(
+            symbol="SOL/USDT", direction="short",
+            entry_price=100.0, quantity=1.0, margin=33.33,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=100.0, trough_price=100.0,
+        )
+        surge_engine._symbol_states["SOL/USDT"] = SymbolState()
+        surge_engine._symbol_states["SOL/USDT"].last_price = 97.0
+        # 3% * 3x leverage = 9%
+        assert abs(surge_engine._calc_position_pnl_pct(pos) - 9.0) < 0.01

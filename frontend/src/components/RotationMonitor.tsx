@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
-import { getRotationStatus, getMarketAnalysis } from '../api/client'
-import type { RotationStatus, ExchangeName } from '../types'
+import { getRotationStatus, getMarketAnalysis, getSurgeScanStatus } from '../api/client'
+import type { RotationStatus, SurgeScanStatus, ExchangeName } from '../types'
 import { formatTs } from '../utils/date'
 
 const MARKET_STATE_LABELS: Record<string, { label: string; color: string }> = {
@@ -12,7 +12,7 @@ const MARKET_STATE_LABELS: Record<string, { label: string; color: string }> = {
 }
 
 export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
-  const isFutures = exchange === 'binance_futures' || exchange === 'binance_surge'
+  const isFutures = exchange === 'binance_futures'
   const { data, isLoading, error } = useQuery<RotationStatus>({
     queryKey: ['rotation-status', exchange],
     queryFn: () => getRotationStatus(exchange),
@@ -25,6 +25,14 @@ export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeN
     queryFn: () => getMarketAnalysis(exchange),
     refetchInterval: 60_000,
     staleTime: 30_000,
+  })
+
+  // 선물 탭에서 서지 스캔 상태도 가져오기
+  const { data: surgeData } = useQuery<SurgeScanStatus>({
+    queryKey: ['surge-scan'],
+    queryFn: getSurgeScanStatus,
+    refetchInterval: 10_000,
+    enabled: isFutures,
   })
 
   if (isLoading) {
@@ -99,25 +107,10 @@ export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeN
         </div>
       </div>
 
-      {/* Dynamic Rotation Coins (futures) */}
-      {isFutures && data.rotation_coins.length > 0 && (
-        <div className="bg-gray-800 rounded-lg p-4">
-          <h3 className="text-sm font-medium text-gray-400 mb-2">동적 종목 ({data.rotation_coins.length}종)</h3>
-          <p className="text-xs text-gray-500 mb-2">24h 거래대금 상위 자동 선정 (6시간 갱신)</p>
-          <div className="flex flex-wrap gap-2">
-            {data.rotation_coins.map((coin) => (
-              <span
-                key={coin}
-                className="px-3 py-1 bg-purple-900/50 border border-purple-700 rounded-full text-sm text-purple-300 font-medium"
-              >
-                {stripQuote(coin)}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Surge Scan Status (futures) */}
+      {isFutures && surgeData && <SurgeScanPanel data={surgeData} />}
 
-      {/* Rotation Enabled Status — 빗썸만 */}
+      {/* Rotation Enabled Status — 현물만 */}
       {!isFutures && (
         <div className="bg-gray-800 rounded-lg p-3 md:p-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -132,7 +125,7 @@ export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeN
         </div>
       )}
 
-      {/* Surge Score Bar Chart — 빗썸만 */}
+      {/* Surge Score Bar Chart — 현물만 */}
       {!isFutures && (
         <div className="bg-gray-800 rounded-lg p-4">
           <h3 className="text-sm font-medium text-gray-400 mb-3">
@@ -191,6 +184,104 @@ export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeN
     </div>
   )
 }
+
+
+function SurgeScanPanel({ data }: { data: SurgeScanStatus }) {
+  const stripQuote = (sym: string) => sym.replace('/USDT', '')
+  const topScores = data.scores.filter((s) => s.score > 0).slice(0, 15)
+  const maxScore = topScores.length > 0 ? Math.max(...topScores.map((s) => s.score), 0.5) : 1
+
+  return (
+    <div className="bg-gray-800 rounded-lg p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-medium text-cyan-400">
+          서지 스캔 ({data.scan_symbols_count}종)
+        </h3>
+        <div className="flex items-center gap-3 text-xs text-gray-500">
+          <span>오늘 {data.daily_trades}/{data.daily_limit}거래</span>
+          {data.paused && <span className="text-yellow-400 font-medium">일시정지</span>}
+          <span>{data.leverage}x</span>
+        </div>
+      </div>
+
+      {/* Open positions */}
+      {data.scores.some((s) => s.has_position) && (
+        <div className="space-y-1">
+          <div className="text-xs text-gray-500">보유 포지션</div>
+          <div className="flex flex-wrap gap-2">
+            {data.scores.filter((s) => s.has_position).map((s) => {
+              const pnlColor = (s.pnl_pct ?? 0) >= 0 ? 'text-buy' : 'text-sell'
+              return (
+                <div key={s.symbol} className="flex items-center gap-1.5 px-2.5 py-1 bg-cyan-900/30 border border-cyan-700/50 rounded-lg">
+                  <span className="text-sm text-cyan-300 font-medium">{stripQuote(s.symbol)}</span>
+                  <span className={`text-xs font-medium ${s.direction === 'short' ? 'text-sell' : 'text-buy'}`}>
+                    {s.direction === 'short' ? 'S' : 'L'}
+                  </span>
+                  <span className={`text-xs font-mono ${pnlColor}`}>
+                    {(s.pnl_pct ?? 0) >= 0 ? '+' : ''}{(s.pnl_pct ?? 0).toFixed(1)}%
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Surge score chart */}
+      {topScores.length > 0 ? (
+        <div className="space-y-1">
+          <div className="text-xs text-gray-500">서지 점수 상위</div>
+          <div className="space-y-1">
+            {topScores.map((item) => {
+              const pct = Math.min((item.score / maxScore) * 100, 100)
+              const isHot = item.score >= 0.40
+              return (
+                <div key={item.symbol} className="flex items-center gap-2">
+                  <span className="w-20 text-xs text-gray-400 text-right shrink-0 font-mono">
+                    {stripQuote(item.symbol)}
+                  </span>
+                  <div className="flex-1 h-4 bg-gray-700 rounded overflow-hidden relative">
+                    <div
+                      className={`h-full rounded transition-all duration-500 ${
+                        item.has_position ? 'bg-cyan-500' : isHot ? 'bg-orange-500' : 'bg-gray-500'
+                      }`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className={`w-10 text-xs text-right shrink-0 font-mono ${
+                    isHot ? 'text-orange-400 font-bold' : 'text-gray-500'
+                  }`}>
+                    {item.score.toFixed(2)}
+                  </span>
+                  <span className="w-14 text-[10px] text-gray-500 text-right shrink-0">
+                    {item.price_chg >= 0 ? '+' : ''}{item.price_chg.toFixed(1)}%
+                  </span>
+                  <span className="w-10 text-[10px] text-gray-500 text-right shrink-0">
+                    R{item.rsi.toFixed(0)}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+          <div className="flex items-center gap-3 mt-2 text-[10px] text-gray-600 flex-wrap">
+            <span className="flex items-center gap-1">
+              <span className="w-2.5 h-2.5 bg-cyan-500 rounded-sm inline-block" /> 보유중
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2.5 h-2.5 bg-orange-500 rounded-sm inline-block" /> 진입 가능
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2.5 h-2.5 bg-gray-500 rounded-sm inline-block" /> 대기
+            </span>
+          </div>
+        </div>
+      ) : (
+        <p className="text-gray-500 text-sm">스캔 데이터 수집 중...</p>
+      )}
+    </div>
+  )
+}
+
 
 function Card({ label, children }: { label: string; children: React.ReactNode }) {
   return (

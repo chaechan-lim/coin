@@ -92,6 +92,9 @@ export const stopEngine = (exchange: ExchangeName = 'bithumb') =>
 export const getRotationStatus = (exchange: ExchangeName = 'bithumb') =>
   api.get<RotationStatus>('/engine/rotation-status', { params: { exchange } }).then((r) => r.data)
 
+export const getSurgeScanStatus = () =>
+  api.get('/engine/surge-scan').then((r) => r.data)
+
 // ── Agents ───────────────────────────────────────────────────
 export const getMarketAnalysis = (exchange: ExchangeName = 'bithumb') =>
   api.get<MarketAnalysis>('/agents/market-analysis/latest', { params: { exchange } }).then((r) => r.data)

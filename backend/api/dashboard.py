@@ -150,6 +150,16 @@ async def get_rotation_status(exchange: str = Query("bithumb")):
     )
 
 
+@router.get("/engine/surge-scan")
+async def get_surge_scan_status():
+    """서지 엔진 스캔 상태 — 심볼별 점수/RSI/포지션 정보."""
+    eng = engine_registry.get_engine("binance_surge")
+    if not eng:
+        return {"status": "not_initialized", "scores": []}
+    scan = eng.scan_status()
+    return scan
+
+
 # -- Agent endpoints --
 @router.get("/agents/market-analysis/latest")
 async def get_latest_market_analysis(

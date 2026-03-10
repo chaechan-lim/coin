@@ -203,6 +203,32 @@ export interface RotationStatus {
   surge_scores: SurgeScore[]
 }
 
+// ── Surge Scan ──────────────────────────────────────────────
+export interface SurgeScanScore {
+  symbol: string
+  score: number
+  vol_ratio: number
+  price_chg: number
+  rsi: number
+  last_price: number
+  has_position: boolean
+  direction: string | null
+  pnl_pct: number | null
+}
+
+export interface SurgeScanStatus {
+  scan_symbols_count: number
+  open_positions: number
+  daily_trades: number
+  daily_limit: number
+  daily_losses: number
+  consecutive_losses: number
+  paused: boolean
+  scan_interval_sec: number
+  leverage: number
+  scores: SurgeScanScore[]
+}
+
 // ── Server Events ───────────────────────────────────────────
 export interface ServerEvent {
   id: number

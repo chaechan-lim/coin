@@ -182,6 +182,49 @@ class SurgeEngine:
             "scan_symbols": len(self._scan_symbols),
         }
 
+    def scan_status(self) -> dict:
+        """서지 스캔 상태 — 심볼별 점수 + 포지션 정보."""
+        scores = []
+        for sym in self._scan_symbols:
+            score, vol_ratio, price_chg = self.compute_surge_score(sym)
+            state = self._symbol_states.get(sym)
+            pos = self._positions.get(sym)
+            scores.append({
+                "symbol": sym,
+                "score": round(score, 4),
+                "vol_ratio": round(vol_ratio, 2),
+                "price_chg": round(price_chg, 3),
+                "rsi": round(self.compute_rsi(sym), 1),
+                "last_price": round(state.last_price, 4) if state else 0,
+                "has_position": pos is not None,
+                "direction": pos.direction if pos else None,
+                "pnl_pct": self._calc_position_pnl_pct(pos) if pos else None,
+            })
+        scores.sort(key=lambda x: x["score"], reverse=True)
+
+        return {
+            "scan_symbols_count": len(self._scan_symbols),
+            "open_positions": len(self._positions),
+            "daily_trades": self._daily_trades,
+            "daily_limit": self._daily_trade_limit,
+            "daily_losses": self._daily_losses,
+            "consecutive_losses": self._consecutive_losses,
+            "paused": self._pause_until is not None and datetime.now(timezone.utc) < self._pause_until,
+            "scan_interval_sec": self._scan_interval,
+            "leverage": self._leverage,
+            "scores": scores,
+        }
+
+    def _calc_position_pnl_pct(self, pos: SurgePositionState) -> float:
+        """인메모리 포지션의 현재 PnL% 계산."""
+        state = self._symbol_states.get(pos.symbol)
+        if not state or state.last_price <= 0 or pos.entry_price <= 0:
+            return 0.0
+        if pos.direction == "long":
+            return (state.last_price - pos.entry_price) / pos.entry_price * 100 * self._leverage
+        else:
+            return (pos.entry_price - state.last_price) / pos.entry_price * 100 * self._leverage
+
     # ── Main loop ────────────────────────────────────────────────
 
     async def _main_loop(self) -> None:
