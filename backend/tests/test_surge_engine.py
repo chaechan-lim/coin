@@ -513,7 +513,7 @@ class TestSurgeTradingConfig:
         assert cfg.long_only is True
         assert cfg.daily_trade_limit == 15
         assert cfg.scan_symbols_count == 30
-        assert cfg.cooldown_per_symbol_sec == 1800
+        assert cfg.cooldown_per_symbol_sec == 3600
         assert cfg.scan_interval_sec == 5
 
     def test_invalid_mode_raises(self):
