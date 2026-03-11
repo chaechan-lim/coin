@@ -107,6 +107,9 @@ ALL_STRATEGIES_6 = [
     "bollinger_rsi", "stochastic_rsi", "obv_divergence",
 ]
 
+# 7전략 = 6전략 + bb_squeeze (라이브 기본)
+ALL_STRATEGIES_7_LIVE = ALL_STRATEGIES_6 + ["bb_squeeze"]
+
 # 7전략 = 6전략 + 변동성 레짐
 ALL_STRATEGIES_7 = ALL_STRATEGIES_6 + ["volatility_regime"]
 
@@ -140,6 +143,17 @@ WEIGHTS_6 = {
     "obv_divergence":      0.13,
 }
 
+# 7전략 가중치 — 라이브 (6전략 + bb_squeeze, combiner.DEFAULT_WEIGHTS 동기)
+WEIGHTS_7_LIVE = {
+    "ma_crossover":        0.07,
+    "rsi":                 0.21,
+    "macd_crossover":      0.07,
+    "bollinger_rsi":       0.26,
+    "stochastic_rsi":      0.13,
+    "obv_divergence":      0.11,
+    "bb_squeeze":          0.15,
+}
+
 # 7전략 가중치 (6전략 + 변동성 레짐)
 WEIGHTS_7 = {
     "ma_crossover":        0.07,
@@ -164,7 +178,7 @@ WEIGHTS_8 = {
 }
 
 # 기본값 = 6전략
-DEFAULT_WEIGHTS = WEIGHTS_6
+DEFAULT_WEIGHTS = WEIGHTS_7_LIVE
 
 
 # ── 데이터 클래스 ──────────────────────────────────────────────
@@ -623,6 +637,8 @@ class Backtester:
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
+        elif set(strategy_names) <= set(WEIGHTS_7_LIVE.keys()):
+            base_weights = WEIGHTS_7_LIVE
         elif set(strategy_names) <= set(WEIGHTS_7.keys()):
             base_weights = WEIGHTS_7
         elif set(strategy_names) <= set(WEIGHTS_8.keys()):
@@ -1388,6 +1404,8 @@ class PortfolioBacktester:
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
+        elif set(strategy_names) <= set(WEIGHTS_7_LIVE.keys()):
+            base_weights = WEIGHTS_7_LIVE
         elif set(strategy_names) <= set(WEIGHTS_7.keys()):
             base_weights = WEIGHTS_7
         elif set(strategy_names) <= set(WEIGHTS_8.keys()):
@@ -2103,6 +2121,8 @@ class FuturesBacktester:
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
+        elif set(strategy_names) <= set(WEIGHTS_7_LIVE.keys()):
+            base_weights = WEIGHTS_7_LIVE
         elif set(strategy_names) <= set(WEIGHTS_7.keys()):
             base_weights = WEIGHTS_7
         elif set(strategy_names) <= set(WEIGHTS_8.keys()):
@@ -3058,6 +3078,8 @@ class FuturesPortfolioBacktester:
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
+        elif set(strategy_names) <= set(WEIGHTS_7_LIVE.keys()):
+            base_weights = WEIGHTS_7_LIVE
         elif set(strategy_names) <= set(WEIGHTS_7.keys()):
             base_weights = WEIGHTS_7
         elif set(strategy_names) <= set(WEIGHTS_8.keys()):
@@ -4858,7 +4880,7 @@ async def main():
     elif args.use_8:
         args.strategies = ALL_STRATEGIES_8
     elif args.strategies is None:
-        args.strategies = ALL_STRATEGIES_6  # 기본: 6전략 (0% 승률 전략 제거)
+        args.strategies = ALL_STRATEGIES_7_LIVE  # 기본: 7전략 (6전략 + bb_squeeze, 라이브 동기)
 
     # 전략 유효성 검사
     invalid = set(args.strategies) - set(ALL_STRATEGIES)
