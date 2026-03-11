@@ -172,8 +172,8 @@ class BinanceSpotTradingConfig(BaseSettings):
     max_trade_size_pct: float = 0.30
     daily_buy_limit: int = 20
     max_daily_coin_buys: int = 3
-    cooldown_after_sell_sec: int = 518400  # 6일 (cd36)
-    cooldown_after_buy_sec: int = 518400  # 6일 (cd36)
+    cooldown_after_sell_sec: int = 0  # 쿨다운 없음 (5종 워치리스트, 기회 차단 방지)
+    cooldown_after_buy_sec: int = 0   # 쿨다운 없음
     rotation_enabled: bool = True
 
     @field_validator("mode")
