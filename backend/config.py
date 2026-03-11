@@ -142,7 +142,7 @@ class BinanceTradingConfig(BaseSettings):
     max_trade_size_pct: float = 0.35
     daily_buy_limit: int = 15
     max_daily_coin_buys: int = 3
-    min_trade_interval_sec: int = 691200  # 8일 (cd48, ML필터+백테스트 최적)
+    min_trade_interval_sec: int = 86400  # 24시간 (cd6, 7전략 백테스트 최적 PF 1.07)
     min_sell_active_weight: float = 0.20  # 숏 진입 시 최소 참여 가중치 (2전략 이상)
     ws_price_monitor: bool = True  # WebSocket 실시간 가격 모니터 활성화
 
