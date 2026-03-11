@@ -155,8 +155,8 @@ class TestAdaptiveWeights:
         combiner = SignalCombiner()
         original_rsi = combiner.weights["rsi"]
         combiner.apply_market_state("crash")
-        # crash 프로필에서 rsi는 0.22 (숏 강화: MA+MACD 가중치 상향)
-        assert combiner.weights["rsi"] == 0.22
+        # crash 프로필에서 rsi는 0.19 (7전략 체제, bb_squeeze 추가)
+        assert combiner.weights["rsi"] == 0.19
         assert combiner.weights["rsi"] != original_rsi or original_rsi == 0.22
 
     def test_apply_unknown_market_state_no_change(self):
@@ -180,13 +180,13 @@ class TestDefaultWeights:
         total = sum(combiner.weights.values())
         assert abs(total - 1.0) < 0.01, f"Weights sum to {total}, expected ~1.0"
 
-    def test_default_has_six_strategies(self):
+    def test_default_has_seven_strategies(self):
         combiner = SignalCombiner()
-        assert len(combiner.weights) == 6
+        assert len(combiner.weights) == 7
 
     def test_default_strategies_names(self):
         combiner = SignalCombiner()
-        expected = {"ma_crossover", "rsi", "macd_crossover", "bollinger_rsi", "stochastic_rsi", "obv_divergence"}
+        expected = {"ma_crossover", "rsi", "macd_crossover", "bollinger_rsi", "stochastic_rsi", "obv_divergence", "bb_squeeze"}
         assert set(combiner.weights.keys()) == expected
 
 

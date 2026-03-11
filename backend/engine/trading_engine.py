@@ -390,6 +390,7 @@ class TradingEngine:
         import strategies.cis_momentum
         import strategies.larry_williams
         import strategies.donchian_channel
+        import strategies.bb_squeeze
 
         self._strategies = StrategyRegistry.create_all()
 
@@ -410,10 +411,11 @@ class TradingEngine:
             for excluded in futures_excluded:
                 self._strategies.pop(excluded, None)
         else:
-            # 현물: 신규 4전략 사용, 기존 6전략 제거
+            # 현물: 신규 4전략 사용, 기존 6전략 + 선물전용 제거
             spot_excluded = always_excluded | {
                 "ma_crossover", "rsi", "macd_crossover",
                 "bollinger_rsi", "stochastic_rsi", "obv_divergence",
+                "bb_squeeze",
             }
             for excluded in spot_excluded:
                 self._strategies.pop(excluded, None)

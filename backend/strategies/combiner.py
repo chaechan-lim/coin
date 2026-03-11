@@ -19,14 +19,15 @@ class CombinedDecision:
 class SignalCombiner:
     """Combines multiple strategy signals using weighted voting."""
 
-    # Default strategy weights — 6전략 (선물용, 기존 유지)
+    # Default strategy weights — 7전략 (선물용, bb_squeeze 추가)
     DEFAULT_WEIGHTS = {
-        "ma_crossover": 0.08,
-        "rsi": 0.25,
-        "macd_crossover": 0.08,
-        "bollinger_rsi": 0.31,
-        "stochastic_rsi": 0.15,
-        "obv_divergence": 0.13,
+        "ma_crossover": 0.07,
+        "rsi": 0.21,
+        "macd_crossover": 0.07,
+        "bollinger_rsi": 0.26,
+        "stochastic_rsi": 0.13,
+        "obv_divergence": 0.11,
+        "bb_squeeze": 0.15,
     }
 
     # 방향별 가중치 — 롱은 추세추종 중심, 숏은 평균회귀 중심
@@ -74,24 +75,29 @@ class SignalCombiner:
     # 시장 상태별 적응형 가중치 프로필 (선물 6전략 전용, 현물은 SPOT_WEIGHTS 고정)
     ADAPTIVE_PROFILES: dict[str, dict[str, float]] = {
         MarketState.STRONG_UPTREND.value: {
-            "ma_crossover": 0.12, "rsi": 0.18, "macd_crossover": 0.12,
-            "bollinger_rsi": 0.28, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
+            "ma_crossover": 0.10, "rsi": 0.16, "macd_crossover": 0.10,
+            "bollinger_rsi": 0.24, "stochastic_rsi": 0.13, "obv_divergence": 0.13,
+            "bb_squeeze": 0.14,
         },
         MarketState.UPTREND.value: {
-            "ma_crossover": 0.10, "rsi": 0.22, "macd_crossover": 0.10,
-            "bollinger_rsi": 0.28, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
+            "ma_crossover": 0.08, "rsi": 0.19, "macd_crossover": 0.08,
+            "bollinger_rsi": 0.24, "stochastic_rsi": 0.13, "obv_divergence": 0.13,
+            "bb_squeeze": 0.15,
         },
         MarketState.SIDEWAYS.value: {
-            "ma_crossover": 0.05, "rsi": 0.27, "macd_crossover": 0.08,
-            "bollinger_rsi": 0.32, "stochastic_rsi": 0.15, "obv_divergence": 0.13,
+            "ma_crossover": 0.04, "rsi": 0.22, "macd_crossover": 0.06,
+            "bollinger_rsi": 0.26, "stochastic_rsi": 0.12, "obv_divergence": 0.10,
+            "bb_squeeze": 0.20,  # 횡보장에서 스퀴즈 가중치 최대
         },
         MarketState.DOWNTREND.value: {
-            "ma_crossover": 0.12, "rsi": 0.22, "macd_crossover": 0.15,
-            "bollinger_rsi": 0.26, "stochastic_rsi": 0.13, "obv_divergence": 0.12,
+            "ma_crossover": 0.10, "rsi": 0.19, "macd_crossover": 0.13,
+            "bollinger_rsi": 0.22, "stochastic_rsi": 0.11, "obv_divergence": 0.10,
+            "bb_squeeze": 0.15,
         },
         MarketState.CRASH.value: {
-            "ma_crossover": 0.10, "rsi": 0.22, "macd_crossover": 0.12,
-            "bollinger_rsi": 0.28, "stochastic_rsi": 0.15, "obv_divergence": 0.13,
+            "ma_crossover": 0.08, "rsi": 0.19, "macd_crossover": 0.10,
+            "bollinger_rsi": 0.24, "stochastic_rsi": 0.13, "obv_divergence": 0.11,
+            "bb_squeeze": 0.15,
         },
     }
 

@@ -72,6 +72,7 @@ from strategies.cis_momentum import CISMomentumStrategy
 from strategies.larry_williams import LarryWilliamsStrategy
 from strategies.donchian_channel import DonchianChannelStrategy
 from strategies.volatility_regime import VolatilityRegimeStrategy
+from strategies.bb_squeeze import BBSqueezeStrategy
 from strategies.registry import StrategyRegistry
 from strategies.combiner import SignalCombiner
 from strategies.base import Signal
@@ -117,7 +118,7 @@ ALL_STRATEGIES_10 = ALL_STRATEGIES_6 + [
 # 전체 사용 가능 전략 (CLI 유효성 검사용)
 ALL_STRATEGIES = ALL_STRATEGIES_8 + [
     "bnf_deviation", "cis_momentum", "larry_williams", "donchian_channel",
-    "volatility_regime",
+    "volatility_regime", "bb_squeeze",
 ]
 
 # 5전략 가중치 (기존)
