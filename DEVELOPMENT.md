@@ -7,7 +7,7 @@
 ### 원칙
 - **모든 코드 변경에 테스트 추가/수정 필수.** 예외 없음.
 - 변경 전 전체 테스트 통과 확인 → 변경 후 다시 통과 확인.
-- 테스트 수는 늘어야지 줄어들면 안 됨 (현재 533+개).
+- 테스트 수는 늘어야지 줄어들면 안 됨 (현재 773개).
 
 ### 실행
 ```bash
@@ -72,10 +72,10 @@ cd backend
 .venv/bin/python backtest.py --portfolio --days 540
 
 # 선물 (롱/숏 + 레버리지)
-.venv/bin/python backtest.py --futures --leverage 3 --days 540
+.venv/bin/python backtest.py --futures --leverage 3 --short-all --dynamic-sl --days 540
 
-# 선물 포트폴리오 (P1 최적화 설정)
-.venv/bin/python backtest.py --futures --portfolio --leverage 3 --short-all --dynamic-sl --days 540
+# 선물 포트폴리오 (라이브 파라미터 일치 — 필수!)
+.venv/bin/python backtest.py --futures --portfolio --leverage 3 --trade-cooldown 6 --min-sell-weight 0.20 --dynamic-sl --short-all --days 540
 
 # 로테이션 (서지 매수)
 .venv/bin/python backtest.py --rotation --dynamic-rotation --days 180

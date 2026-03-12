@@ -13,7 +13,7 @@
 - 시장 데이터 서비스 (OHLCV + 지표)
 
 ## Phase 3 — 전략 엔진 + AI 에이전트 (완료)
-- 10전략 구현: 현물 4 (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + 선물 6 (MA, RSI, MACD, Boll+RSI, StochRSI, OBV) + 독립 2 (Grid, DCA)
+- 11전략 구현: 현물 4 (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + 선물 7 (MA, RSI, MACD, Boll+RSI, StochRSI, OBV, BB Squeeze) + 독립 2 (Grid, DCA)
 - Signal Combiner (가중 투표, HOLD=기권), 주문/포트폴리오 관리자, 트레이딩 엔진
 - AI 에이전트: 시장 분석, 리스크 관리, 거래 리뷰, 에이전트 조율자
 
@@ -25,14 +25,16 @@
 ## Phase 5 — 안정화 (완료)
 - 구조화 로깅 (structlog), 에러 핸들링, 멀티 알림 (Telegram/Discord/Slack)
 - PositionTracker DB 영속화, 가짜 스파이크 6겹 방어, 교차 거래소 충돌 차단
-- 듀얼/트리플 엔진, 바이낸스 선물 라이브, WebSocket 실시간 동기화
+- 쿼드 엔진 (빗썸+바이낸스현물+바이낸스선물+서지), WebSocket 실시간 동기화
 - P1 최적화, 현물 4h 전환, 현물 4전략 전환, 비대칭 전략
 - 자기 치유 엔진 (ErrorClassifier → RecoveryManager → DiagnosticAgent)
 - EngineConfig 거래소 추상화, Order PnL 기록
 - 숏 가중치 최적화: ADAPTIVE_PROFILES downtrend/crash에서 MA+MACD 가중치 상향
 - 백테스트 개선: 동적 포트폴리오, 롱/숏 PnL 분리, 선물 4h 자동보정
 - 선물 cash 스파이크 근본 수정 (notional→margin+PnL 정산)
-- 548 유닛 테스트
+- ML Signal Filter (LightGBM), 서지 엔진, Discord 봇 (자연어 → tool_use)
+- AI 에이전트 5종: 시장분석, 리스크관리, 거래리뷰, 성과분석, 전략조언
+- 773 유닛 테스트
 
 ---
 
@@ -73,3 +75,7 @@
 | v0.32 | 2026-03-08 | 숏 가중치 최적화 (ADAPTIVE_PROFILES), 동적 포트폴리오 백테스트, 롱/숏 PnL 표시 |
 | v0.33 | 2026-03-08 | 성과 분석 에이전트 + 전략 어드바이저 에이전트, 일일 통계 버그 수정, 571 테스트 |
 | v0.34 | 2026-03-08 | Discord 봇 (자연어 → Claude tool_use → 시스템 제어), 600 테스트 |
+| v0.35 | 2026-03-09 | 시스템 안정성 12개 개선 (API 타임아웃, 서킷브레이커, 에러 추적, graceful shutdown), Discord 봇 도구 18개, 포지션 상세 모달, 675 테스트 |
+| v0.36 | 2026-03-09 | systemd 안정성 (RestartSec=20, pg_isready 대기), PostgreSQL 제한, 프론트엔드 조건부 빌드, delisted 심볼 필터 |
+| v0.37 | 2026-03-10 | 선물 구조 최적화 (2x→3x ML, cd72→cd48→cd6), ML Signal Filter (LightGBM 23피처), 서지 엔진, 교차 거래소 포지션 전환, MIN_SELL_ACTIVE_WEIGHT, 페어링 매도, 현물 Optuna 가중치, 766 테스트 |
+| v0.38 | 2026-03-12 | 선물 7전략 (bb_squeeze 추가), 쿨다운 cd6(24h), 버그 수정 11건 (entry_price=0 가드, cash race condition, DB 인덱스, API 검증, fire-and-forget 에러 핸들링), 773 테스트 |

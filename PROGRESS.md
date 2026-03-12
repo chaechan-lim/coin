@@ -1,16 +1,16 @@
 # 코인 자동 매매 시스템 — 운영 참조
 
-> 최종 업데이트: 2026-03-10
+> 최종 업데이트: 2026-03-12
 > 완료된 Phase 1-5 상세 및 버전 이력은 `CHANGELOG.md` 참고.
 
 ---
 
 ## 개요
 
-빗썸(현물, paper) + 바이낸스 현물(live) + 바이낸스 USDM 선물(live, 3x) **트리플 엔진** 24시간 자동 트레이딩 시스템.
-가중 투표 (HOLD=기권) + 거래량 서지 매수 + 5요소 시장 감지, AI 에이전트(시장 분석 + 리스크 관리 + 거래 리뷰 + 성과 분석 + 전략 조언), React 대시보드(8탭, 거래소 전환).
-**현물 4전략** (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + **선물 6전략** (MA, RSI, MACD, 볼린저RSI, 스토캐스틱RSI, OBV).
-**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **688 유닛 테스트**.
+빗썸(현물, 비활성) + 바이낸스 현물(live) + 바이낸스 USDM 선물(live, 3x) + 서지 **쿼드 엔진** 24시간 자동 트레이딩 시스템.
+가중 투표 (HOLD=기권) + ML 시그널 필터 + 5요소 시장 감지 + 적응형 가중치, AI 에이전트 5종, Discord 봇(자연어 제어), React 대시보드(8탭).
+**현물 4전략** (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + **선물 7전략** (MA, RSI, MACD, 볼린저RSI, 스토캐스틱RSI, OBV, BB스퀴즈).
+**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **773 유닛 테스트**.
 
 ---
 
@@ -41,12 +41,12 @@ coin/
 │   ├── core/          (models, schemas, enums, event_bus, error_classifier)
 │   ├── db/            (session, migrate)
 │   ├── exchange/      (base, bithumb_v2, binance_usdm, binance_spot, paper)
-│   ├── services/      (market_data, notification, discord_event_handler)
-│   ├── strategies/    (10전략 + combiner + registry)
+│   ├── services/      (market_data, notification/, llm/, discord_bot/)
+│   ├── strategies/    (11전략 + combiner + registry + ml_filter)
 │   ├── agents/        (market_analysis, risk_management, trade_review, performance_analytics, strategy_advisor, diagnostic_agent, coordinator)
-│   ├── engine/        (trading_engine, futures_engine, order_manager, portfolio_manager, recovery, health_monitor, capital_sync, scheduler)
+│   ├── engine/        (trading_engine, futures_engine, surge_engine, order_manager, portfolio_manager, recovery, health_monitor, capital_sync, scheduler)
 │   ├── api/           (router, dependencies, dashboard, portfolio, trades, strategies, events, capital, websocket)
-│   └── tests/         (600+ tests)
+│   └── tests/         (773 tests)
 └── frontend/
     └── src/           (Dashboard, 8탭 컴포넌트, hooks, types)
 ```
@@ -86,8 +86,11 @@ coin/
 | delisted 심볼 필터 | JEX 등 삭제 심볼 즉시 실패 + rotation 제외, position_sync 60→120초 |
 | 교차 거래소 포지션 전환 | 높은 신뢰도(>=0.65) 반대 신호 시 기존 포지션 청산 후 새 방향 진입 |
 | MIN_SELL_ACTIVE_WEIGHT | 단일 전략 숏 진입 방지 옵션 (기본 0.0=비활성, backtest --min-sell-weight) |
-| 선물 구조 최적화 (v0.37) | 레버리지 3x→2x, 쿨다운 cd36→cd72(12일), min_sell_wt=0.20 — PF 2.49, +36.86% |
-| 선물 쿨다운 구현 | futures_engine에 쿨다운 체크 추가 (기존 미구현), last_sell_at DB 기록 |
+| 선물 구조 최적화 (v0.37→v0.38) | 3x 레버리지, 쿨다운 cd6(24h), 7전략(bb_squeeze 추가), ML Signal Filter |
+| 선물 쿨다운 구현 | futures_engine에 쿨다운 체크 추가, last_sell_at DB 기록 |
+| ML Signal Filter (v0.37) | LightGBM 23피처, 선물 시그널 사전 필터링 (strategies/ml_filter.py) |
+| 서지 엔진 (v0.37) | 거래량 급등 감지 단기 매매, 선물 PM 잔고 공유, exchange="binance_surge" |
+| 버그 수정 11건 (v0.38) | entry_price=0 가드, cash race condition, DB 인덱스, API 검증, fire-and-forget 에러 핸들링 |
 
 ### 낮은 우선순위
 
@@ -109,7 +112,7 @@ coin/
          ↓
   SignalCombiner (가중 투표, HOLD=기권)
   BUY/SELL만 경쟁, active_weight < 0.12 → HOLD
-  임계값(0.50) 이상만 실행
+  임계값(0.55) 이상만 실행
          ↓
   5요소 시장 감지 → 적응형 가중치
   confidence < 0.35 → 임계값 +0.10
@@ -118,24 +121,28 @@ coin/
 
 ### 전략 가중치 프로필
 
-**선물** (6전략, 시장 상태별):
-
-| 시장 상태 | MA | RSI | MACD | Boll+RSI | StochRSI | OBV |
-|---|---|---|---|---|---|---|
-| 강한 상승 | 0.12 | 0.18 | 0.12 | 0.28 | 0.15 | 0.15 |
-| 상승 | 0.10 | 0.22 | 0.10 | 0.28 | 0.15 | 0.15 |
-| 횡보 (기본) | 0.08 | 0.25 | 0.08 | 0.31 | 0.15 | 0.13 |
-| 하락 | 0.12 | 0.22 | 0.15 | 0.26 | 0.13 | 0.12 |
-| 폭락 | 0.10 | 0.22 | 0.12 | 0.28 | 0.15 | 0.13 |
-
-**현물** (4전략, 고정 SPOT_WEIGHTS):
+**선물** (7전략, 기본 DEFAULT_WEIGHTS):
 
 | 전략 | 가중치 |
 |---|---|
-| cis_momentum | 0.32 |
-| larry_williams | 0.32 |
-| donchian_channel | 0.26 |
-| bnf_deviation | 0.10 |
+| bollinger_rsi | 0.26 |
+| rsi | 0.21 |
+| bb_squeeze | 0.15 |
+| stochastic_rsi | 0.13 |
+| obv_divergence | 0.11 |
+| ma_crossover | 0.07 |
+| macd_crossover | 0.07 |
+
+시장 상태별 ADAPTIVE_PROFILES (7전략×5상태): `combiner.py` 참고.
+
+**현물** (4전략, 고정 SPOT_WEIGHTS — Optuna 최적화):
+
+| 전략 | 가중치 |
+|---|---|
+| larry_williams | 0.31 |
+| donchian_channel | 0.24 |
+| bnf_deviation | 0.23 |
+| cis_momentum | 0.22 |
 
 ### 리스크 설정
 
@@ -144,9 +151,9 @@ coin/
 | 단일 코인 최대 비중 | 40% (초과 시 35%까지 자동 매도) |
 | 일일 매수 상한 | 20건 (매도 무제한) |
 | 코인당 매수 상한 | 3건/일 |
-| 매매 쿨다운 | 현물 6일 (cd36), **선물 12일 (cd72)** |
-| 매도 후 재매수 대기 | 현물 6일, **선물 12일** |
-| 선물 레버리지 | **2x** (v0.37, 기존 3x) |
+| 매매 쿨다운 | 현물 32시간 (cd8), **선물 24시간 (cd6)** |
+| 매도 후 재매수 대기 | 현물 32시간, **선물 24시간** |
+| 선물 레버리지 | **3x** |
 | 선물 숏 허용 | 전체 시장 상태 (short-all), min_sell_wt=0.20 (2전략 합의) |
 | 교차 거래소 충돌 | 현물 롱↔선물 숏: 낮은 신뢰도→차단, 높은 신뢰도(>=0.65)→방향 전환 |
 | 현물 비대칭 | crash/downtrend 매수 차단, uptrend 공격적 매수 |

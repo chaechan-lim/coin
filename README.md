@@ -1,7 +1,7 @@
 # Coin Auto-Trading System
 
-Bithumb (spot) + Binance Spot + Binance USDM (futures) **triple-engine** auto-trading bot.
-Spot 4 strategies + Futures 6 strategies, weighted voting, dynamic SL/TP, volume surge rotation, AI agents, React dashboard (8 tabs). 533+ tests.
+Bithumb (spot, inactive) + Binance Spot + Binance USDM (futures) + Surge **quad-engine** auto-trading bot.
+Spot 4 strategies + Futures 7 strategies + ML signal filter, weighted voting, dynamic SL/TP, volume surge rotation, AI agents (5), Discord bot, React dashboard (8 tabs). 773 tests.
 
 ---
 
@@ -21,10 +21,11 @@ Spot 4 strategies + Futures 6 strategies, weighted voting, dynamic SL/TP, volume
           ┌────────────────┼────────────────┐
           │                │                │
    ┌──────┴──────┐ ┌──────┴──────┐ ┌───────┴──────┐
-   │  Strategies  │ │  Engines×3  │ │  AI Agents   │
+   │  Strategies  │ │  Engines×4  │ │  AI Agents   │
    │  Spot 4 +   │ │ Bithumb     │ │  Market/Risk │
-   │  Futures 6  │ │ + BN Spot   │ │  TradeReview │
-   └──────┬──────┘ │ + BN Future │ └──────────────┘
+   │  Futures 7  │ │ + BN Spot   │ │  TradeReview │
+   │  + ML Filter │ │ + BN Future │ │  + Analytics │
+   └──────┬──────┘ │ + Surge     │ └──────────────┘
           │        └──────┬──────┘
    ┌──────┴──────┐        │
    │  Combiner   │ ┌──────┴──────┐
@@ -32,45 +33,51 @@ Spot 4 strategies + Futures 6 strategies, weighted voting, dynamic SL/TP, volume
    └─────────────┘ └─────────────┘
 ```
 
-### Triple Engine
+### Quad Engine
 
 | Engine | Exchange | Market | Features |
 |--------|----------|--------|----------|
-| TradingEngine | Bithumb V2 | Spot (KRW) | SL/TP/trailing, rotation, dynamic SL, asymmetric mode |
-| TradingEngine | Binance Spot | Spot (USDT) | Same as Bithumb, USDT base currency |
-| BinanceFuturesEngine | Binance USDM | Futures (USDT) | Long/short, 3x leverage, liquidation guard, WebSocket monitor |
+| TradingEngine | Bithumb V2 | Spot KRW (inactive) | SL/TP/trailing, rotation, dynamic SL, asymmetric mode |
+| TradingEngine | Binance Spot | Spot USDT (live) | Same as Bithumb, USDT base, paired exit |
+| BinanceFuturesEngine | Binance USDM | Futures USDT (live, 3x) | Long/short, ML filter, SL/TP/trailing, WebSocket |
+| SurgeEngine | Binance Surge | Futures USDT (3x) | Volume spike detection, short-term trades, shares futures PM |
 
 ### Strategies
 
-**Spot (4 strategies — v0.23)**
+**Spot (4 strategies — Optuna optimized)**
 
 | Strategy | Weight | Description |
 |---|---|---|
-| CIS Momentum | 0.32 | Pure momentum (ADX+RSI trend-follow) |
-| Larry Williams | 0.32 | Volatility breakout + Williams %R |
-| Donchian Channel | 0.26 | Turtle trading (20/10 period channel) |
-| BNF Deviation | 0.10 | Mean reversion (Bollinger deviation) |
+| Larry Williams | 0.31 | Volatility breakout + Williams %R |
+| Donchian Channel | 0.24 | Turtle trading (20/10 period channel) |
+| BNF Deviation | 0.23 | Mean reversion (Bollinger deviation) |
+| CIS Momentum | 0.22 | Pure momentum (ADX+RSI trend-follow) |
 
-**Futures (6 strategies)**
+**Futures (7 strategies + ML filter)**
 
 | Strategy | Weight | Description |
 |---|---|---|
-| Bollinger + RSI | 0.31 | Bollinger band + RSI composite |
-| RSI | 0.25 | RSI oversold/overbought reversal |
-| Stochastic RSI | 0.15 | Stochastic RSI momentum |
-| OBV Divergence | 0.13 | On-balance volume divergence |
-| MACD Crossover | 0.08 | MACD/Signal crossover |
-| MA Crossover | 0.08 | Moving average crossover |
+| Bollinger + RSI | 0.26 | Bollinger band + RSI composite |
+| RSI | 0.21 | RSI oversold/overbought reversal |
+| BB Squeeze | 0.15 | Bollinger squeeze breakout detection |
+| Stochastic RSI | 0.13 | Stochastic RSI momentum |
+| OBV Divergence | 0.11 | On-balance volume divergence |
+| MA Crossover | 0.07 | Moving average crossover |
+| MACD Crossover | 0.07 | MACD/Signal crossover |
+
+**ML Signal Filter**: LightGBM (23 features) — pre-filters futures signals for higher win rate.
 
 ### Safety Features
 
 | Feature | Description |
 |---------|-------------|
-| Cross-exchange conflict | Blocks spot buy if futures short exists (and vice versa) |
-| Post-sell washout | 4h cooldown before re-buying same coin after sell |
-| PositionTracker DB | SL/TP/trailing survives server restart |
-| Snapshot reconcile | Prevents fake balance spikes from async interleaving |
+| Cross-exchange conflict | Blocks spot buy if futures short exists; high confidence (>=0.65) triggers position flip |
+| Post-sell cooldown | Spot 32h (cd8), Futures 24h (cd6), Surge 60min |
+| PositionTracker DB | SL/TP/trailing survives server restart (7 columns persisted) |
+| Spike defense | 6-layer fake price spike protection |
 | Asymmetric mode | Blocks spot buys in downtrend/crash markets |
+| Paired exit | Spot: only the entry strategy can trigger sell |
+| Self-healing | ErrorClassifier → RecoveryManager → DiagnosticAgent (LLM) |
 
 ---
 
@@ -158,6 +165,9 @@ curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures&
 | `BINANCE_SPOT_TRADING_MODE` | `paper` / `live` (spot, independent) | `paper` |
 | `DB_URL` | Database connection string | PostgreSQL |
 | `BINANCE_DEFAULT_LEVERAGE` | Futures leverage | `3` |
+| `SURGE_TRADING_ENABLED` | Enable surge engine | `false` |
+| `DISCORD_BOT_ENABLED` | Enable Discord bot | `false` |
+| `LLM_ENABLED` | Enable AI agents | `false` |
 
 ---
 
@@ -165,7 +175,7 @@ curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures&
 
 ```bash
 cd backend
-.venv/bin/python -m pytest tests/ -v   # 533+ tests
+.venv/bin/python -m pytest tests/ -v   # 773 tests
 # Tests use in-memory SQLite (aiosqlite)
 ```
 
@@ -179,8 +189,8 @@ cd backend
 # 기본 (BTC, 540일, 4시간봉)
 .venv/bin/python backtest.py
 
-# 선물 모드 (롱/숏 + 레버리지)
-.venv/bin/python backtest.py --futures --leverage 3
+# 선물 포트폴리오 (라이브 파라미터 일치)
+.venv/bin/python backtest.py --futures --portfolio --leverage 3 --trade-cooldown 6 --min-sell-weight 0.20 --dynamic-sl --short-all --days 540
 
 # 로테이션 모드 (20코인 서지 감지)
 .venv/bin/python backtest.py --rotation --dynamic-rotation

@@ -56,22 +56,10 @@ sudo systemctl restart coin-backend
 # 5. 엔진 시작 (재시작 후 반드시 호출 — 자동 시작 아님)
 curl -X POST "http://localhost:8000/api/v1/engine/start?exchange=binance_futures"
 curl -X POST "http://localhost:8000/api/v1/engine/start?exchange=binance_spot"
-curl -X POST http://localhost:8000/api/v1/engine/start  # 빗썸
+curl -X POST http://localhost:8000/api/v1/engine/start  # 빗썸 (비활성)
 
-# 6. 프론트엔드 재시작 (프론트 변경 시)
+# 6. 프론트엔드 재시작 (프론트 변경 시, 조건부 빌드)
 sudo systemctl restart coin-frontend
-```
-
-### 수동 서버 실행 (systemd 없이)
-
-```bash
-# 백엔드
-cd backend
-nohup .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 > nohup.out 2>&1 &
-
-# 프론트엔드
-cd frontend
-nohup npm run dev > nohup.out 2>&1 &
 ```
 
 ### 서버 중지
@@ -79,9 +67,6 @@ nohup npm run dev > nohup.out 2>&1 &
 ```bash
 # systemd
 sudo systemctl stop coin-backend
-
-# 수동 프로세스
-pgrep -f "uvicorn main:app" | xargs kill
 
 # 엔진만 중지 (서버는 유지)
 curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures"
@@ -116,9 +101,6 @@ docker compose exec postgres pg_dump -U coin coin_trading > backup_$(date +%Y%m%
 ```bash
 # systemd 로그
 journalctl -u coin-backend -f --no-pager
-
-# nohup 로그
-tail -f backend/nohup.out
 
 # 특정 이벤트 필터
 journalctl -u coin-backend | grep "futures_market_buy"
@@ -159,10 +141,8 @@ pgrep -f "uvicorn main:app"
 # 포트 사용 확인
 ss -tlnp | grep 8000
 
-# 이전 프로세스 정리 후 재시작
-pgrep -f "uvicorn main:app" | xargs kill
-sleep 2
-cd backend && nohup .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 > nohup.out 2>&1 &
+# systemd로 재시작 (nohup 사용 금지)
+sudo systemctl restart coin-backend
 ```
 
 ### DB 연결 실패
