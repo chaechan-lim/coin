@@ -102,7 +102,7 @@ class BinanceFuturesEngine(TradingEngine):
             from strategies.ml_filter import MLSignalFilter, MODEL_DIR
             model_path = MODEL_DIR / "signal_filter.pkl"
             if model_path.exists():
-                self._ml_filter = MLSignalFilter(min_win_prob=0.60)
+                self._ml_filter = MLSignalFilter(min_win_prob=0.52)
                 self._ml_filter.load(str(model_path))
                 logger.info("ml_filter_loaded", model_path=str(model_path))
         except Exception as e:

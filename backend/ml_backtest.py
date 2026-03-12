@@ -43,7 +43,7 @@ from exchange.data_models import Ticker
 
 from backtest import (
     fetch_history, _detect_market_state,
-    DEFAULT_FUTURES_PORTFOLIO_COINS, WEIGHTS_6, ALL_STRATEGIES_6,
+    DEFAULT_FUTURES_PORTFOLIO_COINS, WEIGHTS_7_LIVE, ALL_STRATEGIES_7_LIVE,
     FUTURES_FEE,
 )
 
@@ -54,7 +54,7 @@ async def collect_training_data(
     strategy_names: list[str],
     timeframe: str,
     days: int,
-    leverage: int = 2,
+    leverage: int = 3,
     min_confidence: float = 0.55,
 ) -> pd.DataFrame:
     """백테스트 데이터에서 ML 학습용 feature+label 수집.
@@ -85,7 +85,7 @@ async def collect_training_data(
     all_strats = StrategyRegistry.create_all()
     strategies = {name: strat for name, strat in all_strats.items() if name in strategy_names}
 
-    weights = {k: v for k, v in WEIGHTS_6.items() if k in strategy_names}
+    weights = {k: v for k, v in WEIGHTS_7_LIVE.items() if k in strategy_names}
     total_w = sum(weights.values())
     if total_w > 0:
         weights = {k: v / total_w for k, v in weights.items()}
@@ -300,7 +300,7 @@ async def main():
     parser = argparse.ArgumentParser(description="ML Signal Filter 백테스트")
     parser.add_argument("--days", type=int, default=540)
     parser.add_argument("--timeframe", default="4h")
-    parser.add_argument("--leverage", type=int, default=2)
+    parser.add_argument("--leverage", type=int, default=3)
     parser.add_argument("--min-confidence", type=float, default=0.55)
     parser.add_argument("--min-win-prob", type=float, default=0.55)
     parser.add_argument("--portfolio-coins", nargs="+", default=None)
@@ -322,7 +322,7 @@ async def main():
         df = await collect_training_data(
             exchange=exchange,
             symbols=coins,
-            strategy_names=ALL_STRATEGIES_6,
+            strategy_names=ALL_STRATEGIES_7_LIVE,
             timeframe=args.timeframe,
             days=args.days,
             leverage=args.leverage,

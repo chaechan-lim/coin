@@ -54,13 +54,14 @@ class MLSignalFilter:
     """
 
     FEATURE_NAMES = [
-        # 전략 시그널 (6개 × 2 = 12 features)
+        # 전략 시그널 (7개 × 2 = 14 features)
         "sig_ma_crossover", "conf_ma_crossover",
         "sig_rsi", "conf_rsi",
         "sig_macd_crossover", "conf_macd_crossover",
         "sig_bollinger_rsi", "conf_bollinger_rsi",
         "sig_stochastic_rsi", "conf_stochastic_rsi",
         "sig_obv_divergence", "conf_obv_divergence",
+        "sig_bb_squeeze", "conf_bb_squeeze",
         # 기술적 지표 (8 features)
         "rsi_14", "atr_pct", "band_width",
         "sma20_dist", "sma20_sma50_gap",
@@ -101,6 +102,7 @@ class MLSignalFilter:
         strategy_names = [
             "ma_crossover", "rsi", "macd_crossover",
             "bollinger_rsi", "stochastic_rsi", "obv_divergence",
+            "bb_squeeze",
         ]
 
         signal_dict = {s.strategy_name: s for s in signals}

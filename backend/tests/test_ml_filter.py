@@ -97,5 +97,5 @@ class TestMLSignalFilter:
         assert 0 <= pred.win_probability <= 1
 
     def test_feature_names_complete(self):
-        """FEATURE_NAMES가 23개인지 확인."""
-        assert len(MLSignalFilter.FEATURE_NAMES) == 23
+        """FEATURE_NAMES가 25개인지 확인 (7전략×2 + 지표8 + 시장1 + 결합3)."""
+        assert len(MLSignalFilter.FEATURE_NAMES) == 25
