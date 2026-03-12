@@ -7,7 +7,7 @@ from core.utils import utcnow
 from db.session import get_db
 from core.models import PortfolioSnapshot, DailyPnL, Position
 from core.schemas import PortfolioSummaryResponse, PortfolioHistoryPoint, DailyPnLResponse
-from api.dependencies import engine_registry
+from api.dependencies import engine_registry, ExchangeNameType
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
@@ -107,7 +107,7 @@ async def _merge_surge_positions(summary: dict, session: AsyncSession) -> dict:
 
 @router.get("/summary", response_model=PortfolioSummaryResponse)
 async def get_portfolio_summary(
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     pm = _get_pm(exchange)
@@ -132,7 +132,7 @@ async def get_portfolio_summary(
 @router.get("/history", response_model=list[PortfolioHistoryPoint])
 async def get_portfolio_history(
     period: str = Query("7d", pattern="^(1d|7d|30d|90d|all)$"),
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     now = utcnow()
@@ -172,7 +172,7 @@ async def get_portfolio_history(
 @router.get("/daily-pnl", response_model=list[DailyPnLResponse])
 async def get_daily_pnl(
     days: int = Query(30, ge=1, le=365),
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     now = utcnow()

@@ -24,9 +24,9 @@ class TradingConfig(BaseSettings):
         "SOL/KRW",
         "ADA/KRW",
     ]
-    min_trade_interval_sec: int = 518400  # 6일 (cd36, 백테스트 최적)
-    cooldown_after_sell_sec: int = 518400  # 6일 (cd36)
-    cooldown_after_buy_sec: int = 518400  # 6일 (cd36)
+    min_trade_interval_sec: int = 518400  # 6일 (빗썸 비활성, 미사용)
+    cooldown_after_sell_sec: int = 518400  # 6일 (빗썸 비활성, 미사용)
+    cooldown_after_buy_sec: int = 518400  # 6일 (빗썸 비활성, 미사용)
     daily_buy_limit: int = 20          # 일일 매수 상한 (매도는 무제한)
     max_daily_coin_buys: int = 3       # 코인당 일일 매수 상한 (왕복 3회)
     daily_trade_limit: int = 10        # (레거시, 미사용) 하위 호환용

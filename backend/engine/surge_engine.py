@@ -568,10 +568,10 @@ class SurgeEngine:
                 db_pos.highest_price = exec_price
                 db_pos.max_hold_hours = self._max_hold_minutes / 60.0
 
-                await session.commit()
+                # 선물 PM cash 조정 (commit 전에 반영 — 예외 시 rollback과 함께 원복)
+                self._futures_pm.cash_balance -= (actual_margin + fee)
 
-            # 선물 PM cash 조정 (같은 지갑이므로)
-            self._futures_pm.cash_balance -= (actual_margin + fee)
+                await session.commit()
 
             # Track in memory
             self._positions[symbol] = SurgePositionState(
@@ -746,10 +746,10 @@ class SurgeEngine:
                     db_pos.last_trade_at = now
                     db_pos.last_sell_at = now
 
-                await session.commit()
+                # 선물 PM cash 조정 (commit 전에 반영)
+                self._futures_pm.cash_balance += cost_return
 
-            # 선물 PM cash 조정
-            self._futures_pm.cash_balance += cost_return
+                await session.commit()
 
             # Update counters
             if net_pnl_pct < 0:

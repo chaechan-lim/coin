@@ -8,6 +8,7 @@ from core.utils import utcnow, ensure_aware
 from db.session import get_db
 from core.models import Order, Trade
 from core.schemas import OrderResponse, TradeResponse
+from api.dependencies import ExchangeNameType
 
 router = APIRouter(prefix="/trades", tags=["trades"])
 
@@ -20,7 +21,7 @@ async def get_trades(
     strategy: Optional[str] = None,
     side: Optional[str] = None,
     status: Optional[str] = Query(None, pattern="^(filled|open|cancelled|failed|all)$"),
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     query = (
@@ -83,7 +84,7 @@ async def get_trades(
 @router.get("/summary")
 async def get_trade_summary(
     period: str = Query("7d", pattern="^(today|7d|30d|all)$"),
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     now = utcnow()

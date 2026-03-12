@@ -33,20 +33,22 @@ class SignalCombiner:
     # 방향별 가중치 — 롱은 추세추종 중심, 숏은 평균회귀 중심
     # 백테스트 근거: MACD 롱 100% 승률, 평균회귀 숏 35% 승률
     BUY_WEIGHTS = {
-        "ma_crossover": 0.18,
-        "rsi": 0.10,
-        "macd_crossover": 0.25,
-        "bollinger_rsi": 0.15,
-        "stochastic_rsi": 0.10,
-        "obv_divergence": 0.22,
+        "ma_crossover": 0.16,
+        "rsi": 0.09,
+        "macd_crossover": 0.22,
+        "bollinger_rsi": 0.13,
+        "stochastic_rsi": 0.09,
+        "obv_divergence": 0.19,
+        "bb_squeeze": 0.12,
     }
     SELL_WEIGHTS = {
-        "ma_crossover": 0.05,
-        "rsi": 0.25,
-        "macd_crossover": 0.10,
-        "bollinger_rsi": 0.30,
-        "stochastic_rsi": 0.20,
-        "obv_divergence": 0.10,
+        "ma_crossover": 0.04,
+        "rsi": 0.22,
+        "macd_crossover": 0.09,
+        "bollinger_rsi": 0.27,
+        "stochastic_rsi": 0.18,
+        "obv_divergence": 0.09,
+        "bb_squeeze": 0.11,
     }
 
     # 현물용 4전략 가중치 (Optuna 50trials 다중기간 최적화, 2026-03-08)

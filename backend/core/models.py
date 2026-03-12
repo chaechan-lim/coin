@@ -45,6 +45,7 @@ class Order(Base):
         Index("ix_orders_symbol_created", "symbol", "created_at"),
         Index("ix_orders_status", "status"),
         Index("ix_orders_strategy", "strategy_name"),
+        Index("ix_orders_exchange_created", "exchange", "created_at"),
     )
 
     id = Column(Integer, primary_key=True)
@@ -90,6 +91,7 @@ class Trade(Base):
     __tablename__ = "trades"
     __table_args__ = (
         Index("ix_trades_symbol_executed", "symbol", "executed_at"),
+        Index("ix_trades_exchange", "exchange"),
     )
 
     id = Column(Integer, primary_key=True)

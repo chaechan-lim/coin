@@ -446,7 +446,7 @@ class TradingEngine:
                 elif pos.last_sell_at:
                     # 청산된 포지션도 쿨다운 내이면 복원 (재시작 시 쿨다운 유지)
                     elapsed = (datetime.now(timezone.utc) - pos.last_sell_at).total_seconds()
-                    cooldown = getattr(self._ec, 'min_trade_interval_sec', 518400)
+                    cooldown = getattr(self._ec, 'cooldown_after_sell_sec', 518400)
                     if elapsed < cooldown:
                         self._last_sell_time[pos.symbol] = pos.last_sell_at
                         logger.debug("restored_closed_cooldown",
@@ -1023,11 +1023,16 @@ class TradingEngine:
 
         entry = tracker.entry_price
         if entry <= 0:
-            logger.warning("tracker_entry_price_zero", symbol=symbol,
-                           entry=entry, price=price, avg_buy=position.average_buy_price)
-            # fallback to position's average_buy_price or current price
-            entry = position.average_buy_price or price
-            tracker.entry_price = entry
+            # fallback: avg_buy_price > 0 이면 사용, 아니면 SL/TP 체크 스킵
+            if position.average_buy_price and position.average_buy_price > 0:
+                entry = position.average_buy_price
+                tracker.entry_price = entry
+                logger.warning("tracker_entry_price_recovered", symbol=symbol,
+                               source="avg_buy_price", entry=entry)
+            else:
+                logger.error("tracker_entry_price_unrecoverable", symbol=symbol,
+                             entry=entry, price=price, avg_buy=position.average_buy_price)
+                return False  # SL/TP 체크 불가 — 잘못된 기준가로 청산 방지
         pnl_pct = (price - entry) / entry * 100 if entry > 0 else 0.0
 
         sell_reason = None

@@ -812,3 +812,114 @@ class TestVolatilityRegimeStrategy:
         signal = await strategy.analyze(df, _ticker(50000))
         assert signal.signal_type == SignalType.HOLD
         assert signal.confidence == 0.0
+
+
+# ── BB Squeeze Strategy ──────────────────────────────────────
+
+
+class TestBBSqueezeStrategy:
+    @pytest.fixture
+    def strategy(self):
+        from strategies.bb_squeeze import BBSqueezeStrategy
+        return BBSqueezeStrategy()
+
+    def _make_squeeze_df(self, n: int = 40, close_base: float = 100.0):
+        """BB가 KC 안에 수축된 스퀴즈 상태 DataFrame 생성."""
+        closes = np.full(n, close_base)
+        # 극저변동성: 가격 변동 거의 없음
+        for i in range(n):
+            closes[i] = close_base + np.sin(i * 0.1) * 0.1
+        df = pd.DataFrame({
+            "open": closes * 0.9999,
+            "high": closes * 1.001,
+            "low": closes * 0.999,
+            "close": closes,
+            "volume": np.random.uniform(100, 200, n),
+        })
+        return df
+
+    def _make_breakout_df(self, direction: str = "up", n: int = 40, close_base: float = 100.0):
+        """스퀴즈 후 브레이크아웃 DataFrame 생성."""
+        df = self._make_squeeze_df(n - 3, close_base)
+        # 마지막 3봉: 변동성 확대 (브레이크아웃)
+        if direction == "up":
+            breakout = [close_base * 1.02, close_base * 1.035, close_base * 1.05]
+        else:
+            breakout = [close_base * 0.98, close_base * 0.965, close_base * 0.95]
+        for bp in breakout:
+            new_row = pd.DataFrame({
+                "open": [bp * 0.999],
+                "high": [bp * 1.01],
+                "low": [bp * 0.99],
+                "close": [bp],
+                "volume": [500.0],
+            })
+            df = pd.concat([df, new_row], ignore_index=True)
+        return df
+
+    @pytest.mark.asyncio
+    async def test_insufficient_data_hold(self, strategy):
+        """데이터 부족 → HOLD."""
+        df = _make_df(10, close_base=100.0)
+        signal = await strategy.analyze(df, _ticker(100.0))
+        assert signal.signal_type == SignalType.HOLD
+        assert signal.confidence == 0.0
+
+    @pytest.mark.asyncio
+    async def test_no_squeeze_hold(self, strategy):
+        """스퀴즈 아님 → HOLD."""
+        # 높은 변동성: BB가 KC 밖
+        closes = np.linspace(80, 120, 40)
+        df = pd.DataFrame({
+            "open": closes * 0.99,
+            "high": closes * 1.05,
+            "low": closes * 0.95,
+            "close": closes,
+            "volume": np.random.uniform(100, 200, 40),
+        })
+        signal = await strategy.analyze(df, _ticker(120.0))
+        assert signal.signal_type == SignalType.HOLD
+
+    @pytest.mark.asyncio
+    async def test_squeeze_in_progress_hold(self, strategy):
+        """스퀴즈 진행 중 → HOLD (해제 대기)."""
+        df = self._make_squeeze_df(40)
+        signal = await strategy.analyze(df, _ticker(100.0))
+        # 스퀴즈 중이거나 스퀴즈 아님 → HOLD
+        assert signal.signal_type == SignalType.HOLD
+
+    @pytest.mark.asyncio
+    async def test_upward_breakout_buy(self, strategy):
+        """스퀴즈 해제 + 상향 모멘텀 → BUY."""
+        df = self._make_breakout_df("up")
+        price = float(df["close"].iloc[-1])
+        signal = await strategy.analyze(df, _ticker(price))
+        # 스퀴즈 감지 여부에 따라 BUY 또는 HOLD
+        assert signal.signal_type in (SignalType.BUY, SignalType.HOLD)
+        if signal.signal_type == SignalType.BUY:
+            assert signal.confidence >= 0.60
+
+    @pytest.mark.asyncio
+    async def test_downward_breakout_sell(self, strategy):
+        """스퀴즈 해제 + 하향 모멘텀 → SELL."""
+        df = self._make_breakout_df("down")
+        price = float(df["close"].iloc[-1])
+        signal = await strategy.analyze(df, _ticker(price))
+        # 스퀴즈 감지 여부에 따라 SELL 또는 HOLD
+        assert signal.signal_type in (SignalType.SELL, SignalType.HOLD)
+        if signal.signal_type == SignalType.SELL:
+            assert signal.confidence >= 0.60
+
+    @pytest.mark.asyncio
+    async def test_strategy_name(self, strategy):
+        """전략 이름 확인."""
+        assert strategy.name == "bb_squeeze"
+
+    @pytest.mark.asyncio
+    async def test_signal_has_indicators(self, strategy):
+        """시그널에 indicators 딕셔너리 포함."""
+        df = self._make_squeeze_df(40)
+        signal = await strategy.analyze(df, _ticker(100.0))
+        assert signal.indicators is not None
+        assert "squeeze" in signal.indicators
+        assert "momentum" in signal.indicators

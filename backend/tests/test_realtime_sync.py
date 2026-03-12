@@ -44,6 +44,10 @@ def mock_config():
     config.trading.daily_buy_limit = 20
     config.trading.max_daily_coin_buys = 3
     config.trading.min_trade_interval_sec = 3600
+    config.trading.cooldown_after_sell_sec = 3600
+    config.trading.cooldown_after_buy_sec = 3600
+    config.trading.paired_exit = False
+    config.trading.asymmetric_mode = False
     config.trading.rotation_enabled = False
     config.risk.max_trade_size_pct = 0.50
     return config

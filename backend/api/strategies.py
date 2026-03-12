@@ -14,7 +14,7 @@ from core.schemas import (
     StrategyParamsUpdate,
     StrategyWeightUpdate,
 )
-from api.dependencies import engine_registry
+from api.dependencies import engine_registry, ExchangeNameType
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -28,7 +28,7 @@ def _get_combiner(exchange: str):
 
 
 @router.get("", response_model=list[StrategyResponse])
-async def list_strategies(exchange: str = Query("bithumb")):
+async def list_strategies(exchange: ExchangeNameType = Query("bithumb")):
     eng = _get_engine(exchange)
     comb = _get_combiner(exchange)
     if not eng:
@@ -55,7 +55,7 @@ async def list_strategies(exchange: str = Query("bithumb")):
 async def get_strategy_performance(
     name: str,
     period: str = Query("30d"),
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     now = utcnow()
@@ -213,7 +213,7 @@ async def update_strategy_weight(name: str, update: StrategyWeightUpdate, exchan
 @router.get("/comparison")
 async def compare_strategies(
     period: str = Query("30d"),
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     eng = _get_engine(exchange)
@@ -234,7 +234,7 @@ async def get_strategy_logs(
     strategy: Optional[str] = None,
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     query = (
