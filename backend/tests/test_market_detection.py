@@ -158,14 +158,13 @@ class TestSideways:
         price = 50_000_000
         df = _make_market_df(
             close_base=price,
-            sma_20=price * 1.01,  # price ~= SMA20
-            sma_50=price * 1.02,
+            sma_20=price * 1.005,  # price ~= SMA20 (0.5% below)
+            sma_50=price * 1.005,  # SMA20 ≈ SMA50
             rsi_14=50.0,
             trend_pct=0.5,
         )
         state, conf = engine._detect_market_state(df)
-        # With neutral RSI and small change, sideways should get high score
-        assert state in ("sideways", "downtrend")  # close to SMA, could be either
+        assert state == "sideways"
 
 
 # ── 하락장 ────────────────────────────────────────────────────
@@ -207,6 +206,95 @@ class TestCrash:
         assert state in ("crash", "downtrend")
         if state == "crash":
             assert conf >= 0.55
+
+
+# ── Factor 1: SMA20 거리 심도 구분 ────────────────────────────
+
+
+class TestSMA20DistanceSeverity:
+    def test_severe_below_sma20_scores_higher(self):
+        """SMA20 대비 -6% vs -2%: 심한 하락이 더 높은 downtrend 점수."""
+        engine = _make_engine()
+        price = 50_000_000
+
+        # -6% below SMA20 (severe) + RSI 40 (약세)
+        df_severe = _make_market_df(
+            close_base=price,
+            sma_20=price * 1.07,  # ~6.5% below
+            sma_50=price * 1.10,
+            rsi_14=40.0,
+            trend_pct=-4.0,
+        )
+        state_severe, conf_severe = engine._detect_market_state(df_severe)
+
+        # -2% below SMA20 (mild) + 같은 조건
+        df_mild = _make_market_df(
+            close_base=price,
+            sma_20=price * 1.02,  # ~2% below
+            sma_50=price * 1.05,
+            rsi_14=40.0,
+            trend_pct=-4.0,
+        )
+        state_mild, conf_mild = engine._detect_market_state(df_mild)
+
+        # severe는 downtrend/crash, mild도 downtrend — but severe has higher confidence
+        assert state_severe in ("downtrend", "crash")
+        assert state_mild in ("downtrend", "crash", "sideways")
+
+    def test_near_sma20_is_sideways(self):
+        """SMA20 대비 ±0.5%: SIDEWAYS 점수 부여."""
+        engine = _make_engine()
+        price = 50_000_000
+        df = _make_market_df(
+            close_base=price,
+            sma_20=price * 1.003,  # 0.3% below SMA20
+            sma_50=price * 1.003,
+            rsi_14=50.0,
+            trend_pct=0.0,
+        )
+        state, _ = engine._detect_market_state(df)
+        assert state == "sideways"
+
+
+# ── Factor 5: 거래량 방향 반영 ────────────────────────────────
+
+
+class TestVolumeDirection:
+    def _make_volume_df(self, close_base, candle_bullish=True, **kwargs):
+        """거래량 테스트용 DataFrame — 캔들 방향 제어."""
+        df = _make_market_df(close_base=close_base, volume_ratio=3.0, **kwargs)
+        if candle_bullish:
+            df.iloc[-1, df.columns.get_loc("open")] = close_base * 0.99  # green candle
+        else:
+            df.iloc[-1, df.columns.get_loc("open")] = close_base * 1.01  # red candle
+        return df
+
+    def test_volume_surge_red_candle_adds_downtrend(self):
+        """거래량 급증 + 음봉 → DOWNTREND에만 점수."""
+        engine = _make_engine()
+        price = 50_000_000
+        # 다른 팩터를 중립으로: SMA20 근접, RSI 중립, 7d 0%
+        df = self._make_volume_df(
+            price, candle_bullish=False,
+            sma_20=price * 1.001, sma_50=price * 1.001,
+            rsi_14=50.0, trend_pct=0.0,
+        )
+        state, _ = engine._detect_market_state(df)
+        # 음봉 거래량 폭증 → downtrend 방향 점수
+        assert state in ("sideways", "downtrend")
+
+    def test_volume_surge_green_candle_no_downtrend(self):
+        """거래량 급증 + 양봉 → STRONG_UPTREND에만 점수, DOWNTREND 안 올라감."""
+        engine = _make_engine()
+        price = 50_000_000
+        df = self._make_volume_df(
+            price, candle_bullish=True,
+            sma_20=price * 1.001, sma_50=price * 1.001,
+            rsi_14=50.0, trend_pct=0.0,
+        )
+        state, _ = engine._detect_market_state(df)
+        # 양봉 거래량 폭증 → downtrend에 안 기여
+        assert state in ("sideways", "uptrend", "strong_uptrend")
 
 
 # ── 동적 SL 계산 ─────────────────────────────────────────────

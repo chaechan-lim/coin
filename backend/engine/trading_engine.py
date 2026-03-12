@@ -771,14 +771,17 @@ class TradingEngine:
         if sma20 is not None and not (isinstance(sma20, float) and pd.isna(sma20)):
             sma20 = float(sma20)
             if sma20 > 0:
-                if current_price > sma20 * 1.05:
+                dist_pct = (current_price - sma20) / sma20
+                if dist_pct > 0.05:
                     scores[MarketState.STRONG_UPTREND] += 2
-                elif current_price > sma20:
+                elif dist_pct > 0.01:
                     scores[MarketState.UPTREND] += 1.5
-                elif current_price < sma20 * 0.95:
+                elif dist_pct < -0.05:
+                    scores[MarketState.DOWNTREND] += 2
+                elif dist_pct < -0.01:
                     scores[MarketState.DOWNTREND] += 1.5
-                elif current_price < sma20:
-                    scores[MarketState.DOWNTREND] += 1.5
+                else:
+                    scores[MarketState.SIDEWAYS] += 1
 
         # 2. SMA20 vs SMA50 정렬
         sma50 = row.get("sma_50")
@@ -827,7 +830,7 @@ class TradingEngine:
                 else:
                     scores[MarketState.SIDEWAYS] += 2
 
-        # 5. 거래량 / volume_sma_20
+        # 5. 거래량 / volume_sma_20 (캔들 방향 반영)
         vol_sma = row.get("volume_sma_20")
         cur_vol = row.get("volume")
         if (vol_sma is not None and cur_vol is not None
@@ -837,8 +840,15 @@ class TradingEngine:
             if vol_sma_f > 0:
                 vol_ratio = float(cur_vol) / vol_sma_f
                 if vol_ratio > 2.0:
-                    scores[MarketState.STRONG_UPTREND] += 0.5
-                    scores[MarketState.DOWNTREND] += 0.5
+                    candle_open = row.get("open")
+                    if candle_open is not None and float(candle_open) > 0:
+                        if current_price >= float(candle_open):
+                            scores[MarketState.STRONG_UPTREND] += 0.5
+                        else:
+                            scores[MarketState.DOWNTREND] += 0.5
+                    else:
+                        scores[MarketState.STRONG_UPTREND] += 0.25
+                        scores[MarketState.DOWNTREND] += 0.25
 
         # 최고 스코어 상태 결정
         best_state = max(scores, key=scores.get)
