@@ -449,6 +449,8 @@ class BinanceFuturesEngine(TradingEngine):
 
         # 빠른 판정: SL/TP 범위 밖인지 먼저 체크 (대부분 여기서 리턴)
         entry = tracker.entry_price
+        if not entry or entry <= 0:
+            return  # entry_price 미설정 — SL/TP 체크 불가
         # direction은 DB에서 가져와야 하지만, 비용을 줄이기 위해
         # _check_price_in_range로 빠른 필터링
         pnl_pct_long = (price - entry) / entry * 100
@@ -815,6 +817,9 @@ class BinanceFuturesEngine(TradingEngine):
                 return True
 
         # PnL 계산 (방향별)
+        if not entry or entry <= 0:
+            logger.warning("futures_entry_price_zero", symbol=symbol, entry=entry)
+            return False
         tracker_changed = False
         if direction == "long":
             pnl_pct = (price - entry) / entry * 100
@@ -1020,6 +1025,7 @@ class BinanceFuturesEngine(TradingEngine):
 
     async def close_position_for_cross_exchange(self, symbol: str, reason: str) -> bool:
         """다른 엔진의 요청으로 선물 포지션 청산. 자체 세션 사용."""
+        from db.session import get_session_factory
         sf = get_session_factory()
         try:
             async with sf() as session:

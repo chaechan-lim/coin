@@ -16,6 +16,15 @@ _notification_fn: Callable[..., Coroutine] | None = None
 _bot_alert_fn: Callable[..., Coroutine] | None = None
 
 
+def _task_error_handler(task: asyncio.Task) -> None:
+    """Fire-and-forget 태스크의 예외를 로그로 기록 (unhandled exception 방지)."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.warning("event_task_failed", error=str(exc), task=task.get_name())
+
+
 def set_broadcast(callback: Callable[..., Coroutine]) -> None:
     """WebSocket broadcast 함수 등록 (main.py lifespan에서 1회 호출)."""
     global _broadcast_fn
@@ -79,18 +88,20 @@ async def emit_event(
                 # 외부 알림 (Discord 등) — fire-and-forget
                 if _notification_fn:
                     try:
-                        asyncio.create_task(
+                        task = asyncio.create_task(
                             _notification_fn(level, category, title, detail, metadata)
                         )
+                        task.add_done_callback(_task_error_handler)
                     except (TypeError, RuntimeError) as e:
                         logger.debug("notification_dispatch_error", error=str(e))
 
                 # Discord 봇 선제 알림 — fire-and-forget
                 if _bot_alert_fn:
                     try:
-                        asyncio.create_task(
+                        task = asyncio.create_task(
                             _bot_alert_fn(level, category, title, detail or "")
                         )
+                        task.add_done_callback(_task_error_handler)
                     except (TypeError, RuntimeError):
                         pass
                 return
