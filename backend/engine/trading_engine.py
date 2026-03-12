@@ -2153,13 +2153,14 @@ class TradingEngine:
                         pass
                 return
 
+            # P&L 계산 (update_position_on_sell 이전에 — 전량 매도 시 avg_price 리셋됨)
+            entry_price = position.average_buy_price or price
+            pnl_pct = (price - entry_price) / entry_price * 100 if entry_price > 0 else 0
+
             await self._portfolio_manager.update_position_on_sell(
                 session, symbol, position.quantity, price,
                 position.quantity * price, order.fee
             )
-            # P&L 계산
-            entry_price = position.average_buy_price or price
-            pnl_pct = (price - entry_price) / entry_price * 100 if entry_price > 0 else 0
             await emit_event("info", "trade", f"매도: {symbol}", metadata={
                 "price": price,
                 "strategy": primary_signal.strategy_name,

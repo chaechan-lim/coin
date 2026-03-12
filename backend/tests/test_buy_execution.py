@@ -723,6 +723,54 @@ class TestSellExecution:
         assert call_args[0][3] == 0.5
 
     @pytest.mark.asyncio
+    async def test_sell_pnl_in_notification_before_position_reset(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """매도 알림에 올바른 PnL이 포함되어야 함 — update_position_on_sell이 avg_price 리셋하기 전에 계산."""
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        decision = _make_sell_decision()
+
+        pos = MagicMock()
+        pos.quantity = 1.0
+        pos.average_buy_price = 50000  # 진입가 50000
+        pos.total_invested = 50000
+        session = _make_session_no_position()
+
+        async def sell_execute(*args, **kwargs):
+            result = MagicMock()
+            result.scalar_one_or_none = MagicMock(return_value=pos)
+            result.scalars = MagicMock(return_value=MagicMock(
+                first=MagicMock(return_value=None),
+                all=MagicMock(return_value=[]),
+            ))
+            return result
+
+        session.execute = AsyncMock(side_effect=sell_execute)
+
+        # update_position_on_sell이 avg_buy_price를 0으로 리셋하는 것을 시뮬레이션
+        async def reset_position(*args, **kwargs):
+            pos.average_buy_price = 0
+            pos.quantity = 0
+
+        mock_pm.update_position_on_sell = AsyncMock(side_effect=reset_position)
+
+        # 현재가 45000 (진입가 50000 → -10% 손실)
+        mock_market_data.get_ticker = AsyncMock(return_value=MagicMock(last=45000))
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock) as mock_emit:
+            await engine._process_decision(session, "ETH/KRW", decision)
+
+        # emit_event가 올바른 pnl_pct를 받았는지 확인
+        trade_events = [
+            call for call in mock_emit.call_args_list
+            if len(call.args) >= 3 and call.args[1] == "trade" and "매도" in call.args[2]
+        ]
+        assert len(trade_events) >= 1, "매도 emit_event가 호출되어야 함"
+        metadata = trade_events[0].kwargs.get("metadata", {})
+        # entry_price가 0이 아닌 원래 값이어야 함
+        assert metadata.get("entry_price") == 50000
+        # pnl_pct는 (45000-50000)/50000*100 = -10.0
+        assert metadata.get("pnl_pct") == -10.0
+
+    @pytest.mark.asyncio
     async def test_sell_without_position_noop(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
         """SELL 시그널 + 포지션 없음 → 아무 액션 없음."""
         engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)

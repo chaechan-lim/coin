@@ -971,6 +971,7 @@ class BinanceFuturesEngine(TradingEngine):
         )
 
         lev = position.leverage or self._leverage
+        margin_used = position.margin_used or 0
         ep = position.average_buy_price if position.average_buy_price and position.average_buy_price > 0 else None
         order = await self._order_manager.create_order(
             session, symbol, side, position.quantity, price, signal,
@@ -1006,9 +1007,9 @@ class BinanceFuturesEngine(TradingEngine):
 
             entry_price = ep or price
             pnl_pct = ((price - entry_price) / entry_price * 100) if direction == "long" else ((entry_price - price) / entry_price * 100)
-            lev_val = position.leverage or self._leverage
+            lev_val = lev  # 이미 update 전에 저장한 값
             leveraged_pnl = pnl_pct * lev_val
-            loss_amount = position.margin_used * leveraged_pnl / 100 if position.margin_used else 0
+            loss_amount = margin_used * leveraged_pnl / 100 if margin_used else 0
             logger.info("futures_position_closed", symbol=symbol, direction=direction, reason=reason, pnl_pct=round(pnl_pct, 2))
             await emit_event("info", "futures_trade",
                              f"선물 {direction} 청산: {symbol}",
