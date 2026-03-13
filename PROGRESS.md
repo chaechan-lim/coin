@@ -1,6 +1,6 @@
 # 코인 자동 매매 시스템 — 운영 참조
 
-> 최종 업데이트: 2026-03-12
+> 최종 업데이트: 2026-03-13
 > 완료된 Phase 1-5 상세 및 버전 이력은 `CHANGELOG.md` 참고.
 
 ---
@@ -10,7 +10,7 @@
 빗썸(현물, 비활성) + 바이낸스 현물(live) + 바이낸스 USDM 선물(live, 3x) + 서지 **쿼드 엔진** 24시간 자동 트레이딩 시스템.
 가중 투표 (HOLD=기권) + ML 시그널 필터 + 5요소 시장 감지 + 적응형 가중치, AI 에이전트 5종, Discord 봇(자연어 제어), React 대시보드(8탭).
 **현물 4전략** (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + **선물 7전략** (MA, RSI, MACD, 볼린저RSI, 스토캐스틱RSI, OBV, BB스퀴즈).
-**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **773 유닛 테스트**.
+**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **778 유닛 테스트**.
 
 ---
 
@@ -46,7 +46,7 @@ coin/
 │   ├── agents/        (market_analysis, risk_management, trade_review, performance_analytics, strategy_advisor, diagnostic_agent, coordinator)
 │   ├── engine/        (trading_engine, futures_engine, surge_engine, order_manager, portfolio_manager, recovery, health_monitor, capital_sync, scheduler)
 │   ├── api/           (router, dependencies, dashboard, portfolio, trades, strategies, events, capital, websocket)
-│   └── tests/         (773 tests)
+│   └── tests/         (778 tests)
 └── frontend/
     └── src/           (Dashboard, 8탭 컴포넌트, hooks, types)
 ```
@@ -91,6 +91,7 @@ coin/
 | ML Signal Filter (v0.37) | LightGBM 23피처, 선물 시그널 사전 필터링 (strategies/ml_filter.py) |
 | 서지 엔진 (v0.37) | 거래량 급등 감지 단기 매매, 선물 PM 잔고 공유, exchange="binance_surge" |
 | 버그 수정 11건 (v0.38) | entry_price=0 가드, cash race condition, DB 인덱스, API 검증, fire-and-forget 에러 핸들링 |
+| 현물 Optuna 바이낸스 재최적화 (v0.39) | 빗썸 KRW→바이낸스 USDT 데이터로 재최적화 (PF 1.56, +22.48%), cis_momentum 지배적, SL5/TP14/trail3-1.5, cd15(60h) |
 
 ### 낮은 우선순위
 
@@ -135,14 +136,14 @@ coin/
 
 시장 상태별 ADAPTIVE_PROFILES (7전략×5상태): `combiner.py` 참고.
 
-**현물** (4전략, 고정 SPOT_WEIGHTS — Optuna 최적화):
+**현물** (4전략, 고정 SPOT_WEIGHTS — Optuna 바이낸스 USDT 최적화 2026-03-13):
 
 | 전략 | 가중치 |
 |---|---|
-| larry_williams | 0.31 |
+| cis_momentum | 0.42 |
+| bnf_deviation | 0.25 |
 | donchian_channel | 0.24 |
-| bnf_deviation | 0.23 |
-| cis_momentum | 0.22 |
+| larry_williams | 0.10 |
 
 ### 리스크 설정
 
@@ -151,8 +152,8 @@ coin/
 | 단일 코인 최대 비중 | 40% (초과 시 35%까지 자동 매도) |
 | 일일 매수 상한 | 20건 (매도 무제한) |
 | 코인당 매수 상한 | 3건/일 |
-| 매매 쿨다운 | 현물 32시간 (cd8), **선물 24시간 (cd6)** |
-| 매도 후 재매수 대기 | 현물 32시간, **선물 24시간** |
+| 매매 쿨다운 | **현물 60시간 (cd15)**, **선물 24시간 (cd6)** |
+| 매도 후 재매수 대기 | **현물 60시간**, **선물 24시간** |
 | 선물 레버리지 | **3x** |
 | 선물 숏 허용 | 전체 시장 상태 (short-all), min_sell_wt=0.20 (2전략 합의) |
 | 교차 거래소 충돌 | 현물 롱↔선물 숏: 낮은 신뢰도→차단, 높은 신뢰도(>=0.65)→방향 전환 |
