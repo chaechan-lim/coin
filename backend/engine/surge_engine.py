@@ -124,6 +124,7 @@ class SurgeEngine:
         self._candle_vol_accel: dict[str, float] = {}
         self._last_candle_update: float = 0.0
         self._CANDLE_UPDATE_INTERVAL = 60  # 캔들 데이터 갱신 간격 (초)
+        self._last_scan_time: datetime | None = None
 
         # Daily counters (reset at 00:00 UTC)
         self._daily_trades = 0
@@ -219,6 +220,7 @@ class SurgeEngine:
             "paused": self._pause_until is not None and datetime.now(timezone.utc) < self._pause_until,
             "scan_interval_sec": self._scan_interval,
             "leverage": self._leverage,
+            "last_scan_time": self._last_scan_time.isoformat() if self._last_scan_time else None,
             "scores": scores,
         }
 
@@ -278,6 +280,8 @@ class SurgeEngine:
 
         # 7. Scan for new entries
         await self._scan_for_entries(tickers)
+
+        self._last_scan_time = datetime.now(timezone.utc)
 
     # ── Ticker fetching ──────────────────────────────────────────
 

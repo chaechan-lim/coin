@@ -83,7 +83,7 @@ export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeN
             </span>
           </Card>
         )}
-        <Card label="마지막 스캔">
+        <Card label={isFutures ? '마지막 평가' : '마지막 스캔'}>
           <span className="text-sm font-medium text-gray-300">
             {data.last_scan_time
               ? formatTs(data.last_scan_time, 'HH:mm:ss', '대기 중')
@@ -201,6 +201,11 @@ function SurgeScanPanel({ data }: { data: SurgeScanStatus }) {
           <span>오늘 {data.daily_trades}/{data.daily_limit}거래</span>
           {data.paused && <span className="text-yellow-400 font-medium">일시정지</span>}
           <span>{data.leverage}x</span>
+          <span>·</span>
+          <span>{data.scan_interval_sec}초 주기</span>
+          {data.last_scan_time && (
+            <span className="text-gray-600">{formatTs(data.last_scan_time, 'HH:mm:ss')}</span>
+          )}
         </div>
       </div>
 

@@ -226,6 +226,7 @@ export interface SurgeScanStatus {
   paused: boolean
   scan_interval_sec: number
   leverage: number
+  last_scan_time: string | null
   scores: SurgeScanScore[]
 }
 

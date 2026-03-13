@@ -93,6 +93,9 @@ class BinanceFuturesEngine(TradingEngine):
         self._eval_error_counts: dict[str, int] = {}
         self._MAX_EVAL_ERRORS = 3  # 3회 연속 (~15분) → 강제 청산
 
+        # 마지막 평가 시각 (rotation_status에서 last_scan_time으로 노출)
+        self._last_eval_time: datetime | None = None
+
         # ML Signal Filter용 캔들 캐시
         self._latest_candle_rows: dict[str, pd.Series] = {}
 
@@ -771,6 +774,8 @@ class BinanceFuturesEngine(TradingEngine):
                                 await asyncio.sleep(1)
                             else:
                                 raise
+
+                    self._last_eval_time = datetime.now(timezone.utc)
 
                     # WebSocket broadcast
                     if self._broadcast_callback:
@@ -1812,7 +1817,7 @@ class BinanceFuturesEngine(TradingEngine):
             "market_state": self._market_state,
             "current_surge_symbol": None,
             "last_rotation_time": None,
-            "last_scan_time": None,
+            "last_scan_time": self._last_eval_time.isoformat() if self._last_eval_time else None,
             "rotation_cooldown_sec": 0,
             "tracked_coins": self.tracked_coins,
             "rotation_coins": [],
