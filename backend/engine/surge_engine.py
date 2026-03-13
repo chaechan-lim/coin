@@ -344,19 +344,24 @@ class SurgeEngine:
 
     # ── Candle-based volume data ─────────────────────────────────
 
+    # 백테스트 동일 lookback: 60 × 5m = 5시간 baseline
+    _VOL_LOOKBACK = 60
+
     async def _update_candle_volume_data(self) -> None:
-        """5m 캔들 OHLCV로 거래량 비율 갱신 (ticker 24h volume은 변동 없어 사용 불가)."""
+        """5m 캔들 OHLCV로 거래량 비율 갱신 (백테스트와 동일한 5시간 baseline)."""
         updated = 0
+        need = self._VOL_LOOKBACK + 1  # baseline + 현재 캔들
         for sym in self._scan_symbols:
             try:
-                candles = await self._exchange.fetch_ohlcv(sym, "5m", limit=20)
-                if not candles or len(candles) < 6:
+                candles = await self._exchange.fetch_ohlcv(sym, "5m", limit=need)
+                if not candles or len(candles) < 10:
                     continue
 
                 volumes = [c.volume for c in candles]
                 current_vol = volumes[-1]
-                # 최근 캔들 제외 평균 (baseline)
-                avg_vol = np.mean(volumes[:-1])
+                # baseline: 현재 캔들 제외, 최대 _VOL_LOOKBACK개 평균
+                baseline = volumes[:-1]
+                avg_vol = np.mean(baseline)
                 if avg_vol > 0:
                     self._candle_vol_ratios[sym] = current_vol / avg_vol
                 else:
@@ -371,12 +376,12 @@ class SurgeEngine:
                 else:
                     self._candle_price_chgs[sym] = 0.0
 
-                # 가속도: 최근 vol_ratio vs 이전 vol_ratio
-                if len(volumes) >= 6:
-                    prev_avg = np.mean(volumes[:-3]) if len(volumes) > 3 else avg_vol
+                # 가속도: 현재 vol_ratio vs 2캔들 전 vol_ratio
+                if len(volumes) >= self._VOL_LOOKBACK + 3:
+                    prev_baseline = volumes[:-3]
+                    prev_avg = np.mean(prev_baseline[-self._VOL_LOOKBACK:])
                     prev_ratio = volumes[-3] / prev_avg if prev_avg > 0 else 0.0
-                    cur_ratio = self._candle_vol_ratios[sym]
-                    self._candle_vol_accel[sym] = cur_ratio - prev_ratio
+                    self._candle_vol_accel[sym] = self._candle_vol_ratios[sym] - prev_ratio
                 else:
                     self._candle_vol_accel[sym] = 0.0
 

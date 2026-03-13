@@ -705,15 +705,15 @@ class TestScanStatus:
 class TestCandleVolumeData:
     @pytest.mark.asyncio
     async def test_update_candle_volume_data(self, surge_engine):
-        """_update_candle_volume_data fetches 5m candles and computes vol_ratio."""
+        """_update_candle_volume_data fetches 5m candles and computes vol_ratio (5h baseline)."""
         from exchange.data_models import Candle
 
-        # Mock OHLCV data: 19 normal candles + 1 spike candle
+        # Mock OHLCV data: 60 normal candles (5h baseline) + 1 spike candle
         candles = []
-        for i in range(19):
+        for i in range(60):
             candles.append(Candle(
                 timestamp=datetime.now(timezone.utc),
-                open=100.0, high=101.0, low=99.0, close=100.0 + i * 0.1,
+                open=100.0, high=101.0, low=99.0, close=100.0 + i * 0.01,
                 volume=1000.0,  # baseline
             ))
         # Spike candle (10x volume)
