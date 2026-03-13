@@ -168,12 +168,12 @@ class BinanceSpotTradingConfig(BaseSettings):
     mode: str = "paper"  # "paper" or "live" (독립)
     evaluation_interval_sec: int = 300
     initial_balance_usdt: float = 500.0
-    min_combined_confidence: float = 0.55
-    max_trade_size_pct: float = 0.30
+    min_combined_confidence: float = 0.50  # Optuna binance 최적화 (2026-03-13)
+    max_trade_size_pct: float = 0.20
     daily_buy_limit: int = 20
     max_daily_coin_buys: int = 3
-    cooldown_after_sell_sec: int = 115200  # 32시간 (cd8, 백테스트 최적 PF 1.83)
-    cooldown_after_buy_sec: int = 115200  # 32시간 (cd8)
+    cooldown_after_sell_sec: int = 216000  # 60시간 (cd15, Optuna 바이낸스 최적화)
+    cooldown_after_buy_sec: int = 216000  # 60시간 (cd15)
     rotation_enabled: bool = True
 
     @field_validator("mode")

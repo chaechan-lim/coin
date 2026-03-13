@@ -186,10 +186,10 @@ class PositionTracker:
     """
     entry_price: float
     extreme_price: float
-    stop_loss_pct: float = 3.0       # 동적 SL %
-    take_profit_pct: float = 8.0
-    trailing_activation_pct: float = 5.0
-    trailing_stop_pct: float = 4.0
+    stop_loss_pct: float = 5.0       # 동적 SL % (Optuna binance 최적화 2026-03-13)
+    take_profit_pct: float = 14.0
+    trailing_activation_pct: float = 3.0
+    trailing_stop_pct: float = 1.5
     trailing_active: bool = False     # 트레일링 활성 여부
     is_surge: bool = False            # 서지 코인 여부
     max_hold_hours: float = 0        # 최대 보유 시간 (0=무제한)

@@ -53,9 +53,9 @@ class SignalCombiner:
 
     # 현물용 4전략 가중치 (Optuna 50trials 다중기간 최적화, 2026-03-08)
     SPOT_WEIGHTS = {
-        "bnf_deviation": 0.23,
-        "cis_momentum": 0.22,
-        "larry_williams": 0.31,
+        "bnf_deviation": 0.25,
+        "cis_momentum": 0.42,
+        "larry_williams": 0.10,
         "donchian_channel": 0.24,
     }
 
