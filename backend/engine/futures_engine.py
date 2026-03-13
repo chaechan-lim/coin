@@ -127,6 +127,84 @@ class BinanceFuturesEngine(TradingEngine):
                 logger.warning("leverage_set_failed", symbol=symbol, error=str(e))
 
 
+    # ── 좀비 포지션 정리 ────────────────────────────────────────
+
+    async def _close_zombie_positions(self) -> None:
+        """비추적 심볼의 잔여 포지션 자동 청산 (동적 종목 선정 잔여물 등)."""
+        from db.session import get_session_factory
+        tracked = set(self.tracked_coins)
+        try:
+            session_factory = get_session_factory()
+            async with session_factory() as session:
+                result = await session.execute(
+                    select(Position).where(
+                        Position.quantity > 0,
+                        Position.exchange == self._exchange_name,
+                    )
+                )
+                positions = result.scalars().all()
+                for pos in positions:
+                    if pos.symbol in tracked or pos.is_surge:
+                        continue
+                    await self._close_single_zombie(session, pos)
+        except Exception as e:
+            logger.warning("zombie_cleanup_skipped", error=str(e))
+
+    async def _close_single_zombie(self, session, pos: Position) -> None:
+        """단일 좀비 포지션 시장가 청산."""
+        logger.warning("zombie_position_closing",
+                       symbol=pos.symbol, direction=pos.direction,
+                       quantity=pos.quantity, margin=round(pos.total_invested, 2))
+        try:
+            direction = pos.direction or "long"
+            side = "sell" if direction == "long" else "buy"
+            signal = Signal(
+                strategy_name="zombie_cleanup",
+                signal_type="SELL" if direction == "long" else "BUY",
+                confidence=0.99,
+                reason=f"비추적 심볼 자동 청산: {pos.symbol}",
+            )
+            order = await self._order_manager.create_order(
+                session=session,
+                symbol=pos.symbol,
+                side=side,
+                amount=pos.quantity,
+                price=0,
+                signal=signal,
+                order_type="market",
+                direction=direction,
+                leverage=pos.leverage or self._leverage,
+                entry_price=pos.average_buy_price,
+            )
+            exec_price = order.executed_price or pos.average_buy_price
+            if direction == "long":
+                pnl_pct = (exec_price - pos.average_buy_price) / pos.average_buy_price * 100
+            else:
+                pnl_pct = (pos.average_buy_price - exec_price) / pos.average_buy_price * 100
+            lev = pos.leverage or self._leverage
+            pnl_pct *= lev
+
+            pos.quantity = 0
+            pos.last_sell_at = datetime.now(timezone.utc)
+            margin = pos.total_invested or pos.margin_used or 0
+            fee = (exec_price * (order.executed_quantity or 0)) * 0.0004
+            cost_return = margin * (1 + pnl_pct / 100) - fee
+            self._portfolio_manager.cash_balance += cost_return
+            pos.total_invested = 0
+            pos.margin_used = 0
+
+            await session.commit()
+            logger.info("zombie_position_closed",
+                        symbol=pos.symbol, pnl_pct=round(pnl_pct, 2))
+            await emit_event(
+                "info", "engine",
+                f"좀비 포지션 청산: {pos.symbol} (비추적) PnL={pnl_pct:+.1f}%",
+                metadata={"symbol": pos.symbol, "pnl_pct": round(pnl_pct, 2)},
+            )
+        except Exception as e:
+            logger.error("zombie_close_failed",
+                         symbol=pos.symbol, error=str(e))
+
     # ── 듀얼 루프 시작/중지 ─────────────────────────────────────
 
     _FAST_SL_INTERVAL = 30  # 선물 빠른 SL 체크 간격 (초) — WS 실패 시 폴백
@@ -141,6 +219,9 @@ class BinanceFuturesEngine(TradingEngine):
 
         # 다운타임 중 SL/TP 초과 포지션 즉시 체크
         await self._check_downtime_stops()
+
+        # 비추적 좀비 포지션 정리 (이전 동적 종목 선정 잔여)
+        await self._close_zombie_positions()
 
         # WebSocket 가격 모니터 + 잔고 모니터 초기화
         ws_enabled = self._config.binance_trading.ws_price_monitor

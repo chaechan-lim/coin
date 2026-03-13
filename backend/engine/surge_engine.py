@@ -118,6 +118,13 @@ class SurgeEngine:
         self._symbol_states: dict[str, SymbolState] = {}
         self._cooldowns: dict[str, datetime] = {}  # symbol -> next allowed time
 
+        # 캔들 기반 거래량 데이터 (5m OHLCV, 60초마다 갱신)
+        self._candle_vol_ratios: dict[str, float] = {}
+        self._candle_price_chgs: dict[str, float] = {}
+        self._candle_vol_accel: dict[str, float] = {}
+        self._last_candle_update: float = 0.0
+        self._CANDLE_UPDATE_INTERVAL = 60  # 캔들 데이터 갱신 간격 (초)
+
         # Daily counters (reset at 00:00 UTC)
         self._daily_trades = 0
         self._daily_losses = 0
@@ -243,12 +250,12 @@ class SurgeEngine:
         """One scan cycle: update state, check exits, find entries."""
         self._reset_daily_counters_if_needed()
 
-        # 1. Fetch tickers for all scan symbols
+        # 1. Fetch tickers for all scan symbols (prices + exit checks)
         tickers = await self._fetch_tickers()
         if not tickers:
             return
 
-        # 2. Update rolling window state
+        # 2. Update price state
         now = asyncio.get_event_loop().time()
         for sym, ticker_data in tickers.items():
             self._update_symbol_state(sym, ticker_data, now)
@@ -264,15 +271,34 @@ class SurgeEngine:
         if self._daily_trades >= self._daily_trade_limit:
             return
 
-        # 6. Scan for new entries
+        # 6. 캔들 기반 거래량 데이터 갱신 (60초마다)
+        if now - self._last_candle_update >= self._CANDLE_UPDATE_INTERVAL:
+            await self._update_candle_volume_data()
+            self._last_candle_update = now
+
+        # 7. Scan for new entries
         await self._scan_for_entries(tickers)
 
     # ── Ticker fetching ──────────────────────────────────────────
 
     async def _fetch_tickers(self) -> dict[str, dict]:
-        """Fetch current tickers for scan symbols."""
+        """Fetch current tickers for scan symbols (batch API call)."""
         tickers = {}
         try:
+            # 배치 fetch — 개별 30 API 콜 대신 1회 호출
+            all_tickers = await self._exchange.fetch_tickers()
+            scan_set = set(self._scan_symbols)
+            for sym, data in all_tickers.items():
+                if sym in scan_set:
+                    tickers[sym] = {
+                        "last": float(data.get("last", 0) or 0),
+                        "bid": float(data.get("bid", 0) or 0),
+                        "ask": float(data.get("ask", 0) or 0),
+                        "volume": float(data.get("quoteVolume", 0) or 0),
+                    }
+        except Exception as e:
+            logger.warning("surge_ticker_fetch_error", error=str(e))
+            # 폴백: 개별 fetch
             for sym in self._scan_symbols:
                 try:
                     ticker = await self._exchange.fetch_ticker(sym)
@@ -284,8 +310,6 @@ class SurgeEngine:
                     }
                 except Exception:
                     continue
-        except Exception as e:
-            logger.warning("surge_ticker_fetch_error", error=str(e))
         return tickers
 
     # ── Rolling window updates ───────────────────────────────────
@@ -306,6 +330,55 @@ class SurgeEngine:
         state.rsi_closes.append(price)
         state.last_update = now
 
+    # ── Candle-based volume data ─────────────────────────────────
+
+    async def _update_candle_volume_data(self) -> None:
+        """5m 캔들 OHLCV로 거래량 비율 갱신 (ticker 24h volume은 변동 없어 사용 불가)."""
+        updated = 0
+        for sym in self._scan_symbols:
+            try:
+                candles = await self._exchange.fetch_ohlcv(sym, "5m", limit=20)
+                if not candles or len(candles) < 6:
+                    continue
+
+                volumes = [c.volume for c in candles]
+                current_vol = volumes[-1]
+                # 최근 캔들 제외 평균 (baseline)
+                avg_vol = np.mean(volumes[:-1])
+                if avg_vol > 0:
+                    self._candle_vol_ratios[sym] = current_vol / avg_vol
+                else:
+                    self._candle_vol_ratios[sym] = 0.0
+
+                # 가격 변동 (최근 15분 = 3 × 5m 캔들)
+                lookback = min(3, len(candles) - 1)
+                old_close = candles[-lookback - 1].close
+                new_close = candles[-1].close
+                if old_close > 0:
+                    self._candle_price_chgs[sym] = (new_close - old_close) / old_close * 100
+                else:
+                    self._candle_price_chgs[sym] = 0.0
+
+                # 가속도: 최근 vol_ratio vs 이전 vol_ratio
+                if len(volumes) >= 6:
+                    prev_avg = np.mean(volumes[:-3]) if len(volumes) > 3 else avg_vol
+                    prev_ratio = volumes[-3] / prev_avg if prev_avg > 0 else 0.0
+                    cur_ratio = self._candle_vol_ratios[sym]
+                    self._candle_vol_accel[sym] = cur_ratio - prev_ratio
+                else:
+                    self._candle_vol_accel[sym] = 0.0
+
+                updated += 1
+            except Exception:
+                continue
+
+        if updated > 0:
+            # 상위 서지 로그
+            top = sorted(self._candle_vol_ratios.items(), key=lambda x: x[1], reverse=True)[:3]
+            logger.info("surge_candle_volume_updated",
+                        updated=updated,
+                        top=[(s, round(v, 1)) for s, v in top if v >= 2.0])
+
     # ── Surge scoring ────────────────────────────────────────────
 
     def compute_surge_score(
@@ -314,37 +387,15 @@ class SurgeEngine:
         """Compute surge score for a symbol.
 
         Returns (score, volume_ratio, price_change_pct).
-        Matches the scoring algorithm from surge_backtest.py.
+        Uses 5m candle OHLCV data for volume comparison (ticker 24h volume은 변동 없어 사용 불가).
         """
-        state = self._symbol_states.get(symbol)
-        if not state or len(state.volume_1m) < 5 or len(state.prices) < 4:
+        # 캔들 기반 거래량 데이터 사용
+        vol_ratio = self._candle_vol_ratios.get(symbol, 0.0)
+        price_chg = self._candle_price_chgs.get(symbol, 0.0)
+        accel = self._candle_vol_accel.get(symbol, 0.0)
+
+        if vol_ratio <= 0:
             return 0.0, 0.0, 0.0
-
-        # Volume ratio: latest volume vs average
-        volumes = list(state.volume_1m)
-        if len(volumes) > 1:
-            avg_vol = np.mean(volumes[:-1]) if len(volumes) > 1 else volumes[0]
-            vol_ratio = volumes[-1] / avg_vol if avg_vol > 0 else 0.0
-        else:
-            vol_ratio = 0.0
-
-        # Price change: last 3 ticks (approximate 15m in 5s intervals)
-        prices = list(state.prices)
-        lookback = min(3, len(prices) - 1)
-        if lookback > 0 and prices[-lookback - 1] > 0:
-            price_chg = (prices[-1] - prices[-lookback - 1]) / prices[-lookback - 1] * 100
-        else:
-            price_chg = 0.0
-
-        # Acceleration: volume ratio change
-        if len(volumes) >= 3:
-            avg_prev = np.mean(volumes[:-1]) if len(volumes) > 1 else 1.0
-            avg_prev_2 = np.mean(volumes[:-3]) if len(volumes) > 3 else avg_prev
-            ratio_now = volumes[-1] / avg_prev if avg_prev > 0 else 0
-            ratio_prev = volumes[-3] / avg_prev_2 if avg_prev_2 > 0 and len(volumes) >= 3 else 0
-            accel = ratio_now - ratio_prev
-        else:
-            accel = 0.0
 
         # Normalize signals
         vol_signal = min(vol_ratio / 10.0, 1.0)

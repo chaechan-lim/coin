@@ -543,3 +543,98 @@ class TestCooldownBypassOnClose:
                 session, "BTC/USDT", decision, [signal], None,
             )
             mock_open.assert_not_called()
+
+
+# ── Test: Zombie position cleanup ─────────────────────────────────
+
+class TestZombiePositionCleanup:
+    """비추적 심볼의 잔여 포지션 자동 청산 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_close_zombie_long(self, futures_engine, session):
+        """tracked_coins에 없는 롱 포지션은 자동 청산."""
+        # XAU/USDT는 tracked_coins에 없음
+        pos = Position(
+            exchange="binance_futures",
+            symbol="XAU/USDT",
+            quantity=0.022,
+            average_buy_price=5167.0,
+            total_invested=37.0,
+            margin_used=37.0,
+            direction="long",
+            leverage=3,
+        )
+        session.add(pos)
+        await session.flush()
+
+        mock_factory = MagicMock()
+        mock_session_ctx = MagicMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_session_ctx
+
+        futures_engine._order_manager.create_order = AsyncMock(return_value=MagicMock(
+            executed_price=5200.0, executed_quantity=0.022, fee=0.046,
+        ))
+
+        with patch("db.session.get_session_factory", return_value=mock_factory):
+            with patch("core.event_bus.emit_event", new_callable=AsyncMock):
+                await futures_engine._close_zombie_positions()
+
+        # 포지션이 청산됨
+        assert pos.quantity == 0
+
+    @pytest.mark.asyncio
+    async def test_tracked_coins_not_closed(self, futures_engine, session):
+        """tracked_coins에 있는 포지션은 청산 안 함."""
+        pos = Position(
+            exchange="binance_futures",
+            symbol="BTC/USDT",
+            quantity=0.001,
+            average_buy_price=65000.0,
+            total_invested=21.67,
+            direction="long",
+            leverage=3,
+        )
+        session.add(pos)
+        await session.flush()
+
+        mock_factory = MagicMock()
+        mock_session_ctx = MagicMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_session_ctx
+
+        with patch("db.session.get_session_factory", return_value=mock_factory):
+            await futures_engine._close_zombie_positions()
+
+        # BTC는 tracked → 안 건드림
+        assert pos.quantity == 0.001
+
+    @pytest.mark.asyncio
+    async def test_surge_positions_not_closed(self, futures_engine, session):
+        """is_surge=True인 포지션은 청산 안 함."""
+        pos = Position(
+            exchange="binance_futures",
+            symbol="DOGE/USDT",
+            quantity=100.0,
+            average_buy_price=0.15,
+            total_invested=5.0,
+            direction="long",
+            leverage=3,
+            is_surge=True,
+        )
+        session.add(pos)
+        await session.flush()
+
+        mock_factory = MagicMock()
+        mock_session_ctx = MagicMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_session_ctx
+
+        with patch("db.session.get_session_factory", return_value=mock_factory):
+            await futures_engine._close_zombie_positions()
+
+        # 서지 포지션 → 안 건드림
+        assert pos.quantity == 100.0

@@ -127,70 +127,54 @@ class TestSurgeScore:
         assert vol == 0.0
         assert price == 0.0
 
-    def test_insufficient_data_returns_zero(self, surge_engine):
-        """Need at least 5 volume entries and 4 price entries."""
-        surge_engine._symbol_states["BTC/USDT"] = SymbolState()
-        state = surge_engine._symbol_states["BTC/USDT"]
-        # Add only 3 entries
-        for i in range(3):
-            state.volume_1m.append(100.0)
-            state.prices.append(65000.0)
-
+    def test_no_candle_data_returns_zero(self, surge_engine):
+        """No candle volume data → zero score."""
+        # _candle_vol_ratios is empty
         score, vol, price = surge_engine.compute_surge_score("BTC/USDT")
         assert score == 0.0
 
     def test_high_volume_surge_score(self, surge_engine):
-        """High volume spike should produce a meaningful score."""
-        surge_engine._symbol_states["BTC/USDT"] = SymbolState()
-        state = surge_engine._symbol_states["BTC/USDT"]
-
-        # Build baseline: 10 normal volume candles
-        for i in range(10):
-            state.volume_1m.append(100.0)
-            state.prices.append(65000.0 + i * 10)
-            state.rsi_closes.append(65000.0 + i * 10)
-
-        # Now add a volume spike with price jump
-        state.volume_1m.append(1000.0)  # 10x volume
-        state.prices.append(66500.0)    # +2.3% jump
-        state.rsi_closes.append(66500.0)
+        """High volume ratio from candle data should produce a meaningful score."""
+        # Set candle-based data (simulating 5m OHLCV result)
+        surge_engine._candle_vol_ratios["BTC/USDT"] = 10.0  # 10x volume
+        surge_engine._candle_price_chgs["BTC/USDT"] = 2.3   # +2.3% price
+        surge_engine._candle_vol_accel["BTC/USDT"] = 3.0     # accelerating
 
         score, vol_ratio, price_chg = surge_engine.compute_surge_score("BTC/USDT")
-        assert vol_ratio > 5.0  # 10x vs ~100 avg
-        assert score > 0.3      # should be significant
+        assert vol_ratio == 10.0
+        assert price_chg == 2.3
+        assert score > 0.3  # significant score
 
     def test_no_volume_no_score(self, surge_engine):
-        """Zero volume should not trigger."""
-        surge_engine._symbol_states["ETH/USDT"] = SymbolState()
-        state = surge_engine._symbol_states["ETH/USDT"]
-
-        for i in range(10):
-            state.volume_1m.append(0.0)
-            state.prices.append(3500.0)
-            state.rsi_closes.append(3500.0)
+        """Zero volume ratio should not trigger."""
+        surge_engine._candle_vol_ratios["ETH/USDT"] = 0.0
+        surge_engine._candle_price_chgs["ETH/USDT"] = 0.0
+        surge_engine._candle_vol_accel["ETH/USDT"] = 0.0
 
         score, vol_ratio, price_chg = surge_engine.compute_surge_score("ETH/USDT")
-        assert score <= 0.1  # minimal score from flat price
+        assert score == 0.0
 
     def test_score_weights_sum(self, surge_engine):
         """Score weights should sum to 1.0 (0.40 + 0.35 + 0.25)."""
-        # Maximum all signals = 1.0
-        surge_engine._symbol_states["SOL/USDT"] = SymbolState()
-        state = surge_engine._symbol_states["SOL/USDT"]
-
-        # Create extreme surge
-        for i in range(10):
-            state.volume_1m.append(10.0)
-            state.prices.append(100.0)
-            state.rsi_closes.append(100.0)
-
-        # Extreme values
-        state.volume_1m.append(200.0)  # 20x
-        state.prices.append(150.0)     # 50% jump
-        state.rsi_closes.append(150.0)
+        # Set extreme values → all signals saturate at 1.0
+        surge_engine._candle_vol_ratios["SOL/USDT"] = 20.0  # 20x → saturates
+        surge_engine._candle_price_chgs["SOL/USDT"] = 10.0   # 10% → saturates
+        surge_engine._candle_vol_accel["SOL/USDT"] = 5.0      # 5 → saturates
 
         score, _, _ = surge_engine.compute_surge_score("SOL/USDT")
         assert 0.0 <= score <= 1.0
+        assert abs(score - 1.0) < 0.01  # all signals maxed
+
+    def test_moderate_surge(self, surge_engine):
+        """Moderate surge (vol=5x, price=1.5%) should pass threshold."""
+        surge_engine._candle_vol_ratios["XRP/USDT"] = 5.0
+        surge_engine._candle_price_chgs["XRP/USDT"] = 1.5
+        surge_engine._candle_vol_accel["XRP/USDT"] = 1.0
+
+        score, vol_ratio, price_chg = surge_engine.compute_surge_score("XRP/USDT")
+        assert vol_ratio >= 5.0
+        assert abs(price_chg) >= 1.5
+        assert score >= 0.30
 
 
 # ── Test: RSI computation ────────────────────────────────────────
@@ -656,19 +640,20 @@ class TestScanStatus:
         assert len(result["scores"]) == 30
 
     def test_scan_status_with_data(self, surge_engine):
-        """scan_status() returns scores when symbol state exists."""
+        """scan_status() returns scores when candle + ticker data exists."""
         surge_engine._symbol_states["BTC/USDT"] = SymbolState()
         state = surge_engine._symbol_states["BTC/USDT"]
-        for i in range(10):
-            state.volume_1m.append(100.0)
-            state.prices.append(65000.0 + i * 10)
-            state.rsi_closes.append(65000.0 + i * 10)
         state.last_price = 65100.0
+        # Set candle-based volume data
+        surge_engine._candle_vol_ratios["BTC/USDT"] = 3.0
+        surge_engine._candle_price_chgs["BTC/USDT"] = 1.0
+        surge_engine._candle_vol_accel["BTC/USDT"] = 0.5
 
         result = surge_engine.scan_status()
         btc_score = next(s for s in result["scores"] if s["symbol"] == "BTC/USDT")
         assert btc_score["last_price"] == 65100.0
         assert btc_score["has_position"] is False
+        assert btc_score["vol_ratio"] == 3.0
 
     def test_scan_status_with_position(self, surge_engine):
         """scan_status() marks positions correctly."""
@@ -713,3 +698,101 @@ class TestScanStatus:
         surge_engine._symbol_states["SOL/USDT"].last_price = 97.0
         # 3% * 3x leverage = 9%
         assert abs(surge_engine._calc_position_pnl_pct(pos) - 9.0) < 0.01
+
+
+# ── Test: Candle volume data update ──────────────────────────────
+
+class TestCandleVolumeData:
+    @pytest.mark.asyncio
+    async def test_update_candle_volume_data(self, surge_engine):
+        """_update_candle_volume_data fetches 5m candles and computes vol_ratio."""
+        from exchange.data_models import Candle
+
+        # Mock OHLCV data: 19 normal candles + 1 spike candle
+        candles = []
+        for i in range(19):
+            candles.append(Candle(
+                timestamp=datetime.now(timezone.utc),
+                open=100.0, high=101.0, low=99.0, close=100.0 + i * 0.1,
+                volume=1000.0,  # baseline
+            ))
+        # Spike candle (10x volume)
+        candles.append(Candle(
+            timestamp=datetime.now(timezone.utc),
+            open=100.0, high=104.0, low=100.0, close=103.0,
+            volume=10000.0,  # 10x spike
+        ))
+
+        surge_engine._exchange.fetch_ohlcv = AsyncMock(return_value=candles)
+        # Limit scan to 1 symbol for testing
+        surge_engine._scan_symbols = ["BTC/USDT"]
+
+        await surge_engine._update_candle_volume_data()
+
+        assert "BTC/USDT" in surge_engine._candle_vol_ratios
+        assert surge_engine._candle_vol_ratios["BTC/USDT"] == pytest.approx(10.0, rel=0.1)
+        assert "BTC/USDT" in surge_engine._candle_price_chgs
+        assert surge_engine._candle_price_chgs["BTC/USDT"] > 0  # price went up
+
+    @pytest.mark.asyncio
+    async def test_update_candle_volume_handles_errors(self, surge_engine):
+        """Errors in fetch_ohlcv are silently skipped per symbol."""
+        surge_engine._exchange.fetch_ohlcv = AsyncMock(side_effect=Exception("API error"))
+        surge_engine._scan_symbols = ["BTC/USDT"]
+
+        await surge_engine._update_candle_volume_data()
+        # Should not crash, just skip
+        assert "BTC/USDT" not in surge_engine._candle_vol_ratios
+
+    @pytest.mark.asyncio
+    async def test_update_candle_volume_insufficient_data(self, surge_engine):
+        """Skip symbols with < 6 candles."""
+        from exchange.data_models import Candle
+
+        candles = [Candle(
+            timestamp=datetime.now(timezone.utc),
+            open=100.0, high=101.0, low=99.0, close=100.0, volume=1000.0,
+        ) for _ in range(3)]  # Only 3 candles
+
+        surge_engine._exchange.fetch_ohlcv = AsyncMock(return_value=candles)
+        surge_engine._scan_symbols = ["BTC/USDT"]
+
+        await surge_engine._update_candle_volume_data()
+        assert "BTC/USDT" not in surge_engine._candle_vol_ratios
+
+    def test_candle_update_interval_default(self, surge_engine):
+        """Default candle update interval is 60 seconds."""
+        assert surge_engine._CANDLE_UPDATE_INTERVAL == 60
+
+
+# ── Test: Batch ticker fetch ────────────────────────────────────
+
+class TestBatchTickerFetch:
+    @pytest.mark.asyncio
+    async def test_fetch_tickers_batch(self, surge_engine):
+        """_fetch_tickers uses batch API call."""
+        surge_engine._scan_symbols = ["BTC/USDT", "ETH/USDT"]
+        surge_engine._exchange.fetch_tickers = AsyncMock(return_value={
+            "BTC/USDT": {"last": 65000.0, "bid": 64990.0, "ask": 65010.0, "quoteVolume": 1e9},
+            "ETH/USDT": {"last": 3500.0, "bid": 3499.0, "ask": 3501.0, "quoteVolume": 5e8},
+            "OTHER/USDT": {"last": 1.0, "bid": 0.99, "ask": 1.01, "quoteVolume": 1000},
+        })
+
+        tickers = await surge_engine._fetch_tickers()
+        assert "BTC/USDT" in tickers
+        assert "ETH/USDT" in tickers
+        assert "OTHER/USDT" not in tickers  # not in scan_symbols
+        assert tickers["BTC/USDT"]["last"] == 65000.0
+
+    @pytest.mark.asyncio
+    async def test_fetch_tickers_fallback(self, surge_engine):
+        """Falls back to individual fetch on batch failure."""
+        surge_engine._scan_symbols = ["BTC/USDT"]
+        surge_engine._exchange.fetch_tickers = AsyncMock(side_effect=Exception("batch failed"))
+        surge_engine._exchange.fetch_ticker = AsyncMock(return_value=MagicMock(
+            last=65000.0, bid=64990.0, ask=65010.0, volume=1000.0,
+        ))
+
+        tickers = await surge_engine._fetch_tickers()
+        assert "BTC/USDT" in tickers
+        assert tickers["BTC/USDT"]["last"] == 65000.0
