@@ -220,8 +220,8 @@ class SurgeTradingConfig(BaseSettings):
     trail_activation_pct: float = 1.0
     trail_stop_pct: float = 0.8
     max_hold_minutes: int = 120
-    vol_threshold: float = 5.0           # 거래량 배수 임계값
-    price_threshold: float = 1.5         # 가격 변동 % 임계값
+    vol_threshold: float = 4.0           # 거래량 배수 임계값 (백테스트 PF 1.42)
+    price_threshold: float = 1.0         # 가격 변동 % 임계값
     long_only: bool = True
     daily_trade_limit: int = 15
     scan_symbols_count: int = 30

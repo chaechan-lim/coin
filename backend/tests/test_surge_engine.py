@@ -492,8 +492,8 @@ class TestSurgeTradingConfig:
         assert cfg.trail_activation_pct == 1.0
         assert cfg.trail_stop_pct == 0.8
         assert cfg.max_hold_minutes == 120
-        assert cfg.vol_threshold == 5.0
-        assert cfg.price_threshold == 1.5
+        assert cfg.vol_threshold == 4.0
+        assert cfg.price_threshold == 1.0
         assert cfg.long_only is True
         assert cfg.daily_trade_limit == 15
         assert cfg.scan_symbols_count == 30

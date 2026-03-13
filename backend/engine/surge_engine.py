@@ -18,6 +18,7 @@ import structlog
 from sqlalchemy import select
 
 from config import AppConfig, SurgeTradingConfig
+from core.enums import SignalType
 from core.models import Position
 from core.event_bus import emit_event
 from db.session import get_session_factory
@@ -581,7 +582,7 @@ class SurgeEngine:
                 side = "buy" if direction == "long" else "sell"
                 signal = Signal(
                     strategy_name="surge_detector",
-                    signal_type="BUY" if direction == "long" else "SELL",
+                    signal_type=SignalType.BUY if direction == "long" else SignalType.SELL,
                     confidence=score,
                     reason=f"Surge score={score:.2f}",
                 )
@@ -771,7 +772,7 @@ class SurgeEngine:
                 side = "sell" if pos.direction == "long" else "buy"
                 signal = Signal(
                     strategy_name="surge_detector",
-                    signal_type="SELL" if pos.direction == "long" else "BUY",
+                    signal_type=SignalType.SELL if pos.direction == "long" else SignalType.BUY,
                     confidence=0.99,
                     reason=f"Surge exit: {reason}",
                 )
