@@ -10,7 +10,7 @@
 빗썸(현물, 비활성) + 바이낸스 현물(live) + 바이낸스 USDM 선물(live, 3x) + 서지 **쿼드 엔진** 24시간 자동 트레이딩 시스템.
 가중 투표 (HOLD=기권) + ML 시그널 필터 + 5요소 시장 감지 + 적응형 가중치, AI 에이전트 5종, Discord 봇(자연어 제어), React 대시보드(8탭).
 **현물 4전략** (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + **선물 7전략** (MA, RSI, MACD, 볼린저RSI, 스토캐스틱RSI, OBV, BB스퀴즈).
-**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **778 유닛 테스트**.
+**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **789 유닛 테스트**.
 
 ---
 
@@ -92,6 +92,8 @@ coin/
 | 서지 엔진 (v0.37) | 거래량 급등 감지 단기 매매, 선물 PM 잔고 공유, exchange="binance_surge" |
 | 버그 수정 11건 (v0.38) | entry_price=0 가드, cash race condition, DB 인덱스, API 검증, fire-and-forget 에러 핸들링 |
 | 현물 Optuna 바이낸스 재최적화 (v0.39) | 빗썸 KRW→바이낸스 USDT 데이터로 재최적화 (PF 1.56, +22.48%), cis_momentum 지배적, SL5/TP14/trail3-1.5, cd15(60h) |
+| 서지 엔진 거래량 감지 수정 (v0.40) | ticker 24h volume→5m 캔들 OHLCV 기반, 배치 ticker(USDM 키 정규화), 좀비 포지션 자동 청산 |
+| 선물 Optuna 최적화 도구 (v0.40) | optimize.py --futures 지원, 백테스트 적응형 가중치 bb_squeeze 누락 수정 |
 
 ### 낮은 우선순위
 

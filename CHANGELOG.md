@@ -80,3 +80,4 @@
 | v0.37 | 2026-03-10 | 선물 구조 최적화 (2x→3x ML, cd72→cd48→cd6), ML Signal Filter (LightGBM 23피처), 서지 엔진, 교차 거래소 포지션 전환, MIN_SELL_ACTIVE_WEIGHT, 페어링 매도, 현물 Optuna 가중치, 766 테스트 |
 | v0.38 | 2026-03-12 | 선물 7전략 (bb_squeeze 추가), 쿨다운 cd6(24h), 버그 수정 11건 (entry_price=0 가드, cash race condition, DB 인덱스, API 검증, fire-and-forget 에러 핸들링), 773 테스트 |
 | v0.39 | 2026-03-13 | 현물 Optuna 바이낸스 USDT 재최적화 (PF 1.56, +22.48%), cis_momentum 지배적(0.42), SL5/TP14/trail3-1.5, cd15(60h), optimize.py 바이낸스 지원, 778 테스트 |
+| v0.40 | 2026-03-13 | 서지 엔진 거래량 감지 수정 (ticker→5m OHLCV), 배치 ticker USDM 키 정규화, 좀비 포지션 자동 청산, 선물 Optuna 도구, 백테스트 적응형 가중치 bb_squeeze 수정, 789 테스트 |

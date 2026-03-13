@@ -33,7 +33,7 @@ Python 3.12 (FastAPI) + React 18 (TypeScript) + PostgreSQL 16.
 - **모든 코드 변경에 테스트 추가/수정 필수**. 테스트 없는 PR은 허용하지 않음.
 - 변경 후 반드시 `cd backend && .venv/bin/python -m pytest tests/ -x -q` 로 전체 테스트 통과 확인.
 - 테스트는 인메모리 SQLite 기반 (aiosqlite). 외부 의존성 Mock 필수.
-- 현재 **773 테스트**. 줄어들면 안 됨.
+- 현재 **789 테스트**. 줄어들면 안 됨.
 
 ### 2. Backtest Validation
 - **전략 파라미터 변경 시 반드시 540일 백테스트 검증** 후 적용.
