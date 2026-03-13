@@ -46,11 +46,13 @@ USE_BINANCE = False  # CLI에서 설정
 SYMBOLS = SYMBOLS_KRW  # CLI에서 변경
 
 
-def create_exchange():
+async def create_exchange():
     """백테스트용 거래소 어댑터 (캐시 데이터만 사용)."""
     if USE_BINANCE:
         from exchange.binance_spot_adapter import BinanceSpotAdapter
-        return BinanceSpotAdapter(api_key="", api_secret="")
+        ex = BinanceSpotAdapter(api_key="", api_secret="", testnet=False)
+        await ex.initialize()
+        return ex
     return BithumbAdapter(api_key="", api_secret="")
 
 
@@ -87,7 +89,7 @@ async def run_backtest_with_params(
         exchange=exchange,
         strategy_names=STRATEGY_NAMES,
         symbols=SYMBOLS,
-        initial_balance=500_000 if not USE_BINANCE else 500,
+        initial_balance=500_000,
         min_confidence=params["min_confidence"],
         stop_loss_pct=params["stop_loss_pct"],
         take_profit_pct=params["take_profit_pct"],
@@ -125,7 +127,7 @@ async def multi_period_objective(
     180d/365d/540d 모두에서 좋은 파라미터만 높은 점수.
     """
     params = suggest_params(trial)
-    exchange = create_exchange()
+    exchange = await create_exchange()
 
     results = []
     for days in periods:
@@ -176,7 +178,7 @@ async def simple_objective(
 ) -> float:
     """단순 전체 기간 백테스트 objective (빠른 탐색용)."""
     params = suggest_params(trial)
-    exchange = create_exchange()
+    exchange = await create_exchange()
 
     try:
         result = await run_backtest_with_params(exchange, params, days=total_days)
