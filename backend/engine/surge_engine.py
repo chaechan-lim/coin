@@ -287,19 +287,27 @@ class SurgeEngine:
         try:
             # 배치 fetch — 개별 30 API 콜 대신 1회 호출
             all_tickers = await self._exchange.fetch_tickers()
+            # USDM 선물: 키가 "BTC/USDT:USDT" 형식 → "BTC/USDT"로 정규화
             scan_set = set(self._scan_symbols)
-            for sym, data in all_tickers.items():
+            for raw_sym, data in all_tickers.items():
+                sym = raw_sym.replace(":USDT", "")
                 if sym in scan_set:
+                    last = float(data.get("last", 0) or 0)
+                    if last <= 0:
+                        continue
                     tickers[sym] = {
-                        "last": float(data.get("last", 0) or 0),
+                        "last": last,
                         "bid": float(data.get("bid", 0) or 0),
                         "ask": float(data.get("ask", 0) or 0),
                         "volume": float(data.get("quoteVolume", 0) or 0),
                     }
         except Exception as e:
-            logger.warning("surge_ticker_fetch_error", error=str(e))
-            # 폴백: 개별 fetch
+            logger.warning("surge_ticker_batch_failed_fallback", error=str(e))
+        # 배치 실패 또는 심볼 누락 시 → 개별 fetch 폴백
+        if len(tickers) < len(self._scan_symbols) // 2:
             for sym in self._scan_symbols:
+                if sym in tickers:
+                    continue
                 try:
                     ticker = await self._exchange.fetch_ticker(sym)
                     tickers[sym] = {
@@ -372,12 +380,14 @@ class SurgeEngine:
             except Exception:
                 continue
 
+        # 상위 서지 로그 (데이터 없으면 warning)
         if updated > 0:
-            # 상위 서지 로그
             top = sorted(self._candle_vol_ratios.items(), key=lambda x: x[1], reverse=True)[:3]
             logger.info("surge_candle_volume_updated",
                         updated=updated,
                         top=[(s, round(v, 1)) for s, v in top if v >= 2.0])
+        else:
+            logger.warning("surge_candle_volume_no_data", symbols=len(self._scan_symbols))
 
     # ── Surge scoring ────────────────────────────────────────────
 

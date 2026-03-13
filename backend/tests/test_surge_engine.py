@@ -770,12 +770,12 @@ class TestCandleVolumeData:
 class TestBatchTickerFetch:
     @pytest.mark.asyncio
     async def test_fetch_tickers_batch(self, surge_engine):
-        """_fetch_tickers uses batch API call."""
+        """_fetch_tickers uses batch API call (USDM key format)."""
         surge_engine._scan_symbols = ["BTC/USDT", "ETH/USDT"]
         surge_engine._exchange.fetch_tickers = AsyncMock(return_value={
-            "BTC/USDT": {"last": 65000.0, "bid": 64990.0, "ask": 65010.0, "quoteVolume": 1e9},
-            "ETH/USDT": {"last": 3500.0, "bid": 3499.0, "ask": 3501.0, "quoteVolume": 5e8},
-            "OTHER/USDT": {"last": 1.0, "bid": 0.99, "ask": 1.01, "quoteVolume": 1000},
+            "BTC/USDT:USDT": {"last": 65000.0, "bid": 64990.0, "ask": 65010.0, "quoteVolume": 1e9},
+            "ETH/USDT:USDT": {"last": 3500.0, "bid": 3499.0, "ask": 3501.0, "quoteVolume": 5e8},
+            "OTHER/USDT:USDT": {"last": 1.0, "bid": 0.99, "ask": 1.01, "quoteVolume": 1000},
         })
 
         tickers = await surge_engine._fetch_tickers()
@@ -787,11 +787,23 @@ class TestBatchTickerFetch:
     @pytest.mark.asyncio
     async def test_fetch_tickers_fallback(self, surge_engine):
         """Falls back to individual fetch on batch failure."""
-        surge_engine._scan_symbols = ["BTC/USDT"]
+        surge_engine._scan_symbols = ["BTC/USDT", "ETH/USDT"]
         surge_engine._exchange.fetch_tickers = AsyncMock(side_effect=Exception("batch failed"))
         surge_engine._exchange.fetch_ticker = AsyncMock(return_value=MagicMock(
             last=65000.0, bid=64990.0, ask=65010.0, volume=1000.0,
         ))
+
+        tickers = await surge_engine._fetch_tickers()
+        assert "BTC/USDT" in tickers
+        assert tickers["BTC/USDT"]["last"] == 65000.0
+
+    @pytest.mark.asyncio
+    async def test_fetch_tickers_normalizes_usdm_keys(self, surge_engine):
+        """USDM futures ticker keys (BTC/USDT:USDT) are normalized."""
+        surge_engine._scan_symbols = ["BTC/USDT"]
+        surge_engine._exchange.fetch_tickers = AsyncMock(return_value={
+            "BTC/USDT:USDT": {"last": 65000.0, "bid": 64990.0, "ask": 65010.0, "quoteVolume": 1e9},
+        })
 
         tickers = await surge_engine._fetch_tickers()
         assert "BTC/USDT" in tickers
