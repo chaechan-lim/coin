@@ -348,29 +348,36 @@ class SurgeEngine:
     _VOL_LOOKBACK = 60
 
     async def _update_candle_volume_data(self) -> None:
-        """5m 캔들 OHLCV로 거래량 비율 갱신 (백테스트와 동일한 5시간 baseline)."""
+        """5m 캔들 OHLCV로 거래량 비율 갱신 (백테스트와 동일한 5시간 baseline).
+
+        주의: fetch_ohlcv 마지막 캔들은 진행 중(미완성)이므로 제외.
+        [-2]가 가장 최근 완성된 캔들.
+        """
         updated = 0
-        need = self._VOL_LOOKBACK + 1  # baseline + 현재 캔들
+        # baseline(60) + current(1) + 진행중(1) = 62
+        need = self._VOL_LOOKBACK + 2
         for sym in self._scan_symbols:
             try:
                 candles = await self._exchange.fetch_ohlcv(sym, "5m", limit=need)
                 if not candles or len(candles) < 10:
                     continue
 
-                volumes = [c.volume for c in candles]
+                # 마지막 캔들(진행 중) 제외 → [-1]이 최근 완성 캔들
+                completed = candles[:-1]
+                volumes = [c.volume for c in completed]
                 current_vol = volumes[-1]
-                # baseline: 현재 캔들 제외, 최대 _VOL_LOOKBACK개 평균
-                baseline = volumes[:-1]
-                avg_vol = np.mean(baseline)
+                # baseline: 현재 완성 캔들 제외, 최대 _VOL_LOOKBACK개 평균
+                baseline = volumes[:-1][-self._VOL_LOOKBACK:]
+                avg_vol = np.mean(baseline) if baseline else 0.0
                 if avg_vol > 0:
                     self._candle_vol_ratios[sym] = current_vol / avg_vol
                 else:
                     self._candle_vol_ratios[sym] = 0.0
 
-                # 가격 변동 (최근 15분 = 3 × 5m 캔들)
-                lookback = min(3, len(candles) - 1)
-                old_close = candles[-lookback - 1].close
-                new_close = candles[-1].close
+                # 가격 변동 (최근 15분 = 3 × 5m 완성 캔들)
+                lookback = min(3, len(completed) - 1)
+                old_close = completed[-lookback - 1].close
+                new_close = completed[-1].close
                 if old_close > 0:
                     self._candle_price_chgs[sym] = (new_close - old_close) / old_close * 100
                 else:
@@ -378,8 +385,8 @@ class SurgeEngine:
 
                 # 가속도: 현재 vol_ratio vs 2캔들 전 vol_ratio
                 if len(volumes) >= self._VOL_LOOKBACK + 3:
-                    prev_baseline = volumes[:-3]
-                    prev_avg = np.mean(prev_baseline[-self._VOL_LOOKBACK:])
+                    prev_baseline = volumes[:-3][-self._VOL_LOOKBACK:]
+                    prev_avg = np.mean(prev_baseline) if prev_baseline else avg_vol
                     prev_ratio = volumes[-3] / prev_avg if prev_avg > 0 else 0.0
                     self._candle_vol_accel[sym] = self._candle_vol_ratios[sym] - prev_ratio
                 else:

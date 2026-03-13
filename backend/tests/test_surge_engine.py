@@ -705,10 +705,10 @@ class TestScanStatus:
 class TestCandleVolumeData:
     @pytest.mark.asyncio
     async def test_update_candle_volume_data(self, surge_engine):
-        """_update_candle_volume_data fetches 5m candles and computes vol_ratio (5h baseline)."""
+        """_update_candle_volume_data uses last completed candle (skips in-progress)."""
         from exchange.data_models import Candle
 
-        # Mock OHLCV data: 60 normal candles (5h baseline) + 1 spike candle
+        # 60 baseline + 1 spike (completed) + 1 in-progress (will be dropped)
         candles = []
         for i in range(60):
             candles.append(Candle(
@@ -716,23 +716,29 @@ class TestCandleVolumeData:
                 open=100.0, high=101.0, low=99.0, close=100.0 + i * 0.01,
                 volume=1000.0,  # baseline
             ))
-        # Spike candle (10x volume)
+        # Spike candle — last completed
         candles.append(Candle(
             timestamp=datetime.now(timezone.utc),
             open=100.0, high=104.0, low=100.0, close=103.0,
             volume=10000.0,  # 10x spike
         ))
+        # In-progress candle — will be excluded
+        candles.append(Candle(
+            timestamp=datetime.now(timezone.utc),
+            open=103.0, high=103.5, low=102.5, close=103.2,
+            volume=200.0,  # low because incomplete
+        ))
 
         surge_engine._exchange.fetch_ohlcv = AsyncMock(return_value=candles)
-        # Limit scan to 1 symbol for testing
         surge_engine._scan_symbols = ["BTC/USDT"]
 
         await surge_engine._update_candle_volume_data()
 
         assert "BTC/USDT" in surge_engine._candle_vol_ratios
+        # Spike candle (10000) vs baseline avg (1000) = 10x
         assert surge_engine._candle_vol_ratios["BTC/USDT"] == pytest.approx(10.0, rel=0.1)
         assert "BTC/USDT" in surge_engine._candle_price_chgs
-        assert surge_engine._candle_price_chgs["BTC/USDT"] > 0  # price went up
+        assert surge_engine._candle_price_chgs["BTC/USDT"] > 0
 
     @pytest.mark.asyncio
     async def test_update_candle_volume_handles_errors(self, surge_engine):
