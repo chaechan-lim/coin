@@ -940,24 +940,58 @@ class PortfolioManager:
                 is_likely_liquidation = is_futures and pnl_pct < -80
                 reason = "강제청산(추정)" if is_likely_liquidation else "다운타임 중 포지션 종료"
 
+                old_qty = db_pos.quantity
+                now = datetime.now(timezone.utc)
+
                 logger.warning(
                     "position_cleared_not_on_exchange",
-                    symbol=db_sym, old_qty=db_pos.quantity,
+                    symbol=db_sym, old_qty=old_qty,
                     entry_price=entry, direction=direction,
                     leverage=leverage, invested=round(invested, 2),
                     reason=reason,
                 )
+
+                # 거래 이력에 기록 (Order 생성)
+                pnl_amount = invested * pnl_pct / 100 if invested else 0
+                close_side = "sell" if direction != "short" else "buy"
+                order = Order(
+                    exchange=self._exchange_name,
+                    symbol=db_sym,
+                    side=close_side,
+                    order_type="market",
+                    status="filled",
+                    requested_price=current_price,
+                    executed_price=current_price,
+                    requested_quantity=old_qty,
+                    executed_quantity=old_qty,
+                    fee=0.0,
+                    fee_currency="USDT" if is_futures else cash_symbol,
+                    is_paper=db_pos.is_paper or False,
+                    direction=direction,
+                    leverage=leverage,
+                    margin_used=invested,
+                    entry_price=entry,
+                    realized_pnl=round(pnl_amount, 4),
+                    realized_pnl_pct=round(pnl_pct, 2),
+                    strategy_name="position_sync",
+                    signal_confidence=0.0,
+                    signal_reason=reason,
+                    filled_at=now,
+                )
+                session.add(order)
+
                 db_pos.quantity = 0
-                db_pos.last_sell_at = datetime.now(timezone.utc)
+                db_pos.last_sell_at = now
                 synced_count += 1
                 self._cleared_positions.append({
                     "symbol": db_sym,
-                    "quantity": db_pos.quantity,
+                    "quantity": 0,
                     "entry_price": entry,
                     "direction": direction,
                     "leverage": leverage,
                     "invested": invested,
                     "reason": reason,
+                    "pnl_pct": round(pnl_pct, 2),
                 })
 
         await session.flush()

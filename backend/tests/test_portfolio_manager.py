@@ -843,6 +843,20 @@ async def test_sync_clears_position_not_on_exchange(session):
     assert cp["direction"] == "long"
     assert cp["invested"] == 1007
 
+    # Order 기록이 생성됨 (거래 이력 추적 가능)
+    from core.models import Order as OrderModel
+    order_result = await session.execute(
+        select(OrderModel).where(
+            OrderModel.symbol == "MOCA/KRW",
+            OrderModel.strategy_name == "position_sync",
+        )
+    )
+    order = order_result.scalar_one_or_none()
+    assert order is not None
+    assert order.side == "sell"
+    assert order.status == "filled"
+    assert order.executed_quantity == 43.56
+
 
 @pytest.mark.asyncio
 async def test_sync_cleared_position_futures_liquidation(session):
@@ -891,6 +905,22 @@ async def test_sync_cleared_position_futures_liquidation(session):
     assert cp["direction"] == "long"
     assert cp["leverage"] == 3
     assert "청산" in cp["reason"]
+
+    # Order 기록이 생성됨
+    from core.models import Order as OrderModel
+    order_result = await session.execute(
+        select(OrderModel).where(
+            OrderModel.symbol == "ETH/USDT",
+            OrderModel.exchange == "binance_futures",
+            OrderModel.strategy_name == "position_sync",
+        )
+    )
+    order = order_result.scalar_one_or_none()
+    assert order is not None
+    assert order.side == "sell"
+    assert order.status == "filled"
+    assert order.realized_pnl is not None
+    assert order.realized_pnl_pct < -80  # 강제청산 수준
 
 
 @pytest.mark.asyncio
