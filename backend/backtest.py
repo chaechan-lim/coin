@@ -1270,26 +1270,32 @@ def _detect_market_state(row, df=None, i: int = 0, use_agent_scoring: bool = Tru
 
 
 # 시장 상태별 적응형 가중치 프로필 (6전략 — vol_breakout/supertrend 제거)
+# 7전략 적응형 가중치 (combiner.py ADAPTIVE_PROFILES와 동기화 필수!)
 _ADAPTIVE_WEIGHT_PROFILES = {
     "strong_uptrend": {
-        "ma_crossover": 0.12, "rsi": 0.18, "macd_crossover": 0.12,
-        "bollinger_rsi": 0.28, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
+        "ma_crossover": 0.10, "rsi": 0.16, "macd_crossover": 0.10,
+        "bollinger_rsi": 0.24, "stochastic_rsi": 0.13, "obv_divergence": 0.13,
+        "bb_squeeze": 0.14,
     },
     "uptrend": {
-        "ma_crossover": 0.10, "rsi": 0.22, "macd_crossover": 0.10,
-        "bollinger_rsi": 0.28, "stochastic_rsi": 0.15, "obv_divergence": 0.15,
+        "ma_crossover": 0.08, "rsi": 0.19, "macd_crossover": 0.08,
+        "bollinger_rsi": 0.24, "stochastic_rsi": 0.13, "obv_divergence": 0.13,
+        "bb_squeeze": 0.15,
     },
     "sideways": {
-        "ma_crossover": 0.05, "rsi": 0.27, "macd_crossover": 0.08,
-        "bollinger_rsi": 0.32, "stochastic_rsi": 0.15, "obv_divergence": 0.13,
+        "ma_crossover": 0.04, "rsi": 0.22, "macd_crossover": 0.06,
+        "bollinger_rsi": 0.26, "stochastic_rsi": 0.12, "obv_divergence": 0.10,
+        "bb_squeeze": 0.20,
     },
     "downtrend": {
-        "ma_crossover": 0.12, "rsi": 0.22, "macd_crossover": 0.15,
-        "bollinger_rsi": 0.26, "stochastic_rsi": 0.13, "obv_divergence": 0.12,
+        "ma_crossover": 0.10, "rsi": 0.19, "macd_crossover": 0.13,
+        "bollinger_rsi": 0.22, "stochastic_rsi": 0.11, "obv_divergence": 0.10,
+        "bb_squeeze": 0.15,
     },
     "crash": {
-        "ma_crossover": 0.10, "rsi": 0.22, "macd_crossover": 0.12,
-        "bollinger_rsi": 0.28, "stochastic_rsi": 0.15, "obv_divergence": 0.13,
+        "ma_crossover": 0.08, "rsi": 0.19, "macd_crossover": 0.10,
+        "bollinger_rsi": 0.24, "stochastic_rsi": 0.13, "obv_divergence": 0.11,
+        "bb_squeeze": 0.15,
     },
 }
 
