@@ -160,7 +160,7 @@ class BinanceFuturesEngine(TradingEngine):
             side = "sell" if direction == "long" else "buy"
             signal = Signal(
                 strategy_name="zombie_cleanup",
-                signal_type="SELL" if direction == "long" else "BUY",
+                signal_type=SignalType.SELL if direction == "long" else SignalType.BUY,
                 confidence=0.99,
                 reason=f"비추적 심볼 자동 청산: {pos.symbol}",
             )
