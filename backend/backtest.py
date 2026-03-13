@@ -1368,6 +1368,10 @@ class PortfolioBacktester:
         max_coin_buys: int = 3,
         # 전략 매도 모드
         strategy_sell_mode: str = "none",  # "none" | "voting" | "paired"
+        # 멀티 포지션 모드
+        multi_position: bool = False,
+        # 쿨다운 오버라이드 (고신뢰도 시 쿨다운 무시)
+        cooldown_override_conf: float = 0.0,
     ):
         self._exchange = exchange
         self._initial_balance = initial_balance
@@ -1385,6 +1389,8 @@ class PortfolioBacktester:
         self._max_positions = max_positions
         self._max_trade_size_pct = max_trade_size_pct
         self._strategy_sell_mode = strategy_sell_mode
+        self._multi_position = multi_position
+        self._cooldown_override_conf = cooldown_override_conf
         self._symbols = symbols or DEFAULT_PORTFOLIO_COINS
 
         # 리스크 관리자
@@ -1494,9 +1500,12 @@ class PortfolioBacktester:
         limit_str = "ON" if self._trade_limiter else "OFF"
         print(f"  최대 동시 포지션: {self._max_positions} | 코인당 자금: {self._max_trade_size_pct*100:.0f}%")
         print(f"  손절: {sl_str} | 익절: {tp_str} | 트레일링: {trail_str}")
+        multi_str = "ON" if self._multi_position else "OFF"
         sell_mode_str = {"none": "OFF", "voting": "투표", "paired": "페어링"}.get(self._strategy_sell_mode, "OFF")
         print(f"  비대칭: {asym_str} | 쿨다운: {self._trade_cooldown}캔들 | 전략매도: {sell_mode_str}")
-        print(f"  리스크 관리: {risk_str} | 매매 제한: {limit_str}")
+        cd_override_str = f"{self._cooldown_override_conf:.0%}" if self._cooldown_override_conf > 0 else "OFF"
+        print(f"  리스크 관리: {risk_str} | 매매 제한: {limit_str} | 멀티포지션: {multi_str}")
+        print(f"  쿨다운 오버라이드: {cd_override_str}")
         print(f"{'='*60}")
 
         # 1. 데이터 프리페치
@@ -1548,12 +1557,13 @@ class PortfolioBacktester:
             # 4a. 에쿼티 계산
             equity = cash
             position_values: dict[str, float] = {}
-            for sym, pos in positions.items():
-                if sym in all_data and ts in all_data[sym].index:
-                    val = pos.quantity * float(all_data[sym].loc[ts, "close"])
+            for pos_key, pos in positions.items():
+                _sym = pos.symbol  # composite key에서도 symbol 직접 참조
+                if _sym in all_data and ts in all_data[_sym].index:
+                    val = pos.quantity * float(all_data[_sym].loc[ts, "close"])
                 else:
                     val = pos.quantity * pos.avg_price
-                position_values[sym] = val
+                position_values[pos_key] = val
                 equity += val
 
             # 4b. 에쿼티 곡선/낙폭
@@ -1595,10 +1605,11 @@ class PortfolioBacktester:
 
             # 4f. 보유 포지션 SL/TP/트레일링 체크
             to_close: list[str] = []
-            for sym, pos in positions.items():
-                if sym not in all_data or ts not in all_data[sym].index:
+            for pos_key, pos in positions.items():
+                _sym = pos.symbol
+                if _sym not in all_data or ts not in all_data[_sym].index:
                     continue
-                cur_price = float(all_data[sym].loc[ts, "close"])
+                cur_price = float(all_data[_sym].loc[ts, "close"])
                 unrealized_pct = (cur_price - pos.avg_price) / pos.avg_price * 100
 
                 if cur_price > pos.peak_price:
@@ -1627,18 +1638,18 @@ class PortfolioBacktester:
                     drop = (pos.peak_price - cur_price) / pos.peak_price * 100
                     if drop >= eff_trail_stop:
                         sell_tag = "sell(trail)"
-                        sell_text = f"트레일링 ({sym}) 고점 대비 -{drop:.1f}% (수익 {unrealized_pct:+.1f}%)"
+                        sell_text = f"트레일링 ({_sym}) 고점 대비 -{drop:.1f}% (수익 {unrealized_pct:+.1f}%)"
 
                 # 손절
                 if not sell_tag and pos.dynamic_sl_pct > 0 and unrealized_pct <= -pos.dynamic_sl_pct:
                     sell_tag = "sell(sl)"
-                    sell_text = f"손절 ({sym}) {unrealized_pct:.1f}% (한도 -{pos.dynamic_sl_pct:.1f}%)"
+                    sell_text = f"손절 ({_sym}) {unrealized_pct:.1f}% (한도 -{pos.dynamic_sl_pct:.1f}%)"
 
                 # 익절 (트레일링 미활성 시)
                 if (not sell_tag and not pos.trailing_active
                         and self._take_profit_pct > 0 and unrealized_pct >= self._take_profit_pct):
                     sell_tag = "sell(tp)"
-                    sell_text = f"익절 ({sym}) +{unrealized_pct:.1f}%"
+                    sell_text = f"익절 ({_sym}) +{unrealized_pct:.1f}%"
 
                 if sell_tag:
                     proceeds, pnl, pnl_pct, t = self._execute_sell(
@@ -1646,28 +1657,30 @@ class PortfolioBacktester:
                     )
                     cash += proceeds
                     trades.append(t)
-                    coin_stats[sym]["trades"] += 1
-                    coin_stats[sym]["pnl"] += pnl
+                    coin_stats[_sym]["trades"] += 1
+                    coin_stats[_sym]["pnl"] += pnl
                     if pnl > 0:
                         win_count += 1
                         total_win_pct += abs(pnl_pct)
-                        coin_stats[sym]["wins"] += 1
+                        coin_stats[_sym]["wins"] += 1
                     else:
                         loss_count += 1
                         total_loss_pct += abs(pnl_pct)
-                        coin_stats[sym]["losses"] += 1
-                    to_close.append(sym)
+                        coin_stats[_sym]["losses"] += 1
+                    to_close.append(pos_key)
 
-            for sym in to_close:
-                del positions[sym]
+            for pk in to_close:
+                del positions[pk]
 
-            # 4f-2. 전략 신호 기반 매도 (voting/paired 모드)
-            if self._strategy_sell_mode != "none":
+            # 4f-2. 전략 신호 기반 매도 (voting/paired/multi 모드)
+            _sell_mode = "paired" if self._multi_position else self._strategy_sell_mode
+            if _sell_mode != "none":
                 strat_sell_list: list[str] = []
-                for sym, pos in positions.items():
-                    if sym not in all_data or ts not in all_data[sym].index:
+                for pos_key, pos in positions.items():
+                    _sym = pos.symbol
+                    if _sym not in all_data or ts not in all_data[_sym].index:
                         continue
-                    sym_df = all_data[sym]
+                    sym_df = all_data[_sym]
                     sym_iloc = sym_df.index.get_loc(ts)
                     if isinstance(sym_iloc, slice):
                         sym_iloc = sym_iloc.start
@@ -1675,7 +1688,7 @@ class PortfolioBacktester:
                     slice_df = sym_df.iloc[max(0, sym_iloc - 200):sym_iloc + 1]
                     row = sym_df.iloc[sym_iloc]
                     ticker = Ticker(
-                        symbol=sym, last=cur_price,
+                        symbol=_sym, last=cur_price,
                         bid=cur_price * 0.9995, ask=cur_price * 1.0005,
                         high=float(row["high"]), low=float(row["low"]),
                         volume=float(row.get("volume", 0)), timestamp=ts,
@@ -1686,7 +1699,7 @@ class PortfolioBacktester:
                     sell_confidence = 0.0
                     sell_reason = ""
 
-                    if self._strategy_sell_mode == "paired":
+                    if _sell_mode == "paired":
                         entry_strat = self._strategies.get(pos.entry_strategy)
                         if entry_strat is None:
                             continue
@@ -1696,11 +1709,11 @@ class PortfolioBacktester:
                                 should_sell = True
                                 sell_strategy = pos.entry_strategy
                                 sell_confidence = sig.confidence
-                                sell_reason = f"페어링 매도 ({sym}) {sig.reason}"
+                                sell_reason = f"페어링 매도 ({_sym}) {sig.reason}"
                         except Exception:
                             pass
 
-                    elif self._strategy_sell_mode == "voting":
+                    elif _sell_mode == "voting":
                         signals: list[Signal] = []
                         for name, strategy in self._strategies.items():
                             try:
@@ -1716,7 +1729,7 @@ class PortfolioBacktester:
                                 should_sell = True
                                 sell_strategy = best_sig.strategy_name
                                 sell_confidence = float(decision.combined_confidence)
-                                sell_reason = f"투표 매도 ({sym}) {best_sig.reason}"
+                                sell_reason = f"투표 매도 ({_sym}) {best_sig.reason}"
 
                     if should_sell:
                         proceeds, pnl, pnl_pct, t = self._execute_sell(
@@ -1725,195 +1738,299 @@ class PortfolioBacktester:
                         )
                         cash += proceeds
                         trades.append(t)
-                        coin_stats[sym]["trades"] += 1
-                        coin_stats[sym]["pnl"] += pnl
+                        coin_stats[_sym]["trades"] += 1
+                        coin_stats[_sym]["pnl"] += pnl
                         if pnl > 0:
                             win_count += 1
                             total_win_pct += abs(pnl_pct)
-                            coin_stats[sym]["wins"] += 1
+                            coin_stats[_sym]["wins"] += 1
                         else:
                             loss_count += 1
                             total_loss_pct += abs(pnl_pct)
-                            coin_stats[sym]["losses"] += 1
-                        strat_sell_list.append(sym)
+                            coin_stats[_sym]["losses"] += 1
+                        strat_sell_list.append(pos_key)
 
-                for sym in strat_sell_list:
-                    del positions[sym]
+                for pk in strat_sell_list:
+                    del positions[pk]
 
-            # 4g. 미보유 코인 순회: 전략 시그널 → 매수 후보 수집
-            buy_candidates: list[tuple[str, float, Signal, object]] = []  # (sym, confidence, best_signal, decision)
+            # 4g. 매수 후보 수집 + 실행
+            if self._multi_position:
+                # ── 멀티 포지션: 각 전략이 독립적으로 매수 결정 ──
+                num_strats = len(self._strategies)
+                slot_size_pct = self._max_trade_size_pct / num_strats
 
-            for sym in portfolio_syms:
-                if sym in positions:
-                    continue  # 이미 보유 중
-                if sym not in all_data or ts not in all_data[sym].index:
-                    continue
-                if len(positions) >= self._max_positions:
-                    break  # 최대 포지션 도달
-
-                # 코인별 쿨다운
-                last_idx = last_trade_idx_per_coin.get(sym, -9999)
-                if candle_idx - last_idx < self._trade_cooldown:
-                    continue
-
-                sym_df = all_data[sym]
-                sym_iloc = sym_df.index.get_loc(ts)
-                if isinstance(sym_iloc, slice):
-                    sym_iloc = sym_iloc.start
-
-                row = sym_df.iloc[sym_iloc]
-                cur_price = float(row["close"])
-
-                # 추세 필터
-                if self._trend_filter and _is_downtrend(row):
-                    continue
-
-                # 전략 신호 수집
-                slice_df = sym_df.iloc[max(0, sym_iloc - 200):sym_iloc + 1]
-                ticker = Ticker(
-                    symbol=sym, last=cur_price,
-                    bid=cur_price * 0.9995, ask=cur_price * 1.0005,
-                    high=float(row["high"]), low=float(row["low"]),
-                    volume=float(row.get("volume", 0)), timestamp=ts,
-                )
-
-                signals: list[Signal] = []
-                for name, strategy in self._strategies.items():
-                    try:
-                        sig = await strategy.analyze(slice_df.copy(), ticker)
-                        signals.append(sig)
-                    except Exception:
-                        pass
-
-                if not signals:
-                    continue
-
-                decision = self._combiner.combine(signals, market_state=current_market_state)
-                if decision.action != SignalType.BUY:
-                    continue
-
-                # 비대칭 전략
-                if self._asymmetric:
-                    if current_market_state in ("crash", "downtrend"):
+                for sym in portfolio_syms:
+                    if sym not in all_data or ts not in all_data[sym].index:
                         continue
-                    _asym_conf = {
-                        "strong_uptrend": max(self._min_confidence - 0.15, 0.35),
-                        "uptrend": max(self._min_confidence - 0.10, 0.40),
-                        "sideways": self._min_confidence + 0.05,
-                    }
-                    buy_threshold = _asym_conf.get(current_market_state, self._min_confidence)
-                else:
-                    buy_threshold = self._min_confidence
-                    if market_confidence < 0.35:
-                        buy_threshold = self._min_confidence + 0.10
+                    if len(positions) >= self._max_positions * num_strats:
+                        break
 
-                if decision.combined_confidence < buy_threshold:
-                    continue
+                    sym_df = all_data[sym]
+                    sym_iloc = sym_df.index.get_loc(ts)
+                    if isinstance(sym_iloc, slice):
+                        sym_iloc = sym_iloc.start
+                    row = sym_df.iloc[sym_iloc]
+                    cur_price = float(row["close"])
 
-                buy_signals = [s for s in signals if s.signal_type == SignalType.BUY]
-                best_signal = max(buy_signals, key=lambda s: s.confidence) if buy_signals else signals[0]
+                    if self._trend_filter and _is_downtrend(row):
+                        continue
 
-                buy_candidates.append((sym, float(decision.combined_confidence), best_signal, decision))
+                    slice_df = sym_df.iloc[max(0, sym_iloc - 200):sym_iloc + 1]
+                    ticker = Ticker(
+                        symbol=sym, last=cur_price,
+                        bid=cur_price * 0.9995, ask=cur_price * 1.0005,
+                        high=float(row["high"]), low=float(row["low"]),
+                        volume=float(row.get("volume", 0)), timestamp=ts,
+                    )
 
-            # 신뢰도 내림차순 정렬 (현금 경쟁 시 강한 시그널 우선)
-            buy_candidates.sort(key=lambda x: x[1], reverse=True)
+                    for strat_name, strategy in self._strategies.items():
+                        pos_key = f"{sym}|{strat_name}"
+                        if pos_key in positions:
+                            continue  # 이 전략이 이미 이 코인 보유 중
 
-            for sym, conf, best_signal, decision in buy_candidates:
-                if len(positions) >= self._max_positions:
-                    break
+                        # 전략별 쿨다운
+                        last_idx = last_trade_idx_per_coin.get(pos_key, -9999)
+                        if candle_idx - last_idx < self._trade_cooldown:
+                            continue
 
-                # 리스크 관리자 체크
-                if self._risk_manager:
-                    # 포지션 가치 재계산 (매수 완료된 것 포함)
-                    cur_pos_values = {}
-                    for s, p in positions.items():
-                        if s in all_data and ts in all_data[s].index:
-                            cur_pos_values[s] = p.quantity * float(all_data[s].loc[ts, "close"])
+                        try:
+                            sig = await strategy.analyze(slice_df.copy(), ticker)
+                        except Exception:
+                            continue
+
+                        if sig.signal_type != SignalType.BUY:
+                            continue
+                        if sig.confidence < self._min_confidence:
+                            continue
+
+                        # 비대칭 전략
+                        if self._asymmetric and current_market_state in ("crash", "downtrend"):
+                            continue
+
+                        # 매매 제한
+                        if self._trade_limiter:
+                            ok, reason = self._trade_limiter.can_buy(sym, candle_idx)
+                            if not ok:
+                                continue
+
+                        # 포지션 사이징 (전략 수로 나눔)
+                        trade_size = cash * slot_size_pct
+                        if trade_size < MIN_TRADE_KRW:
+                            continue
+
+                        exec_price = cur_price * (1 + SLIPPAGE)
+                        fee = trade_size * TAKER_FEE
+                        qty = (trade_size - fee) / exec_price
+                        cost = qty * exec_price
+                        cash -= (cost + fee)
+
+                        # 동적 손절
+                        if self._dynamic_sl:
+                            dyn_sl = _calc_dynamic_sl(row, cur_price, current_market_state)
                         else:
-                            cur_pos_values[s] = p.quantity * p.avg_price
-                    cur_equity = cash + sum(cur_pos_values.values())
-                    buy_value = cash * self._max_trade_size_pct
-                    ok, reason = self._risk_manager.can_buy(ts, sym, buy_value, cur_pos_values, cur_equity)
-                    if not ok:
+                            dyn_sl = self._stop_loss_pct
+
+                        positions[pos_key] = PortfolioPositionState(
+                            symbol=sym, quantity=qty, avg_price=exec_price,
+                            entry_idx=candle_idx, peak_price=cur_price,
+                            dynamic_sl_pct=dyn_sl, entry_strategy=strat_name,
+                        )
+
+                        t = BacktestTrade(
+                            timestamp=ts, side="buy", symbol=sym,
+                            price=exec_price, quantity=qty, cost=cost, fee=fee,
+                            strategy=strat_name,
+                            confidence=float(sig.confidence),
+                            reason=sig.reason,
+                        )
+                        trades.append(t)
+                        strategy_trades[strat_name] = strategy_trades.get(strat_name, 0) + 1
+                        last_trade_idx_per_coin[pos_key] = candle_idx
+
+                        if self._trade_limiter:
+                            self._trade_limiter.record_buy(sym, candle_idx)
+
+            else:
+                # ── 기존: 컴바이너 합의 기반 단일 포지션 ──
+                buy_candidates: list[tuple[str, float, Signal, object]] = []
+
+                for sym in portfolio_syms:
+                    if sym in positions:
+                        continue  # 이미 보유 중
+                    if sym not in all_data or ts not in all_data[sym].index:
+                        continue
+                    if len(positions) >= self._max_positions:
+                        break  # 최대 포지션 도달
+
+                    # 코인별 쿨다운 (오버라이드 가능 — 시그널 먼저 확인)
+                    last_idx = last_trade_idx_per_coin.get(sym, -9999)
+                    in_cooldown = candle_idx - last_idx < self._trade_cooldown
+                    if in_cooldown and self._cooldown_override_conf <= 0:
+                        continue  # 오버라이드 비활성 → 즉시 스킵
+
+                    sym_df = all_data[sym]
+                    sym_iloc = sym_df.index.get_loc(ts)
+                    if isinstance(sym_iloc, slice):
+                        sym_iloc = sym_iloc.start
+
+                    row = sym_df.iloc[sym_iloc]
+                    cur_price = float(row["close"])
+
+                    # 추세 필터
+                    if self._trend_filter and _is_downtrend(row):
                         continue
 
-                # 매매 제한 체크
-                if self._trade_limiter:
-                    ok, reason = self._trade_limiter.can_buy(sym, candle_idx)
-                    if not ok:
+                    # 전략 신호 수집
+                    slice_df = sym_df.iloc[max(0, sym_iloc - 200):sym_iloc + 1]
+                    ticker = Ticker(
+                        symbol=sym, last=cur_price,
+                        bid=cur_price * 0.9995, ask=cur_price * 1.0005,
+                        high=float(row["high"]), low=float(row["low"]),
+                        volume=float(row.get("volume", 0)), timestamp=ts,
+                    )
+
+                    signals: list[Signal] = []
+                    for name, strategy in self._strategies.items():
+                        try:
+                            sig = await strategy.analyze(slice_df.copy(), ticker)
+                            signals.append(sig)
+                        except Exception:
+                            pass
+
+                    if not signals:
                         continue
 
-                # 포지션 사이징
-                if self._asymmetric:
-                    _asym_size = {
-                        "strong_uptrend": 0.95, "uptrend": 0.80, "sideways": 0.50,
-                    }
-                    size_mult = _asym_size.get(current_market_state, 0.50)
-                    trade_size = min(cash * self._max_trade_size_pct, cash * size_mult)
-                else:
-                    trade_size = cash * self._max_trade_size_pct
+                    decision = self._combiner.combine(signals, market_state=current_market_state)
+                    if decision.action != SignalType.BUY:
+                        continue
 
-                if trade_size < MIN_TRADE_KRW:
-                    continue
+                    # 비대칭 전략
+                    if self._asymmetric:
+                        if current_market_state in ("crash", "downtrend"):
+                            continue
+                        _asym_conf = {
+                            "strong_uptrend": max(self._min_confidence - 0.15, 0.35),
+                            "uptrend": max(self._min_confidence - 0.10, 0.40),
+                            "sideways": self._min_confidence + 0.05,
+                        }
+                        buy_threshold = _asym_conf.get(current_market_state, self._min_confidence)
+                    else:
+                        buy_threshold = self._min_confidence
+                        if market_confidence < 0.35:
+                            buy_threshold = self._min_confidence + 0.10
 
-                cur_price = float(all_data[sym].loc[ts, "close"])
-                exec_price = cur_price * (1 + SLIPPAGE)
-                fee = trade_size * TAKER_FEE
-                qty = (trade_size - fee) / exec_price
-                cost = qty * exec_price
+                    if decision.combined_confidence < buy_threshold:
+                        continue
 
-                cash -= (cost + fee)
+                    # 쿨다운 오버라이드: 신뢰도가 높으면 쿨다운 무시
+                    if in_cooldown and decision.combined_confidence < self._cooldown_override_conf:
+                        continue  # 신뢰도 부족 → 쿨다운 유지
 
-                # 동적 손절
-                row = all_data[sym].loc[ts]
-                if self._dynamic_sl:
-                    dyn_sl = _calc_dynamic_sl(row, cur_price, current_market_state)
-                else:
-                    dyn_sl = self._stop_loss_pct
+                    buy_signals = [s for s in signals if s.signal_type == SignalType.BUY]
+                    best_signal = max(buy_signals, key=lambda s: s.confidence) if buy_signals else signals[0]
 
-                positions[sym] = PortfolioPositionState(
-                    symbol=sym, quantity=qty, avg_price=exec_price,
-                    entry_idx=candle_idx, peak_price=cur_price,
-                    dynamic_sl_pct=dyn_sl, entry_strategy=best_signal.strategy_name,
-                )
+                    buy_candidates.append((sym, float(decision.combined_confidence), best_signal, decision))
 
-                t = BacktestTrade(
-                    timestamp=ts, side="buy", symbol=sym,
-                    price=exec_price, quantity=qty, cost=cost, fee=fee,
-                    strategy=best_signal.strategy_name,
-                    confidence=conf,
-                    reason=best_signal.reason,
-                )
-                trades.append(t)
-                strategy_trades[best_signal.strategy_name] = strategy_trades.get(best_signal.strategy_name, 0) + 1
-                last_trade_idx_per_coin[sym] = candle_idx
+                # 신뢰도 내림차순 정렬 (현금 경쟁 시 강한 시그널 우선)
+                buy_candidates.sort(key=lambda x: x[1], reverse=True)
 
-                if self._trade_limiter:
-                    self._trade_limiter.record_buy(sym, candle_idx)
+                for sym, conf, best_signal, decision in buy_candidates:
+                    if len(positions) >= self._max_positions:
+                        break
+
+                    # 리스크 관리자 체크
+                    if self._risk_manager:
+                        cur_pos_values = {}
+                        for s, p in positions.items():
+                            _s = p.symbol
+                            if _s in all_data and ts in all_data[_s].index:
+                                cur_pos_values[s] = p.quantity * float(all_data[_s].loc[ts, "close"])
+                            else:
+                                cur_pos_values[s] = p.quantity * p.avg_price
+                        cur_equity = cash + sum(cur_pos_values.values())
+                        buy_value = cash * self._max_trade_size_pct
+                        ok, reason = self._risk_manager.can_buy(ts, sym, buy_value, cur_pos_values, cur_equity)
+                        if not ok:
+                            continue
+
+                    # 매매 제한 체크
+                    if self._trade_limiter:
+                        ok, reason = self._trade_limiter.can_buy(sym, candle_idx)
+                        if not ok:
+                            continue
+
+                    # 포지션 사이징
+                    if self._asymmetric:
+                        _asym_size = {
+                            "strong_uptrend": 0.95, "uptrend": 0.80, "sideways": 0.50,
+                        }
+                        size_mult = _asym_size.get(current_market_state, 0.50)
+                        trade_size = min(cash * self._max_trade_size_pct, cash * size_mult)
+                    else:
+                        trade_size = cash * self._max_trade_size_pct
+
+                    if trade_size < MIN_TRADE_KRW:
+                        continue
+
+                    cur_price = float(all_data[sym].loc[ts, "close"])
+                    exec_price = cur_price * (1 + SLIPPAGE)
+                    fee = trade_size * TAKER_FEE
+                    qty = (trade_size - fee) / exec_price
+                    cost = qty * exec_price
+
+                    cash -= (cost + fee)
+
+                    # 동적 손절
+                    row = all_data[sym].loc[ts]
+                    if self._dynamic_sl:
+                        dyn_sl = _calc_dynamic_sl(row, cur_price, current_market_state)
+                    else:
+                        dyn_sl = self._stop_loss_pct
+
+                    positions[sym] = PortfolioPositionState(
+                        symbol=sym, quantity=qty, avg_price=exec_price,
+                        entry_idx=candle_idx, peak_price=cur_price,
+                        dynamic_sl_pct=dyn_sl, entry_strategy=best_signal.strategy_name,
+                    )
+
+                    t = BacktestTrade(
+                        timestamp=ts, side="buy", symbol=sym,
+                        price=exec_price, quantity=qty, cost=cost, fee=fee,
+                        strategy=best_signal.strategy_name,
+                        confidence=conf,
+                        reason=best_signal.reason,
+                    )
+                    trades.append(t)
+                    strategy_trades[best_signal.strategy_name] = strategy_trades.get(best_signal.strategy_name, 0) + 1
+                    last_trade_idx_per_coin[sym] = candle_idx
+
+                    if self._trade_limiter:
+                        self._trade_limiter.record_buy(sym, candle_idx)
 
         # 5. 잔여 포지션 강제 청산
-        for sym, pos in list(positions.items()):
-            if sym in all_data:
-                last_price = float(all_data[sym].iloc[-1]["close"])
+        for pos_key, pos in list(positions.items()):
+            _sym = pos.symbol
+            if _sym in all_data:
+                last_price = float(all_data[_sym].iloc[-1]["close"])
             else:
                 last_price = pos.avg_price
             proceeds, pnl, pnl_pct, t = self._execute_sell(
                 all_timestamps[-1], last_price, pos,
                 "sell(close)", "forced_close", 0,
-                f"백테스트 종료 강제 청산 ({sym})",
+                f"백테스트 종료 강제 청산 ({_sym})",
             )
             cash += proceeds
             trades.append(t)
-            coin_stats[sym]["trades"] += 1
-            coin_stats[sym]["pnl"] += pnl
+            coin_stats[_sym]["trades"] += 1
+            coin_stats[_sym]["pnl"] += pnl
             if pnl > 0:
                 win_count += 1
                 total_win_pct += abs(pnl_pct)
-                coin_stats[sym]["wins"] += 1
+                coin_stats[_sym]["wins"] += 1
             else:
                 loss_count += 1
                 total_loss_pct += abs(pnl_pct)
-                coin_stats[sym]["losses"] += 1
+                coin_stats[_sym]["losses"] += 1
 
         # 6. 통계 집계
         final_balance = cash
@@ -3009,6 +3126,8 @@ class FuturesPortfolioBacktester:
         trade_limit_enabled: bool = False,
         trade_daily_buy_limit: int = 20,
         trade_max_coin_buys: int = 3,
+        # 쿨다운 오버라이드
+        cooldown_override_conf: float = 0.0,
     ):
         self._exchange = exchange
         self._initial_balance = initial_balance
@@ -3022,6 +3141,7 @@ class FuturesPortfolioBacktester:
         self._dynamic_sl = dynamic_sl
         self._agent_market = agent_market
         self._trade_cooldown = trade_cooldown
+        self._cooldown_override_conf = cooldown_override_conf
         self._leverage = leverage
         self._futures_fee = futures_fee
         self._funding_rate = funding_rate
@@ -3540,10 +3660,11 @@ class FuturesPortfolioBacktester:
                 if len(positions) >= self._max_positions:
                     break
 
-                # 코인별 쿨다운
+                # 코인별 쿨다운 (오버라이드 가능)
                 last_idx = last_trade_idx_per_coin.get(sym, -9999)
-                if candle_idx - last_idx < self._trade_cooldown:
-                    continue
+                in_cooldown = candle_idx - last_idx < self._trade_cooldown
+                if in_cooldown and self._cooldown_override_conf <= 0:
+                    continue  # 오버라이드 비활성 → 즉시 스킵
 
                 sym_df = all_data[sym]
                 sym_iloc = sym_df.index.get_loc(ts)
@@ -3586,6 +3707,10 @@ class FuturesPortfolioBacktester:
                     _ml_pred = self._ml_filter.predict(_ml_features)
                     if not _ml_pred.should_trade:
                         continue
+
+                # 쿨다운 오버라이드: 신뢰도가 높으면 쿨다운 무시
+                if in_cooldown and decision.combined_confidence < self._cooldown_override_conf:
+                    continue  # 신뢰도 부족 → 쿨다운 유지
 
                 if decision.action == SignalType.BUY:
                     # 롱 시장 게이팅 — 지정 상태에서 차단
@@ -3734,9 +3859,10 @@ class FuturesPortfolioBacktester:
                 row = sym_df.iloc[sym_iloc]
                 cur_price = float(row["close"])
 
-                # 쿨다운
+                # 쿨다운 (오버라이드 가능)
                 last_idx = last_trade_idx_per_coin.get(sym, -9999)
-                if candle_idx - last_idx < self._trade_cooldown:
+                in_cooldown_flip = candle_idx - last_idx < self._trade_cooldown
+                if in_cooldown_flip and self._cooldown_override_conf <= 0:
                     continue
 
                 slice_df = sym_df.iloc[max(0, sym_iloc - 200):sym_iloc + 1]
@@ -3759,6 +3885,10 @@ class FuturesPortfolioBacktester:
                     continue
 
                 decision = self._combiner.combine(signals, market_state=current_market_state)
+
+                # 쿨다운 오버라이드
+                if in_cooldown_flip and decision.combined_confidence < self._cooldown_override_conf:
+                    continue
 
                 should_close = False
                 if pos.side == "long" and decision.action == SignalType.SELL:
@@ -4876,6 +5006,12 @@ async def main():
     # 전략 매도 모드 (현물 포트폴리오)
     parser.add_argument("--strategy-sell",   choices=["none", "voting", "paired"], default="none",
                         help="전략 매도 모드: none=SL/TP만, voting=투표, paired=진입전략만 (기본 none)")
+    # 멀티 포지션 모드
+    parser.add_argument("--multi-position",  action="store_true", default=False,
+                        help="전략별 독립 포지션 (각 전략이 개별 매수/매도)")
+    # 쿨다운 오버라이드
+    parser.add_argument("--cooldown-override-conf", type=float, default=0.0,
+                        help="이 신뢰도 이상이면 쿨다운 무시 (0=비활성, 기본 0)")
     # 바이낸스 현물 데이터 사용 (빗썸 불가 시)
     parser.add_argument("--use-binance",     action="store_true", default=False,
                         help="현물 백테스트에 바이낸스 현물 데이터 사용 (빗썸 대신)")
@@ -4986,6 +5122,7 @@ async def main():
                 volatility_filter=args.volatility_filter,
                 ml_filter_path=args.ml_filter,
                 ml_min_win_prob=args.ml_min_win_prob,
+                cooldown_override_conf=args.cooldown_override_conf,
             )
             if args.min_sell_weight > 0:
                 bt._combiner.MIN_SELL_ACTIVE_WEIGHT = args.min_sell_weight
@@ -5150,6 +5287,8 @@ async def main():
             daily_buy_limit=args.daily_buy_limit,
             max_coin_buys=args.max_coin_buys,
             strategy_sell_mode=args.strategy_sell,
+            multi_position=args.multi_position,
+            cooldown_override_conf=args.cooldown_override_conf,
         )
         result = await bt.run(args.timeframe, args.days)
         print_portfolio_result(result)

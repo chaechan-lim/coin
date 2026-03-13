@@ -37,13 +37,20 @@ from optuna.samplers import TPESampler
 from backtest import PortfolioBacktester
 
 STRATEGY_NAMES = ["bnf_deviation", "cis_momentum", "larry_williams", "donchian_channel"]
-SYMBOLS = ["BTC/KRW", "ETH/KRW", "XRP/KRW", "SOL/KRW", "ADA/KRW"]
+SYMBOLS_KRW = ["BTC/KRW", "ETH/KRW", "XRP/KRW", "SOL/KRW", "ADA/KRW"]
+SYMBOLS_USDT = ["BTC/USDT", "ETH/USDT", "XRP/USDT", "SOL/USDT", "ADA/USDT"]
 TIMEFRAME = "4h"
 MULTI_PERIODS = [180, 365, 540]  # 다중 기간 검증
 
+USE_BINANCE = False  # CLI에서 설정
+SYMBOLS = SYMBOLS_KRW  # CLI에서 변경
 
-def create_exchange() -> BithumbAdapter:
+
+def create_exchange():
     """백테스트용 거래소 어댑터 (캐시 데이터만 사용)."""
+    if USE_BINANCE:
+        from exchange.binance_spot_adapter import BinanceSpotAdapter
+        return BinanceSpotAdapter(api_key="", api_secret="")
     return BithumbAdapter(api_key="", api_secret="")
 
 
@@ -71,7 +78,7 @@ def suggest_params(trial: optuna.Trial) -> dict:
 
 
 async def run_backtest_with_params(
-    exchange: BithumbAdapter,
+    exchange,
     params: dict,
     days: int,
 ) -> dict:
@@ -80,7 +87,7 @@ async def run_backtest_with_params(
         exchange=exchange,
         strategy_names=STRATEGY_NAMES,
         symbols=SYMBOLS,
-        initial_balance=500_000,
+        initial_balance=500_000 if not USE_BINANCE else 500,
         min_confidence=params["min_confidence"],
         stop_loss_pct=params["stop_loss_pct"],
         take_profit_pct=params["take_profit_pct"],
@@ -90,6 +97,8 @@ async def run_backtest_with_params(
         trade_cooldown=params["trade_cooldown"],
         asymmetric=True,
         max_trade_size_pct=params["max_trade_size_pct"],
+        dynamic_sl=True,
+        strategy_sell_mode="paired",
     )
     bt._combiner = SignalCombiner(
         strategy_weights=params["weights"],
@@ -245,7 +254,13 @@ def main():
     parser.add_argument("--days", type=int, default=540, help="단순 모드 백테스트 기간")
     parser.add_argument("--simple", action="store_true", help="단순 모드 (단일 기간)")
     parser.add_argument("--db", type=str, default=None, help="Optuna DB 경로 (이어하기)")
+    parser.add_argument("--use-binance", action="store_true", help="바이낸스 USDT 데이터 사용")
     args = parser.parse_args()
+
+    global USE_BINANCE, SYMBOLS
+    if args.use_binance:
+        USE_BINANCE = True
+        SYMBOLS = SYMBOLS_USDT
 
     if args.simple:
         mode_str = f"단순 ({args.days}일)"
@@ -262,8 +277,9 @@ def main():
     print()
 
     storage = f"sqlite:///{args.db}" if args.db else None
+    exch_tag = "binance" if USE_BINANCE else "bithumb"
     study = optuna.create_study(
-        study_name="spot_4strategy_optimize",
+        study_name=f"spot_4strategy_{exch_tag}",
         direction="maximize",
         sampler=TPESampler(seed=42),
         storage=storage,
