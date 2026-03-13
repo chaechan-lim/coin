@@ -124,6 +124,14 @@ ALL_STRATEGIES = ALL_STRATEGIES_8 + [
     "volatility_regime", "bb_squeeze",
 ]
 
+# 4전략 현물 가중치 (Optuna 바이낸스 USDT 최적화 2026-03-13)
+WEIGHTS_4_SPOT = {
+    "bnf_deviation":    0.25,
+    "cis_momentum":     0.42,
+    "larry_williams":   0.10,
+    "donchian_channel": 0.24,
+}
+
 # 5전략 가중치 (기존)
 WEIGHTS_5 = {
     "volatility_breakout": 0.10,
@@ -633,7 +641,9 @@ class Backtester:
             if name in strategy_names
         }
         # 전략 수에 맞는 가중치 선택
-        if set(strategy_names) <= set(WEIGHTS_5.keys()):
+        if set(strategy_names) <= set(WEIGHTS_4_SPOT.keys()):
+            base_weights = WEIGHTS_4_SPOT
+        elif set(strategy_names) <= set(WEIGHTS_5.keys()):
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
@@ -1416,7 +1426,9 @@ class PortfolioBacktester:
             name: strat for name, strat in all_strats.items()
             if name in strategy_names
         }
-        if set(strategy_names) <= set(WEIGHTS_5.keys()):
+        if set(strategy_names) <= set(WEIGHTS_4_SPOT.keys()):
+            base_weights = WEIGHTS_4_SPOT
+        elif set(strategy_names) <= set(WEIGHTS_5.keys()):
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
@@ -2244,7 +2256,9 @@ class FuturesBacktester:
             name: strat for name, strat in all_strats.items()
             if name in strategy_names
         }
-        if set(strategy_names) <= set(WEIGHTS_5.keys()):
+        if set(strategy_names) <= set(WEIGHTS_4_SPOT.keys()):
+            base_weights = WEIGHTS_4_SPOT
+        elif set(strategy_names) <= set(WEIGHTS_5.keys()):
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
@@ -3204,7 +3218,9 @@ class FuturesPortfolioBacktester:
             name: strat for name, strat in all_strats.items()
             if name in strategy_names
         }
-        if set(strategy_names) <= set(WEIGHTS_5.keys()):
+        if set(strategy_names) <= set(WEIGHTS_4_SPOT.keys()):
+            base_weights = WEIGHTS_4_SPOT
+        elif set(strategy_names) <= set(WEIGHTS_5.keys()):
             base_weights = WEIGHTS_5
         elif set(strategy_names) <= set(WEIGHTS_6.keys()):
             base_weights = WEIGHTS_6
