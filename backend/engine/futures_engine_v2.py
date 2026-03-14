@@ -84,6 +84,8 @@ class FuturesEngineV2:
             market_data=market_data,
             leverage=v2_cfg.leverage,
             max_position_pct=v2_cfg.tier1_max_position_pct,
+            min_confidence=v2_cfg.tier1_min_confidence,
+            cooldown_seconds=v2_cfg.tier1_cooldown_seconds,
         )
 
         self._tier2 = Tier2Scanner(

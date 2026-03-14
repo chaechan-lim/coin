@@ -252,6 +252,8 @@ class FuturesV2Config(BaseSettings):
     tier1_max_position_pct: float = 0.15
     tier1_eval_interval_sec: int = 60
     tier1_base_risk_pct: float = 0.02
+    tier1_min_confidence: float = 0.4
+    tier1_cooldown_seconds: int = 93600  # 26h (백테스트 최적)
 
     # Tier 2
     tier2_enabled: bool = True

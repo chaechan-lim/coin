@@ -4,6 +4,7 @@ Tier1Manager — Tier 1 코인 상시 포지션 관리.
 SAR(Stop-and-Reverse): 항상 포지션 유지, 방향 즉시 전환, 쿨다운 없음.
 ATR 기반 연속 사이징: 변동성 낮으면 크게, 높으면 작게.
 """
+import time
 import structlog
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,6 +37,8 @@ class Tier1Manager:
         market_data: MarketDataService,
         leverage: int = 3,
         max_position_pct: float = 0.15,
+        min_confidence: float = 0.4,
+        cooldown_seconds: int = 93600,  # 26h (백테스트 최적 cd312 = 312*5min)
     ):
         self._coins = coins
         self._safe_order = safe_order
@@ -46,6 +49,9 @@ class Tier1Manager:
         self._market_data = market_data
         self._leverage = leverage
         self._max_position_pct = max_position_pct
+        self._min_confidence = min_confidence
+        self._cooldown_sec = cooldown_seconds
+        self._last_exit_time: dict[str, float] = {}  # symbol → timestamp
 
     @property
     def coins(self) -> list[str]:
@@ -113,21 +119,33 @@ class Tier1Manager:
             # 포지션 청산
             if current_dir and current_dir != Direction.FLAT:
                 await self._close_position(session, symbol, current_dir, decision.reason)
+                self._last_exit_time[symbol] = time.time()
+            return
+
+        # 최소 신뢰도 필터
+        if decision.confidence < self._min_confidence:
+            logger.debug("tier1_low_confidence", symbol=symbol,
+                        confidence=decision.confidence, min=self._min_confidence)
             return
 
         if current_dir and current_dir != Direction.FLAT and decision.direction != current_dir:
-            # SAR: 기존 포지션 청산 → 반대 방향 진입
-            pos_state = self._positions.get(symbol)
-            entry = pos_state.entry_price if pos_state else 0.0
+            # SAR: 기존 포지션 청산 → 반대 방향 진입 (쿨다운 면제)
             await self._close_position(
                 session, symbol, current_dir,
                 f"SAR: {current_dir.value}→{decision.direction.value}",
             )
+            self._last_exit_time[symbol] = time.time()
             # 새 방향 진입
             await self._open_position(session, symbol, decision, close, atr)
 
         elif current_dir is None or current_dir == Direction.FLAT:
-            # 신규 진입
+            # 신규 진입 — 쿨다운 체크
+            last_exit = self._last_exit_time.get(symbol, 0)
+            elapsed = time.time() - last_exit
+            if elapsed < self._cooldown_sec:
+                remaining_h = (self._cooldown_sec - elapsed) / 3600
+                logger.debug("tier1_cooldown", symbol=symbol, remaining_h=f"{remaining_h:.1f}")
+                return
             await self._open_position(session, symbol, decision, close, atr)
 
     async def _open_position(
