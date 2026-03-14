@@ -141,6 +141,18 @@ async def test_merge_surge_positions_into_futures(session):
     assert result["positions"][0]["is_surge"] is True
     assert result["invested_value_krw"] > 50.0  # 서지 투자금 합산
 
+    # total_value_krw 검증:
+    # - 서지 진입 시 futures_pm.cash_balance에서 margin이 차감됨 (summary["cash_balance_krw"] 이미 반영됨)
+    # - 따라서 merge 시 current_value(= invested + unrealized)를 더해야 총 자산이 올바름
+    # - 케이스: entry=100, current=100(가격 없어 fallback), unrealized=0, invested=33.33
+    # - 기대: 300.0 + (33.33 + 0) = 333.33
+    expected_total = round(300.0 + 33.33, 2)
+    assert result["total_value_krw"] == expected_total, (
+        f"total_value_krw should be {expected_total} (300.0 base + 33.33 surge margin), "
+        f"got {result['total_value_krw']}. "
+        "Bug: if only unrealized(=0) is added, total stays at 300.0 losing the surge margin."
+    )
+
 
 @pytest.mark.asyncio
 async def test_merge_surge_no_positions(session):
@@ -156,3 +168,66 @@ async def test_merge_surge_no_positions(session):
     result = await _merge_surge_positions(summary, session)
     assert len(result["positions"]) == 0
     assert result["total_value_krw"] == 300.0
+
+
+@pytest.mark.asyncio
+async def test_merge_surge_total_value_includes_margin_with_pnl(session):
+    """서지 포지션 총 자산 = futures 총 자산 + 서지 current_value (invested + unrealized).
+
+    재현 시나리오:
+    - 서지 마진 50 USDT로 롱 진입 (entry=100), 현재 가격=110 (+10%)
+    - unrealized = 50 * 3 * (110-100)/100 = 15 USDT
+    - current_value = 50 + 15 = 65 USDT
+    - futures PM cash는 이미 50 USDT 차감된 상태
+    - 따라서 total_value_krw 에는 current_value(65) 전체를 더해야 함
+    """
+    from unittest.mock import MagicMock
+    from core.models import Position
+    from api.portfolio import _merge_surge_positions
+    from api.dependencies import engine_registry as reg
+
+    pos = Position(
+        exchange="binance_surge",
+        symbol="BTC/USDT",
+        quantity=0.05,
+        average_buy_price=100.0,
+        total_invested=50.0,
+        direction="long",
+        leverage=3,
+        is_surge=True,
+        entered_at=datetime.now(timezone.utc),
+    )
+    session.add(pos)
+    await session.flush()
+
+    # 서지 엔진 mock — 현재 가격 110 반환
+    mock_state = MagicMock()
+    mock_state.last_price = 110.0
+    mock_surge_eng = MagicMock()
+    mock_surge_eng._symbol_states = {"BTC/USDT": mock_state}
+
+    summary = {
+        "exchange": "binance_futures",
+        "total_value_krw": 200.0,
+        "cash_balance_krw": 150.0,  # 이미 서지 마진 50 차감된 상태
+        "invested_value_krw": 50.0,
+        "unrealized_pnl": 0.0,
+        "positions": [],
+    }
+
+    original_get = reg.get_engine
+    reg.get_engine = MagicMock(return_value=mock_surge_eng)
+    try:
+        result = await _merge_surge_positions(summary, session)
+    finally:
+        reg.get_engine = original_get
+
+    # unrealized = 50 * 3 * (110-100)/100 = 15
+    # current_value = 50 + 15 = 65
+    # total_value_krw = 200.0 + 65 = 265.0
+    assert result["unrealized_pnl"] == 15.0
+    assert result["total_value_krw"] == 265.0, (
+        f"Expected 265.0 (200 base + 65 surge current_value), got {result['total_value_krw']}. "
+        "Bug: unrealized(15)만 더하면 215.0이 됨 — 마진 50 USDT가 누락됨."
+    )
+    assert result["invested_value_krw"] == 100.0  # 50 futures + 50 surge

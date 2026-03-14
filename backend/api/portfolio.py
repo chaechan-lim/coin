@@ -98,9 +98,13 @@ async def _merge_surge_positions(summary: dict, session: AsyncSession) -> dict:
         })
 
         # 합산 수치 갱신
+        # total_value_krw 계산:
+        #   서지 진입 시 futures_pm.cash_balance -= margin 이므로 cash가 이미 margin만큼 줄어있음.
+        #   따라서 current_value(= invested + unrealized) 전체를 더해야 총 자산이 올바름.
+        #   unrealized만 더하면 invested(margin)만큼 총 자산이 과소계상됨.
         summary["invested_value_krw"] = round(summary.get("invested_value_krw", 0) + invested, 2)
         summary["unrealized_pnl"] = round(summary.get("unrealized_pnl", 0) + unrealized, 2)
-        summary["total_value_krw"] = round(summary.get("total_value_krw", 0) + unrealized, 2)
+        summary["total_value_krw"] = round(summary.get("total_value_krw", 0) + current_value, 2)
 
     return summary
 
