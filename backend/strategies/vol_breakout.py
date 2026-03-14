@@ -14,8 +14,8 @@ from strategies.regime_base import RegimeStrategy, StrategyDecision
 
 class VolBreakoutStrategy(RegimeStrategy):
 
-    KC_MULT: float = 1.8       # Keltner Channel ATR 배수 (기존 2.0→완화)
-    VOL_MIN: float = 1.2       # 최소 거래량 비율 (기존 1.5→완화)
+    KC_MULT: float = 2.2       # Keltner Channel ATR 배수 (선별적 돌파)
+    VOL_MIN: float = 2.0       # 최소 거래량 비율 (강한 확인)
 
     @property
     def name(self) -> str:
@@ -55,39 +55,37 @@ class VolBreakoutStrategy(RegimeStrategy):
         # 1h RSI 방향 (모멘텀 확인)
         rsi_1h = self._col(df_1h, "rsi_14")
 
-        # ── 상단 돌파 + 거래량 + RSI 모멘텀 ──
+        # ── 상단 돌파 + 거래량 + RSI 모멘텀 필수 ──
         if close > kc_upper and vol_ratio > self.VOL_MIN:
-            # RSI > 50이면 모멘텀 정렬 (부스트)
-            momentum_aligned = rsi > 50 and rsi_1h > 50
-            conf = min(1.0, vol_ratio / 3.0 * 0.4 + (close - kc_upper) / atr * 0.3)
-            conf = max(0.3, conf)
-            if momentum_aligned:
-                conf = min(1.0, conf + 0.1)
+            # RSI 모멘텀 정렬 필수 (5m + 1h 모두 > 50)
+            if rsi <= 50 or rsi_1h <= 50:
+                return self._hold(current_position, "no_momentum_alignment")
+            conf = min(1.0, vol_ratio / 4.0 * 0.4 + (close - kc_upper) / atr * 0.3)
+            conf = max(0.35, conf)
             return StrategyDecision(
                 direction=Direction.LONG,
                 confidence=conf,
                 sizing_factor=min(0.8, conf * 0.7),
-                stop_loss_atr=1.8,
-                take_profit_atr=3.5,
-                reason=f"KC upper breakout: vol={vol_ratio:.1f}x, RSI={rsi:.0f}, momentum={momentum_aligned}",
+                stop_loss_atr=1.5,
+                take_profit_atr=3.0,
+                reason=f"KC upper breakout: vol={vol_ratio:.1f}x, RSI={rsi:.0f}",
                 strategy_name=self.name,
                 indicators={"kc_upper": kc_upper, "vol_ratio": vol_ratio, "rsi": rsi, "close": close},
             )
 
-        # ── 하단 돌파 + 거래량 + RSI 모멘텀 ──
+        # ── 하단 돌파 + 거래량 + RSI 모멘텀 필수 ──
         if close < kc_lower and vol_ratio > self.VOL_MIN:
-            momentum_aligned = rsi < 50 and rsi_1h < 50
-            conf = min(1.0, vol_ratio / 3.0 * 0.4 + (kc_lower - close) / atr * 0.3)
-            conf = max(0.3, conf)
-            if momentum_aligned:
-                conf = min(1.0, conf + 0.1)
+            if rsi >= 50 or rsi_1h >= 50:
+                return self._hold(current_position, "no_momentum_alignment")
+            conf = min(1.0, vol_ratio / 4.0 * 0.4 + (kc_lower - close) / atr * 0.3)
+            conf = max(0.35, conf)
             return StrategyDecision(
                 direction=Direction.SHORT,
                 confidence=conf,
                 sizing_factor=min(0.8, conf * 0.7),
-                stop_loss_atr=1.8,
-                take_profit_atr=3.5,
-                reason=f"KC lower breakout: vol={vol_ratio:.1f}x, RSI={rsi:.0f}, momentum={momentum_aligned}",
+                stop_loss_atr=1.5,
+                take_profit_atr=3.0,
+                reason=f"KC lower breakout: vol={vol_ratio:.1f}x, RSI={rsi:.0f}",
                 strategy_name=self.name,
                 indicators={"kc_lower": kc_lower, "vol_ratio": vol_ratio, "rsi": rsi, "close": close},
             )

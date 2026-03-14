@@ -43,19 +43,26 @@ def strategy():
 class TestLongBreakout:
     @pytest.mark.asyncio
     async def test_kc_upper_breakout(self, strategy):
-        """KC 상단 돌파 + 거래량 → 롱."""
-        # KC upper = 80000 + 2*1000 = 82000, close > 82000
-        df = _df(close=82500, ema_20=80000, atr=1000, volume=3000, vol_avg=1000)
+        """KC 상단 돌파 + 거래량 + 모멘텀 → 롱."""
+        # KC upper = 80000 + 2.2*1000 = 82200, close > 82200
+        df = _df(close=82500, ema_20=80000, atr=1000, volume=3000, vol_avg=1000, rsi=55)
         result = await strategy.evaluate(df, df, _regime(), None)
         assert result.direction == Direction.LONG
         assert result.sizing_factor > 0
-        assert result.stop_loss_atr == 1.8
-        assert result.take_profit_atr == 3.5
+        assert result.stop_loss_atr == 1.5
+        assert result.take_profit_atr == 3.0
 
     @pytest.mark.asyncio
     async def test_no_breakout_low_volume(self, strategy):
         """가격 돌파했지만 거래량 부족 → 시그널 없음."""
-        df = _df(close=82500, ema_20=80000, atr=1000, volume=1000, vol_avg=1000)
+        df = _df(close=82500, ema_20=80000, atr=1000, volume=1500, vol_avg=1000, rsi=55)
+        result = await strategy.evaluate(df, df, _regime(), None)
+        assert result.is_hold
+
+    @pytest.mark.asyncio
+    async def test_no_breakout_no_momentum(self, strategy):
+        """가격+거래량 돌파했지만 RSI 모멘텀 부족 → 시그널 없음."""
+        df = _df(close=82500, ema_20=80000, atr=1000, volume=3000, vol_avg=1000, rsi=45)
         result = await strategy.evaluate(df, df, _regime(), None)
         assert result.is_hold
 
@@ -63,9 +70,9 @@ class TestLongBreakout:
 class TestShortBreakout:
     @pytest.mark.asyncio
     async def test_kc_lower_breakout(self, strategy):
-        """KC 하단 돌파 + 거래량 → 숏."""
-        # KC lower = 80000 - 2*1000 = 78000, close < 78000
-        df = _df(close=77500, ema_20=80000, atr=1000, volume=3000, vol_avg=1000)
+        """KC 하단 돌파 + 거래량 + 모멘텀 → 숏."""
+        # KC lower = 80000 - 2.2*1000 = 77800, close < 77800
+        df = _df(close=77500, ema_20=80000, atr=1000, volume=3000, vol_avg=1000, rsi=45)
         result = await strategy.evaluate(df, df, _regime(), None)
         assert result.direction == Direction.SHORT
 

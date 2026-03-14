@@ -43,9 +43,21 @@ class TrendFollowerStrategy(RegimeStrategy):
             return self._hold(current_position, "invalid_price")
 
         if regime.regime == Regime.TRENDING_UP:
-            return self._evaluate_uptrend(
-                ema_fast, ema_slow, rsi, atr, close, adx, current_position,
-            )
+            # 상승 추세에서는 SAR(기존 롱→숏 전환)만 허용, 신규 진입 차단
+            # 백테스트 결과: 상승 추세 신규 진입 PF 0.29, WR 22% → 비활성화
+            if current_position == Direction.LONG and ema_fast < ema_slow:
+                sar_conf = 0.6 if adx > 25 else 0.5
+                return StrategyDecision(
+                    direction=Direction.SHORT,
+                    confidence=sar_conf,
+                    sizing_factor=0.5,
+                    stop_loss_atr=2.0,
+                    take_profit_atr=2.5,
+                    reason=f"SAR: EMA cross down in uptrend, ADX={adx:.0f}",
+                    strategy_name=self.name,
+                    indicators={"ema_fast": ema_fast, "ema_slow": ema_slow, "adx": adx},
+                )
+            return self._hold(current_position, "uptrend_entry_disabled")
         elif regime.regime == Regime.TRENDING_DOWN:
             return self._evaluate_downtrend(
                 ema_fast, ema_slow, rsi, atr, close, adx, current_position,
@@ -58,12 +70,11 @@ class TrendFollowerStrategy(RegimeStrategy):
     ) -> StrategyDecision:
         spread_pct = (ema_fast - ema_slow) / ema_slow * 100 if ema_slow > 0 else 0
 
-        if ema_fast > ema_slow:
-            # 풀백 매수: RSI 30-50 (눌림목)
-            if 30 <= rsi <= 50:
+        if ema_fast > ema_slow and adx >= 25:
+            # 풀백 매수: RSI 35-48 (눌림목, 타이트 범위)
+            if 35 <= rsi <= 48 and spread_pct > 0.15:
                 conf = min(1.0, spread_pct / 0.5)
                 conf = max(0.3, conf)
-                # ADX 강도로 신뢰도 보정
                 if adx > 35:
                     conf = min(1.0, conf + 0.1)
                 return StrategyDecision(
@@ -77,11 +88,10 @@ class TrendFollowerStrategy(RegimeStrategy):
                     indicators={"ema_fast": ema_fast, "ema_slow": ema_slow, "rsi": rsi, "adx": adx},
                 )
 
-            # 모멘텀 지속 매수: RSI 50-65 + 강한 스프레드
-            if 50 < rsi <= 65 and spread_pct > 0.3:
+            # 모멘텀 지속 매수: RSI 50-60 + 강한 스프레드 + 강한 ADX
+            if 50 < rsi <= 60 and spread_pct > 0.4 and adx > 30:
                 conf = min(1.0, spread_pct / 0.8)
                 conf = max(0.3, conf)
-                # 모멘텀 진입은 약간 보수적
                 return StrategyDecision(
                     direction=Direction.LONG,
                     confidence=conf * 0.85,
@@ -114,9 +124,9 @@ class TrendFollowerStrategy(RegimeStrategy):
     ) -> StrategyDecision:
         spread_pct = (ema_slow - ema_fast) / ema_slow * 100 if ema_slow > 0 else 0
 
-        if ema_fast < ema_slow:
-            # 랠리 매도: RSI 50-70 (반등 후 재하락)
-            if 50 <= rsi <= 70:
+        if ema_fast < ema_slow and adx >= 25:
+            # 랠리 매도: RSI 52-65 (반등 후 재하락, 타이트 범위)
+            if 52 <= rsi <= 65 and spread_pct > 0.15:
                 conf = min(1.0, spread_pct / 0.5)
                 conf = max(0.3, conf)
                 if adx > 35:
@@ -132,8 +142,8 @@ class TrendFollowerStrategy(RegimeStrategy):
                     indicators={"ema_fast": ema_fast, "ema_slow": ema_slow, "rsi": rsi, "adx": adx},
                 )
 
-            # 모멘텀 지속 매도: RSI 35-50 + 강한 스프레드
-            if 35 <= rsi < 50 and spread_pct > 0.3:
+            # 모멘텀 지속 매도: RSI 40-50 + 강한 스프레드 + 강한 ADX
+            if 40 <= rsi < 50 and spread_pct > 0.4 and adx > 30:
                 conf = min(1.0, spread_pct / 0.8)
                 conf = max(0.3, conf)
                 return StrategyDecision(

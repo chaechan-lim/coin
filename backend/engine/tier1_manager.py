@@ -82,20 +82,17 @@ class Tier1Manager:
 
         decision = await strategy.evaluate(df_5m, df_1h, regime, current_dir)
 
-        if decision.is_hold:
-            # 극단 가격만 업데이트
-            if pos_state:
-                price = self._last_close(df_5m)
-                if price > 0:
-                    pos_state.update_extreme(price)
-            return
-
-        # ATR 기반 SL/TP 체크 (기존 포지션)
+        # SL/TP 체크는 전략 시그널과 무관하게 항상 수행
         if pos_state:
             price = self._last_close(df_5m)
             atr = self._last_atr(df_5m)
+            if price > 0:
+                pos_state.update_extreme(price)
             if await self._check_sl_tp(session, symbol, pos_state, price, atr):
                 return  # SL/TP로 청산됨
+
+        if decision.is_hold:
+            return
 
         # SAR: 방향 전환
         await self._execute_decision(session, symbol, decision, current_dir, df_5m)

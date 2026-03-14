@@ -36,6 +36,24 @@ def _df(
     })
 
 
+def _df_1h_rising(n=50, rsi_start=25.0, rsi_end=30.0) -> pd.DataFrame:
+    """1h RSI가 상승하는 DataFrame."""
+    rsi_values = [rsi_start] * (n - 1) + [rsi_end]
+    return pd.DataFrame({
+        "close": [80000.0] * n,
+        "rsi_14": rsi_values,
+    })
+
+
+def _df_1h_falling(n=50, rsi_start=75.0, rsi_end=70.0) -> pd.DataFrame:
+    """1h RSI가 하락하는 DataFrame."""
+    rsi_values = [rsi_start] * (n - 1) + [rsi_end]
+    return pd.DataFrame({
+        "close": [80000.0] * n,
+        "rsi_14": rsi_values,
+    })
+
+
 @pytest.fixture
 def strategy():
     return MeanReversionStrategy()
@@ -44,9 +62,10 @@ def strategy():
 class TestLongEntry:
     @pytest.mark.asyncio
     async def test_bb_lower_touch_oversold(self, strategy):
-        """BB 하단 + RSI 과매도 → 롱."""
+        """BB 하단 + RSI 과매도 + 1h RSI 반등 → 롱."""
         df = _df(close=78100, bb_upper=82000, bb_lower=78000, bb_mid=80000, rsi=28)
-        result = await strategy.evaluate(df, df, _regime(), None)
+        df_1h = _df_1h_rising(rsi_start=25, rsi_end=30)
+        result = await strategy.evaluate(df, df_1h, _regime(), None)
         assert result.direction == Direction.LONG
         assert result.confidence > 0.3
 
@@ -54,6 +73,14 @@ class TestLongEntry:
     async def test_no_signal_rsi_not_low(self, strategy):
         """BB 하단이지만 RSI 높으면 시그널 없음."""
         df = _df(close=78100, rsi=55)
+        df_1h = _df_1h_rising()
+        result = await strategy.evaluate(df, df_1h, _regime(), None)
+        assert result.is_hold
+
+    @pytest.mark.asyncio
+    async def test_no_signal_1h_not_rising(self, strategy):
+        """BB 하단 + RSI 과매도지만 1h RSI 미반등 → 시그널 없음."""
+        df = _df(close=78100, bb_upper=82000, bb_lower=78000, bb_mid=80000, rsi=28)
         result = await strategy.evaluate(df, df, _regime(), None)
         assert result.is_hold
 
@@ -61,16 +88,18 @@ class TestLongEntry:
 class TestShortEntry:
     @pytest.mark.asyncio
     async def test_bb_upper_touch_overbought(self, strategy):
-        """BB 상단 + RSI 과매수 → 숏."""
+        """BB 상단 + RSI 과매수 + 1h RSI 하락 → 숏."""
         df = _df(close=81900, bb_upper=82000, bb_lower=78000, bb_mid=80000, rsi=72)
-        result = await strategy.evaluate(df, df, _regime(), None)
+        df_1h = _df_1h_falling(rsi_start=75, rsi_end=70)
+        result = await strategy.evaluate(df, df_1h, _regime(), None)
         assert result.direction == Direction.SHORT
 
     @pytest.mark.asyncio
     async def test_no_signal_rsi_not_high(self, strategy):
         """BB 상단이지만 RSI 낮으면 시그널 없음."""
         df = _df(close=81900, rsi=50)
-        result = await strategy.evaluate(df, df, _regime(), None)
+        df_1h = _df_1h_falling()
+        result = await strategy.evaluate(df, df_1h, _regime(), None)
         assert result.is_hold
 
 
@@ -108,6 +137,7 @@ class TestEdgeCases:
     async def test_tight_sl_tp(self, strategy):
         """횡보장 SL/TP는 타이트."""
         df = _df(close=78100, bb_upper=82000, bb_lower=78000, bb_mid=80000, rsi=28)
-        result = await strategy.evaluate(df, df, _regime(), None)
+        df_1h = _df_1h_rising(rsi_start=25, rsi_end=30)
+        result = await strategy.evaluate(df, df_1h, _regime(), None)
         assert result.stop_loss_atr == 1.5
         assert result.take_profit_atr == 2.0

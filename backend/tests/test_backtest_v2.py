@@ -225,6 +225,48 @@ class TestV2Backtester:
         assert len(regimes) == 50  # n - 50 = 50
         assert all(isinstance(r[1], RegimeState) for r in regimes)
 
+    def test_custom_regime_params(self, mock_exchange):
+        """커스텀 레짐 파라미터가 RegimeDetector에 전달되는지 확인."""
+        from backtest_v2 import V2Backtester
+        bt = V2Backtester(
+            exchange=mock_exchange,
+            coins=["BTC/USDT"],
+            leverage=3,
+            initial_balance=1000.0,
+            regime_confirm=1,
+            regime_min_hours=1,
+            regime_adx_enter=25.0,
+            regime_adx_exit=20.0,
+        )
+        # 내부 파라미터가 저장되었는지 확인
+        assert bt._regime_confirm == 1
+        assert bt._regime_min_hours == 1
+        assert bt._regime_adx_enter == 25.0
+        assert bt._regime_adx_exit == 20.0
+        # RegimeDetector에 전달되었는지 확인
+        assert bt._regime_detector._confirm_count == 1
+        assert bt._regime_detector._min_duration_h == 1
+        assert bt._regime_detector._adx_enter == 25.0
+        assert bt._regime_detector._adx_exit == 20.0
+
+    def test_precompute_regimes_uses_custom_params(self, mock_exchange):
+        """_precompute_regimes가 커스텀 레짐 파라미터를 사용하는지 확인."""
+        from backtest_v2 import V2Backtester
+        bt = V2Backtester(
+            exchange=mock_exchange,
+            coins=["BTC/USDT"],
+            leverage=3,
+            initial_balance=1000.0,
+            regime_confirm=1,
+            regime_min_hours=0,
+            regime_adx_enter=25.0,
+            regime_adx_exit=20.0,
+        )
+        df_1h = _make_1h_df(n=100)
+        regimes = bt._precompute_regimes(df_1h)
+        assert len(regimes) == 50
+        assert all(isinstance(r[1], RegimeState) for r in regimes)
+
     def test_get_regime_at(self, backtester):
         dates = pd.date_range(end=datetime.now(timezone.utc), periods=10, freq="1h")
         regime_state = RegimeState(

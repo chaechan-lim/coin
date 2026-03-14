@@ -51,31 +51,16 @@ class TestProperties:
 
 class TestUptrend:
     @pytest.mark.asyncio
-    async def test_pullback_buy(self, strategy):
-        """상승 추세 + EMA9>EMA21 + RSI 풀백 → 롱."""
+    async def test_uptrend_entry_disabled(self, strategy):
+        """상승 추세에서 신규 진입 비활성화."""
         df = _df_5m(ema_9=81000, ema_21=80000, rsi=40)
         result = await strategy.evaluate(df, df, _regime(Regime.TRENDING_UP), None)
-        assert result.direction == Direction.LONG
-        assert result.confidence > 0.3
-        assert result.sizing_factor > 0
-
-    @pytest.mark.asyncio
-    async def test_no_signal_rsi_too_high(self, strategy):
-        """RSI 70 → 풀백 아님, 시그널 없음."""
-        df = _df_5m(ema_9=81000, ema_21=80000, rsi=70)
-        result = await strategy.evaluate(df, df, _regime(Regime.TRENDING_UP), None)
         assert result.is_hold
-
-    @pytest.mark.asyncio
-    async def test_no_signal_rsi_too_low(self, strategy):
-        """RSI 20 → 풀백 아님."""
-        df = _df_5m(ema_9=81000, ema_21=80000, rsi=20)
-        result = await strategy.evaluate(df, df, _regime(Regime.TRENDING_UP), None)
-        assert result.is_hold
+        assert "uptrend" in result.reason.lower() or "disabled" in result.reason.lower()
 
     @pytest.mark.asyncio
     async def test_sar_cross_down(self, strategy):
-        """상승 추세에서 EMA 데드크로스 + 롱 보유 → 숏 전환."""
+        """상승 추세에서 EMA 데드크로스 + 롱 보유 → 숏 전환 (SAR만 허용)."""
         df = _df_5m(ema_9=79000, ema_21=80000, rsi=50)
         result = await strategy.evaluate(
             df, df, _regime(Regime.TRENDING_UP), Direction.LONG
@@ -144,14 +129,14 @@ class TestEdgeCases:
 class TestSizing:
     @pytest.mark.asyncio
     async def test_low_volatility_larger_size(self, strategy):
-        """저변동 → 큰 사이징."""
-        df = _df_5m(ema_9=81000, ema_21=80000, rsi=40, atr=500, close=80000)
-        result = await strategy.evaluate(df, df, _regime(), None)
+        """저변동 → 큰 사이징 (하락 추세 매도)."""
+        df = _df_5m(ema_9=79000, ema_21=80000, rsi=60, atr=500, close=80000)
+        result = await strategy.evaluate(df, df, _regime(Regime.TRENDING_DOWN), None)
         assert result.sizing_factor > 0.5
 
     @pytest.mark.asyncio
     async def test_high_volatility_smaller_size(self, strategy):
-        """고변동 → 작은 사이징."""
-        df = _df_5m(ema_9=81000, ema_21=80000, rsi=40, atr=3000, close=80000)
-        result = await strategy.evaluate(df, df, _regime(), None)
+        """고변동 → 작은 사이징 (하락 추세 매도)."""
+        df = _df_5m(ema_9=79000, ema_21=80000, rsi=60, atr=3000, close=80000)
+        result = await strategy.evaluate(df, df, _regime(Regime.TRENDING_DOWN), None)
         assert result.sizing_factor < 0.7

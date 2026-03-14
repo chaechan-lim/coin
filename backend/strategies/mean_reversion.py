@@ -60,37 +60,32 @@ class MeanReversionStrategy(RegimeStrategy):
         rsi_1h_rising = rsi_1h > rsi_1h_prev
         rsi_1h_falling = rsi_1h < rsi_1h_prev
 
-        # ── 롱 진입: 하단 근접 + RSI 과매도 + 1h RSI 반전 ──
-        if bb_pos < self.BB_ENTRY_LOW and rsi < self.RSI_OVERSOLD:
-            # 1h RSI가 반등 중이면 신뢰도 부스트
-            conf = min(1.0, (self.RSI_OVERSOLD - rsi) / 25)
-            conf = max(0.3, conf)
-            if rsi_1h_rising:
-                conf = min(1.0, conf + 0.15)
+        # ── 롱 진입: 하단 근접 + RSI 과매도 + 1h RSI 반등 필수 ──
+        if bb_pos < self.BB_ENTRY_LOW and rsi < self.RSI_OVERSOLD and rsi_1h_rising:
+            conf = min(1.0, (self.RSI_OVERSOLD - rsi) / 20 + 0.15)
+            conf = max(0.35, conf)
             return StrategyDecision(
                 direction=Direction.LONG,
                 confidence=conf,
                 sizing_factor=self._calc_sizing(conf, atr, close),
                 stop_loss_atr=1.5,
                 take_profit_atr=2.0,
-                reason=f"BB lower: pos={bb_pos:.2f}, RSI={rsi:.0f}, 1h_rising={rsi_1h_rising}",
+                reason=f"BB lower: pos={bb_pos:.2f}, RSI={rsi:.0f}, 1h_rising=True",
                 strategy_name=self.name,
                 indicators={"bb_pos": bb_pos, "rsi": rsi, "rsi_1h": rsi_1h, "close": close},
             )
 
-        # ── 숏 진입: 상단 근접 + RSI 과매수 + 1h RSI 반전 ──
-        if bb_pos > self.BB_ENTRY_HIGH and rsi > self.RSI_OVERBOUGHT:
-            conf = min(1.0, (rsi - self.RSI_OVERBOUGHT) / 25)
-            conf = max(0.3, conf)
-            if rsi_1h_falling:
-                conf = min(1.0, conf + 0.15)
+        # ── 숏 진입: 상단 근접 + RSI 과매수 + 1h RSI 하락 필수 ──
+        if bb_pos > self.BB_ENTRY_HIGH and rsi > self.RSI_OVERBOUGHT and rsi_1h_falling:
+            conf = min(1.0, (rsi - self.RSI_OVERBOUGHT) / 20 + 0.15)
+            conf = max(0.35, conf)
             return StrategyDecision(
                 direction=Direction.SHORT,
                 confidence=conf,
                 sizing_factor=self._calc_sizing(conf, atr, close),
                 stop_loss_atr=1.5,
                 take_profit_atr=2.0,
-                reason=f"BB upper: pos={bb_pos:.2f}, RSI={rsi:.0f}, 1h_falling={rsi_1h_falling}",
+                reason=f"BB upper: pos={bb_pos:.2f}, RSI={rsi:.0f}, 1h_falling=True",
                 strategy_name=self.name,
                 indicators={"bb_pos": bb_pos, "rsi": rsi, "rsi_1h": rsi_1h, "close": close},
             )

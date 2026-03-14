@@ -456,6 +456,10 @@ class V2Backtester:
         min_confidence: float = 0.5,   # 최소 신뢰도
         trending_only: bool = False,   # True = TRENDING 레짐에서만 거래
         eval_interval: int = 12,       # 전략 평가 주기 (5m 캔들 수, 12=1h)
+        regime_confirm: int = 2,       # 레짐 전환 연속 확인 횟수
+        regime_min_hours: int = 3,     # 레짐 최소 유지 시간
+        regime_adx_enter: float = 27.0,  # 추세 진입 ADX 임계값
+        regime_adx_exit: float = 23.0,   # 추세 이탈 ADX 임계값
     ):
         self._exchange = exchange
         self._coins = coins
@@ -470,7 +474,18 @@ class V2Backtester:
         self._use_v1 = False
         self._v1_adapter: V1StrategyAdapter | None = None
 
-        self._regime_detector = RegimeDetector()
+        # 레짐 감지 파라미터 저장 (_precompute_regimes에서도 사용)
+        self._regime_confirm = regime_confirm
+        self._regime_min_hours = regime_min_hours
+        self._regime_adx_enter = regime_adx_enter
+        self._regime_adx_exit = regime_adx_exit
+
+        self._regime_detector = RegimeDetector(
+            confirm_count=regime_confirm,
+            min_duration_h=regime_min_hours,
+            adx_enter=regime_adx_enter,
+            adx_exit=regime_adx_exit,
+        )
         self._strategy_selector = StrategySelector()
 
     def enable_v1_strategies(self) -> None:
@@ -871,7 +886,12 @@ class V2Backtester:
 
     def _precompute_regimes(self, df_1h: pd.DataFrame) -> list[tuple[datetime, RegimeState]]:
         """1h 캔들마다 레짐을 감지하여 시계열로 반환."""
-        detector = RegimeDetector()
+        detector = RegimeDetector(
+            confirm_count=self._regime_confirm,
+            min_duration_h=self._regime_min_hours,
+            adx_enter=self._regime_adx_enter,
+            adx_exit=self._regime_adx_exit,
+        )
         regimes = []
         for i in range(50, len(df_1h)):
             window = df_1h.iloc[:i + 1]
@@ -1167,6 +1187,65 @@ def print_results(r: V2BacktestResult) -> None:
             wr = s["wins"] / s["trades"] * 100 if s["trades"] > 0 else 0
             print(f"  {sym:<12s} {s['trades']:>6d} {s['wins']:>4d} {s['losses']:>4d} {wr:>6.1f}% {s['pnl']:>+10.2f}")
 
+    # 전략별/레짐별 성과
+    if r.trades:
+        print(f"\n  전략별 성과:")
+        strat_stats: dict[str, dict] = {}
+        for t in r.trades:
+            key = t.strategy_name or "unknown"
+            if key not in strat_stats:
+                strat_stats[key] = {"trades": 0, "wins": 0, "pnl": 0.0, "win_amt": 0.0, "loss_amt": 0.0}
+            s = strat_stats[key]
+            s["trades"] += 1
+            s["pnl"] += t.pnl
+            if t.pnl > 0:
+                s["wins"] += 1
+                s["win_amt"] += t.pnl
+            else:
+                s["loss_amt"] += abs(t.pnl)
+        print(f"  {'전략':<20s} {'거래':>5s} {'승률':>6s} {'PF':>6s} {'PnL':>10s}")
+        for name, s in sorted(strat_stats.items(), key=lambda x: -x[1]["pnl"]):
+            wr = s["wins"] / s["trades"] * 100 if s["trades"] > 0 else 0
+            pf = s["win_amt"] / s["loss_amt"] if s["loss_amt"] > 0 else float('inf')
+            print(f"  {name:<20s} {s['trades']:>5d} {wr:>5.1f}% {pf:>5.2f} {s['pnl']:>+10.2f}")
+
+        print(f"\n  레짐별 성과:")
+        regime_stats: dict[str, dict] = {}
+        for t in r.trades:
+            key = t.regime or "unknown"
+            if key not in regime_stats:
+                regime_stats[key] = {"trades": 0, "wins": 0, "pnl": 0.0, "win_amt": 0.0, "loss_amt": 0.0}
+            s = regime_stats[key]
+            s["trades"] += 1
+            s["pnl"] += t.pnl
+            if t.pnl > 0:
+                s["wins"] += 1
+                s["win_amt"] += t.pnl
+            else:
+                s["loss_amt"] += abs(t.pnl)
+        print(f"  {'레짐':<20s} {'거래':>5s} {'승률':>6s} {'PF':>6s} {'PnL':>10s}")
+        for name, s in sorted(regime_stats.items(), key=lambda x: -x[1]["pnl"]):
+            wr = s["wins"] / s["trades"] * 100 if s["trades"] > 0 else 0
+            pf = s["win_amt"] / s["loss_amt"] if s["loss_amt"] > 0 else float('inf')
+            print(f"  {name:<20s} {s['trades']:>5d} {wr:>5.1f}% {pf:>5.2f} {s['pnl']:>+10.2f}")
+
+        # 청산 사유별 통계
+        print(f"\n  청산 사유별:")
+        exit_stats: dict[str, dict] = {}
+        for t in r.trades:
+            key = t.exit_reason or "unknown"
+            if key not in exit_stats:
+                exit_stats[key] = {"trades": 0, "wins": 0, "pnl": 0.0}
+            s = exit_stats[key]
+            s["trades"] += 1
+            s["pnl"] += t.pnl
+            if t.pnl > 0:
+                s["wins"] += 1
+        print(f"  {'사유':<20s} {'거래':>5s} {'승률':>6s} {'PnL':>10s}")
+        for name, s in sorted(exit_stats.items(), key=lambda x: -x[1]["pnl"]):
+            wr = s["wins"] / s["trades"] * 100 if s["trades"] > 0 else 0
+            print(f"  {name:<20s} {s['trades']:>5d} {wr:>5.1f}% {s['pnl']:>+10.2f}")
+
     # 타겟 달성 확인
     print(f"\n  ── 타겟 확인 ──")
     pf_ok = r.profit_factor >= 1.5
@@ -1235,6 +1314,15 @@ def parse_args():
     parser.add_argument("--train-days", type=int, default=240, help="WF 학습 기간")
     parser.add_argument("--val-days", type=int, default=60, help="WF 검증 기간")
     parser.add_argument("--test-days", type=int, default=60, help="WF 테스트 기간")
+    # 레짐 감지 튜닝
+    parser.add_argument("--regime-confirm", type=int, default=2,
+                        help="레짐 전환 연속 확인 횟수 (기본 2)")
+    parser.add_argument("--regime-min-hours", type=int, default=3,
+                        help="레짐 최소 유지 시간 (기본 3시간)")
+    parser.add_argument("--regime-adx-enter", type=float, default=27.0,
+                        help="추세 진입 ADX 임계값 (기본 27)")
+    parser.add_argument("--regime-adx-exit", type=float, default=23.0,
+                        help="추세 이탈 ADX 임계값 (기본 23)")
     return parser.parse_args()
 
 
@@ -1263,6 +1351,10 @@ async def main():
         min_confidence=args.min_confidence,
         trending_only=args.trending_only,
         eval_interval=args.eval_interval,
+        regime_confirm=args.regime_confirm,
+        regime_min_hours=args.regime_min_hours,
+        regime_adx_enter=args.regime_adx_enter,
+        regime_adx_exit=args.regime_adx_exit,
     )
 
     if args.v1_strategies:
