@@ -238,6 +238,54 @@ class SurgeTradingConfig(BaseSettings):
     model_config = {"env_prefix": "SURGE_TRADING_"}
 
 
+class FuturesV2Config(BaseSettings):
+    """선물 엔진 v2 전용 설정."""
+    enabled: bool = False
+    mode: str = "paper"
+    leverage: int = 3
+    max_leverage: int = 5
+
+    # Tier 1
+    tier1_coins: list[str] = [
+        "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT",
+    ]
+    tier1_max_position_pct: float = 0.15
+    tier1_eval_interval_sec: int = 60
+    tier1_base_risk_pct: float = 0.02
+
+    # Tier 2
+    tier2_enabled: bool = True
+    tier2_max_concurrent: int = 5
+    tier2_max_position_pct: float = 0.05
+    tier2_max_hold_minutes: int = 120
+    tier2_scan_interval_sec: int = 60
+    tier2_vol_threshold: float = 5.0
+    tier2_price_threshold: float = 1.5
+    tier2_sl_pct: float = 2.0
+    tier2_tp_pct: float = 4.0
+    tier2_daily_trade_limit: int = 20
+
+    # Regime detector
+    regime_adx_enter: float = 27.0
+    regime_adx_exit: float = 23.0
+    regime_confirm_count: int = 2
+    regime_min_duration_h: int = 3
+
+    # Balance guard
+    balance_divergence_warn_pct: float = 3.0
+    balance_divergence_pause_pct: float = 5.0
+    balance_check_interval_sec: int = 300
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v):
+        if v not in ("paper", "live"):
+            raise ValueError(f"mode must be 'paper' or 'live', got '{v}'")
+        return v
+
+    model_config = {"env_prefix": "FUTURES_V2_"}
+
+
 class DiscordBotConfig(BaseSettings):
     """Discord 봇 설정 (자연어 명령)."""
     enabled: bool = False
@@ -262,6 +310,7 @@ class AppConfig(BaseSettings):
     redis: RedisConfig = Field(default_factory=RedisConfig)
     notification: NotificationConfig = Field(default_factory=NotificationConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    futures_v2: FuturesV2Config = Field(default_factory=FuturesV2Config)
     discord_bot: DiscordBotConfig = Field(default_factory=DiscordBotConfig)
     log_level: str = "INFO"
 
