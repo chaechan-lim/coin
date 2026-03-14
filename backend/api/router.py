@@ -6,10 +6,12 @@ from api.dashboard import router as dashboard_router
 from api.events import router as events_router
 from api.capital import router as capital_router
 from api.websocket import router as ws_router
+from api.health import router as health_router
 
 
 def create_api_router() -> APIRouter:
     api_router = APIRouter(prefix="/api/v1")
+    api_router.include_router(health_router)
     api_router.include_router(portfolio_router)
     api_router.include_router(trades_router)
     api_router.include_router(strategies_router)
