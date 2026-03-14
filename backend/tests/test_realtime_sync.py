@@ -1067,3 +1067,181 @@ class TestMarketStateSymbol:
         sig = inspect.signature(futures_engine._maybe_update_market_state)
         params = list(sig.parameters.keys())
         assert "session" in params, "선물 엔진은 session 인자를 받는 오버라이드 사용"
+
+
+# ── Trailing Stop Notification Throttle Bug Regression ────────
+
+class TestTrailingStopNotificationThrottle:
+    """트레일링 스탑 알림 쿨다운 버그 수정 회귀 테스트.
+
+    버그: _execute_stop_sell에서 order.status != "filled" 시 예외 없이 return →
+         _check_stop_conditions가 성공으로 오판 → _last_stop_event_time 쿨다운 해제 →
+         30초마다 알림 반복 발생.
+
+    수정: 미체결 주문 시 RuntimeError 발생 → 쿨다운 유지 → 5분 간격으로만 재알림.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unfilled_order_raises_runtime_error(self, spot_engine):
+        """미체결 주문 시 _execute_stop_sell이 RuntimeError를 발생시켜야 함."""
+        mock_position = MagicMock()
+        mock_position.quantity = 0.001
+        mock_position.average_buy_price = 69000.0
+
+        mock_order = MagicMock()
+        mock_order.status = "open"       # not "filled"
+        mock_order.exchange_order_id = None
+        mock_order.id = 1
+
+        spot_engine._order_manager = AsyncMock()
+        spot_engine._order_manager.create_order = AsyncMock(return_value=mock_order)
+
+        mock_session = AsyncMock()
+
+        with pytest.raises(RuntimeError, match="sell_order_not_filled"):
+            await spot_engine._execute_stop_sell(
+                mock_session, "BTC/USDT", mock_position, 70906.0, "Trailing Stop"
+            )
+
+    @pytest.mark.asyncio
+    async def test_unfilled_order_cancels_exchange_order(self, spot_engine):
+        """미체결 주문에 exchange_order_id가 있으면 취소 시도 후 RuntimeError 발생."""
+        mock_position = MagicMock()
+        mock_position.quantity = 0.001
+        mock_position.average_buy_price = 69000.0
+
+        mock_order = MagicMock()
+        mock_order.status = "open"
+        mock_order.exchange_order_id = "binance-order-123"
+        mock_order.id = 99
+
+        spot_engine._order_manager = AsyncMock()
+        spot_engine._order_manager.create_order = AsyncMock(return_value=mock_order)
+        spot_engine._order_manager.cancel_order_by_id = AsyncMock()
+
+        mock_session = AsyncMock()
+
+        with pytest.raises(RuntimeError):
+            await spot_engine._execute_stop_sell(
+                mock_session, "BTC/USDT", mock_position, 70906.0, "Trailing Stop"
+            )
+
+        # 거래소 취소가 먼저 시도되었는지 확인
+        spot_engine._order_manager.cancel_order_by_id.assert_called_once_with(mock_session, 99)
+
+    @pytest.mark.asyncio
+    async def test_cooldown_preserved_when_sell_order_not_filled(self, spot_engine, mock_market_data):
+        """미체결 주문 시 _last_stop_event_time 쿨다운이 유지되어야 함.
+
+        수정 전 버그: _execute_stop_sell이 silent return → _check_stop_conditions가
+        _last_stop_event_time.pop()을 호출하여 쿨다운 해제 → 30초마다 알림 폭주.
+        수정 후: RuntimeError → except 분기 → pop 미호출 → 쿨다운 유지.
+        """
+        # 유저 리포트와 동일한 시나리오:
+        # 고점 73901, 현재 70906 → drawdown 4.05% >= trailing_stop_pct 4.0%
+        spot_engine._position_trackers["BTC/USDT"] = PositionTracker(
+            entry_price=69000.0,
+            extreme_price=73901.0,
+            trailing_stop_pct=4.0,
+            trailing_activation_pct=5.0,
+            trailing_active=True,
+        )
+
+        # 방금(10초 전) 알림이 발송된 상태 → 5분 쿨다운 중이므로 재발송 안 됨
+        initial_time = datetime.now(timezone.utc) - timedelta(seconds=10)
+        spot_engine._last_stop_event_time["BTC/USDT"] = initial_time
+
+        # 현재 가격: 70906 → trailing stop 조건 충족
+        mock_market_data.get_current_price = AsyncMock(return_value=70906.0)
+
+        mock_position = MagicMock()
+        mock_position.symbol = "BTC/USDT"
+        mock_position.quantity = 0.001
+        mock_position.average_buy_price = 69000.0
+        mock_position.stop_loss_pct = 5.0
+        mock_position.take_profit_pct = 14.0
+        mock_position.trailing_activation_pct = 5.0
+        mock_position.trailing_stop_pct = 4.0
+        mock_position.trailing_active = True
+        mock_position.highest_price = 73901.0
+        mock_position.is_surge = False
+        mock_position.max_hold_hours = 0
+        mock_position.entered_at = None
+
+        # 미체결 주문 반환
+        mock_order = MagicMock()
+        mock_order.status = "open"
+        mock_order.exchange_order_id = None
+        mock_order.id = 1
+
+        spot_engine._order_manager = AsyncMock()
+        spot_engine._order_manager.create_order = AsyncMock(return_value=mock_order)
+
+        mock_session = AsyncMock()
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            result = await spot_engine._check_stop_conditions(
+                mock_session, "BTC/USDT", mock_position
+            )
+
+        # 매도 실패 → False 반환
+        assert result is False
+
+        # 핵심: 쿨다운이 지워지지 않아야 함 (initial_time 그대로)
+        assert "BTC/USDT" in spot_engine._last_stop_event_time
+        assert spot_engine._last_stop_event_time["BTC/USDT"] == initial_time
+
+    @pytest.mark.asyncio
+    async def test_cooldown_cleared_on_successful_sell(self, spot_engine, mock_market_data):
+        """정상 체결 시에는 쿨다운이 클리어되고 True 반환."""
+        spot_engine._position_trackers["BTC/USDT"] = PositionTracker(
+            entry_price=69000.0,
+            extreme_price=73901.0,
+            trailing_stop_pct=4.0,
+            trailing_activation_pct=5.0,
+            trailing_active=True,
+        )
+        spot_engine._last_stop_event_time["BTC/USDT"] = datetime(
+            2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc
+        )
+
+        mock_market_data.get_current_price = AsyncMock(return_value=70906.0)
+
+        mock_position = MagicMock()
+        mock_position.symbol = "BTC/USDT"
+        mock_position.quantity = 0.001
+        mock_position.average_buy_price = 69000.0
+        mock_position.stop_loss_pct = 5.0
+        mock_position.take_profit_pct = 14.0
+        mock_position.trailing_activation_pct = 5.0
+        mock_position.trailing_stop_pct = 4.0
+        mock_position.trailing_active = True
+        mock_position.highest_price = 73901.0
+        mock_position.is_surge = False
+        mock_position.max_hold_hours = 0
+        mock_position.entered_at = None
+
+        # 정상 체결 주문
+        mock_order = MagicMock()
+        mock_order.status = "filled"
+        mock_order.id = 2
+        mock_order.fee = 0.04
+
+        spot_engine._order_manager = AsyncMock()
+        spot_engine._order_manager.create_order = AsyncMock(return_value=mock_order)
+
+        spot_engine._portfolio_manager = AsyncMock()
+        spot_engine._portfolio_manager.update_position_on_sell = AsyncMock()
+
+        spot_engine._on_sell_completed = AsyncMock()
+
+        mock_session = AsyncMock()
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            result = await spot_engine._check_stop_conditions(
+                mock_session, "BTC/USDT", mock_position
+            )
+
+        # 성공 → True, 쿨다운 클리어
+        assert result is True
+        assert "BTC/USDT" not in spot_engine._last_stop_event_time
