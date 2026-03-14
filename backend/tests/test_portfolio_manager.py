@@ -859,6 +859,94 @@ async def test_sync_clears_position_not_on_exchange(session):
 
 
 @pytest.mark.asyncio
+async def test_sync_clears_zombie_with_dust_on_exchange(session):
+    """거래소에 dust(가치 미만) 잔고만 남은 포지션은 좀비로 정리돼야 한다."""
+    from exchange.base import Balance
+    from core.models import Order as OrderModel
+
+    # DB에 MOCA/USDT 포지션 존재 (qty=50, 가치 $100)
+    session.add(Position(
+        exchange="binance_spot", symbol="MOCA/USDT",
+        quantity=50.0, average_buy_price=2.0,
+        total_invested=100.0, is_paper=False,
+    ))
+    await session.flush()
+
+    # 거래소: MOCA가 dust 수준(0.0001개, 가격 $2 → $0.0002 < $1)만 남음
+    pm = PortfolioManager(
+        market_data=_make_market_data({"MOCA/USDT": 2.0}),
+        initial_balance_krw=1000,
+        is_paper=False,
+        exchange_name="binance_spot",
+    )
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=900, used=0, total=900),
+        "MOCA": Balance(currency="MOCA", free=0.0001, used=0, total=0.0001),
+    })
+
+    await pm.sync_exchange_positions(session, adapter, ["MOCA/USDT"])
+    await session.flush()
+
+    # MOCA/USDT quantity가 0으로 정리됨 (dust는 zombie로 처리)
+    result = await session.execute(
+        select(Position).where(Position.symbol == "MOCA/USDT", Position.exchange == "binance_spot")
+    )
+    pos = result.scalar_one()
+    assert pos.quantity == 0
+
+    # _cleared_positions에 기록됨
+    assert len(pm._cleared_positions) == 1
+    assert pm._cleared_positions[0]["symbol"] == "MOCA/USDT"
+
+    # Order 기록이 생성됨
+    order_result = await session.execute(
+        select(OrderModel).where(
+            OrderModel.symbol == "MOCA/USDT",
+            OrderModel.strategy_name == "position_sync",
+        )
+    )
+    assert order_result.scalar_one_or_none() is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_keeps_position_with_normal_balance(session):
+    """거래소에 정상 잔고가 있으면 좀비로 정리되지 않아야 한다."""
+    from exchange.base import Balance
+
+    session.add(Position(
+        exchange="binance_spot", symbol="BTC/USDT",
+        quantity=0.01, average_buy_price=50000.0,
+        total_invested=500.0, is_paper=False,
+    ))
+    await session.flush()
+
+    # 거래소: BTC가 $500 이상 (정상 잔고)
+    pm = PortfolioManager(
+        market_data=_make_market_data({"BTC/USDT": 50000.0}),
+        initial_balance_krw=1000,
+        is_paper=False,
+        exchange_name="binance_spot",
+    )
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=500, used=0, total=500),
+        "BTC": Balance(currency="BTC", free=0.01, used=0, total=0.01),
+    })
+
+    await pm.sync_exchange_positions(session, adapter, ["BTC/USDT"])
+    await session.flush()
+
+    # 포지션이 그대로 유지됨
+    result = await session.execute(
+        select(Position).where(Position.symbol == "BTC/USDT", Position.exchange == "binance_spot")
+    )
+    pos = result.scalar_one()
+    assert pos.quantity == pytest.approx(0.01)
+    assert len(pm._cleared_positions) == 0
+
+
+@pytest.mark.asyncio
 async def test_sync_cleared_position_futures_liquidation(session):
     """선물 포지션이 거래소에서 사라지면 _cleared_positions에 기록."""
     from exchange.base import Balance

@@ -674,6 +674,8 @@ class PortfolioManager:
         # tracked_coins에 포함된 심볼 + 실제 잔고가 있는 코인 처리
         synced_count = 0
         total_invested = 0.0
+        # 좀비 탐지용: dust 필터를 통과한 심볼만 기록 (raw balances 재스캔 금지)
+        exchange_symbols: set[str] = set()
 
         # 선물: fetch_positions로 실제 마진/방향/레버리지 조회
         is_futures = "futures" in self._exchange_name
@@ -715,8 +717,11 @@ class PortfolioManager:
                 # 바이낸스: 1 USDT 미만, 빗썸: 1000원 미만 무시
                 min_value = 1.0 if "binance" in self._exchange_name else 1000
                 if coin_value < min_value:
-                    continue
+                    continue  # dust: 좀비 탐지에도 포함 안 됨
+                exchange_symbols.add(pair)
             except Exception:
+                # 가격 조회 실패: 잔고가 실제 있다고 보수적으로 처리 (거짓 좀비 방지)
+                exchange_symbols.add(pair)
                 continue
 
             # 선물: 실제 마진/방향/레버리지 가져오기
@@ -912,11 +917,7 @@ class PortfolioManager:
                 )
 
         # DB에 있지만 거래소에 없는 포지션 → 청산/수동매도로 사라진 경우
-        exchange_symbols = set()
-        for symbol, bal in balances.items():
-            if symbol == cash_symbol or bal.total <= 0:
-                continue
-            exchange_symbols.add(f"{symbol}/{cash_symbol}")
+        # exchange_symbols는 위 루프에서 dust 필터 통과 심볼만 수집됨
         if is_futures:
             for fp_sym in futures_positions:
                 exchange_symbols.add(fp_sym.replace(":USDT", ""))
