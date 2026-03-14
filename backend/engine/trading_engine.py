@@ -1210,7 +1210,7 @@ class TradingEngine:
                     await self._order_manager.cancel_order_by_id(session, order.id)
                 except Exception:
                     pass
-            return
+            raise RuntimeError(f"sell_order_not_filled: {order.status}")
 
         await self._portfolio_manager.update_position_on_sell(
             session, symbol, position.quantity, price,
