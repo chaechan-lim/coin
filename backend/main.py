@@ -588,11 +588,11 @@ async def lifespan(app: FastAPI):
     )
 
     # 바이낸스 스케줄 잡 추가
+    from engine.scheduler import _wrap
     if config.binance.enabled and _binance_engine:
         binance_coord = engine_registry.get_coordinator("binance_futures")
         binance_pm = engine_registry.get_portfolio_manager("binance_futures")
         if binance_coord and binance_pm:
-            from engine.scheduler import _wrap
             _scheduler.add_job(
                 _wrap(binance_coord.run_market_analysis),
                 name="binance_market_analysis",
@@ -630,7 +630,6 @@ async def lifespan(app: FastAPI):
 
     # ── 입출금 자동 감지 스케줄러 ───────────────────────────────
     from engine.capital_sync import sync_binance_deposits, detect_bithumb_balance_change
-    from engine.scheduler import _wrap
 
     if config.binance.enabled and _binance_engine and not (config.binance_trading.mode == "paper"):
         binance_adapter_for_sync = engine_registry.get_engine("binance_futures")

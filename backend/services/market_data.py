@@ -90,6 +90,12 @@ class MarketDataService:
         self._ohlcv_cache.put(key, df)
         return df
 
+    async def get_ohlcv_df(
+        self, symbol: str, timeframe: str = "1h", limit: int = 200,
+    ) -> pd.DataFrame:
+        """Alias for get_candles (v2 엔진 호환)."""
+        return await self.get_candles(symbol, timeframe, limit)
+
     async def get_ticker(self, symbol: str) -> Ticker:
         """Fetch current ticker with caching."""
         cached = self._ticker_cache.get(symbol)

@@ -67,8 +67,14 @@ async def get_engine_status(
         mode = ec.mode
         eval_interval = ec.evaluation_interval_sec
     else:
-        mode = getattr(eng, '_mode', 'paper')
-        eval_interval = getattr(eng, '_scan_interval', 300)
+        # v2 엔진 또는 서지 엔진
+        cfg = getattr(eng, '_config', None)
+        if cfg and hasattr(cfg, 'futures_v2'):
+            mode = cfg.futures_v2.mode
+            eval_interval = cfg.futures_v2.tier1_eval_interval_sec
+        else:
+            mode = getattr(eng, '_mode', 'paper')
+            eval_interval = getattr(eng, '_scan_interval', 300)
 
     strategies = getattr(eng, 'strategies', None)
     strategies_active = list(strategies.keys()) if strategies else []
