@@ -258,6 +258,10 @@ async def fetch_ohlcv_cached(
         cached_df = pd.read_csv(
             cache_path, parse_dates=["timestamp"], index_col="timestamp",
         )
+        # 손상된 인덱스 행 제거 (파싱 실패 시 Index가 object dtype이 됨)
+        if not isinstance(cached_df.index, pd.DatetimeIndex):
+            cached_df.index = pd.to_datetime(cached_df.index, errors="coerce", utc=True)
+            cached_df = cached_df[cached_df.index.notna()]
         if cached_df.index.tz is None:
             cached_df.index = cached_df.index.tz_localize("UTC")
         cached_df.sort_index(inplace=True)
@@ -515,14 +519,9 @@ class V2Backtester:
         days: int,
     ) -> V2BacktestResult:
         """메인 시뮬레이션 루프."""
-        # 날짜 범위 제한
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        if list(all_data.values())[0][0].index.tz is not None:
-            cutoff = cutoff.replace(tzinfo=list(all_data.values())[0][0].index.tz)
-
-        # 유니온 5m 타임스탬프
+        # 유니온 5m 타임스탬프 (데이터 전체 사용 — 이미 prefetch/WF에서 슬라이싱됨)
         all_ts = sorted(set().union(*(
-            df5m[df5m.index >= cutoff].index for df5m, _ in all_data.values()
+            df5m.index for df5m, _ in all_data.values()
         )))
         if not all_ts:
             raise ValueError("날짜 범위에 데이터 없음")
@@ -1094,6 +1093,7 @@ class V2Backtester:
 
             # 테스트 데이터 슬라이싱
             test_data = {}
+            skipped = []
             for sym, (df5m, df1h) in all_data.items():
                 df5m_test = df5m[(df5m.index >= test_start) & (df5m.index <= test_end)]
                 df1h_test = df1h[(df1h.index >= test_start) & (df1h.index <= test_end)]
@@ -1103,6 +1103,11 @@ class V2Backtester:
                     df5m_slice = df5m[(df5m.index >= warmup_start) & (df5m.index <= test_end)]
                     df1h_slice = df1h[(df1h.index >= warmup_start) & (df1h.index <= test_end)]
                     test_data[sym] = (df5m_slice, df1h_slice)
+                else:
+                    skipped.append(sym)
+
+            if skipped:
+                print(f"     데이터 부족으로 제외: {', '.join(skipped)}")
 
             if test_data:
                 result = await self._simulate(test_data, test_days + 5)

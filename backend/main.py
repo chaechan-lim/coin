@@ -333,7 +333,6 @@ async def lifespan(app: FastAPI):
     if config.binance.enabled:
         try:
             from exchange.binance_usdm_adapter import BinanceUSDMAdapter
-            from engine.futures_engine import BinanceFuturesEngine
 
             binance_adapter = BinanceUSDMAdapter(
                 api_key=config.binance.api_key,
@@ -349,9 +348,6 @@ async def lifespan(app: FastAPI):
             initial_usdt = bt.initial_balance_usdt
             logger.info("binance_mode", mode=bt.mode, is_paper=binance_is_paper)
 
-            binance_combiner, binance_coordinator = _create_agent_stack(
-                binance_market_data, config, "binance_futures", market_symbol="BTC/USDT",
-            )
             binance_order_mgr = OrderManager(
                 binance_adapter, is_paper=binance_is_paper,
                 exchange_name="binance_futures", fee_currency="USDT",
@@ -363,42 +359,90 @@ async def lifespan(app: FastAPI):
                 exchange_name="binance_futures",
             )
 
-            binance_engine = BinanceFuturesEngine(
-                config=config,
-                exchange=binance_adapter,
-                market_data=binance_market_data,
-                order_manager=binance_order_mgr,
-                portfolio_manager=binance_portfolio_mgr,
-                combiner=binance_combiner,
-                agent_coordinator=binance_coordinator,
-            )
-            binance_coordinator.set_engine(binance_engine)
-            await binance_engine.initialize()
-            binance_engine.set_broadcast_callback(ws_manager.broadcast)
-            _binance_engine = binance_engine
+            if config.futures_v2.enabled:
+                # ── v2 레짐 적응형 엔진 ──
+                from engine.futures_engine_v2 import FuturesEngineV2
 
-            if not binance_is_paper:
-                await _sync_live_state(
-                    binance_portfolio_mgr, binance_adapter, config.binance.tracked_coins,
-                    "binance_futures", "USDT", initial_usdt, is_futures=True,
+                v2_mode = config.futures_v2.mode
+                logger.info("futures_v2_mode", mode=v2_mode)
+
+                binance_engine = FuturesEngineV2(
+                    config=config,
+                    exchange=binance_adapter,
+                    market_data=binance_market_data,
+                    order_manager=binance_order_mgr,
+                    portfolio_manager=binance_portfolio_mgr,
+                )
+                await binance_engine.initialize()
+                binance_engine.set_broadcast_callback(ws_manager.broadcast)
+                _binance_engine = binance_engine
+
+                if not (v2_mode == "paper"):
+                    await _sync_live_state(
+                        binance_portfolio_mgr, binance_adapter, list(config.futures_v2.tier1_coins),
+                        "binance_futures", "USDT", initial_usdt, is_futures=True,
+                    )
+
+                engine_registry.register(
+                    "binance_futures", binance_engine, binance_portfolio_mgr,
+                    None, None,
                 )
 
-            engine_registry.register(
-                "binance_futures", binance_engine, binance_portfolio_mgr,
-                binance_combiner, binance_coordinator,
-            )
+                futures_health = _create_self_healing(
+                    binance_engine, binance_portfolio_mgr, binance_adapter,
+                    binance_market_data, "binance_futures", list(config.futures_v2.tier1_coins),
+                )
 
-            futures_health = _create_self_healing(
-                binance_engine, binance_portfolio_mgr, binance_adapter,
-                binance_market_data, "binance_futures", config.binance.tracked_coins,
-            )
+                logger.info("binance_futures_v2_ready",
+                             mode=v2_mode,
+                             initial_usdt=round(initial_usdt, 2),
+                             tier1_coins=list(config.futures_v2.tier1_coins),
+                             leverage=config.futures_v2.leverage,
+                             tier2_enabled=config.futures_v2.tier2_enabled)
+            else:
+                # ── v1 기존 7전략+ML 엔진 ──
+                from engine.futures_engine import BinanceFuturesEngine
 
-            logger.info("binance_futures_engine_ready",
-                         mode=bt.mode,
-                         is_paper=binance_is_paper,
-                         initial_usdt=round(initial_usdt, 2),
-                         tracked_coins=config.binance.tracked_coins,
-                         leverage=config.binance.default_leverage)
+                binance_combiner, binance_coordinator = _create_agent_stack(
+                    binance_market_data, config, "binance_futures", market_symbol="BTC/USDT",
+                )
+
+                binance_engine = BinanceFuturesEngine(
+                    config=config,
+                    exchange=binance_adapter,
+                    market_data=binance_market_data,
+                    order_manager=binance_order_mgr,
+                    portfolio_manager=binance_portfolio_mgr,
+                    combiner=binance_combiner,
+                    agent_coordinator=binance_coordinator,
+                )
+                binance_coordinator.set_engine(binance_engine)
+                await binance_engine.initialize()
+                binance_engine.set_broadcast_callback(ws_manager.broadcast)
+                _binance_engine = binance_engine
+
+                if not binance_is_paper:
+                    await _sync_live_state(
+                        binance_portfolio_mgr, binance_adapter, config.binance.tracked_coins,
+                        "binance_futures", "USDT", initial_usdt, is_futures=True,
+                    )
+
+                engine_registry.register(
+                    "binance_futures", binance_engine, binance_portfolio_mgr,
+                    binance_combiner, binance_coordinator,
+                )
+
+                futures_health = _create_self_healing(
+                    binance_engine, binance_portfolio_mgr, binance_adapter,
+                    binance_market_data, "binance_futures", config.binance.tracked_coins,
+                )
+
+                logger.info("binance_futures_v1_ready",
+                             mode=bt.mode,
+                             is_paper=binance_is_paper,
+                             initial_usdt=round(initial_usdt, 2),
+                             tracked_coins=config.binance.tracked_coins,
+                             leverage=config.binance.default_leverage)
         except Exception as e:
             logger.error("binance_futures_init_failed", error=str(e), exc_info=True)
 

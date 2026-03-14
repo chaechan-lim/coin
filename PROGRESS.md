@@ -10,7 +10,7 @@
 빗썸(현물, 비활성) + 바이낸스 현물(live) + 바이낸스 USDM 선물(live, 3x) + 서지 **쿼드 엔진** 24시간 자동 트레이딩 시스템.
 가중 투표 (HOLD=기권) + ML 시그널 필터 + 5요소 시장 감지 + 적응형 가중치, AI 에이전트 5종, Discord 봇(자연어 제어), React 대시보드(8탭).
 **현물 4전략** (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + **선물 7전략** (MA, RSI, MACD, 볼린저RSI, 스토캐스틱RSI, OBV, BB스퀴즈).
-**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **793 유닛 테스트**.
+**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **979 유닛 테스트**.
 
 ---
 
@@ -46,7 +46,7 @@ coin/
 │   ├── agents/        (market_analysis, risk_management, trade_review, performance_analytics, strategy_advisor, diagnostic_agent, coordinator)
 │   ├── engine/        (trading_engine, futures_engine, surge_engine, order_manager, portfolio_manager, recovery, health_monitor, capital_sync, scheduler)
 │   ├── api/           (router, dependencies, dashboard, portfolio, trades, strategies, events, capital, websocket)
-│   └── tests/         (793 tests)
+│   └── tests/         (979 tests)
 └── frontend/
     └── src/           (Dashboard, 8탭 컴포넌트, hooks, types)
 ```
@@ -97,6 +97,8 @@ coin/
 | 서지 엔진 거래량 감지 수정 (v0.40) | ticker 24h volume→5m 캔들 OHLCV 기반, 배치 ticker(USDM 키 정규화), 좀비 포지션 자동 청산 |
 | 현물 좀비 포지션 감지 버그 수정 | `sync_exchange_positions`: dust 잔고(가치 미만)가 exchange_symbols에 포함돼 좀비 탐지가 누락되던 버그 수정. exchange_symbols를 dust 필터 통과 심볼만 수집하도록 변경 |
 | 선물 Optuna 최적화 도구 (v0.40) | optimize.py --futures 지원, 백테스트 적응형 가중치 bb_squeeze 누락 수정 |
+| v2 백테스터 + 레짐 전략 개선 | backtest_v2.py: Walk-Forward 검증, 레짐 적응형 선물 엔진, 쿨다운/신뢰도/레짐 필터/평가 주기 |
+| v2 레짐 전략 튜닝 (2026-03-14) | MeanReversion(BB 0.15/0.85, RSI 40/60, 1h확인), VolBreakout(KC 1.8x, VOL 1.2x, RSI필터), TrendFollower(모멘텀 진입, ADX부스트, SAR체크). 540d: PF 1.73, WR 59.1%, MDD 9.69%, +45.3%, Sharpe 2.03 |
 
 ### 낮은 우선순위
 
