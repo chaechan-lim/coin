@@ -243,6 +243,26 @@ class DailyPnL(Base):
     created_at = Column(DateTime, default=_utcnow)
 
 
+class RegimeLog(Base):
+    """레짐 변경 이력 (선물 v2)."""
+    __tablename__ = "regime_logs"
+    __table_args__ = (
+        Index("ix_regime_logs_at", "detected_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    exchange = Column(String(20), default="binance_futures")
+    symbol = Column(String(20), default="BTC/USDT")
+    regime = Column(String(20), nullable=False)
+    prev_regime = Column(String(20), nullable=True)
+    confidence = Column(Float)
+    adx = Column(Float)
+    bb_width = Column(Float)
+    atr_pct = Column(Float)
+    volume_ratio = Column(Float)
+    detected_at = Column(DateTime, default=_utcnow)
+
+
 class ServerEvent(Base):
     __tablename__ = "server_events"
     __table_args__ = (

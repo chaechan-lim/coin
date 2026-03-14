@@ -43,3 +43,16 @@ class RiskLevel(str, Enum):
 class TradingMode(str, Enum):
     PAPER = "paper"
     LIVE = "live"
+
+
+class Regime(str, Enum):
+    TRENDING_UP = "trending_up"
+    TRENDING_DOWN = "trending_down"
+    RANGING = "ranging"
+    VOLATILE = "volatile"
+
+
+class Direction(str, Enum):
+    LONG = "long"
+    SHORT = "short"
+    FLAT = "flat"
