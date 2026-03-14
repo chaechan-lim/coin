@@ -94,7 +94,14 @@ async def fetch_ohlcv_cached(
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ms = now_ms - candles_needed * tf_ms
 
-    if cached_df is not None and last_cached_ts > start_ms:
+    # 캐시가 충분히 오래된 데이터를 가지고 있는지 확인
+    needs_old_data = True
+    if cached_df is not None:
+        first_cached_ts = int(cached_df.index[0].timestamp() * 1000)
+        if first_cached_ts <= start_ms + tf_ms * 10:  # 10캔들 허용 오차
+            needs_old_data = False
+
+    if cached_df is not None and not needs_old_data and last_cached_ts > start_ms:
         fetch_since = last_cached_ts + tf_ms
     else:
         fetch_since = start_ms
@@ -258,6 +265,10 @@ class V2Backtester:
         initial_balance: float = 1000.0,
         max_position_pct: float = 0.15,
         base_risk_pct: float = BASE_RISK_PCT,
+        cooldown_candles: int = 36,    # 3시간 (5m × 36)
+        min_confidence: float = 0.5,   # 최소 신뢰도
+        trending_only: bool = False,   # True = TRENDING 레짐에서만 거래
+        eval_interval: int = 12,       # 전략 평가 주기 (5m 캔들 수, 12=1h)
     ):
         self._exchange = exchange
         self._coins = coins
@@ -265,6 +276,10 @@ class V2Backtester:
         self._initial_balance = initial_balance
         self._max_position_pct = max_position_pct
         self._base_risk_pct = base_risk_pct
+        self._cooldown_candles = cooldown_candles
+        self._min_confidence = min_confidence
+        self._trending_only = trending_only
+        self._eval_interval = eval_interval
 
         self._regime_detector = RegimeDetector()
         self._strategy_selector = StrategySelector()
@@ -294,6 +309,7 @@ class V2Backtester:
         print(f"  코인: {', '.join(self._coins)}")
         print(f"  레버리지: {self._leverage}x | 수수료: {FUTURES_FEE*100:.2f}%")
         print(f"  최대 포지션: {self._max_position_pct*100:.0f}% | 리스크: {self._base_risk_pct*100:.0f}%")
+        print(f"  쿨다운: {self._cooldown_candles}캔들 ({self._cooldown_candles*5}분) | 최소 신뢰도: {self._min_confidence}")
         print(f"{'='*60}")
 
         all_data = await self.prefetch(days)
@@ -322,10 +338,13 @@ class V2Backtester:
 
         print(f"\n  타임라인: {len(all_ts):,}개 5m 캔들 ({all_ts[0].date()} ~ {all_ts[-1].date()})")
 
-        # 1h 레짐 사전 계산 (BTC 기준)
+        # 1h 레짐 사전 계산 (코인별)
+        regimes_per_coin: dict[str, list[tuple[datetime, RegimeState]]] = {}
+        for sym, (_, df_1h) in all_data.items():
+            regimes_per_coin[sym] = self._precompute_regimes(df_1h)
+        # BTC 기준 글로벌 레짐 (에쿼티 보고용)
         btc_key = "BTC/USDT" if "BTC/USDT" in all_data else list(all_data.keys())[0]
-        _, df_1h_btc = all_data[btc_key]
-        regimes_by_hour = self._precompute_regimes(df_1h_btc)
+        regimes_by_hour = regimes_per_coin[btc_key]
 
         # 초기 상태
         cash = self._initial_balance
@@ -344,6 +363,9 @@ class V2Backtester:
                   "long_wins": 0, "long_losses": 0, "short_wins": 0, "short_losses": 0}
             for sym in all_data
         }
+
+        # 쿨다운 추적 (코인별 마지막 청산 캔들 인덱스)
+        last_exit_idx: dict[str, int] = {}
 
         # 진입 가격 기록 (B&H 비교용)
         first_prices: dict[str, float] = {}
@@ -423,16 +445,38 @@ class V2Backtester:
                         trades.append(trade)
                         self._update_coin_stats(coin_stats, trade)
                         del positions[sym]
+                        last_exit_idx[sym] = candle_idx
                         has_position = False
                     else:
                         # 트레일링 업데이트
                         self._update_trailing(pos, price)
 
-                # ─── 전략 평가 ───
-                if regime is None:
+                # ─── 전략 평가 (eval_interval 주기로만) ───
+                if candle_idx % self._eval_interval != 0:
                     continue
 
-                strategy = self._strategy_selector.select(regime.regime)
+                # 코인별 레짐 조회
+                coin_regime = self._get_regime_at(
+                    regimes_per_coin.get(sym, regimes_by_hour), ts,
+                )
+                if coin_regime is None:
+                    continue
+
+                # trending-only 모드: 비추세 레짐에서 기존 포지션 청산, 신규 진입 차단
+                if self._trending_only and coin_regime.regime not in (Regime.TRENDING_UP, Regime.TRENDING_DOWN):
+                    if sym in positions:
+                        pos = positions[sym]
+                        pnl, fee = self._close_position(pos, price)
+                        cash += pos.margin + pnl - fee
+                        total_fees += fee
+                        trade = self._record_trade(pos, price, ts, "regime_exit", pnl, coin_regime)
+                        trades.append(trade)
+                        self._update_coin_stats(coin_stats, trade)
+                        del positions[sym]
+                        last_exit_idx[sym] = candle_idx
+                    continue
+
+                strategy = self._strategy_selector.select(coin_regime.regime)
                 current_dir = positions[sym].direction if sym in positions else None
 
                 # 5m 윈도우 슬라이스
@@ -450,7 +494,7 @@ class V2Backtester:
                 if len(window_5m) < 21 or len(window_1h) < 5:
                     continue
 
-                decision = await strategy.evaluate(window_5m, window_1h, regime, current_dir)
+                decision = await strategy.evaluate(window_5m, window_1h, coin_regime, current_dir)
 
                 # ─── 시그널 처리 ───
                 if decision.is_hold:
@@ -462,23 +506,35 @@ class V2Backtester:
                     pnl, fee = self._close_position(pos, price)
                     cash += pos.margin + pnl - fee
                     total_fees += fee
-                    trade = self._record_trade(pos, price, ts, "strategy_exit", pnl, regime)
+                    trade = self._record_trade(pos, price, ts, "strategy_exit", pnl, coin_regime)
                     trades.append(trade)
                     self._update_coin_stats(coin_stats, trade)
                     del positions[sym]
+                    last_exit_idx[sym] = candle_idx
                     continue
 
                 if decision.is_entry:
+                    # 최소 신뢰도 필터
+                    if decision.confidence < self._min_confidence:
+                        continue
+
                     # SAR: 현재 포지션과 다른 방향 → 청산 후 신규 진입
                     if sym in positions and positions[sym].direction != decision.direction:
                         pos = positions[sym]
                         pnl, fee = self._close_position(pos, price)
                         cash += pos.margin + pnl - fee
                         total_fees += fee
-                        trade = self._record_trade(pos, price, ts, "SAR", pnl, regime)
+                        trade = self._record_trade(pos, price, ts, "SAR", pnl, coin_regime)
                         trades.append(trade)
                         self._update_coin_stats(coin_stats, trade)
                         del positions[sym]
+                        last_exit_idx[sym] = candle_idx
+                    elif sym not in positions:
+                        # 신규 진입 시 쿨다운 체크 (SAR은 쿨다운 면제)
+                        if sym in last_exit_idx:
+                            elapsed = candle_idx - last_exit_idx[sym]
+                            if elapsed < self._cooldown_candles:
+                                continue
 
                     # 이미 같은 방향 포지션 있으면 스킵
                     if sym in positions:
@@ -974,6 +1030,10 @@ def parse_args():
     parser.add_argument("--leverage", type=int, default=3, help="레버리지 배수")
     parser.add_argument("--balance", type=float, default=1000.0, help="초기 잔고 (USDT)")
     parser.add_argument("--max-position-pct", type=float, default=0.15, help="최대 포지션 비율")
+    parser.add_argument("--cooldown", type=int, default=36, help="쿨다운 캔들 수 (5m 기준, 기본 36=3시간)")
+    parser.add_argument("--min-confidence", type=float, default=0.5, help="최소 신뢰도 (0.0-1.0)")
+    parser.add_argument("--trending-only", action="store_true", help="추세 레짐에서만 거래")
+    parser.add_argument("--eval-interval", type=int, default=12, help="전략 평가 주기 (5m 캔들, 12=1h)")
     parser.add_argument("--walk-forward", action="store_true", help="Walk-Forward 검증 모드")
     parser.add_argument("--train-days", type=int, default=240, help="WF 학습 기간")
     parser.add_argument("--val-days", type=int, default=60, help="WF 검증 기간")
@@ -1002,6 +1062,10 @@ async def main():
         leverage=args.leverage,
         initial_balance=args.balance,
         max_position_pct=args.max_position_pct,
+        cooldown_candles=args.cooldown,
+        min_confidence=args.min_confidence,
+        trending_only=args.trending_only,
+        eval_interval=args.eval_interval,
     )
 
     try:
