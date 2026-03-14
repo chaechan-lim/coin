@@ -95,6 +95,7 @@ coin/
 | 현물 Optuna 바이낸스 재최적화 (v0.39) | 빗썸 KRW→바이낸스 USDT 데이터로 재최적화 (PF 1.56, +22.48%), cis_momentum 지배적, SL5/TP14/trail3-1.5, cd15(60h) |
 | 트레일링 스탑 알림 반복 버그 수정 | `_execute_stop_sell`: 미체결 주문 시 `return` → `raise RuntimeError` — cooldown pop 오동작 방지, 30초마다 알림 폭주 해결 |
 | 서지 엔진 거래량 감지 수정 (v0.40) | ticker 24h volume→5m 캔들 OHLCV 기반, 배치 ticker(USDM 키 정규화), 좀비 포지션 자동 청산 |
+| 현물 좀비 포지션 감지 버그 수정 | `sync_exchange_positions`: dust 잔고(가치 미만)가 exchange_symbols에 포함돼 좀비 탐지가 누락되던 버그 수정. exchange_symbols를 dust 필터 통과 심볼만 수집하도록 변경 |
 | 선물 Optuna 최적화 도구 (v0.40) | optimize.py --futures 지원, 백테스트 적응형 가중치 bb_squeeze 누락 수정 |
 
 ### 낮은 우선순위
