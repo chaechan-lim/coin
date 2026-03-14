@@ -1,6 +1,6 @@
 # 코인 자동 매매 시스템 — 운영 참조
 
-> 최종 업데이트: 2026-03-13
+> 최종 업데이트: 2026-03-14
 > 완료된 Phase 1-5 상세 및 버전 이력은 `CHANGELOG.md` 참고.
 
 ---
@@ -85,6 +85,7 @@ coin/
 | 프론트엔드 조건부 빌드 | src 변경 시만 npm build (506MB 피크 메모리 절감) |
 | delisted 심볼 필터 | JEX 등 삭제 심볼 즉시 실패 + rotation 제외, position_sync 60→120초 |
 | 교차 거래소 포지션 전환 | 높은 신뢰도(>=0.65) 반대 신호 시 기존 포지션 청산 후 새 방향 진입 |
+| 선물 총 자산 과소계상 버그 수정 | `_merge_surge_positions`: `total_value_krw += unrealized` → `+= current_value` (surge 마진이 총 자산에서 누락되던 문제) |
 | MIN_SELL_ACTIVE_WEIGHT | 단일 전략 숏 진입 방지 옵션 (기본 0.0=비활성, backtest --min-sell-weight) |
 | 선물 구조 최적화 (v0.37→v0.38) | 3x 레버리지, 쿨다운 cd6(24h), 7전략(bb_squeeze 추가), ML Signal Filter |
 | 선물 쿨다운 구현 | futures_engine에 쿨다운 체크 추가, last_sell_at DB 기록 |
