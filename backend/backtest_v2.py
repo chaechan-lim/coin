@@ -29,11 +29,12 @@ structlog.configure(
     wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
 )
 
-from core.enums import Direction, Regime
+from core.enums import Direction, Regime, SignalType
 from engine.regime_detector import RegimeDetector, RegimeState
 from engine.strategy_selector import StrategySelector
-from strategies.regime_base import StrategyDecision
-from exchange.data_models import Candle
+from strategies.regime_base import RegimeStrategy, StrategyDecision
+from strategies.base import Signal
+from exchange.data_models import Candle, Ticker
 
 # ── 상수 ──────────────────────────────────────────────────────
 FUTURES_FEE = 0.0004      # 0.04% maker/taker (바이낸스 선물)
@@ -58,6 +59,177 @@ _RENAME_MAP = {
     "BBL_20_2.0": "bb_lower_20",
     "BBM_20_2.0": "bb_mid_20",
 }
+
+
+# v1 전략 → v2 레짐 매핑 (미니 앙상블)
+REGIME_STRATEGY_MAP: dict[Regime, list[tuple[str, float]]] = {
+    # TRENDING: 추세추종 전략 (ma, macd, obv 중심)
+    Regime.TRENDING_UP: [
+        ("ma_crossover", 0.20),
+        ("macd_crossover", 0.25),
+        ("obv_divergence", 0.20),
+        ("bollinger_rsi", 0.20),
+        ("bb_squeeze", 0.15),
+    ],
+    Regime.TRENDING_DOWN: [
+        ("ma_crossover", 0.20),
+        ("macd_crossover", 0.25),
+        ("obv_divergence", 0.20),
+        ("bollinger_rsi", 0.20),
+        ("bb_squeeze", 0.15),
+    ],
+    # RANGING: 평균회귀 전략 (bollinger_rsi, rsi, stochastic 중심)
+    Regime.RANGING: [
+        ("bollinger_rsi", 0.30),
+        ("rsi", 0.25),
+        ("stochastic_rsi", 0.20),
+        ("bb_squeeze", 0.25),
+    ],
+    # VOLATILE: 돌파 전략 (bb_squeeze, obv 중심)
+    Regime.VOLATILE: [
+        ("bb_squeeze", 0.30),
+        ("obv_divergence", 0.25),
+        ("bollinger_rsi", 0.20),
+        ("rsi", 0.15),
+        ("stochastic_rsi", 0.10),
+    ],
+}
+
+
+class V1StrategyAdapter(RegimeStrategy):
+    """v1 BaseStrategy 래퍼 → v2 RegimeStrategy 인터페이스.
+
+    v1 Signal(BUY/SELL/HOLD) → v2 StrategyDecision(LONG/SHORT/FLAT).
+    레짐별 미니 앙상블: 2-5개 v1 전략 가중 투표.
+    """
+
+    def __init__(self, strategies: dict, regime_map: dict):
+        self._strategies = strategies  # {name: BaseStrategy instance}
+        self._regime_map = regime_map  # {Regime: [(name, weight), ...]}
+
+    @property
+    def name(self) -> str:
+        return "v1_ensemble"
+
+    @property
+    def target_regimes(self) -> list[Regime]:
+        return list(self._regime_map.keys())
+
+    async def evaluate(
+        self,
+        df_5m: pd.DataFrame,
+        df_1h: pd.DataFrame,
+        regime: RegimeState,
+        current_position: Direction | None,
+    ) -> StrategyDecision:
+        group = self._regime_map.get(regime.regime, [])
+        if not group:
+            return self._hold(current_position)
+
+        # v1 전략은 4h 캔들용 → 1h 데이터 사용 (5m 노이즈 회피)
+        df = df_1h if len(df_1h) >= 25 else df_5m
+        close = float(df["close"].iloc[-1]) if "close" in df.columns else 0.0
+        atr = float(df["atr_14"].iloc[-1]) if "atr_14" in df.columns else 0.0
+
+        # 더미 Ticker (v1 전략의 analyze()에 필요)
+        ticker = Ticker(
+            symbol="X/USDT", last=close, bid=close * 0.999, ask=close * 1.001,
+            high=close * 1.01, low=close * 0.99, volume=1000.0,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        buy_score = 0.0
+        sell_score = 0.0
+        total_weight = 0.0
+        active_signals: list[Signal] = []
+
+        for strat_name, weight in group:
+            strat = self._strategies.get(strat_name)
+            if strat is None:
+                continue
+            try:
+                signal = await strat.analyze(df, ticker)
+            except Exception:
+                continue
+
+            if signal.signal_type == SignalType.HOLD:
+                continue  # HOLD = 기권
+
+            total_weight += weight
+            if signal.signal_type == SignalType.BUY:
+                buy_score += weight * signal.confidence
+            elif signal.signal_type == SignalType.SELL:
+                sell_score += weight * signal.confidence
+            active_signals.append(signal)
+
+        if total_weight < 0.10:  # 참여 전략 부족
+            return self._hold(current_position)
+
+        buy_norm = buy_score / total_weight if total_weight > 0 else 0
+        sell_norm = sell_score / total_weight if total_weight > 0 else 0
+
+        # BUY vs SELL 판정
+        if buy_norm > sell_norm and buy_norm > 0.3:
+            conf = min(1.0, buy_norm)
+            sizing = self._calc_sizing(conf, atr, close) if atr > 0 and close > 0 else 0.5
+            return StrategyDecision(
+                direction=Direction.LONG,
+                confidence=conf,
+                sizing_factor=sizing,
+                stop_loss_atr=1.5,
+                take_profit_atr=3.0,
+                reason=f"v1 ensemble BUY: {buy_norm:.2f} vs {sell_norm:.2f}",
+                strategy_name="v1_ensemble",
+                indicators={"buy_score": buy_norm, "sell_score": sell_norm,
+                             "active": len(active_signals)},
+            )
+        elif sell_norm > buy_norm and sell_norm > 0.3:
+            conf = min(1.0, sell_norm)
+            sizing = self._calc_sizing(conf, atr, close) if atr > 0 and close > 0 else 0.5
+            return StrategyDecision(
+                direction=Direction.SHORT,
+                confidence=conf,
+                sizing_factor=sizing,
+                stop_loss_atr=1.5,
+                take_profit_atr=3.0,
+                reason=f"v1 ensemble SELL: {sell_norm:.2f} vs {buy_norm:.2f}",
+                strategy_name="v1_ensemble",
+                indicators={"buy_score": buy_norm, "sell_score": sell_norm,
+                             "active": len(active_signals)},
+            )
+
+        return self._hold(current_position)
+
+    def _hold(self, current_position: Direction | None) -> StrategyDecision:
+        return StrategyDecision(
+            direction=current_position or Direction.FLAT,
+            confidence=0.5,
+            sizing_factor=0.0,
+            stop_loss_atr=0,
+            take_profit_atr=0,
+            reason="v1_ensemble_hold",
+            strategy_name="v1_ensemble",
+        )
+
+
+def create_v1_strategies() -> dict:
+    """v1 전략 인스턴스 생성."""
+    from strategies.bollinger_rsi import BollingerRSIStrategy
+    from strategies.rsi_strategy import RSIStrategy
+    from strategies.ma_crossover import MACrossoverStrategy
+    from strategies.macd_crossover import MACDCrossoverStrategy
+    from strategies.stochastic_rsi import StochasticRSIStrategy
+    from strategies.obv_divergence import OBVDivergenceStrategy
+    from strategies.bb_squeeze import BBSqueezeStrategy
+    return {
+        "bollinger_rsi": BollingerRSIStrategy(),
+        "rsi": RSIStrategy(),
+        "ma_crossover": MACrossoverStrategy(),
+        "macd_crossover": MACDCrossoverStrategy(),
+        "stochastic_rsi": StochasticRSIStrategy(),
+        "obv_divergence": OBVDivergenceStrategy(),
+        "bb_squeeze": BBSqueezeStrategy(),
+    }
 
 
 def _tf_hours(tf: str) -> float:
@@ -151,9 +323,10 @@ async def fetch_ohlcv_cached(
 
 
 def compute_v2_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """v2 전략에 필요한 기술적 지표 계산."""
+    """v2 전략 + v1 전략에 필요한 기술적 지표 계산."""
     df = df.copy()
 
+    # v2 전략용
     df.ta.ema(length=9, append=True)
     df.ta.ema(length=20, append=True)
     df.ta.ema(length=21, append=True)
@@ -162,6 +335,16 @@ def compute_v2_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df.ta.atr(length=14, append=True)
     df.ta.adx(length=14, append=True)
     df.ta.bbands(length=20, std=2, append=True)
+
+    # v1 전략용 추가 지표
+    df.ta.sma(length=5, append=True)
+    df.ta.sma(length=20, append=True)
+    df.ta.sma(length=50, append=True)
+    df.ta.sma(length=60, append=True)
+    df.ta.ema(length=12, append=True)
+    df.ta.ema(length=26, append=True)
+    df.ta.macd(fast=12, slow=26, signal=9, append=True)
+    df["Volume_SMA_20"] = df["volume"].rolling(window=20).mean()
 
     # 컬럼 이름 변환: pandas_ta uppercase → v2 lowercase
     df.rename(columns=_RENAME_MAP, inplace=True)
@@ -280,9 +463,17 @@ class V2Backtester:
         self._min_confidence = min_confidence
         self._trending_only = trending_only
         self._eval_interval = eval_interval
+        self._use_v1 = False
+        self._v1_adapter: V1StrategyAdapter | None = None
 
         self._regime_detector = RegimeDetector()
         self._strategy_selector = StrategySelector()
+
+    def enable_v1_strategies(self) -> None:
+        """v1 전략 미니 앙상블 모드 활성화."""
+        strategies = create_v1_strategies()
+        self._v1_adapter = V1StrategyAdapter(strategies, REGIME_STRATEGY_MAP)
+        self._use_v1 = True
 
     async def prefetch(self, days: int) -> dict[str, tuple[pd.DataFrame, pd.DataFrame]]:
         """모든 코인의 5m + 1h 데이터 프리페치."""
@@ -476,7 +667,7 @@ class V2Backtester:
                         last_exit_idx[sym] = candle_idx
                     continue
 
-                strategy = self._strategy_selector.select(coin_regime.regime)
+                strategy = self._v1_adapter if self._use_v1 else self._strategy_selector.select(coin_regime.regime)
                 current_dir = positions[sym].direction if sym in positions else None
 
                 # 5m 윈도우 슬라이스
@@ -1034,6 +1225,7 @@ def parse_args():
     parser.add_argument("--min-confidence", type=float, default=0.5, help="최소 신뢰도 (0.0-1.0)")
     parser.add_argument("--trending-only", action="store_true", help="추세 레짐에서만 거래")
     parser.add_argument("--eval-interval", type=int, default=12, help="전략 평가 주기 (5m 캔들, 12=1h)")
+    parser.add_argument("--v1-strategies", action="store_true", help="v1 7전략 레짐 미니앙상블 모드")
     parser.add_argument("--walk-forward", action="store_true", help="Walk-Forward 검증 모드")
     parser.add_argument("--train-days", type=int, default=240, help="WF 학습 기간")
     parser.add_argument("--val-days", type=int, default=60, help="WF 검증 기간")
@@ -1067,6 +1259,10 @@ async def main():
         trending_only=args.trending_only,
         eval_interval=args.eval_interval,
     )
+
+    if args.v1_strategies:
+        bt.enable_v1_strategies()
+        print("  v1 7전략 레짐 미니앙상블 모드 활성화")
 
     try:
         if args.walk_forward:

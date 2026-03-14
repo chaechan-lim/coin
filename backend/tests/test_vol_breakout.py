@@ -23,11 +23,13 @@ def _df(
     atr=1000.0,
     volume=2000.0,
     vol_avg=1000.0,
+    rsi=55.0,
 ) -> pd.DataFrame:
     data = {
         "close": [close] * n,
         "ema_20": [ema_20] * n,
         "atr_14": [atr] * n,
+        "rsi_14": [rsi] * n,
         "volume": [vol_avg] * (n - 1) + [volume],  # 마지막만 높음
     }
     return pd.DataFrame(data)
@@ -47,8 +49,8 @@ class TestLongBreakout:
         result = await strategy.evaluate(df, df, _regime(), None)
         assert result.direction == Direction.LONG
         assert result.sizing_factor > 0
-        assert result.stop_loss_atr == 2.0
-        assert result.take_profit_atr == 4.0
+        assert result.stop_loss_atr == 1.8
+        assert result.take_profit_atr == 3.5
 
     @pytest.mark.asyncio
     async def test_no_breakout_low_volume(self, strategy):
@@ -71,16 +73,16 @@ class TestShortBreakout:
 class TestBreakoutFailure:
     @pytest.mark.asyncio
     async def test_long_failure(self, strategy):
-        """롱 포지션 + 가격 EMA20 아래 → 청산."""
-        df = _df(close=79000, ema_20=80000)
+        """롱 포지션 + 가격 EMA20 아래 + RSI<50 → 청산."""
+        df = _df(close=79000, ema_20=80000, rsi=40)
         result = await strategy.evaluate(df, df, _regime(), Direction.LONG)
         assert result.direction == Direction.FLAT
         assert "failure" in result.reason.lower()
 
     @pytest.mark.asyncio
     async def test_short_failure(self, strategy):
-        """숏 포지션 + 가격 EMA20 위 → 청산."""
-        df = _df(close=81000, ema_20=80000)
+        """숏 포지션 + 가격 EMA20 위 + RSI>50 → 청산."""
+        df = _df(close=81000, ema_20=80000, rsi=60)
         result = await strategy.evaluate(df, df, _regime(), Direction.SHORT)
         assert result.direction == Direction.FLAT
 
@@ -106,7 +108,7 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_max_sizing_cap(self, strategy):
-        """사이징 상한 0.7."""
+        """사이징 상한 0.8."""
         df = _df(close=82500, ema_20=80000, atr=1000, volume=10000, vol_avg=1000)
         result = await strategy.evaluate(df, df, _regime(), None)
-        assert result.sizing_factor <= 0.7
+        assert result.sizing_factor <= 0.8

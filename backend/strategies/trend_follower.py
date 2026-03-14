@@ -1,9 +1,9 @@
 """
-TrendFollower — 추세 순응 전략 (EMA 크로스 + RSI 풀백).
+TrendFollower — 추세 순응 전략 (EMA 크로스 + RSI + ADX).
 
-TRENDING_UP: 풀백 매수 (EMA9>EMA21, RSI 30-50)
-TRENDING_DOWN: 랠리 매도 (EMA9<EMA21, RSI 50-70)
-SAR: 추세 이탈 시 방향 전환.
+TRENDING_UP: 풀백 매수 (RSI 30-50) + 모멘텀 지속 (RSI 50-65)
+TRENDING_DOWN: 랠리 매도 (RSI 50-70) + 모멘텀 지속 (RSI 35-50)
+SAR: 추세 이탈 시 방향 전환 (ADX 확인).
 """
 import pandas as pd
 
@@ -37,85 +37,128 @@ class TrendFollowerStrategy(RegimeStrategy):
         rsi = self._col(df_5m, "rsi_14")
         atr = self._col(df_5m, "atr_14")
         close = self._col(df_5m, "close")
+        adx = regime.adx  # 레짐 감지 시점의 ADX
 
         if close <= 0 or ema_slow <= 0:
             return self._hold(current_position, "invalid_price")
 
         if regime.regime == Regime.TRENDING_UP:
             return self._evaluate_uptrend(
-                ema_fast, ema_slow, rsi, atr, close, current_position,
+                ema_fast, ema_slow, rsi, atr, close, adx, current_position,
             )
         elif regime.regime == Regime.TRENDING_DOWN:
             return self._evaluate_downtrend(
-                ema_fast, ema_slow, rsi, atr, close, current_position,
+                ema_fast, ema_slow, rsi, atr, close, adx, current_position,
             )
 
         return self._hold(current_position, "regime_mismatch")
 
     def _evaluate_uptrend(
-        self, ema_fast, ema_slow, rsi, atr, close, current_position,
+        self, ema_fast, ema_slow, rsi, atr, close, adx, current_position,
     ) -> StrategyDecision:
-        # 롱 진입: EMA9 > EMA21 + RSI 풀백
-        if ema_fast > ema_slow and 30 <= rsi <= 50:
-            spread_pct = (ema_fast - ema_slow) / ema_slow * 100
-            conf = min(1.0, spread_pct / 0.5)
-            conf = max(0.3, conf)
-            return StrategyDecision(
-                direction=Direction.LONG,
-                confidence=conf,
-                sizing_factor=self._calc_sizing(conf, atr, close),
-                stop_loss_atr=1.5,
-                take_profit_atr=3.0,
-                reason=f"Trend pullback buy: spread={spread_pct:.2f}%, RSI={rsi:.0f}",
-                strategy_name=self.name,
-                indicators={"ema_fast": ema_fast, "ema_slow": ema_slow, "rsi": rsi, "atr": atr},
-            )
+        spread_pct = (ema_fast - ema_slow) / ema_slow * 100 if ema_slow > 0 else 0
 
-        # SAR: 추세 이탈 + 현재 롱 → 숏 전환
+        if ema_fast > ema_slow:
+            # 풀백 매수: RSI 30-50 (눌림목)
+            if 30 <= rsi <= 50:
+                conf = min(1.0, spread_pct / 0.5)
+                conf = max(0.3, conf)
+                # ADX 강도로 신뢰도 보정
+                if adx > 35:
+                    conf = min(1.0, conf + 0.1)
+                return StrategyDecision(
+                    direction=Direction.LONG,
+                    confidence=conf,
+                    sizing_factor=self._calc_sizing(conf, atr, close),
+                    stop_loss_atr=1.5,
+                    take_profit_atr=3.0,
+                    reason=f"Trend pullback buy: spread={spread_pct:.2f}%, RSI={rsi:.0f}, ADX={adx:.0f}",
+                    strategy_name=self.name,
+                    indicators={"ema_fast": ema_fast, "ema_slow": ema_slow, "rsi": rsi, "adx": adx},
+                )
+
+            # 모멘텀 지속 매수: RSI 50-65 + 강한 스프레드
+            if 50 < rsi <= 65 and spread_pct > 0.3:
+                conf = min(1.0, spread_pct / 0.8)
+                conf = max(0.3, conf)
+                # 모멘텀 진입은 약간 보수적
+                return StrategyDecision(
+                    direction=Direction.LONG,
+                    confidence=conf * 0.85,
+                    sizing_factor=self._calc_sizing(conf * 0.85, atr, close),
+                    stop_loss_atr=1.5,
+                    take_profit_atr=2.5,
+                    reason=f"Trend momentum buy: spread={spread_pct:.2f}%, RSI={rsi:.0f}",
+                    strategy_name=self.name,
+                    indicators={"ema_fast": ema_fast, "ema_slow": ema_slow, "rsi": rsi, "adx": adx},
+                )
+
+        # SAR: 추세 이탈 + 현재 롱 → 숏 전환 (ADX 확인)
         if ema_fast < ema_slow and current_position == Direction.LONG:
+            sar_conf = 0.6 if adx > 25 else 0.5
             return StrategyDecision(
                 direction=Direction.SHORT,
-                confidence=0.7,
+                confidence=sar_conf,
                 sizing_factor=0.5,
                 stop_loss_atr=2.0,
                 take_profit_atr=2.5,
-                reason="SAR: EMA cross down in uptrend",
+                reason=f"SAR: EMA cross down, ADX={adx:.0f}",
                 strategy_name=self.name,
-                indicators={"ema_fast": ema_fast, "ema_slow": ema_slow},
+                indicators={"ema_fast": ema_fast, "ema_slow": ema_slow, "adx": adx},
             )
 
         return self._hold(current_position, "no_signal_uptrend")
 
     def _evaluate_downtrend(
-        self, ema_fast, ema_slow, rsi, atr, close, current_position,
+        self, ema_fast, ema_slow, rsi, atr, close, adx, current_position,
     ) -> StrategyDecision:
-        # 숏 진입: EMA9 < EMA21 + RSI 랠리
-        if ema_fast < ema_slow and 50 <= rsi <= 70:
-            spread_pct = (ema_slow - ema_fast) / ema_slow * 100
-            conf = min(1.0, spread_pct / 0.5)
-            conf = max(0.3, conf)
-            return StrategyDecision(
-                direction=Direction.SHORT,
-                confidence=conf,
-                sizing_factor=self._calc_sizing(conf, atr, close),
-                stop_loss_atr=1.5,
-                take_profit_atr=3.0,
-                reason=f"Trend rally sell: spread={spread_pct:.2f}%, RSI={rsi:.0f}",
-                strategy_name=self.name,
-                indicators={"ema_fast": ema_fast, "ema_slow": ema_slow, "rsi": rsi, "atr": atr},
-            )
+        spread_pct = (ema_slow - ema_fast) / ema_slow * 100 if ema_slow > 0 else 0
+
+        if ema_fast < ema_slow:
+            # 랠리 매도: RSI 50-70 (반등 후 재하락)
+            if 50 <= rsi <= 70:
+                conf = min(1.0, spread_pct / 0.5)
+                conf = max(0.3, conf)
+                if adx > 35:
+                    conf = min(1.0, conf + 0.1)
+                return StrategyDecision(
+                    direction=Direction.SHORT,
+                    confidence=conf,
+                    sizing_factor=self._calc_sizing(conf, atr, close),
+                    stop_loss_atr=1.5,
+                    take_profit_atr=3.0,
+                    reason=f"Trend rally sell: spread={spread_pct:.2f}%, RSI={rsi:.0f}, ADX={adx:.0f}",
+                    strategy_name=self.name,
+                    indicators={"ema_fast": ema_fast, "ema_slow": ema_slow, "rsi": rsi, "adx": adx},
+                )
+
+            # 모멘텀 지속 매도: RSI 35-50 + 강한 스프레드
+            if 35 <= rsi < 50 and spread_pct > 0.3:
+                conf = min(1.0, spread_pct / 0.8)
+                conf = max(0.3, conf)
+                return StrategyDecision(
+                    direction=Direction.SHORT,
+                    confidence=conf * 0.85,
+                    sizing_factor=self._calc_sizing(conf * 0.85, atr, close),
+                    stop_loss_atr=1.5,
+                    take_profit_atr=2.5,
+                    reason=f"Trend momentum sell: spread={spread_pct:.2f}%, RSI={rsi:.0f}",
+                    strategy_name=self.name,
+                    indicators={"ema_fast": ema_fast, "ema_slow": ema_slow, "rsi": rsi, "adx": adx},
+                )
 
         # SAR: 추세 이탈 + 현재 숏 → 롱 전환
         if ema_fast > ema_slow and current_position == Direction.SHORT:
+            sar_conf = 0.6 if adx > 25 else 0.5
             return StrategyDecision(
                 direction=Direction.LONG,
-                confidence=0.7,
+                confidence=sar_conf,
                 sizing_factor=0.5,
                 stop_loss_atr=2.0,
                 take_profit_atr=2.5,
-                reason="SAR: EMA cross up in downtrend",
+                reason=f"SAR: EMA cross up, ADX={adx:.0f}",
                 strategy_name=self.name,
-                indicators={"ema_fast": ema_fast, "ema_slow": ema_slow},
+                indicators={"ema_fast": ema_fast, "ema_slow": ema_slow, "adx": adx},
             )
 
         return self._hold(current_position, "no_signal_downtrend")
