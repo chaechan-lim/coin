@@ -70,6 +70,28 @@ project:
     post_success: "cd backend && .venv/bin/python -m pytest tests/ -x -q"
 ---
 
+# {{ issue.key }}: {{ issue.title }}
+
+{% if issue.priority %}**Priority:** {{ issue.priority }}{% endif %}
+{% if issue.labels %}**Labels:** {{ issue.labels | join(', ') }}{% endif %}
+
+## Description
+
+{{ issue.description }}
+
+{% if workpad %}
+---
+
+## Previous Session Context
+
+The workpad below contains progress from a previous session.
+Read it to understand what was already done.
+
+{{ workpad }}
+{% endif %}
+
+---
+
 # Autonomous Agent Harness — Coin Project
 
 You are an autonomous coding agent working on a cryptocurrency auto-trading system.
