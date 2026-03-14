@@ -1,14 +1,16 @@
 """
 Health check endpoint for the Coin auto-trading API.
 
-Exposes GET /api/v1/health — returns engine registration status and
-overall service readiness without requiring DB access.
+Exposes GET /api/v1/health — returns engine registration status,
+DB connectivity, and overall service readiness.
 """
 from datetime import datetime, timezone
 
 from fastapi import APIRouter
+from sqlalchemy import select
 
 from api.dependencies import engine_registry
+from db.session import get_session_factory
 
 router = APIRouter(tags=["health"])
 
@@ -19,11 +21,21 @@ async def api_health_check():
     API-level health check.
 
     Returns:
-    - ``status``: always ``"ok"`` (HTTP 200 means the service is reachable)
+    - ``status``: ``"ok"`` when DB is reachable, ``"degraded"`` otherwise
     - ``timestamp``: current UTC time in ISO-8601
+    - ``db_connected``: whether the database is reachable
     - ``exchanges_registered``: list of exchange names with registered engines
     - ``engines``: per-exchange ``{registered, running}`` summary
     """
+    # DB 연결 확인
+    db_ok = True
+    try:
+        sf = get_session_factory()
+        async with sf() as session:
+            await session.execute(select(1))
+    except Exception:
+        db_ok = False
+
     exchanges = engine_registry.available_exchanges
 
     engines_status: dict[str, dict] = {}
@@ -35,8 +47,9 @@ async def api_health_check():
         }
 
     return {
-        "status": "ok",
+        "status": "ok" if db_ok else "degraded",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "db_connected": db_ok,
         "exchanges_registered": exchanges,
         "engines": engines_status,
     }
