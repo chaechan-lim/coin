@@ -13,7 +13,9 @@ from core.event_bus import emit_event
 logger = structlog.get_logger(__name__)
 
 
-async def sync_binance_deposits(session: AsyncSession, adapter) -> list[CapitalTransaction]:
+async def sync_binance_deposits(
+    session: AsyncSession, adapter, exchange_name: str = "binance_futures"
+) -> list[CapitalTransaction]:
     """바이낸스 USDT 입금을 자동 감지하여 미확인 CapitalTransaction 생성."""
     try:
         deposits = await adapter._exchange.fetch_deposits("USDT")
@@ -25,7 +27,7 @@ async def sync_binance_deposits(session: AsyncSession, adapter) -> list[CapitalT
     result = await session.execute(
         select(CapitalTransaction.exchange_tx_id)
         .where(
-            CapitalTransaction.exchange == "binance_futures",
+            CapitalTransaction.exchange == exchange_name,
             CapitalTransaction.exchange_tx_id.isnot(None),
         )
     )
@@ -40,7 +42,7 @@ async def sync_binance_deposits(session: AsyncSession, adapter) -> list[CapitalT
             continue
         amount = float(dep["amount"])
         tx = CapitalTransaction(
-            exchange="binance_futures",
+            exchange=exchange_name,
             tx_type="deposit",
             amount=amount,
             currency="USDT",
@@ -67,7 +69,7 @@ async def sync_binance_deposits(session: AsyncSession, adapter) -> list[CapitalT
 
 
 async def detect_bithumb_balance_change(
-    session: AsyncSession, pm, adapter,
+    session: AsyncSession, pm, adapter, exchange_name: str = "bithumb",
 ) -> CapitalTransaction | None:
     """빗썸 KRW 잔고의 설명 불가능한 증가를 감지."""
     try:
@@ -85,7 +87,7 @@ async def detect_bithumb_balance_change(
     # 10,000원 이상 설명 불가능한 증가 → 입금 후보
     if diff > 10_000:
         tx = CapitalTransaction(
-            exchange="bithumb",
+            exchange=exchange_name,
             tx_type="deposit",
             amount=diff,
             currency="KRW",

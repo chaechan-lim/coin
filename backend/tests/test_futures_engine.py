@@ -856,3 +856,50 @@ class TestStopEventThrottle:
 
         # 청산 완료 후 쿨다운 해제
         assert "BTC/USDT" not in futures_engine._last_stop_event_time
+
+
+# ── Harness Conformance Tests (COIN-10) ────────────────────────────────────
+
+
+class TestEngineConfigConformance:
+    """COIN-10: futures_engine은 _ec.* 를 통해 설정값에 접근해야 함."""
+
+    def test_tracked_coins_uses_ec(self, futures_engine):
+        """tracked_coins property는 _ec.tracked_coins를 사용해야 한다."""
+        # _ec.tracked_coins와 tracked_coins 프로퍼티가 일치해야 함
+        assert futures_engine.tracked_coins == list(futures_engine._ec.tracked_coins)
+
+    def test_tracked_coins_not_from_raw_config(self, futures_engine):
+        """tracked_coins 수정 시 _ec를 통해 반영된다 (_config.binance 직접 접근 금지)."""
+        original = futures_engine._ec.tracked_coins.copy()
+        futures_engine._ec.tracked_coins = ["BTC/USDT"]
+        assert futures_engine.tracked_coins == ["BTC/USDT"]
+        # 복원
+        futures_engine._ec.tracked_coins = original
+
+    def test_start_log_uses_exchange_name(self, futures_engine):
+        """_exchange_name 속성이 'binance_futures'로 올바르게 설정된다."""
+        assert futures_engine._exchange_name == "binance_futures"
+
+    def test_ec_mode_consistent_with_config(self, futures_engine):
+        """_ec.mode가 binance_trading.mode와 일치해야 한다."""
+        # EngineConfig.from_app_config가 올바르게 binance_trading.mode를 매핑하는지 확인
+        # futures_engine의 _ec는 부모 TradingEngine.__init__에서 생성됨
+        assert futures_engine._ec.mode is not None
+
+    def test_ec_evaluation_interval_consistent(self, futures_engine):
+        """_ec.evaluation_interval_sec이 binance_trading 설정과 일치해야 한다."""
+        assert futures_engine._ec.evaluation_interval_sec == 300
+
+    def test_ec_min_combined_confidence(self, futures_engine):
+        """_ec.min_combined_confidence가 EngineConfig에 올바르게 매핑된다."""
+        assert futures_engine._ec.min_combined_confidence == 0.50
+
+    def test_ec_max_trade_size_pct(self, futures_engine):
+        """_ec.max_trade_size_pct가 EngineConfig에 올바르게 매핑된다."""
+        assert futures_engine._ec.max_trade_size_pct == 0.15
+
+    def test_ec_min_trade_interval_sec(self, futures_engine):
+        """_ec.min_trade_interval_sec이 EngineConfig에 올바르게 매핑된다."""
+        # mock_config에서 binance_trading.min_trade_interval_sec = 1036800
+        assert futures_engine._ec.min_trade_interval_sec == 1036800

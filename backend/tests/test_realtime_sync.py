@@ -614,6 +614,7 @@ class TestReconcilePaperOnly:
         live_pm = PortfolioManager.__new__(PortfolioManager)
         live_pm._is_paper = False
         live_pm._exchange_name = "bithumb"
+        live_pm._is_futures = False
         live_pm._initial_balance = 500_000
         live_pm._cash_balance = 300_000
 
@@ -629,6 +630,7 @@ class TestReconcilePaperOnly:
         paper_pm = PortfolioManager.__new__(PortfolioManager)
         paper_pm._is_paper = True
         paper_pm._exchange_name = "bithumb"
+        paper_pm._is_futures = False
         paper_pm._initial_balance = 500_000
         paper_pm._cash_balance = 999_999  # Intentionally wrong
         paper_pm._realized_pnl = 0.0

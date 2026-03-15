@@ -290,3 +290,112 @@ async def test_confirm_updates_initial_balance(session):
     await session.flush()
     await pm.load_initial_balance_from_db(session)
     assert pm._initial_balance == 600_000
+
+
+# ── capital_sync exchange_name 파라미터 테스트 (COIN-10) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_deposits_default_exchange_name(session):
+    """sync_binance_deposits: 기본값 exchange_name='binance_futures' 사용."""
+    from unittest.mock import AsyncMock, MagicMock
+    from engine.capital_sync import sync_binance_deposits
+
+    adapter = MagicMock()
+    adapter._exchange = MagicMock()
+    # 빈 목록 반환 → 새 TX 없음
+    adapter._exchange.fetch_deposits = AsyncMock(return_value=[])
+
+    result = await sync_binance_deposits(session, adapter)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_deposits_custom_exchange_name(session):
+    """sync_binance_deposits: exchange_name 파라미터로 커스텀 거래소 이름 지원."""
+    from unittest.mock import AsyncMock, MagicMock
+    from sqlalchemy import select
+    from core.models import CapitalTransaction
+    from engine.capital_sync import sync_binance_deposits
+
+    adapter = MagicMock()
+    adapter._exchange = MagicMock()
+    adapter._exchange.fetch_deposits = AsyncMock(return_value=[
+        {"id": "tx_001", "amount": 200.0, "status": "ok"},
+    ])
+
+    result = await sync_binance_deposits(session, adapter, exchange_name="binance_spot")
+    assert len(result) == 1
+    assert result[0].exchange == "binance_spot"
+    assert result[0].amount == 200.0
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_deposits_deduplicates_by_exchange(session):
+    """sync_binance_deposits: 동일 txid도 exchange가 다르면 별도 처리."""
+    from unittest.mock import AsyncMock, MagicMock
+    from engine.capital_sync import sync_binance_deposits
+
+    # 먼저 binance_futures에 tx_abc 기록
+    session.add(CapitalTransaction(
+        exchange="binance_futures",
+        tx_type="deposit",
+        amount=100.0,
+        currency="USDT",
+        source="auto_detected",
+        confirmed=False,
+        exchange_tx_id="tx_abc",
+    ))
+    await session.flush()
+
+    adapter = MagicMock()
+    adapter._exchange = MagicMock()
+    # 같은 tx_id를 binance_spot으로 조회
+    adapter._exchange.fetch_deposits = AsyncMock(return_value=[
+        {"id": "tx_abc", "amount": 100.0, "status": "ok"},
+    ])
+
+    # binance_spot exchange_name으로 호출 → tx_abc는 binance_spot에 없으므로 새로 생성
+    result = await sync_binance_deposits(session, adapter, exchange_name="binance_spot")
+    assert len(result) == 1
+    assert result[0].exchange == "binance_spot"
+
+
+@pytest.mark.asyncio
+async def test_detect_bithumb_balance_change_custom_exchange(session):
+    """detect_bithumb_balance_change: exchange_name 파라미터 사용."""
+    from unittest.mock import AsyncMock, MagicMock
+    from engine.capital_sync import detect_bithumb_balance_change
+
+    pm = MagicMock()
+    pm.cash_balance = 1_000_000  # 기존 예상 잔고
+
+    cash_bal = MagicMock()
+    cash_bal.free = 1_050_000  # 5만원 증가 감지
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={"KRW": cash_bal})
+
+    result = await detect_bithumb_balance_change(
+        session, pm, adapter, exchange_name="bithumb"
+    )
+    assert result is not None
+    assert result.exchange == "bithumb"
+    assert result.amount == 50_000
+
+
+@pytest.mark.asyncio
+async def test_detect_bithumb_balance_change_default_exchange(session):
+    """detect_bithumb_balance_change: 기본 exchange_name='bithumb'."""
+    from unittest.mock import AsyncMock, MagicMock
+    from engine.capital_sync import detect_bithumb_balance_change
+
+    pm = MagicMock()
+    pm.cash_balance = 500_000  # 변동 없음
+
+    cash_bal = MagicMock()
+    cash_bal.free = 500_000  # diff=0 → 감지 없음
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={"KRW": cash_bal})
+
+    result = await detect_bithumb_balance_change(session, pm, adapter)
+    assert result is None

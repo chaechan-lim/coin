@@ -121,7 +121,7 @@ class BinanceFuturesEngine(TradingEngine):
         await super().initialize()
 
         # 바이낸스 선물 전용 tracked_coins 레버리지 설정
-        tracked = self._config.binance.tracked_coins
+        tracked = self._ec.tracked_coins
         for symbol in tracked:
             try:
                 await self._exchange.set_leverage(symbol, self._leverage)
@@ -216,9 +216,9 @@ class BinanceFuturesEngine(TradingEngine):
         """Start futures engine: WebSocket price monitor + strategy eval loop."""
         self._is_running = True
         await self._restore_trade_timestamps()
-        logger.info("engine_started", exchange="binance_futures")
+        logger.info("engine_started", exchange=self._exchange_name)
         await emit_event("info", "engine", "선물 엔진 시작",
-                         metadata={"mode": self._config.binance_trading.mode})
+                         metadata={"mode": self._ec.mode})
 
         # 다운타임 중 SL/TP 초과 포지션 즉시 체크
         await self._check_downtime_stops()
@@ -270,7 +270,7 @@ class BinanceFuturesEngine(TradingEngine):
 
     async def _strategy_eval_loop(self) -> None:
         """기존 5분 주기 전략 평가 루프."""
-        interval = self._config.binance_trading.evaluation_interval_sec
+        interval = self._ec.evaluation_interval_sec
         while self._is_running:
             try:
                 await self._evaluation_cycle()
@@ -693,13 +693,13 @@ class BinanceFuturesEngine(TradingEngine):
 
         # 부모 TradingEngine.stop() (NOT BinanceFuturesEngine.stop() 재귀)
         self._is_running = False
-        logger.info("engine_stopping", exchange="binance_futures")
+        logger.info("engine_stopping", exchange=self._exchange_name)
         await emit_event("info", "engine", "선물 엔진 중지")
 
     @property
     def tracked_coins(self) -> list[str]:
         """설정 코인 목록."""
-        return list(self._config.binance.tracked_coins)
+        return list(self._ec.tracked_coins)
 
 
     async def _evaluation_cycle(self) -> None:
@@ -782,7 +782,7 @@ class BinanceFuturesEngine(TradingEngine):
                         summary = await self._portfolio_manager.get_portfolio_summary(session)
                         await self._broadcast_callback({
                             "event": "portfolio_update",
-                            "exchange": "binance_futures",
+                            "exchange": self._exchange_name,
                             "data": summary,
                         })
 
@@ -1234,8 +1234,7 @@ class BinanceFuturesEngine(TradingEngine):
             return
 
         # 최소 확신도
-        bt = self._config.binance_trading
-        min_conf = bt.min_combined_confidence
+        min_conf = self._ec.min_combined_confidence
         if self._market_confidence < 0.35:
             min_conf += 0.10
 
@@ -1357,7 +1356,7 @@ class BinanceFuturesEngine(TradingEngine):
         last_sell = self._last_sell_time.get(symbol)
         if last_sell:
             elapsed = (datetime.now(timezone.utc) - last_sell).total_seconds()
-            cooldown_sec = self._config.binance_trading.min_trade_interval_sec
+            cooldown_sec = self._ec.min_trade_interval_sec
             if elapsed < cooldown_sec:
                 remaining_h = (cooldown_sec - elapsed) / 3600
                 logger.debug("futures_cooldown_blocked", symbol=symbol,
@@ -1380,8 +1379,7 @@ class BinanceFuturesEngine(TradingEngine):
         effective_lev = lev_override if lev_override is not None else self._leverage
 
         cash = self._portfolio_manager.cash_balance
-        bt = self._config.binance_trading
-        size_pct = bt.max_trade_size_pct * margin_mult  # ATR에 따른 마진 축소
+        size_pct = self._ec.max_trade_size_pct * margin_mult  # ATR에 따른 마진 축소
 
         # Confidence-proportional sizing: conf 0.55→0.7x, 0.70→1.0x, 0.85→1.5x, 1.0→2.0x
         conf = decision.combined_confidence
@@ -1560,8 +1558,7 @@ class BinanceFuturesEngine(TradingEngine):
         effective_lev = lev_override if lev_override is not None else self._leverage
 
         cash = self._portfolio_manager.cash_balance
-        bt = self._config.binance_trading
-        size_pct = bt.max_trade_size_pct * margin_mult  # ATR에 따른 마진 축소
+        size_pct = self._ec.max_trade_size_pct * margin_mult  # ATR에 따른 마진 축소
 
         # Confidence-proportional sizing: conf 0.55→0.7x, 0.70→1.0x, 0.85→1.5x, 1.0→2.0x
         conf = decision.combined_confidence
