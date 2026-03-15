@@ -103,6 +103,7 @@ coin/
 | 에이전트 탭 개선 (2026-03-15) | 매매 회고 `analyzed_at` 타임스탬프 추가. 성과 분석/전략 어드바이저 바이낸스 스케줄 누락 수정 (선물·현물 각각 21:30 KST 매일, 일요일 22:00 KST 자동 실행). 프론트엔드 타임스탬프 표시 (KST). |
 
 | 프론트엔드 탭 수정 (COIN-7) | `FuturesEngineV2`에 `strategies` + `rotation_status` 프로퍼티 추가 → 전략 성과/종목·로테이션 탭 500 에러 해결. `list_strategies` getattr 폴백. `StrategyPerformance.tsx` bb_squeeze + v2 전략 이름 추가. `RotationMonitor.tsx` v2 레짐 상태 레이블 추가 |
+| 신호 로그 최종 판단 (COIN-11) | `OrderLog.tsx`: 코인 헤더 우측에 가중 투표 기반 최종 판단 배지 추가 (BUY/SELL/HOLD + confidence %). `computeCombinedSignal()` 함수가 백엔드 SignalCombiner 로직을 미러링 (HOLD=기권, active_weight<0.12→HOLD, confidence<threshold→HOLD). 백엔드 계약 검증 테스트 6개 추가. |
 
 ### 낮은 우선순위
 
