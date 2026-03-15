@@ -974,6 +974,8 @@ async def test_sync_cleared_position_futures_liquidation(session):
     })
     adapter._exchange = AsyncMock()
     adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    # Income API: INSURANCE_CLEAR 없음 → PnL 기반 강제청산 추정
+    adapter.fetch_income = AsyncMock(return_value=[])
 
     await pm.sync_exchange_positions(session, adapter, ["ETH/USDT"])
     await session.flush()
@@ -994,13 +996,13 @@ async def test_sync_cleared_position_futures_liquidation(session):
     assert cp["leverage"] == 3
     assert "청산" in cp["reason"]
 
-    # Order 기록이 생성됨
+    # Order 기록이 생성됨 (strategy_name=forced_liquidation)
     from core.models import Order as OrderModel
     order_result = await session.execute(
         select(OrderModel).where(
             OrderModel.symbol == "ETH/USDT",
             OrderModel.exchange == "binance_futures",
-            OrderModel.strategy_name == "position_sync",
+            OrderModel.strategy_name == "forced_liquidation",
         )
     )
     order = order_result.scalar_one_or_none()
@@ -1009,6 +1011,393 @@ async def test_sync_cleared_position_futures_liquidation(session):
     assert order.status == "filled"
     assert order.realized_pnl is not None
     assert order.realized_pnl_pct < -80  # 강제청산 수준
+
+
+# ── COIN-14: 포지션 종료 사유 판별 테스트 ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_determine_close_reason_stop_loss(session):
+    """SL 수준 이하 PnL → stop_loss로 판별."""
+    from exchange.base import Balance
+    from core.models import Order as OrderModel
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"BTC/USDT": 47500.0}),
+        initial_balance_krw=1000,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # DB에 BTC/USDT long 포지션 (entry 50000, SL 5%)
+    # 현재가 47500 → PnL = (47500-50000)/50000 * 3 * 100 = -15% (lev 3)
+    session.add(Position(
+        exchange="binance_futures", symbol="BTC/USDT",
+        quantity=0.01, average_buy_price=50000.0,
+        total_invested=167.0, is_paper=False,
+        direction="long", leverage=3, margin_used=167.0,
+        stop_loss_pct=5.0, take_profit_pct=10.0,
+    ))
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=800, used=0, total=800),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["BTC/USDT"])
+    await session.flush()
+
+    # strategy_name이 "stop_loss"로 기록됨
+    order_result = await session.execute(
+        select(OrderModel).where(
+            OrderModel.symbol == "BTC/USDT",
+            OrderModel.exchange == "binance_futures",
+        )
+    )
+    order = order_result.scalar_one()
+    assert order.strategy_name == "stop_loss"
+    assert "SL" in order.signal_reason
+    assert order.realized_pnl_pct < -5  # SL 수준 이하
+
+    cp = pm._cleared_positions[0]
+    assert "SL" in cp["reason"]
+
+
+@pytest.mark.asyncio
+async def test_determine_close_reason_take_profit(session):
+    """TP 수준 이상 PnL → take_profit로 판별."""
+    from exchange.base import Balance
+    from core.models import Order as OrderModel
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"ETH/USDT": 2200.0}),
+        initial_balance_krw=1000,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # DB에 ETH/USDT long 포지션 (entry 2000, TP 8%)
+    # 현재가 2200 → PnL = (2200-2000)/2000 * 3 * 100 = +30% (lev 3)
+    session.add(Position(
+        exchange="binance_futures", symbol="ETH/USDT",
+        quantity=0.1, average_buy_price=2000.0,
+        total_invested=67.0, is_paper=False,
+        direction="long", leverage=3, margin_used=67.0,
+        stop_loss_pct=5.0, take_profit_pct=8.0,
+        trailing_active=False,
+    ))
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=900, used=0, total=900),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["ETH/USDT"])
+    await session.flush()
+
+    order_result = await session.execute(
+        select(OrderModel).where(
+            OrderModel.symbol == "ETH/USDT",
+            OrderModel.exchange == "binance_futures",
+        )
+    )
+    order = order_result.scalar_one()
+    assert order.strategy_name == "take_profit"
+    assert "TP" in order.signal_reason
+    assert order.realized_pnl_pct > 8  # TP 수준 이상
+
+
+@pytest.mark.asyncio
+async def test_determine_close_reason_trailing_stop(session):
+    """트레일링 스탑 활성 + 하락 → trailing_stop로 판별."""
+    from exchange.base import Balance
+    from core.models import Order as OrderModel
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"SOL/USDT": 105.0}),
+        initial_balance_krw=1000,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # DB에 SOL/USDT long 포지션 (entry 100, trailing 활성, highest 115)
+    # 현재가 105 → PnL = (105-100)/100 * 3 * 100 = +15%
+    # highest 115 → drawdown = (115-105)/115 * 100 = 8.7%
+    session.add(Position(
+        exchange="binance_futures", symbol="SOL/USDT",
+        quantity=1.0, average_buy_price=100.0,
+        total_invested=33.3, is_paper=False,
+        direction="long", leverage=3, margin_used=33.3,
+        stop_loss_pct=5.0, take_profit_pct=10.0,
+        trailing_activation_pct=5.0, trailing_stop_pct=4.0,
+        trailing_active=True, highest_price=115.0,
+    ))
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=900, used=0, total=900),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["SOL/USDT"])
+    await session.flush()
+
+    order_result = await session.execute(
+        select(OrderModel).where(
+            OrderModel.symbol == "SOL/USDT",
+            OrderModel.exchange == "binance_futures",
+        )
+    )
+    order = order_result.scalar_one()
+    assert order.strategy_name == "trailing_stop"
+    assert "트레일링" in order.signal_reason
+
+
+@pytest.mark.asyncio
+async def test_determine_close_reason_income_api_liquidation(session):
+    """Income API에서 INSURANCE_CLEAR 확인 → forced_liquidation으로 판별."""
+    from exchange.base import Balance
+    from core.models import Order as OrderModel
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"FIL/USDT": 4.0}),
+        initial_balance_krw=1000,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # DB에 FIL/USDT long 포지션 (중간 손실, PnL < -80 아님)
+    # entry 5.0, 현재가 4.0 → PnL = (4-5)/5 * 3 * 100 = -60% (강제청산 추정 기준 미달)
+    session.add(Position(
+        exchange="binance_futures", symbol="FIL/USDT",
+        quantity=10.0, average_buy_price=5.0,
+        total_invested=16.7, is_paper=False,
+        direction="long", leverage=3, margin_used=16.7,
+        stop_loss_pct=5.0,
+    ))
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=400, used=0, total=400),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    # Income API에서 INSURANCE_CLEAR 이벤트 반환 → 확정 강제청산
+    adapter.fetch_income = AsyncMock(return_value=[
+        {"income_type": "INSURANCE_CLEAR", "income": -16.7, "symbol": "FILUSDT", "time": 0, "asset": "USDT"},
+    ])
+
+    await pm.sync_exchange_positions(session, adapter, ["FIL/USDT"])
+    await session.flush()
+
+    order_result = await session.execute(
+        select(OrderModel).where(
+            OrderModel.symbol == "FIL/USDT",
+            OrderModel.exchange == "binance_futures",
+        )
+    )
+    order = order_result.scalar_one()
+    assert order.strategy_name == "forced_liquidation"
+    assert "Income API" in order.signal_reason
+
+
+@pytest.mark.asyncio
+async def test_determine_close_reason_time_expiry(session):
+    """보유 시간 초과 → time_expiry로 판별."""
+    from exchange.base import Balance
+    from core.models import Order as OrderModel
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"DOGE/USDT": 0.10}),
+        initial_balance_krw=1000,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # DB에 DOGE/USDT 서지 포지션 (max_hold 48h, 50시간 전 진입)
+    # 현재가 = entry → PnL 0% (SL/TP 히트 안됨)
+    entered = datetime.now(timezone.utc) - timedelta(hours=50)
+    session.add(Position(
+        exchange="binance_futures", symbol="DOGE/USDT",
+        quantity=100.0, average_buy_price=0.10,
+        total_invested=3.3, is_paper=False,
+        direction="long", leverage=3, margin_used=3.3,
+        is_surge=True, max_hold_hours=48.0, entered_at=entered,
+    ))
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=900, used=0, total=900),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["DOGE/USDT"])
+    await session.flush()
+
+    order_result = await session.execute(
+        select(OrderModel).where(
+            OrderModel.symbol == "DOGE/USDT",
+            OrderModel.exchange == "binance_futures",
+        )
+    )
+    order = order_result.scalar_one()
+    assert order.strategy_name == "time_expiry"
+    assert "시간 초과" in order.signal_reason
+
+
+@pytest.mark.asyncio
+async def test_determine_close_reason_fallback(session):
+    """SL/TP/trailing/시간초과/강제청산 어디에도 해당하지 않으면 position_sync."""
+    from exchange.base import Balance
+    from core.models import Order as OrderModel
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"RENDER/USDT": 7.5}),
+        initial_balance_krw=1000,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # DB에 RENDER/USDT long 포지션 (SL/TP 수준 미설정, 작은 손실)
+    # entry 8.0, 현재가 7.5 → PnL = (7.5-8)/8 * 3 * 100 = -18.75%
+    session.add(Position(
+        exchange="binance_futures", symbol="RENDER/USDT",
+        quantity=5.0, average_buy_price=8.0,
+        total_invested=13.3, is_paper=False,
+        direction="long", leverage=3, margin_used=13.3,
+        # SL/TP 미설정
+    ))
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=900, used=0, total=900),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["RENDER/USDT"])
+    await session.flush()
+
+    order_result = await session.execute(
+        select(OrderModel).where(
+            OrderModel.symbol == "RENDER/USDT",
+            OrderModel.exchange == "binance_futures",
+        )
+    )
+    order = order_result.scalar_one()
+    assert order.strategy_name == "position_sync"
+    assert "다운타임" in order.signal_reason
+
+
+@pytest.mark.asyncio
+async def test_determine_close_reason_short_stop_loss(session):
+    """숏 포지션 SL 히트 → stop_loss로 판별."""
+    from exchange.base import Balance
+    from core.models import Order as OrderModel
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"ETH/USDT": 2200.0}),
+        initial_balance_krw=1000,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # DB에 ETH/USDT short 포지션 (entry 2000, SL 5%)
+    # 현재가 2200 → PnL = (2000-2200)/2000 * 3 * 100 = -30% (SL 5% 초과)
+    session.add(Position(
+        exchange="binance_futures", symbol="ETH/USDT",
+        quantity=0.1, average_buy_price=2000.0,
+        total_invested=67.0, is_paper=False,
+        direction="short", leverage=3, margin_used=67.0,
+        stop_loss_pct=5.0, take_profit_pct=10.0,
+    ))
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=900, used=0, total=900),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["ETH/USDT"])
+    await session.flush()
+
+    order_result = await session.execute(
+        select(OrderModel).where(
+            OrderModel.symbol == "ETH/USDT",
+            OrderModel.exchange == "binance_futures",
+        )
+    )
+    order = order_result.scalar_one()
+    assert order.strategy_name == "stop_loss"
+    assert "SL" in order.signal_reason
+    # 숏은 buy로 청산
+    assert order.side == "buy"
+
+
+@pytest.mark.asyncio
+async def test_determine_close_reason_income_api_failure_falls_back(session):
+    """Income API 실패 시 PnL 기반 추정으로 폴백."""
+    from exchange.base import Balance
+    from core.models import Order as OrderModel
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"ETH/USDT": 500.0}),
+        initial_balance_krw=1000,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # DB에 ETH/USDT long 포지션 (entry 2000, 현재가 500 → PnL = -225% → 강제청산)
+    session.add(Position(
+        exchange="binance_futures", symbol="ETH/USDT",
+        quantity=0.1, average_buy_price=2000.0,
+        total_invested=67.0, is_paper=False,
+        direction="long", leverage=3, margin_used=67.0,
+    ))
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=50, used=0, total=50),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    # Income API가 예외 발생
+    adapter.fetch_income = AsyncMock(side_effect=Exception("API timeout"))
+
+    await pm.sync_exchange_positions(session, adapter, ["ETH/USDT"])
+    await session.flush()
+
+    order_result = await session.execute(
+        select(OrderModel).where(
+            OrderModel.symbol == "ETH/USDT",
+            OrderModel.exchange == "binance_futures",
+        )
+    )
+    order = order_result.scalar_one()
+    # Income API 실패 → PnL 기반 강제청산 추정
+    assert order.strategy_name == "forced_liquidation"
+    assert "추정" in order.signal_reason
 
 
 @pytest.mark.asyncio
