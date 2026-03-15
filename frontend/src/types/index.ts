@@ -180,6 +180,7 @@ export interface EngineStatus {
   tracked_coins: string[]
   daily_trade_count: number
   strategies_active: string[]
+  min_confidence?: number
 }
 
 // ── Rotation Monitor ────────────────────────────────────────

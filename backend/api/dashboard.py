@@ -79,6 +79,9 @@ async def get_engine_status(
     strategies = getattr(eng, 'strategies', None)
     strategies_active = list(strategies.keys()) if strategies else []
 
+    comb = engine_registry.get_combiner(exchange)
+    min_confidence = getattr(comb, 'min_confidence', 0.55) if comb else 0.55
+
     return EngineStatusResponse(
         exchange=exchange,
         is_running=eng.is_running,
@@ -87,6 +90,7 @@ async def get_engine_status(
         tracked_coins=getattr(eng, 'tracked_coins', []),
         daily_trade_count=daily_count,
         strategies_active=strategies_active,
+        min_confidence=min_confidence,
     )
 
 
