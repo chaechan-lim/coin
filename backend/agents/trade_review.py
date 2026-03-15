@@ -33,6 +33,7 @@ class TradeReview:
     open_positions: list       # 현재 보유 포지션
     insights: list[str]
     recommendations: list[str]
+    analyzed_at: str = ""      # 분석 수행 시각 (UTC ISO 8601)
 
 
 class TradeReviewAgent:
@@ -127,6 +128,7 @@ class TradeReviewAgent:
                 open_positions=open_positions,
                 insights=["분석 기간 내 거래 없음"],
                 recommendations=["거래 데이터 축적 후 재분석 필요"],
+                analyzed_at=utcnow().isoformat(),
             )
             self._last_review = review
             return review
@@ -365,6 +367,7 @@ class TradeReviewAgent:
             open_positions=open_positions,
             insights=insights,
             recommendations=recommendations,
+            analyzed_at=utcnow().isoformat(),
         )
         self._last_review = review
 

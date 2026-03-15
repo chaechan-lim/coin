@@ -264,3 +264,54 @@ async def test_review_profit_factor_capped(session):
 
     review = await agent.review(session)
     assert review.profit_factor == 99.0  # 캡핑됨 (이전: 999.0)
+
+
+# ── analyzed_at 타임스탬프 Tests ──
+
+
+@pytest.mark.asyncio
+async def test_review_analyzed_at_populated_when_no_orders(session):
+    """거래 없을 때도 analyzed_at이 설정됨."""
+    agent = TradeReviewAgent(exchange_name="bithumb")
+    review = await agent.review(session)
+    assert review.analyzed_at != ""
+    # ISO 8601 형식인지 확인
+    from datetime import datetime
+    dt = datetime.fromisoformat(review.analyzed_at)
+    assert dt is not None
+
+
+@pytest.mark.asyncio
+async def test_review_analyzed_at_populated_with_orders(session):
+    """거래 있을 때도 analyzed_at이 설정됨."""
+    agent = TradeReviewAgent(exchange_name="bithumb", review_window_hours=24)
+
+    now = datetime.now(timezone.utc)
+    session.add(Order(
+        exchange="bithumb", symbol="BTC/KRW", side="buy",
+        order_type="market", status="filled",
+        requested_price=50_000_000, executed_price=50_000_000,
+        requested_quantity=0.001, executed_quantity=0.001,
+        fee=125, fee_currency="KRW", is_paper=False,
+        strategy_name="rsi", signal_confidence=0.7, signal_reason="test",
+        created_at=now - timedelta(hours=3),
+        filled_at=now - timedelta(hours=3),
+    ))
+    session.add(Order(
+        exchange="bithumb", symbol="BTC/KRW", side="sell",
+        order_type="market", status="filled",
+        requested_price=55_000_000, executed_price=55_000_000,
+        requested_quantity=0.001, executed_quantity=0.001,
+        fee=137, fee_currency="KRW", is_paper=False,
+        strategy_name="rsi", signal_confidence=0.7, signal_reason="test",
+        created_at=now - timedelta(hours=2),
+        filled_at=now - timedelta(hours=2),
+    ))
+    await session.flush()
+
+    review = await agent.review(session)
+    assert review.analyzed_at != ""
+    # ISO 형식 파싱 가능
+    dt = datetime.fromisoformat(review.analyzed_at)
+    # 현재 시간과 가까운지 확인 (5초 이내)
+    assert abs((datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc if dt.tzinfo is None else dt.tzinfo)).total_seconds()) < 5

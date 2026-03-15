@@ -228,6 +228,7 @@ class AgentCoordinator:
                         "open_positions": review.open_positions,
                         "insights": review.insights,
                         "recommendations": review.recommendations,
+                        "analyzed_at": review.analyzed_at,
                     },
                 )
                 session.add(log)

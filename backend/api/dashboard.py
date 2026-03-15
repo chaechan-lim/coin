@@ -248,6 +248,7 @@ async def get_latest_trade_review(
             "open_positions": r.open_positions,
             "insights": r.insights,
             "recommendations": r.recommendations,
+            "analyzed_at": r.analyzed_at,
         }
 
     # Fallback to DB (서버 재시작 후 인메모리 캐시 비어있을 때)
