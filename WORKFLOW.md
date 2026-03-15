@@ -122,7 +122,7 @@ This is an unattended orchestration session. Never ask a human to perform follow
 - **Commit incrementally**: Create focused commits at logical checkpoints using
   conventional prefixes (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`).
   Do NOT accumulate all changes into a single giant commit.
-- **Keep workpad current**: Treat the persistent workpad comment as the source of truth
+- **Keep workpad current**: Treat `.symphony-workpad.md` as the source of truth
   for progress. Update it at every meaningful milestone.
 
 ## Mandatory Project Rules (from CLAUDE.md)
@@ -148,9 +148,10 @@ This is an unattended orchestration session. Never ask a human to perform follow
    - `CLAUDE.md` — mandatory rules, architecture, conventions, gotchas
    - `PROGRESS.md` — current status, recent changes, operational context
 2. **Understand the architecture** relevant to the issue before planning changes.
-3. **Create the workpad** — Find or create a single persistent comment on the issue
-   with the header `## Symphony Workpad`. This is your external memory.
-   If one exists from a previous session, read it and continue from its state.
+3. **Create the workpad** — Write your plan and progress to `.symphony-workpad.md`
+   in the workspace root. The orchestrator automatically syncs this file to the
+   issue tracker. If the file already exists from a previous session, read it and
+   continue from its state.
 
 ### Workpad Template
 
@@ -276,10 +277,11 @@ If after investigation you determine no changes are required:
   If blocked, record it in the workpad and proceed with what you can.
 - Final message must report completed actions and blockers only.
   Do not include "next steps for user" or suggestions.
-- Use exactly one persistent workpad comment (`## Symphony Workpad`) per issue.
+- Use `.symphony-workpad.md` in the workspace root for all workpad content.
+  The orchestrator syncs this file to the issue tracker automatically.
 - Do not edit the issue body/description for planning or progress.
-- If blocked with no workpad yet, add one comment describing the blocker, impact,
-  and what is needed to unblock.
+- If blocked with no workpad yet, write the blocker, impact, and what is needed
+  to unblock into `.symphony-workpad.md`.
 
 ## Safety Rules
 
