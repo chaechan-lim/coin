@@ -101,6 +101,8 @@ coin/
 | v2 백테스터 + 레짐 전략 개선 | backtest_v2.py: Walk-Forward 검증, 레짐 적응형 선물 엔진, 쿨다운/신뢰도/레짐 필터/평가 주기 |
 | v2 레짐 전략 최적화 (2026-03-14) | MR: 1h RSI 반전 필수(88.5% WR), VB: KC 2.2/VOL 2.0/RSI필수(PF 1.54), TF: 상승 진입 비활성(하락만 PF 3.27). Tier1 SL/TP 버그 수정. 540d: **PF 2.17, WR 63.4%, MDD 5.42%**, WF 4/4 PASS |
 
+| 프론트엔드 탭 수정 (COIN-7) | `FuturesEngineV2`에 `strategies` + `rotation_status` 프로퍼티 추가 → 전략 성과/종목·로테이션 탭 500 에러 해결. `list_strategies` getattr 폴백. `StrategyPerformance.tsx` bb_squeeze + v2 전략 이름 추가. `RotationMonitor.tsx` v2 레짐 상태 레이블 추가 |
+
 ### 낮은 우선순위
 
 | 항목 | 상세 |

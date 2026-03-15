@@ -137,3 +137,66 @@ class TestStatus:
         assert "tier1_positions" in status
         assert "tier2_positions" in status
         assert "balance_guard_paused" in status
+
+
+class TestAPICompatibility:
+    """종목/로테이션 탭 및 전략 성과 탭 API 호환성 테스트."""
+
+    def test_strategies_property_returns_dict(self, engine):
+        """eng.strategies는 dict를 반환해야 함 (전략 성과 탭용)."""
+        strats = engine.strategies
+        assert isinstance(strats, dict)
+
+    def test_strategies_contains_v2_strategy_names(self, engine):
+        """v2 레짐 전략 3종 이름이 포함되어야 함."""
+        strats = engine.strategies
+        strategy_names = set(strats.keys())
+        # TrendFollower는 TRENDING_UP과 TRENDING_DOWN에 동일 인스턴스가 매핑되므로
+        # deduplicate 후 3종
+        assert "trend_follower" in strategy_names
+        assert "mean_reversion" in strategy_names
+        assert "vol_breakout" in strategy_names
+        assert len(strategy_names) == 3
+
+    def test_strategies_values_have_name_attr(self, engine):
+        """각 전략 객체에는 name 속성이 있어야 함."""
+        for name, strategy in engine.strategies.items():
+            assert hasattr(strategy, 'name')
+            assert strategy.name == name
+
+    def test_rotation_status_property_exists(self, engine):
+        """rotation_status 프로퍼티가 존재해야 함 (종목/로테이션 탭용)."""
+        rs = engine.rotation_status
+        assert isinstance(rs, dict)
+
+    def test_rotation_status_required_keys(self, engine):
+        """rotation_status는 RotationStatusResponse에 필요한 모든 키를 포함해야 함."""
+        rs = engine.rotation_status
+        required_keys = [
+            "rotation_enabled", "surge_threshold", "market_state",
+            "current_surge_symbol", "last_rotation_time", "last_scan_time",
+            "rotation_cooldown_sec", "tracked_coins", "rotation_coins",
+            "all_surge_scores",
+        ]
+        for key in required_keys:
+            assert key in rs, f"rotation_status is missing key: {key}"
+
+    def test_rotation_status_tracked_coins(self, engine):
+        """rotation_status.tracked_coins는 엔진 tracked_coins와 일치해야 함."""
+        rs = engine.rotation_status
+        assert rs["tracked_coins"] == engine.tracked_coins
+
+    def test_rotation_status_market_state_on_init(self, engine):
+        """초기화 시 market_state는 유효한 문자열이어야 함."""
+        rs = engine.rotation_status
+        assert isinstance(rs["market_state"], str)
+        # 레짐이 없으면 'sideways' 폴백
+        assert rs["market_state"] == "sideways"
+
+    def test_rotation_status_futures_flags(self, engine):
+        """선물 v2 엔진은 rotation 비활성 + surge 없음."""
+        rs = engine.rotation_status
+        assert rs["rotation_enabled"] is False
+        assert rs["surge_threshold"] == 0.0
+        assert rs["current_surge_symbol"] is None
+        assert rs["all_surge_scores"] == {}

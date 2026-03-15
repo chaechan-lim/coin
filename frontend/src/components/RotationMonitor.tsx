@@ -4,11 +4,17 @@ import type { RotationStatus, SurgeScanStatus, ExchangeName } from '../types'
 import { formatTs } from '../utils/date'
 
 const MARKET_STATE_LABELS: Record<string, { label: string; color: string }> = {
+  // v1 MarketState
   strong_uptrend: { label: '강한 상승', color: 'text-green-400' },
   uptrend: { label: '상승', color: 'text-green-300' },
   sideways: { label: '횡보', color: 'text-yellow-400' },
   downtrend: { label: '하락', color: 'text-red-400' },
   crash: { label: '폭락', color: 'text-red-600' },
+  // v2 Regime
+  trending_up: { label: '상승 추세', color: 'text-green-400' },
+  trending_down: { label: '하락 추세', color: 'text-red-400' },
+  ranging: { label: '횡보 구간', color: 'text-yellow-400' },
+  volatile: { label: '고변동성', color: 'text-orange-400' },
 }
 
 export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {

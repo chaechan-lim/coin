@@ -271,6 +271,37 @@ class FuturesEngineV2:
 
     # ── API 호환 메서드 ──────────────────────────
 
+    @property
+    def strategies(self) -> dict:
+        """v2 레짐 전략 이름 → 전략 객체 매핑 (전략 성과 탭용).
+
+        중복 객체 제거: 같은 전략 인스턴스가 여러 레짐에 매핑될 수 있으므로
+        name 기준으로 deduplicate.
+        """
+        seen: dict[str, object] = {}
+        for strategy in self._strategies._strategies.values():
+            if strategy.name not in seen:
+                seen[strategy.name] = strategy
+        return seen
+
+    @property
+    def rotation_status(self) -> dict:
+        """종목/로테이션 탭용 상태 (v2 레짐 적응형 엔진)."""
+        regime = self._regime.current
+        market_state = regime.regime.value if regime else "sideways"
+        return {
+            "rotation_enabled": False,
+            "surge_threshold": 0.0,
+            "market_state": market_state,
+            "current_surge_symbol": None,
+            "last_rotation_time": None,
+            "last_scan_time": None,
+            "rotation_cooldown_sec": 0,
+            "tracked_coins": self.tracked_coins,
+            "rotation_coins": [],
+            "all_surge_scores": {},
+        }
+
     def get_status(self) -> dict:
         """엔진 상태 정보 반환 (API용)."""
         regime = self._regime.current
