@@ -37,14 +37,15 @@ async def list_strategies(exchange: ExchangeNameType = Query("bithumb")):
     strategies = []
     for name, strategy in eng.strategies.items():
         weight = comb.weights.get(name, 0.0) if comb else 0.0
+        # v2 RegimeStrategy는 BaseStrategy 인터페이스의 일부 속성이 없을 수 있음
         strategies.append(
             StrategyResponse(
-                name=strategy.name,
-                display_name=strategy.display_name,
-                applicable_market_types=strategy.applicable_market_types,
-                default_coins=strategy.default_coins,
-                required_timeframe=strategy.required_timeframe,
-                params=strategy.get_params(),
+                name=getattr(strategy, 'name', name),
+                display_name=getattr(strategy, 'display_name', name),
+                applicable_market_types=getattr(strategy, 'applicable_market_types', ['futures']),
+                default_coins=getattr(strategy, 'default_coins', []),
+                required_timeframe=getattr(strategy, 'required_timeframe', '5m'),
+                params=strategy.get_params() if hasattr(strategy, 'get_params') else {},
                 current_weight=weight,
             )
         )

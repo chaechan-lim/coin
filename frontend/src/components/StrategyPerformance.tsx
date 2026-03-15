@@ -10,6 +10,7 @@ const STRATEGY_KR: Record<string, string> = {
   rsi: 'RSI',
   macd_crossover: 'MACD',
   bollinger_rsi: '볼린저+RSI',
+  bb_squeeze: 'BB 스퀴즈',
   stochastic_rsi: '스토캐스틱RSI',
   obv_divergence: 'OBV 다이버전스',
   bnf_deviation: 'BNF 이격도',
@@ -17,6 +18,10 @@ const STRATEGY_KR: Record<string, string> = {
   larry_williams: '래리 윌리엄스',
   donchian_channel: '돈치안 채널',
   risk_management: '리스크 관리',
+  // v2 레짐 전략
+  trend_follower: '추세 추종',
+  mean_reversion: '평균 회귀',
+  vol_breakout: '변동성 돌파 v2',
 }
 
 const PERIODS = ['7d', '30d', '90d'] as const
