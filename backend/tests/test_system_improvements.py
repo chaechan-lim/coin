@@ -418,3 +418,55 @@ class TestTaskNames:
         from api import dashboard
         source = inspect.getsource(dashboard.start_engine)
         assert "name=" in source
+
+
+# ── Scheduler Setup Tests ─────────────────────────────────────
+
+class TestSchedulerSetup:
+    """setup_scheduler 잡 등록 검증."""
+
+    def test_setup_scheduler_registers_performance_analytics_for_coordinator(self):
+        """coordinator가 있을 때 performance_analytics 크론잡이 등록됨."""
+        from engine.scheduler import setup_scheduler
+
+        mock_coord = MagicMock()
+        mock_coord.run_market_analysis = AsyncMock()
+        mock_coord.run_risk_evaluation = AsyncMock()
+        mock_coord.run_performance_analysis = AsyncMock()
+        mock_coord.run_strategy_advice = AsyncMock()
+
+        mock_config = MagicMock()
+        mock_config.llm.enabled = False
+        mock_config.llm.daily_review_enabled = False
+        mock_config.llm.api_key = ""
+
+        with patch("config.get_config", return_value=mock_config):
+            with patch("apscheduler.schedulers.asyncio.AsyncIOScheduler.start"):
+                scheduler = setup_scheduler(
+                    config=mock_config,
+                    session_factory=MagicMock(),
+                    coordinator=mock_coord,
+                    portfolio_manager=None,
+                )
+
+        assert "performance_analytics" in scheduler._jobs
+        assert "strategy_advice" in scheduler._jobs
+
+    def test_setup_scheduler_no_coordinator_skips_agent_jobs(self):
+        """coordinator가 None이면 에이전트 잡 등록 안 됨."""
+        from engine.scheduler import setup_scheduler
+
+        mock_config = MagicMock()
+        mock_config.llm.enabled = False
+
+        # coordinator=None이면 get_config 호출 없으므로 패치 불필요
+        scheduler = setup_scheduler(
+            config=mock_config,
+            session_factory=MagicMock(),
+            coordinator=None,
+            portfolio_manager=None,
+        )
+
+        assert "performance_analytics" not in scheduler._jobs
+        assert "strategy_advice" not in scheduler._jobs
+        assert "market_analysis" not in scheduler._jobs
