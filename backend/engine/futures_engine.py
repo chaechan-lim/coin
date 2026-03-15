@@ -953,26 +953,30 @@ class BinanceFuturesEngine(TradingEngine):
             await self._save_tracker_to_db(session, symbol, tracker)
 
         if sell_reason:
-            # 스탑 경고 이벤트 (PnL + 손절/익절 가격 포함)
-            lev_val = position.leverage or getattr(self, '_leverage', 3)
-            leveraged_pnl = pnl_pct * lev_val
-            loss_amount = abs(pnl_pct / 100 * entry * (position.quantity or 0))
-            await emit_event(
-                "warning", "futures_trade",
-                f"선물 {direction} 스탑: {symbol}",
-                detail=sell_reason,
-                metadata={
-                    "symbol": symbol,
-                    "price": price,
-                    "entry_price": entry,
-                    "pnl_pct": round(pnl_pct, 2),
-                    "leveraged_pnl_pct": round(leveraged_pnl, 2),
-                    "loss_amount": round(loss_amount, 2),
-                    "reason": sell_reason,
-                    "direction": direction,
-                    "leverage": lev_val,
-                },
-            )
+            # 스탑 경고 이벤트 — 5분 쿨다운으로 스팸 방지 (30초 루프에서 반복 발화 방지)
+            now = datetime.now(timezone.utc)
+            last_event = self._last_stop_event_time.get(symbol)
+            if not last_event or (now - last_event).total_seconds() >= 300:
+                lev_val = position.leverage or getattr(self, '_leverage', 3)
+                leveraged_pnl = pnl_pct * lev_val
+                loss_amount = abs(pnl_pct / 100 * entry * (position.quantity or 0))
+                await emit_event(
+                    "warning", "futures_trade",
+                    f"선물 {direction} 스탑: {symbol}",
+                    detail=sell_reason,
+                    metadata={
+                        "symbol": symbol,
+                        "price": price,
+                        "entry_price": entry,
+                        "pnl_pct": round(pnl_pct, 2),
+                        "leveraged_pnl_pct": round(leveraged_pnl, 2),
+                        "loss_amount": round(loss_amount, 2),
+                        "reason": sell_reason,
+                        "direction": direction,
+                        "leverage": lev_val,
+                    },
+                )
+                self._last_stop_event_time[symbol] = now
             await self._close_position(session, symbol, position, price, sell_reason)
             return True
 
@@ -1071,6 +1075,7 @@ class BinanceFuturesEngine(TradingEngine):
             now = datetime.now(timezone.utc)
             self._last_sell_time[symbol] = now
             self._position_trackers.pop(symbol, None)
+            self._last_stop_event_time.pop(symbol, None)  # 청산 완료 시 알림 쿨다운 해제
 
             try:
                 await self._portfolio_manager.update_position_on_sell(
