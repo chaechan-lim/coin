@@ -26,6 +26,7 @@ class PortfolioManager:
         self._cash_balance = initial_balance_krw
         self._is_paper = is_paper
         self._exchange_name = exchange_name
+        self._is_futures = "futures" in exchange_name
         self._peak_value = initial_balance_krw
         self._realized_pnl = 0.0
         self._peak_already_adjusted = False
@@ -115,7 +116,7 @@ class PortfolioManager:
 
         old_quantity = position.quantity
         sell_ratio = quantity / old_quantity if old_quantity > 0 else 1.0
-        is_futures = "futures" in self._exchange_name
+        is_futures = self._is_futures
 
         if is_futures and position.leverage and position.leverage > 1:
             # 선물: margin 기반 정산 — notional이 아닌 마진+레버리지 PnL 반환
@@ -184,7 +185,7 @@ class PortfolioManager:
         total_current_value = 0.0
         position_details = []
 
-        is_futures = "futures" in self._exchange_name
+        is_futures = self._is_futures
 
         for pos in positions:
             try:
@@ -363,7 +364,7 @@ class PortfolioManager:
             # 1) Cash spike check (직전 1개)
             #    선물: 내부 장부 기반이므로 cash는 매매로만 변동 → 스킵
             #    현물: 거래소 sync 기반이므로 여전히 필요
-            if "futures" not in self._exchange_name:
+            if not self._is_futures:
                 prev_cash = prev_rows[0][1]
                 if prev_cash is not None and prev_cash > 0:
                     cash_change_pct = abs(new_cash - prev_cash) / prev_cash * 100
@@ -524,7 +525,7 @@ class PortfolioManager:
         정확한 잔고가 설정됨. 공식 계산은 수수료/슬리피지 누적 오차로 실제 잔고와 괴리.
         paper 모드만 공식 기반 reconcile 적용.
         """
-        if "futures" in self._exchange_name:
+        if self._is_futures:
             return
         if not self._is_paper:
             return
@@ -568,7 +569,7 @@ class PortfolioManager:
 
         COMMISSION은 _parse_order에서 이미 추정 차감되므로 FUNDING_FEE만 반영.
         """
-        if "futures" not in self._exchange_name:
+        if not self._is_futures:
             return 0.0
 
         try:
@@ -611,7 +612,7 @@ class PortfolioManager:
 
     async def initialize_cash_from_exchange(self, exchange_adapter) -> None:
         """서버 시작 시 거래소 실잔고에서 cash 초기화 (선물, 1회성)."""
-        if "futures" not in self._exchange_name:
+        if not self._is_futures:
             return
         try:
             balances = await exchange_adapter.fetch_balance()
@@ -678,7 +679,7 @@ class PortfolioManager:
         exchange_symbols: set[str] = set()
 
         # 선물: fetch_positions로 실제 마진/방향/레버리지 조회
-        is_futures = "futures" in self._exchange_name
+        is_futures = self._is_futures
         futures_positions = {}
         if is_futures:
             try:

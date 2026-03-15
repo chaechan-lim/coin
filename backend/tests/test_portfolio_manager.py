@@ -2337,3 +2337,58 @@ async def test_daily_buy_count_restored_from_orders(session):
     assert engine._daily_buy_count == 3
     assert engine._daily_coin_buy_count.get("BTC/KRW") == 2
     assert engine._daily_coin_buy_count.get("ETH/KRW") == 1
+
+
+# ── _is_futures 캐싱 테스트 (COIN-10) ──────────────────────────────────────
+
+
+class TestIsFuturesCaching:
+    """COIN-10: _is_futures 플래그가 __init__에서 캐싱되어야 함."""
+
+    def test_is_futures_true_for_binance_futures(self):
+        """binance_futures exchange_name → _is_futures=True."""
+        pm = PortfolioManager(
+            market_data=_make_market_data({}),
+            initial_balance_krw=1000.0,
+            exchange_name="binance_futures",
+        )
+        assert pm._is_futures is True
+
+    def test_is_futures_false_for_bithumb(self):
+        """bithumb exchange_name → _is_futures=False."""
+        pm = PortfolioManager(
+            market_data=_make_market_data({}),
+            initial_balance_krw=500_000,
+            exchange_name="bithumb",
+        )
+        assert pm._is_futures is False
+
+    def test_is_futures_false_for_binance_spot(self):
+        """binance_spot exchange_name → _is_futures=False."""
+        pm = PortfolioManager(
+            market_data=_make_market_data({}),
+            initial_balance_krw=1000.0,
+            exchange_name="binance_spot",
+        )
+        assert pm._is_futures is False
+
+    def test_is_futures_default_bithumb(self):
+        """기본 exchange_name='bithumb' → _is_futures=False."""
+        pm = PortfolioManager(
+            market_data=_make_market_data({}),
+            initial_balance_krw=500_000,
+        )
+        assert pm._is_futures is False
+
+    @pytest.mark.asyncio
+    async def test_reconcile_skips_for_futures(self, session):
+        """선물 PM은 reconcile_cash_from_db를 즉시 건너뜀 (_is_futures=True)."""
+        pm = PortfolioManager(
+            market_data=_make_market_data({}),
+            initial_balance_krw=1000.0,
+            exchange_name="binance_futures",
+        )
+        original_cash = pm.cash_balance
+        # 선물은 reconcile을 건너뜀 → cash 변화 없음
+        await pm.reconcile_cash_from_db(session)
+        assert pm.cash_balance == original_cash
