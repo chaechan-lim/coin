@@ -10,6 +10,60 @@ const SIGNAL_STYLE: Record<string, string> = {
   HOLD: 'text-gray-400 bg-gray-800 border-gray-700',
 }
 
+const VERDICT_STYLE: Record<string, string> = {
+  BUY: 'text-buy bg-green-900/60 border-green-700',
+  SELL: 'text-sell bg-red-900/60 border-red-700',
+  HOLD: 'text-gray-400 bg-gray-800/80 border-gray-600',
+}
+
+/** Minimum active weight for a combined signal — mirrors SignalCombiner.MIN_ACTIVE_WEIGHT */
+const MIN_ACTIVE_WEIGHT = 0.12
+
+/**
+ * Compute combined/final signal for a set of strategy logs.
+ * Mirrors the core logic of SignalCombiner.combine() (backend/strategies/combiner.py).
+ *
+ * HOLD = abstain (not counted in active weight).
+ * BUY/SELL scores are normalised by active_weight then compared to minConfidence.
+ */
+export function computeCombinedSignal(
+  logs: StrategyLog[],
+  weights: Record<string, number>,
+  minConfidence: number,
+): { action: 'BUY' | 'SELL' | 'HOLD'; confidence: number } {
+  let buyScore = 0, sellScore = 0
+  let buyActive = 0, sellActive = 0
+
+  for (const log of logs) {
+    const w = weights[log.strategy_name] ?? 0.1
+    const conf = log.confidence ?? 0
+    if (log.signal_type === 'BUY') {
+      buyScore += w * conf
+      buyActive += w
+    } else if (log.signal_type === 'SELL') {
+      sellScore += w * conf
+      sellActive += w
+    }
+    // HOLD → abstain, not counted
+  }
+
+  const activeWeight = buyActive + sellActive
+  if (activeWeight < MIN_ACTIVE_WEIGHT) {
+    return { action: 'HOLD', confidence: 0 }
+  }
+
+  const buyNorm = buyScore / activeWeight
+  const sellNorm = sellScore / activeWeight
+  const isLong = buyNorm >= sellNorm
+  const winningScore = isLong ? buyNorm : sellNorm
+
+  if (winningScore < minConfidence) {
+    return { action: 'HOLD', confidence: winningScore }
+  }
+
+  return { action: isLong ? 'BUY' : 'SELL', confidence: winningScore }
+}
+
 export function OrderLog({ exchange = 'bithumb' }: { exchange?: ExchangeName }) {
   const [symbol, setSymbol] = useState('')
   const [strategy, setStrategy] = useState('')
@@ -43,6 +97,12 @@ export function OrderLog({ exchange = 'bithumb' }: { exchange?: ExchangeName }) 
       }),
     staleTime: 20_000,
   })
+
+  // Build strategy weights map for combined signal computation
+  const weightsMap = useMemo(() => {
+    if (!strategies) return {} as Record<string, number>
+    return Object.fromEntries(strategies.map((s) => [s.name, s.current_weight]))
+  }, [strategies])
 
   // Group logs by symbol
   const grouped = useMemo(() => {
@@ -98,7 +158,7 @@ export function OrderLog({ exchange = 'bithumb' }: { exchange?: ExchangeName }) 
             {grouped.map(([sym, logs]) => (
               <div key={sym} className="px-3 md:px-4 py-3">
                 {/* Coin header */}
-                <div className="flex items-center gap-2 mb-2">
+                <div className="flex items-center gap-2 mb-2 flex-wrap">
                   <span className="text-white font-semibold text-sm">
                     {sym.replace(/\/(KRW|USDT)/, '')}
                   </span>
@@ -106,6 +166,25 @@ export function OrderLog({ exchange = 'bithumb' }: { exchange?: ExchangeName }) 
                   <span className="text-gray-600 text-xs ml-1">
                     {formatTs(logs[0].logged_at, 'MM/dd HH:mm')}
                   </span>
+
+                  {/* Final combined verdict */}
+                  {(() => {
+                    const verdict = computeCombinedSignal(logs, weightsMap, minConfidence)
+                    const vs = VERDICT_STYLE[verdict.action] ?? VERDICT_STYLE.HOLD
+                    return (
+                      <div className="ml-auto flex items-center gap-1.5">
+                        <span className="text-gray-500 text-xs">최종</span>
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded border ${vs}`}>
+                          {verdict.action}
+                          {verdict.confidence > 0 && (
+                            <span className="ml-1 font-normal opacity-80">
+                              {(verdict.confidence * 100).toFixed(0)}%
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                    )
+                  })()}
                 </div>
 
                 {/* Strategy signals for this coin */}

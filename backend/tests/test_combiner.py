@@ -236,3 +236,122 @@ class TestUnknownStrategy:
         # buy_score = 0.25*0.70 + 0.10*0.70 = 0.245
         # normalized = 0.245 / 0.35 = 0.70
         assert abs(result.combined_confidence - 0.70) < 0.01
+
+
+# ── 프론트엔드 최종 판단 계산 계약 ───────────────────────────
+# OrderLog.tsx의 computeCombinedSignal() 함수는 이 클래스의 로직을 미러링함.
+# 프론트엔드가 올바른 최종 판단을 계산할 수 있도록 백엔드 계약을 검증.
+
+
+class TestFrontendCombinedSignalContract:
+    """
+    프론트엔드 신호 로그 개선 (COIN-11):
+    코인별 최종 판단을 표시하기 위해 frontend/OrderLog.tsx는 전략 로그 +
+    현재 가중치로 최종 신호를 계산한다.
+    여기서는 그 계산 로직이 백엔드 SignalCombiner와 동일함을 검증한다.
+    """
+
+    def _compute_combined(
+        self,
+        signals: list[Signal],
+        weights: dict[str, float],
+        min_confidence: float = 0.55,
+        min_active_weight: float = 0.12,
+    ) -> dict:
+        """Frontend computeCombinedSignal() 파이썬 복제."""
+        buy_score = sell_score = 0.0
+        buy_active = sell_active = 0.0
+        for s in signals:
+            w = weights.get(s.strategy_name, 0.1)
+            conf = s.confidence
+            if s.signal_type == SignalType.BUY:
+                buy_score += w * conf
+                buy_active += w
+            elif s.signal_type == SignalType.SELL:
+                sell_score += w * conf
+                sell_active += w
+            # HOLD → abstain
+        active_weight = buy_active + sell_active
+        if active_weight < min_active_weight:
+            return {"action": "HOLD", "confidence": 0.0}
+        buy_norm = buy_score / active_weight
+        sell_norm = sell_score / active_weight
+        is_long = buy_norm >= sell_norm
+        winning_score = buy_norm if is_long else sell_norm
+        if winning_score < min_confidence:
+            return {"action": "HOLD", "confidence": winning_score}
+        return {"action": "BUY" if is_long else "SELL", "confidence": winning_score}
+
+    def test_buy_signals_produce_buy_verdict(self):
+        """다수 BUY 신호 → 최종 BUY 판단."""
+        weights = {"bollinger_rsi": 0.26, "rsi": 0.21, "bb_squeeze": 0.15}
+        signals = [
+            _signal("bollinger_rsi", SignalType.BUY, 0.80),
+            _signal("rsi", SignalType.BUY, 0.70),
+            _signal("bb_squeeze", SignalType.HOLD, 0.30),
+        ]
+        result = self._compute_combined(signals, weights)
+        assert result["action"] == "BUY"
+        assert result["confidence"] > 0.55
+
+        # 백엔드 SignalCombiner와 동일한 결과 확인
+        combiner = SignalCombiner(strategy_weights=weights, min_confidence=0.55)
+        backend_result = combiner.combine(signals)
+        assert backend_result.action == SignalType.BUY
+        assert abs(backend_result.combined_confidence - result["confidence"]) < 0.001
+
+    def test_sell_signals_produce_sell_verdict(self):
+        """다수 SELL 신호 → 최종 SELL 판단."""
+        weights = {"bollinger_rsi": 0.26, "rsi": 0.21, "stochastic_rsi": 0.13}
+        signals = [
+            _signal("bollinger_rsi", SignalType.SELL, 0.80),
+            _signal("rsi", SignalType.SELL, 0.75),
+            _signal("stochastic_rsi", SignalType.HOLD, 0.20),
+        ]
+        result = self._compute_combined(signals, weights)
+        assert result["action"] == "SELL"
+
+        combiner = SignalCombiner(strategy_weights=weights, min_confidence=0.55)
+        backend_result = combiner.combine(signals)
+        assert backend_result.action == SignalType.SELL
+        assert abs(backend_result.combined_confidence - result["confidence"]) < 0.001
+
+    def test_low_confidence_shows_hold(self):
+        """낮은 신뢰도 → 최종 HOLD."""
+        weights = {"rsi": 0.25, "macd": 0.20}
+        signals = [
+            _signal("rsi", SignalType.BUY, 0.40),
+            _signal("macd", SignalType.BUY, 0.35),
+        ]
+        result = self._compute_combined(signals, weights, min_confidence=0.55)
+        assert result["action"] == "HOLD"
+        assert result["confidence"] > 0  # confidence는 0보다 크지만 threshold 미달
+
+    def test_all_hold_returns_hold_with_zero_confidence(self):
+        """모든 전략 HOLD → 최종 HOLD, confidence=0."""
+        weights = {"rsi": 0.25, "macd": 0.20}
+        signals = [
+            _signal("rsi", SignalType.HOLD, 0.50),
+            _signal("macd", SignalType.HOLD, 0.50),
+        ]
+        result = self._compute_combined(signals, weights)
+        assert result["action"] == "HOLD"
+        assert result["confidence"] == 0.0
+
+    def test_mixed_signals_buy_wins(self):
+        """BUY와 SELL 혼합 — 가중 점수가 높은 BUY 승리."""
+        weights = {"bollinger_rsi": 0.26, "rsi": 0.21}
+        signals = [
+            _signal("bollinger_rsi", SignalType.BUY, 0.90),   # 0.26 * 0.90 = 0.234
+            _signal("rsi", SignalType.SELL, 0.60),             # 0.21 * 0.60 = 0.126
+        ]
+        result = self._compute_combined(signals, weights, min_confidence=0.10)
+        assert result["action"] == "BUY"
+
+    def test_min_active_weight_guard(self):
+        """active_weight < 0.12 → HOLD (단일 약소 전략 방지)."""
+        weights = {"tiny": 0.05}
+        signals = [_signal("tiny", SignalType.BUY, 0.99)]
+        result = self._compute_combined(signals, weights)
+        assert result["action"] == "HOLD"
+        assert result["confidence"] == 0.0
