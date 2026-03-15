@@ -104,16 +104,21 @@ export function OrderLog({ exchange = 'bithumb' }: { exchange?: ExchangeName }) 
     return Object.fromEntries(strategies.map((s) => [s.name, s.current_weight]))
   }, [strategies])
 
-  // Group logs by symbol
+  // Group logs by symbol + 1-minute time bucket to separate evaluation cycles.
+  // The API returns logs sorted newest-first across all cycles. Without this bucketing,
+  // all cycles for the same symbol land in one group → each strategy appears N× times.
   const grouped = useMemo(() => {
     if (!data) return []
-    const map = new Map<string, StrategyLog[]>()
+    const map = new Map<string, { symbol: string; logs: StrategyLog[] }>()
     for (const log of data) {
-      const key = log.symbol
-      if (!map.has(key)) map.set(key, [])
-      map.get(key)!.push(log)
+      // "YYYY-MM-DDTHH:MM" — all strategies in one evaluation cycle are logged
+      // within seconds of each other, so a 1-minute bucket reliably separates cycles.
+      const minute = log.logged_at.slice(0, 16)
+      const key = `${log.symbol}::${minute}`
+      if (!map.has(key)) map.set(key, { symbol: log.symbol, logs: [] })
+      map.get(key)!.logs.push(log)
     }
-    return Array.from(map.entries())
+    return Array.from(map.values())
   }, [data])
 
   return (
@@ -155,8 +160,8 @@ export function OrderLog({ exchange = 'bithumb' }: { exchange?: ExchangeName }) 
       ) : (
         <>
           <div className="divide-y divide-gray-700">
-            {grouped.map(([sym, logs]) => (
-              <div key={sym} className="px-3 md:px-4 py-3">
+            {grouped.map(({ symbol: sym, logs }) => (
+              <div key={`${sym}::${logs[0]?.logged_at.slice(0, 16)}`} className="px-3 md:px-4 py-3">
                 {/* Coin header */}
                 <div className="flex items-center gap-2 mb-2 flex-wrap">
                   <span className="text-white font-semibold text-sm">
