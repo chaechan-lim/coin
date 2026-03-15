@@ -638,3 +638,221 @@ class TestZombiePositionCleanup:
 
         # 서지 포지션 → 안 건드림
         assert pos.quantity == 100.0
+
+
+class TestStopEventThrottle:
+    """트레일링 스탑/SL/TP 경고 이벤트 스팸 방지 테스트 (COIN-6)."""
+
+    def test_last_stop_event_time_initialized(self, futures_engine):
+        """_last_stop_event_time이 TradingEngine에서 상속되어 빈 dict로 초기화됨."""
+        assert hasattr(futures_engine, "_last_stop_event_time")
+        assert futures_engine._last_stop_event_time == {}
+
+    @pytest.mark.asyncio
+    async def test_stop_event_emitted_on_first_trigger(self, futures_engine, mock_market_data):
+        """첫 번째 트레일링 스탑 조건 충족 시 경고 이벤트 발생."""
+        mock_market_data.get_current_price = AsyncMock(return_value=90000.0)
+
+        position = MagicMock(spec=Position)
+        position.symbol = "BTC/USDT"
+        position.quantity = 0.001
+        position.direction = "long"
+        position.average_buy_price = 80000.0
+        position.leverage = 3
+        position.margin_used = 26.67
+        position.stop_loss_pct = 2.83
+        position.take_profit_pct = 5.66
+        position.trailing_activation_pct = 1.77
+        position.trailing_stop_pct = 1.24
+        position.trailing_active = True
+        position.highest_price = 100000.0  # peak
+        position.liquidation_price = None
+        position.entered_at = None
+        position.is_surge = False
+        position.max_hold_hours = 0
+
+        # 트래커: trailing_active=True, extreme=100000, 현재가 90000 → drawdown=10% > trailing_stop_pct
+        tracker = PositionTracker(
+            entry_price=80000.0,
+            extreme_price=100000.0,
+            stop_loss_pct=2.83,
+            take_profit_pct=5.66,
+            trailing_activation_pct=1.77,
+            trailing_stop_pct=1.24,
+            trailing_active=True,
+        )
+        futures_engine._position_trackers["BTC/USDT"] = tracker
+
+        session = AsyncMock()
+        mock_order = MagicMock()
+        mock_order.status = "pending"  # 청산 실패 (filled 아님)
+        futures_engine._order_manager.create_order = AsyncMock(return_value=mock_order)
+        futures_engine._portfolio_manager.update_position_on_sell = AsyncMock()
+
+        with patch("engine.futures_engine.emit_event", new_callable=AsyncMock) as mock_emit:
+            result = await futures_engine._check_futures_stop_conditions(
+                session, "BTC/USDT", position
+            )
+
+        assert result is True
+        # 경고 이벤트가 1회 발생해야 함
+        warning_calls = [
+            c for c in mock_emit.call_args_list if c.args[0] == "warning"
+        ]
+        assert len(warning_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_stop_event_suppressed_within_cooldown(self, futures_engine, mock_market_data):
+        """5분 이내 재발화 시 경고 이벤트 억제 (노티 스팸 방지)."""
+        from datetime import timedelta
+
+        mock_market_data.get_current_price = AsyncMock(return_value=90000.0)
+
+        position = MagicMock(spec=Position)
+        position.symbol = "BTC/USDT"
+        position.quantity = 0.001
+        position.direction = "long"
+        position.average_buy_price = 80000.0
+        position.leverage = 3
+        position.margin_used = 26.67
+        position.stop_loss_pct = 2.83
+        position.take_profit_pct = 5.66
+        position.trailing_activation_pct = 1.77
+        position.trailing_stop_pct = 1.24
+        position.trailing_active = True
+        position.highest_price = 100000.0
+        position.liquidation_price = None
+        position.entered_at = None
+        position.is_surge = False
+        position.max_hold_hours = 0
+
+        tracker = PositionTracker(
+            entry_price=80000.0,
+            extreme_price=100000.0,
+            stop_loss_pct=2.83,
+            take_profit_pct=5.66,
+            trailing_activation_pct=1.77,
+            trailing_stop_pct=1.24,
+            trailing_active=True,
+        )
+        futures_engine._position_trackers["BTC/USDT"] = tracker
+
+        # 2분 전에 이미 이벤트를 발생시켰다고 기록 → 쿨다운 중
+        futures_engine._last_stop_event_time["BTC/USDT"] = (
+            datetime.now(timezone.utc) - timedelta(minutes=2)
+        )
+
+        session = AsyncMock()
+        mock_order = MagicMock()
+        mock_order.status = "pending"
+        futures_engine._order_manager.create_order = AsyncMock(return_value=mock_order)
+        futures_engine._portfolio_manager.update_position_on_sell = AsyncMock()
+
+        with patch("engine.futures_engine.emit_event", new_callable=AsyncMock) as mock_emit:
+            result = await futures_engine._check_futures_stop_conditions(
+                session, "BTC/USDT", position
+            )
+
+        assert result is True
+        # 쿨다운 중 → 경고 이벤트 억제
+        warning_calls = [
+            c for c in mock_emit.call_args_list if c.args[0] == "warning"
+        ]
+        assert len(warning_calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_stop_event_resumes_after_cooldown(self, futures_engine, mock_market_data):
+        """5분 쿨다운 만료 후 경고 이벤트 재발생."""
+        from datetime import timedelta
+
+        mock_market_data.get_current_price = AsyncMock(return_value=90000.0)
+
+        position = MagicMock(spec=Position)
+        position.symbol = "BTC/USDT"
+        position.quantity = 0.001
+        position.direction = "long"
+        position.average_buy_price = 80000.0
+        position.leverage = 3
+        position.margin_used = 26.67
+        position.stop_loss_pct = 2.83
+        position.take_profit_pct = 5.66
+        position.trailing_activation_pct = 1.77
+        position.trailing_stop_pct = 1.24
+        position.trailing_active = True
+        position.highest_price = 100000.0
+        position.liquidation_price = None
+        position.entered_at = None
+        position.is_surge = False
+        position.max_hold_hours = 0
+
+        tracker = PositionTracker(
+            entry_price=80000.0,
+            extreme_price=100000.0,
+            stop_loss_pct=2.83,
+            take_profit_pct=5.66,
+            trailing_activation_pct=1.77,
+            trailing_stop_pct=1.24,
+            trailing_active=True,
+        )
+        futures_engine._position_trackers["BTC/USDT"] = tracker
+
+        # 6분 전 기록 → 쿨다운 만료
+        futures_engine._last_stop_event_time["BTC/USDT"] = (
+            datetime.now(timezone.utc) - timedelta(minutes=6)
+        )
+
+        session = AsyncMock()
+        mock_order = MagicMock()
+        mock_order.status = "pending"
+        futures_engine._order_manager.create_order = AsyncMock(return_value=mock_order)
+        futures_engine._portfolio_manager.update_position_on_sell = AsyncMock()
+
+        with patch("engine.futures_engine.emit_event", new_callable=AsyncMock) as mock_emit:
+            result = await futures_engine._check_futures_stop_conditions(
+                session, "BTC/USDT", position
+            )
+
+        assert result is True
+        warning_calls = [
+            c for c in mock_emit.call_args_list if c.args[0] == "warning"
+        ]
+        assert len(warning_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_close_position_clears_throttle(self, futures_engine):
+        """포지션 청산 완료 시 _last_stop_event_time에서 해당 심볼 제거."""
+        from datetime import timedelta
+
+        position = MagicMock(spec=Position)
+        position.symbol = "BTC/USDT"
+        position.quantity = 0.001
+        position.direction = "long"
+        position.average_buy_price = 65000.0
+        position.leverage = 3
+        position.margin_used = 21.67
+        position.liquidation_price = None
+
+        futures_engine._last_stop_event_time["BTC/USDT"] = (
+            datetime.now(timezone.utc) - timedelta(minutes=1)
+        )
+
+        mock_order = MagicMock()
+        mock_order.status = "filled"
+        mock_order.executed_price = 90000.0
+        mock_order.executed_quantity = 0.001
+        mock_order.fee = 0.0036
+        futures_engine._order_manager.create_order = AsyncMock(return_value=mock_order)
+        futures_engine._portfolio_manager.update_position_on_sell = AsyncMock()
+
+        session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = position
+        session.execute = AsyncMock(return_value=mock_result)
+
+        with patch("engine.futures_engine.emit_event", new_callable=AsyncMock):
+            await futures_engine._close_position(
+                session, "BTC/USDT", position, 90000.0, "Trailing Stop"
+            )
+
+        # 청산 완료 후 쿨다운 해제
+        assert "BTC/USDT" not in futures_engine._last_stop_event_time
