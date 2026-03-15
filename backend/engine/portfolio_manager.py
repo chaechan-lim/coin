@@ -637,6 +637,109 @@ class PortfolioManager:
         except Exception as e:
             logger.warning("futures_cash_init_failed", error=str(e))
 
+    async def _determine_close_reason(
+        self,
+        symbol: str,
+        db_pos: Position,
+        current_price: float,
+        pnl_pct: float,
+        exchange_adapter,
+    ) -> tuple[str, str]:
+        """포지션 소실 시 실제 청산 사유를 판별한다.
+
+        거래소에서 사라진 포지션에 대해 가능한 정보를 활용하여
+        실제 청산 사유를 추정한다.
+
+        판별 순서:
+        1. Income API → INSURANCE_CLEAR (강제청산 확정)
+        2. DB SL/TP 수준 비교 → SL/TP/trailing stop 히트 추정
+        3. max_hold_hours → 보유 시간 초과
+        4. PnL 기반 → 80% 이상 손실 시 강제청산 추정
+        5. 폴백 → 다운타임 중 포지션 종료
+
+        Returns:
+            (strategy_name, reason) 튜플
+        """
+        direction = getattr(db_pos, "direction", "long")
+        entry = db_pos.average_buy_price or 0
+        leverage = getattr(db_pos, "leverage", 1) or 1
+
+        # 1. 선물: Income API로 강제청산 확인
+        if self._is_futures and hasattr(exchange_adapter, "fetch_income"):
+            try:
+                since_ms = int(
+                    (datetime.now(timezone.utc).timestamp() - 86400) * 1000
+                )
+                incomes = await exchange_adapter.fetch_income(
+                    income_type="INSURANCE_CLEAR",
+                    start_time=since_ms,
+                )
+                binance_sym = symbol.replace("/", "")
+                for inc in incomes:
+                    if inc.get("symbol", "") == binance_sym:
+                        return (
+                            "forced_liquidation",
+                            f"거래소 강제청산 (Income API 확인, PnL {pnl_pct:+.1f}%)",
+                        )
+            except Exception:
+                pass  # Income API 실패 시 다음 단계로
+
+        # 2. DB SL/TP 수준과 비교
+        sl_pct = getattr(db_pos, "stop_loss_pct", None)
+        tp_pct = getattr(db_pos, "take_profit_pct", None)
+        trailing_active = getattr(db_pos, "trailing_active", False)
+        trailing_stop_pct = getattr(db_pos, "trailing_stop_pct", None)
+
+        if sl_pct and pnl_pct <= -sl_pct:
+            return (
+                "stop_loss",
+                f"SL 히트 추정: {pnl_pct:.1f}% (한도 -{sl_pct:.1f}%)",
+            )
+
+        if tp_pct and not trailing_active and pnl_pct >= tp_pct:
+            return (
+                "take_profit",
+                f"TP 히트 추정: +{pnl_pct:.1f}% (목표 +{tp_pct:.1f}%)",
+            )
+
+        if trailing_active and trailing_stop_pct:
+            extreme = getattr(db_pos, "highest_price", None) or entry
+            if extreme and extreme > 0:
+                if direction == "long":
+                    drawdown = (extreme - current_price) / extreme * 100
+                else:
+                    drawdown = (current_price - extreme) / extreme * 100
+                if drawdown >= trailing_stop_pct:
+                    return (
+                        "trailing_stop",
+                        f"트레일링 스탑 추정: 하락 {drawdown:.1f}% (한도 {trailing_stop_pct:.1f}%)",
+                    )
+
+        # 3. 보유 시간 초과 체크 (서지 포지션 등)
+        max_hold = getattr(db_pos, "max_hold_hours", None)
+        entered_at = getattr(db_pos, "entered_at", None)
+        if max_hold and max_hold > 0 and entered_at:
+            if entered_at.tzinfo is None:
+                entered_at = entered_at.replace(tzinfo=timezone.utc)
+            held_hours = (
+                datetime.now(timezone.utc) - entered_at
+            ).total_seconds() / 3600
+            if held_hours >= max_hold:
+                return (
+                    "time_expiry",
+                    f"보유 시간 초과: {held_hours:.1f}h (한도 {max_hold:.0f}h)",
+                )
+
+        # 4. PnL 기반 강제청산 추정
+        if self._is_futures and pnl_pct < -80:
+            return (
+                "forced_liquidation",
+                f"강제청산(추정): {pnl_pct:.1f}%",
+            )
+
+        # 5. 폴백
+        return ("position_sync", "다운타임 중 포지션 종료")
+
     async def sync_exchange_positions(
         self, session: AsyncSession, exchange_adapter, tracked_coins: list[str]
     ) -> None:
@@ -939,8 +1042,10 @@ class PortfolioManager:
                 else:
                     pnl_pct = (current_price - entry) / entry * leverage * 100 if entry else 0
 
-                is_likely_liquidation = is_futures and pnl_pct < -80
-                reason = "강제청산(추정)" if is_likely_liquidation else "다운타임 중 포지션 종료"
+                # 실제 청산 사유 판별
+                strategy_name, reason = await self._determine_close_reason(
+                    db_sym, db_pos, current_price, pnl_pct, exchange_adapter,
+                )
 
                 old_qty = db_pos.quantity
                 now = datetime.now(timezone.utc)
@@ -950,7 +1055,7 @@ class PortfolioManager:
                     symbol=db_sym, old_qty=old_qty,
                     entry_price=entry, direction=direction,
                     leverage=leverage, invested=round(invested, 2),
-                    reason=reason,
+                    reason=reason, strategy_name=strategy_name,
                 )
 
                 # 거래 이력에 기록 (Order 생성)
@@ -975,7 +1080,7 @@ class PortfolioManager:
                     entry_price=entry,
                     realized_pnl=round(pnl_amount, 4),
                     realized_pnl_pct=round(pnl_pct, 2),
-                    strategy_name="position_sync",
+                    strategy_name=strategy_name,
                     signal_confidence=0.0,
                     signal_reason=reason,
                     filled_at=now,
