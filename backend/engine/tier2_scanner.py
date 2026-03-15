@@ -265,6 +265,9 @@ class Tier2Scanner:
             else:
                 pnl_pct = (entry - price) / entry * 100
 
+            # 레버리지 적용: 실제 PnL = raw price change × leverage
+            pnl_pct *= self._leverage
+
             if pnl_pct <= -self._sl_pct:
                 to_close.append((symbol, state, f"SL: {pnl_pct:.1f}%"))
             elif pnl_pct >= self._tp_pct:

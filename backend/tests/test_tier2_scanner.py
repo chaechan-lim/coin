@@ -193,6 +193,116 @@ class TestExits:
         assert tier2._safe_order.execute_order.called
 
 
+class TestLeveragePnL:
+    """Bug COIN-13: SL/TP 계산 시 레버리지 적용 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_sl_with_leverage_long(self, tier2, mock_exchange, session):
+        """롱 포지션: 레버리지 적용 후 SL 히트 계산.
+
+        entry=100, sl=2%, leverage=3x
+        raw price change 0.67% → leveraged PnL = 2.0% → SL 히트
+        """
+        state = PositionState(
+            symbol="BTC/USDT", direction=Direction.LONG, quantity=0.01,
+            entry_price=100.0, margin=25.0, leverage=3,
+            extreme_price=100.0, stop_loss_atr=2.0, take_profit_atr=4.0,
+            trailing_activation_atr=1.0, trailing_stop_atr=0.8,
+            tier="tier2",
+        )
+        tier2._positions.open_position(state)
+
+        # 가격 99.33 → raw change = -0.67%, leveraged = -0.67% × 3 = -2.01% → SL(2%) 히트
+        mock_exchange.fetch_ticker.return_value = Ticker(
+            symbol="BTC/USDT", last=99.33, bid=99.32, ask=99.34,
+            high=101.0, low=99.0, volume=10000.0,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        await tier2._check_exits(session)
+        assert tier2._safe_order.execute_order.called
+
+    @pytest.mark.asyncio
+    async def test_sl_not_hit_without_leverage_threshold(self, tier2, mock_exchange, session):
+        """레버리지 적용 전 raw 변동 기준으로는 SL 미히트 확인.
+
+        entry=100, sl=2%, leverage=3x
+        raw change = -0.5% → leveraged PnL = -1.5% → SL(2%) 미히트
+        """
+        state = PositionState(
+            symbol="BTC/USDT", direction=Direction.LONG, quantity=0.01,
+            entry_price=100.0, margin=25.0, leverage=3,
+            extreme_price=100.0, stop_loss_atr=2.0, take_profit_atr=4.0,
+            trailing_activation_atr=1.0, trailing_stop_atr=0.8,
+            tier="tier2",
+        )
+        tier2._positions.open_position(state)
+
+        # 가격 99.50 → raw change = -0.5%, leveraged = -1.5% → SL(2%) 미히트
+        mock_exchange.fetch_ticker.return_value = Ticker(
+            symbol="BTC/USDT", last=99.50, bid=99.49, ask=99.51,
+            high=101.0, low=99.0, volume=10000.0,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        await tier2._check_exits(session)
+        assert not tier2._safe_order.execute_order.called
+
+    @pytest.mark.asyncio
+    async def test_tp_with_leverage_short(self, tier2, mock_exchange, session):
+        """숏 포지션: 레버리지 적용 후 TP 히트 계산.
+
+        entry=100, tp=4%, leverage=3x
+        raw change = 1.34% → leveraged PnL = 4.02% → TP(4%) 히트
+        """
+        state = PositionState(
+            symbol="BTC/USDT", direction=Direction.SHORT, quantity=0.01,
+            entry_price=100.0, margin=25.0, leverage=3,
+            extreme_price=100.0, stop_loss_atr=2.0, take_profit_atr=4.0,
+            trailing_activation_atr=1.0, trailing_stop_atr=0.8,
+            tier="tier2",
+        )
+        tier2._positions.open_position(state)
+
+        # 가격 98.66 → short profit raw = 1.34%, leveraged = 4.02% → TP(4%) 히트
+        mock_exchange.fetch_ticker.return_value = Ticker(
+            symbol="BTC/USDT", last=98.66, bid=98.65, ask=98.67,
+            high=101.0, low=98.0, volume=10000.0,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        await tier2._check_exits(session)
+        assert tier2._safe_order.execute_order.called
+
+    @pytest.mark.asyncio
+    async def test_sl_with_high_leverage(self, tier2, mock_exchange, session):
+        """고레버리지(20x): 작은 변동도 SL 히트.
+
+        entry=100, sl=2%, leverage=20x
+        raw change = -0.11% → leveraged PnL = -2.2% → SL(2%) 히트
+        """
+        tier2._leverage = 20
+
+        state = PositionState(
+            symbol="BTC/USDT", direction=Direction.LONG, quantity=0.01,
+            entry_price=100.0, margin=25.0, leverage=20,
+            extreme_price=100.0, stop_loss_atr=2.0, take_profit_atr=4.0,
+            trailing_activation_atr=1.0, trailing_stop_atr=0.8,
+            tier="tier2",
+        )
+        tier2._positions.open_position(state)
+
+        # 가격 99.89 → raw change = -0.11%, leveraged = -0.11% × 20 = -2.2% → SL(2%) 히트
+        mock_exchange.fetch_ticker.return_value = Ticker(
+            symbol="BTC/USDT", last=99.89, bid=99.88, ask=99.90,
+            high=101.0, low=99.0, volume=10000.0,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        await tier2._check_exits(session)
+        assert tier2._safe_order.execute_order.called
+
+
 class TestResetDaily:
     def test_reset(self, tier2):
         tier2._daily_trades = 5

@@ -112,6 +112,10 @@ class FuturesEngineV2:
         self._recovery_manager = None
         self._broadcast_callback = None
 
+        # health_monitor 호환 속성
+        self._eval_error_counts: dict[str, int] = {}
+        self._position_trackers: dict = {}
+
     # ── EngineRegistry 호환 인터페이스 ──────────
 
     @property
@@ -134,6 +138,14 @@ class FuturesEngineV2:
 
     def set_broadcast_callback(self, callback) -> None:
         self._broadcast_callback = callback
+
+    def pause_buying(self, coins: list[str] | None = None) -> None:
+        """health_monitor 호환: API 장애 시 매수 일시중지 (v2는 no-op 로그)."""
+        logger.warning("v2_buying_paused", coins=coins)
+
+    def resume_buying(self, coins: list[str] | None = None) -> None:
+        """health_monitor 호환: API 복구 시 매수 재개 (v2는 no-op 로그)."""
+        logger.info("v2_buying_resumed", coins=coins)
 
     # ── 시작/중지 ──────────────────────────────
 
