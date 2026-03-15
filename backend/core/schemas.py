@@ -181,6 +181,7 @@ class EngineStatusResponse(BaseModel):
     tracked_coins: list[str]
     daily_trade_count: int
     strategies_active: list[str]
+    min_confidence: float = 0.55
 
 
 class ModeUpdate(BaseModel):
