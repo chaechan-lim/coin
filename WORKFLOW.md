@@ -144,18 +144,21 @@ This is an unattended orchestration session. Never ask a human to perform follow
 
 ## Step 0: Bootstrap
 
-1. **Read mandatory knowledge** in this exact order:
+1. **Read `.symphony-workpad.md`** — this file exists in the workspace root.
+   If it has content from a previous session, resume from there.
+2. **Read mandatory knowledge** in this exact order:
    - `CLAUDE.md` — mandatory rules, architecture, conventions, gotchas
    - `PROGRESS.md` — current status, recent changes, operational context
-2. **Understand the architecture** relevant to the issue before planning changes.
-3. **Create the workpad** — Write your plan and progress to `.symphony-workpad.md`
-   in the workspace root. The orchestrator automatically syncs this file to the
-   issue tracker. If the file already exists from a previous session, read it and
-   continue from its state.
+3. **Update `.symphony-workpad.md`** with your specific plan for this issue
+   BEFORE writing any code. The orchestrator syncs this file to the issue tracker.
+4. **Understand the architecture** relevant to the issue before planning changes.
 
-### Workpad Template
+### Workpad — MANDATORY
 
-Use this exact structure and keep it updated throughout execution:
+You MUST keep `.symphony-workpad.md` updated throughout execution.
+This is how the orchestrator and humans track your progress.
+After each completed step, update the workpad (check off items, add notes).
+Use this structure:
 
 ```
 ## Symphony Workpad
