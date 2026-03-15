@@ -608,6 +608,19 @@ async def lifespan(app: FastAPI):
             )
             # trade_review: 매도 5회마다 엔진에서 직접 트리거
 
+            # 성과 분석: 매일 21:30 KST (12:30 UTC)
+            _scheduler.add_cron_job(
+                _wrap(binance_coord.run_performance_analysis),
+                name="binance_futures_performance_analytics",
+                hour=12, minute=30,
+            )
+            # 전략 어드바이저: 매주 일요일 22:00 KST (13:00 UTC)
+            _scheduler.add_weekly_cron_job(
+                _wrap(binance_coord.run_strategy_advice),
+                name="binance_futures_strategy_advice",
+                day_of_week="sun", hour=13, minute=0,
+            )
+
     # 바이낸스 현물 스케줄 잡 추가
     if config.binance.spot_enabled and _binance_spot_engine:
         spot_coord = engine_registry.get_coordinator("binance_spot")
@@ -627,6 +640,19 @@ async def lifespan(app: FastAPI):
                 seconds=300,
             )
             # trade_review: 매도 5회마다 엔진에서 직접 트리거
+
+            # 성과 분석: 매일 21:30 KST (12:30 UTC)
+            _scheduler.add_cron_job(
+                _wrap(spot_coord.run_performance_analysis),
+                name="binance_spot_performance_analytics",
+                hour=12, minute=30,
+            )
+            # 전략 어드바이저: 매주 일요일 22:00 KST (13:00 UTC)
+            _scheduler.add_weekly_cron_job(
+                _wrap(spot_coord.run_strategy_advice),
+                name="binance_spot_strategy_advice",
+                day_of_week="sun", hour=13, minute=0,
+            )
 
     # ── 입출금 자동 감지 스케줄러 ───────────────────────────────
     from engine.capital_sync import sync_binance_deposits, detect_bithumb_balance_change
