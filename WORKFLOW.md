@@ -17,10 +17,10 @@ tracker:
 # Claude Code Agent
 agent:
   type: claude
-  model: sonnet
+  model: opus
   permission_mode: dangerously-skip
   max_turns: 200
-  max_budget_usd: 5.00
+  max_budget_usd: 20.00
   timeout_minutes: 60
   effort: high
 
