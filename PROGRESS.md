@@ -108,6 +108,7 @@ coin/
 | v2 Tier2Scanner 레버리지 버그 수정 (COIN-13) | SafeOrderPipeline에 주문 전 set_leverage() 호출 추가 (Tier2 30코인 거래소 기본 레버리지 방지). Tier2 SL/TP에 레버리지 승수 적용 (pnl_pct *= leverage). FuturesEngineV2에 health_monitor 호환 속성 추가 (_eval_error_counts, _position_trackers, pause_buying, resume_buying). |
 | 포지션 종료 사유 추적 (COIN-14) | `sync_exchange_positions`에서 사라진 포지션의 실제 청산 사유 판별. `_determine_close_reason()` 메서드 추가: Income API INSURANCE_CLEAR→강제청산, DB SL/TP 수준 비교→SL/TP/trailing stop, max_hold_hours→시간초과, PnL<-80%→강제청산(추정), 폴백→position_sync. strategy_name을 `stop_loss`/`take_profit`/`trailing_stop`/`forced_liquidation`/`time_expiry`/`position_sync`으로 세분화. |
 | V2 Tier1 평가 사이클 관측성 (COIN-17) | `evaluation_cycle()` 완료 시 `tier1_cycle_complete` info 로그 추가 (coins_evaluated, hold/low_conf/cooldown/sl_tp/executed 카운트, regime, elapsed_ms). `CycleStats` 데이터클래스로 사이클 결과 구조화. `Tier1Manager.get_status()` 메서드 + `GET /api/v1/engine/v2/tier1-status` 엔드포인트 추가 (cycle_count, last_cycle_at, last_action_at, last_decisions, active_positions, regime). |
+| 선물 position_sync 잔고 불일치 수정 (COIN-18) | `sync_exchange_positions`에서 선물 포지션 청산 시 `invested + pnl_amount`을 `cash_balance`에 반환. 강제청산 시 `max(0)` 보호. `_realized_pnl`도 동기화. 거래소 SL/TP/트레일링으로 청산된 포지션의 마진이 내부 장부에 미반영되던 버그 해결. |
 
 ### 낮은 우선순위
 
