@@ -160,51 +160,18 @@ async def get_rotation_status(exchange: str = Query("bithumb")):
     )
 
 
-@router.get("/engine/balance-guard/status")
-async def get_balance_guard_status(exchange: str = Query("binance_futures")):
-    """BalanceGuard 상태 조회."""
-    eng = _get_engine(exchange)
+@router.get("/engine/v2/tier1-status")
+async def get_tier1_status():
+    """V2 Tier1 평가 사이클 운영 상태 — 관측용 (COIN-17)."""
+    eng = engine_registry.get_engine("binance_futures")
     if not eng:
-        raise HTTPException(status_code=500, detail=f"Engine '{exchange}' not initialized")
-    guard = getattr(eng, "balance_guard", None) or getattr(eng, "_guard", None)
-    if not guard:
-        raise HTTPException(status_code=404, detail="BalanceGuard not available for this engine")
-    return {"exchange": exchange, **guard.get_status()}
+        raise HTTPException(status_code=500, detail="Futures engine not initialized")
 
+    get_tier1 = getattr(eng, "get_tier1_status", None)
+    if not get_tier1:
+        raise HTTPException(status_code=400, detail="Engine does not support tier1 status")
 
-@router.post("/engine/balance-guard/resume")
-async def resume_balance_guard(exchange: str = Query("binance_futures")):
-    """BalanceGuard 수동 재개 — 관리자 확인 후 일시 정지 해제."""
-    eng = _get_engine(exchange)
-    if not eng:
-        raise HTTPException(status_code=500, detail=f"Engine '{exchange}' not initialized")
-    guard = getattr(eng, "balance_guard", None) or getattr(eng, "_guard", None)
-    if not guard:
-        raise HTTPException(status_code=404, detail="BalanceGuard not available for this engine")
-    was_paused = guard.is_paused
-    guard.resume(reason="admin_api")
-    return {
-        "exchange": exchange,
-        "was_paused": was_paused,
-        "is_paused": guard.is_paused,
-        "status": "resumed" if was_paused else "already_running",
-    }
-
-
-@router.post("/engine/balance-guard/sync")
-async def sync_balance_guard(exchange: str = Query("binance_futures")):
-    """내부 현금을 거래소 실제 잔고로 동기화 (최후 수단)."""
-    eng = _get_engine(exchange)
-    if not eng:
-        raise HTTPException(status_code=500, detail=f"Engine '{exchange}' not initialized")
-    sync_fn = getattr(eng, "sync_balance_to_exchange", None)
-    if not sync_fn:
-        raise HTTPException(
-            status_code=404,
-            detail="Balance sync not available for this engine",
-        )
-    result = await sync_fn()
-    return {"exchange": exchange, **result}
+    return get_tier1()
 
 
 @router.get("/engine/surge-scan")
@@ -477,3 +444,58 @@ async def trigger_strategy_advice(exchange: str = Query("bithumb")):
                 "suggestions": advice.suggestions,
             }
     return {"status": "error", "message": "coordinator not found"}
+
+
+# ── BalanceGuard Admin API ───────────────────────────────────
+
+
+def _get_balance_guard(exchange: str):
+    """엔진에서 BalanceGuard 인스턴스를 가져온다."""
+    eng = _get_engine(exchange)
+    if not eng:
+        raise HTTPException(status_code=500, detail=f"Engine '{exchange}' not initialized")
+    guard = getattr(eng, "balance_guard", None)
+    if guard is None:
+        # fallback: _guard 직접 접근
+        guard = getattr(eng, "_guard", None)
+    if guard is None:
+        raise HTTPException(status_code=404, detail="BalanceGuard not available for this engine")
+    return eng, guard
+
+
+@router.get("/engine/balance-guard/status")
+async def get_balance_guard_status(exchange: str = Query("binance_futures")):
+    """BalanceGuard 현재 상태 조회."""
+    _eng, guard = _get_balance_guard(exchange)
+    status = guard.get_status()
+    status["exchange"] = exchange
+    return status
+
+
+@router.post("/engine/balance-guard/resume")
+async def resume_balance_guard(exchange: str = Query("binance_futures")):
+    """BalanceGuard 수동 재개."""
+    _eng, guard = _get_balance_guard(exchange)
+    was_paused = guard.is_paused
+    if was_paused:
+        guard.resume(reason="manual_api")
+    return {
+        "exchange": exchange,
+        "was_paused": was_paused,
+        "is_paused": guard.is_paused,
+        "status": "resumed" if was_paused else "already_running",
+    }
+
+
+@router.post("/engine/balance-guard/sync")
+async def sync_balance_guard(exchange: str = Query("binance_futures")):
+    """내부 현금 → 거래소 잔고 동기화."""
+    eng = _get_engine(exchange)
+    if not eng:
+        raise HTTPException(status_code=500, detail=f"Engine '{exchange}' not initialized")
+    sync_fn = getattr(eng, "sync_balance_to_exchange", None)
+    if sync_fn is None:
+        raise HTTPException(status_code=404, detail="sync_balance_to_exchange not available")
+    result = await sync_fn()
+    result["exchange"] = exchange
+    return result
