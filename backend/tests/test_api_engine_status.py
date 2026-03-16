@@ -285,3 +285,160 @@ async def test_tier1_status_required_fields():
             assert field in data, f"Missing field: {field}"
     finally:
         _restore(exchange, saved)
+
+
+# ── COIN-15: balance-guard endpoints tests ───────────────────────────────────
+
+def _mock_v2_engine_with_balance_guard(*, paused: bool = False) -> MagicMock:
+    """V2 엔진 mock with balance guard methods."""
+    eng = MagicMock()
+    eng.is_running = True
+    eng.resume_balance_guard = MagicMock(return_value={
+        "was_paused": paused,
+        "is_paused": False,
+        "guard": {
+            "is_paused": False,
+            "consecutive_warnings": 0,
+            "consecutive_stable": 0,
+            "auto_resume_stable_count": 3,
+            "warn_pct": 3.0,
+            "pause_pct": 5.0,
+            "last_check": None,
+        },
+    })
+    eng.get_balance_guard_status = MagicMock(return_value={
+        "is_paused": paused,
+        "consecutive_warnings": 0,
+        "consecutive_stable": 0,
+        "auto_resume_stable_count": 3,
+        "warn_pct": 3.0,
+        "pause_pct": 5.0,
+        "last_check": None,
+    })
+    return eng
+
+
+@pytest.mark.asyncio
+async def test_balance_guard_resume_endpoint():
+    """COIN-15: POST /engine/balance-guard/resume resumes the guard."""
+    exchange = "binance_futures"
+    saved = _save_and_clear(exchange)
+    eng = _mock_v2_engine_with_balance_guard(paused=True)
+    _register(exchange, eng)
+    try:
+        app = _make_test_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/engine/balance-guard/resume",
+                params={"exchange": exchange},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "resumed"
+        assert data["exchange"] == exchange
+        assert data["was_paused"] is True
+        assert data["is_paused"] is False
+        eng.resume_balance_guard.assert_called_once()
+    finally:
+        _restore(exchange, saved)
+
+
+@pytest.mark.asyncio
+async def test_balance_guard_resume_no_engine():
+    """COIN-15: No engine → 500 error."""
+    exchange = "binance_futures"
+    saved = _save_and_clear(exchange)
+    engine_registry._engines.pop(exchange, None)
+    try:
+        app = _make_test_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/engine/balance-guard/resume",
+                params={"exchange": exchange},
+            )
+        assert resp.status_code == 500
+    finally:
+        _restore(exchange, saved)
+
+
+@pytest.mark.asyncio
+async def test_balance_guard_resume_unsupported_engine():
+    """COIN-15: Engine without resume_balance_guard → 400 error."""
+    exchange = "binance_futures"
+    saved = _save_and_clear(exchange)
+    eng = _mock_engine(running=True)
+    del eng.resume_balance_guard
+    _register(exchange, eng)
+    try:
+        app = _make_test_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/engine/balance-guard/resume",
+                params={"exchange": exchange},
+            )
+        assert resp.status_code == 400
+    finally:
+        _restore(exchange, saved)
+
+
+@pytest.mark.asyncio
+async def test_balance_guard_status_endpoint():
+    """COIN-15: GET /engine/balance-guard/status returns guard state."""
+    exchange = "binance_futures"
+    saved = _save_and_clear(exchange)
+    eng = _mock_v2_engine_with_balance_guard(paused=False)
+    _register(exchange, eng)
+    try:
+        app = _make_test_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(
+                "/engine/balance-guard/status",
+                params={"exchange": exchange},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["exchange"] == exchange
+        assert data["is_paused"] is False
+        assert "consecutive_stable" in data
+        assert "auto_resume_stable_count" in data
+        eng.get_balance_guard_status.assert_called_once()
+    finally:
+        _restore(exchange, saved)
+
+
+@pytest.mark.asyncio
+async def test_balance_guard_status_no_engine():
+    """COIN-15: No engine for status → 500 error."""
+    exchange = "binance_futures"
+    saved = _save_and_clear(exchange)
+    engine_registry._engines.pop(exchange, None)
+    try:
+        app = _make_test_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(
+                "/engine/balance-guard/status",
+                params={"exchange": exchange},
+            )
+        assert resp.status_code == 500
+    finally:
+        _restore(exchange, saved)
+
+
+@pytest.mark.asyncio
+async def test_balance_guard_status_unsupported_engine():
+    """COIN-15: Engine without get_balance_guard_status → 400 error."""
+    exchange = "binance_futures"
+    saved = _save_and_clear(exchange)
+    eng = _mock_engine(running=True)
+    del eng.get_balance_guard_status
+    _register(exchange, eng)
+    try:
+        app = _make_test_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(
+                "/engine/balance-guard/status",
+                params={"exchange": exchange},
+            )
+        assert resp.status_code == 400
+    finally:
+        _restore(exchange, saved)

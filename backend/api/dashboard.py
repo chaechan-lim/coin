@@ -160,6 +160,44 @@ async def get_rotation_status(exchange: str = Query("bithumb")):
     )
 
 
+@router.post("/engine/balance-guard/resume")
+async def resume_balance_guard(exchange: str = Query("binance_futures")):
+    """BalanceGuard 수동 재개 — 관리자 확인 후 호출.
+
+    잔고 괴리로 일시 정지된 엔진의 주문 차단을 해제한다.
+    """
+    eng = _get_engine(exchange)
+    if not eng:
+        raise HTTPException(status_code=500, detail=f"Engine '{exchange}' not initialized")
+
+    resume_fn = getattr(eng, "resume_balance_guard", None)
+    if not resume_fn:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Engine '{exchange}' does not support balance guard resume",
+        )
+
+    result = resume_fn()
+    return {"status": "resumed", "exchange": exchange, **result}
+
+
+@router.get("/engine/balance-guard/status")
+async def get_balance_guard_status(exchange: str = Query("binance_futures")):
+    """BalanceGuard 상태 조회."""
+    eng = _get_engine(exchange)
+    if not eng:
+        raise HTTPException(status_code=500, detail=f"Engine '{exchange}' not initialized")
+
+    status_fn = getattr(eng, "get_balance_guard_status", None)
+    if not status_fn:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Engine '{exchange}' does not support balance guard status",
+        )
+
+    return {"exchange": exchange, **status_fn()}
+
+
 @router.get("/engine/v2/tier1-status")
 async def get_tier1_status():
     """V2 Tier1 평가 사이클 운영 상태 — 관측용 (COIN-17)."""

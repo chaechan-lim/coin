@@ -318,6 +318,24 @@ class FuturesEngineV2:
         """Tier1 운영 상태 반환 (관측용 API)."""
         return self._tier1.get_status()
 
+    def resume_balance_guard(self) -> dict:
+        """BalanceGuard 수동 재개 (관리자 API용).
+
+        Returns:
+            재개 후 상태 정보.
+        """
+        was_paused = self._guard.is_paused
+        self._guard.resume(reason="manual_api")
+        return {
+            "was_paused": was_paused,
+            "is_paused": self._guard.is_paused,
+            "guard": self._guard.get_status(),
+        }
+
+    def get_balance_guard_status(self) -> dict:
+        """BalanceGuard 상태 반환 (API용)."""
+        return self._guard.get_status()
+
     def get_status(self) -> dict:
         """엔진 상태 정보 반환 (API용)."""
         regime = self._regime.current
@@ -330,5 +348,6 @@ class FuturesEngineV2:
             "tier2_positions": self._positions.active_count("tier2"),
             "total_positions": self._positions.active_count(),
             "balance_guard_paused": self._guard.is_paused,
+            "balance_guard": self._guard.get_status(),
             "tracked_coins": self.tracked_coins,
         }
