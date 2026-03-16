@@ -143,7 +143,7 @@ class BalanceGuard:
                 self._paused = True
                 await emit_event(
                     "critical", "balance_guard",
-                    f"잔고 괴리 3회 연속 — 엔진 일시 정지",
+                    "잔고 괴리 3회 연속 — 엔진 일시 정지",
                     detail=f"괴리율: {result.divergence_pct}%",
                 )
         else:

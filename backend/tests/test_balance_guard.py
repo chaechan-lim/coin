@@ -1,10 +1,8 @@
 """BalanceGuard 테스트."""
 import pytest
-import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock
-from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 
-from engine.balance_guard import BalanceGuard, BalanceCheckResult
+from engine.balance_guard import BalanceGuard
 from exchange.data_models import Balance
 
 
