@@ -107,6 +107,7 @@ coin/
 | 전략 신호 로그 중복 표시 수정 (COIN-12) | `OrderLog.tsx`: 신호 로그 그룹핑을 `symbol` → `symbol + 1분 시간 버킷`으로 변경. 평가 사이클마다 7전략 로그가 DB에 쌓이면서 size=30 응답에 여러 사이클이 섞여 각 전략이 N번씩 표시되던 버그 수정. |
 | v2 Tier2Scanner 레버리지 버그 수정 (COIN-13) | SafeOrderPipeline에 주문 전 set_leverage() 호출 추가 (Tier2 30코인 거래소 기본 레버리지 방지). Tier2 SL/TP에 레버리지 승수 적용 (pnl_pct *= leverage). FuturesEngineV2에 health_monitor 호환 속성 추가 (_eval_error_counts, _position_trackers, pause_buying, resume_buying). |
 | 포지션 종료 사유 추적 (COIN-14) | `sync_exchange_positions`에서 사라진 포지션의 실제 청산 사유 판별. `_determine_close_reason()` 메서드 추가: Income API INSURANCE_CLEAR→강제청산, DB SL/TP 수준 비교→SL/TP/trailing stop, max_hold_hours→시간초과, PnL<-80%→강제청산(추정), 폴백→position_sync. strategy_name을 `stop_loss`/`take_profit`/`trailing_stop`/`forced_liquidation`/`time_expiry`/`position_sync`으로 세분화. |
+| 선물 포지션 청산 시 cash 반환 (COIN-18) | `sync_exchange_positions`에서 거래소에 없는 선물 포지션 청산(position_cleared_not_on_exchange) 시 내부 `_cash_balance`에 마진+PnL 미반환 버그 수정. `cash_returned = max(0, invested + pnl_amount)` 반환 + `_realized_pnl` 업데이트. 강제청산(PnL < -100%) 시 cash_returned=0으로 클램프. 거래소 잔고와 대시보드 잔고 불일치(누적 마진 차감) 해결. |
 
 ### 낮은 우선순위
 
