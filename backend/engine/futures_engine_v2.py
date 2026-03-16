@@ -64,6 +64,7 @@ class FuturesEngineV2:
             exchange_name=self.EXCHANGE_NAME,
             warn_pct=v2_cfg.balance_divergence_warn_pct,
             pause_pct=v2_cfg.balance_divergence_pause_pct,
+            auto_resume_count=v2_cfg.balance_auto_resume_count,
         )
 
         self._safe_order = SafeOrderPipeline(
@@ -138,6 +139,36 @@ class FuturesEngineV2:
 
     def set_broadcast_callback(self, callback) -> None:
         self._broadcast_callback = callback
+
+    @property
+    def balance_guard(self) -> BalanceGuard:
+        """API 레이어에서 BalanceGuard 접근용."""
+        return self._guard
+
+    async def sync_balance_to_exchange(self) -> dict:
+        """내부 cash를 거래소 실제 잔고로 동기화 (최후 수단).
+
+        Returns:
+            {"old_cash": float, "new_cash": float, "exchange_balance": float}
+        """
+        exchange_balance = await self._guard._fetch_exchange_balance()
+        old_cash = self._pm.cash_balance
+        self._pm._cash_balance = exchange_balance
+        logger.warning(
+            "balance_guard_cash_synced",
+            exchange=self.EXCHANGE_NAME,
+            old_cash=round(old_cash, 4),
+            new_cash=round(exchange_balance, 4),
+        )
+        await emit_event(
+            "warning", "balance_guard",
+            f"내부 현금 동기화: {old_cash:.2f} → {exchange_balance:.2f}",
+        )
+        return {
+            "old_cash": round(old_cash, 4),
+            "new_cash": round(exchange_balance, 4),
+            "exchange_balance": round(exchange_balance, 4),
+        }
 
     def pause_buying(self, coins: list[str] | None = None) -> None:
         """health_monitor 호환: API 장애 시 매수 일시중지 (v2는 no-op 로그)."""

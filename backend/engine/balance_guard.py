@@ -32,6 +32,7 @@ class BalanceGuard:
     - 경고 임계: warn_pct (기본 3%) → 로그 + 이벤트.
     - 위험 임계: pause_pct (기본 5%) → 엔진 일시 정지 요청.
     - 스냅샷 스파이크: snapshot_spike_pct (기본 10%) → 거부.
+    - 자동 복구: 일시 정지 중 N회 연속 안정 → 자동 resume.
     """
 
     def __init__(
@@ -41,15 +42,18 @@ class BalanceGuard:
         warn_pct: float = 3.0,
         pause_pct: float = 5.0,
         snapshot_spike_pct: float = 10.0,
+        auto_resume_count: int = 3,
     ):
         self._exchange = exchange
         self._exchange_name = exchange_name
         self._warn_pct = warn_pct
         self._pause_pct = pause_pct
         self._snapshot_spike_pct = snapshot_spike_pct
+        self._auto_resume_count = auto_resume_count
         self._paused = False
         self._last_check: BalanceCheckResult | None = None
         self._consecutive_warnings = 0
+        self._consecutive_stable = 0
 
     @property
     def is_paused(self) -> bool:
@@ -59,11 +63,24 @@ class BalanceGuard:
     def last_check(self) -> BalanceCheckResult | None:
         return self._last_check
 
-    def resume(self) -> None:
-        """수동 재개 (관리자 확인 후)."""
+    @property
+    def consecutive_stable(self) -> int:
+        return self._consecutive_stable
+
+    def resume(self, reason: str = "manual") -> None:
+        """재개 (수동 또는 자동 복구).
+
+        Args:
+            reason: 재개 사유 ('manual', 'auto_recovery').
+        """
         self._paused = False
         self._consecutive_warnings = 0
-        logger.info("balance_guard_resumed", exchange=self._exchange_name)
+        self._consecutive_stable = 0
+        logger.info(
+            "balance_guard_resumed",
+            exchange=self._exchange_name,
+            reason=reason,
+        )
 
     async def check_balance(self, internal_balance: float) -> BalanceCheckResult:
         """거래소 잔고와 내부 장부를 비교한다.
@@ -96,6 +113,7 @@ class BalanceGuard:
 
         if is_critical:
             self._consecutive_warnings += 1
+            self._consecutive_stable = 0
             self._paused = True
             logger.error(
                 "balance_guard_CRITICAL",
@@ -112,6 +130,7 @@ class BalanceGuard:
             )
         elif is_warning:
             self._consecutive_warnings += 1
+            self._consecutive_stable = 0
             logger.warning(
                 "balance_guard_warning",
                 exchange=self._exchange_name,
@@ -129,6 +148,25 @@ class BalanceGuard:
                 )
         else:
             self._consecutive_warnings = 0
+            # 자동 복구: 일시 정지 중 N회 연속 안정 → 자동 resume
+            if self._paused:
+                self._consecutive_stable += 1
+                if (
+                    self._auto_resume_count > 0
+                    and self._consecutive_stable >= self._auto_resume_count
+                ):
+                    logger.info(
+                        "balance_guard_auto_recovery",
+                        exchange=self._exchange_name,
+                        stable_count=self._consecutive_stable,
+                        divergence_pct=result.divergence_pct,
+                    )
+                    await emit_event(
+                        "info", "balance_guard",
+                        f"잔고 안정 {self._consecutive_stable}회 연속 — 자동 복구",
+                        detail=f"괴리율: {result.divergence_pct}%",
+                    )
+                    self.resume(reason="auto_recovery")
 
         return result
 
@@ -218,6 +256,26 @@ class BalanceGuard:
         except Exception as e:
             logger.warning("balance_fetch_failed", error=str(e))
             return 0.0
+
+    def get_status(self) -> dict:
+        """현재 BalanceGuard 상태 반환 (API용)."""
+        last = self._last_check
+        return {
+            "paused": self._paused,
+            "consecutive_warnings": self._consecutive_warnings,
+            "consecutive_stable": self._consecutive_stable,
+            "auto_resume_count": self._auto_resume_count,
+            "warn_pct": self._warn_pct,
+            "pause_pct": self._pause_pct,
+            "last_check": {
+                "exchange_balance": last.exchange_balance,
+                "internal_balance": last.internal_balance,
+                "divergence_pct": last.divergence_pct,
+                "is_warning": last.is_warning,
+                "is_critical": last.is_critical,
+                "checked_at": last.checked_at.isoformat(),
+            } if last else None,
+        }
 
     async def periodic_reconcile(self, internal_balance: float) -> BalanceCheckResult:
         """주기적 교차 검증 (루프에서 호출)."""

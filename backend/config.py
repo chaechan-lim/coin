@@ -277,6 +277,7 @@ class FuturesV2Config(BaseSettings):
     balance_divergence_warn_pct: float = 3.0
     balance_divergence_pause_pct: float = 5.0
     balance_check_interval_sec: int = 300
+    balance_auto_resume_count: int = 3  # 0=비활성, N=N회 연속 안정 시 자동 복구
 
     @field_validator("mode")
     @classmethod
