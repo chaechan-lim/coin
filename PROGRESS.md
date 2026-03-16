@@ -107,6 +107,7 @@ coin/
 | 전략 신호 로그 중복 표시 수정 (COIN-12) | `OrderLog.tsx`: 신호 로그 그룹핑을 `symbol` → `symbol + 1분 시간 버킷`으로 변경. 평가 사이클마다 7전략 로그가 DB에 쌓이면서 size=30 응답에 여러 사이클이 섞여 각 전략이 N번씩 표시되던 버그 수정. |
 | v2 Tier2Scanner 레버리지 버그 수정 (COIN-13) | SafeOrderPipeline에 주문 전 set_leverage() 호출 추가 (Tier2 30코인 거래소 기본 레버리지 방지). Tier2 SL/TP에 레버리지 승수 적용 (pnl_pct *= leverage). FuturesEngineV2에 health_monitor 호환 속성 추가 (_eval_error_counts, _position_trackers, pause_buying, resume_buying). |
 | 포지션 종료 사유 추적 (COIN-14) | `sync_exchange_positions`에서 사라진 포지션의 실제 청산 사유 판별. `_determine_close_reason()` 메서드 추가: Income API INSURANCE_CLEAR→강제청산, DB SL/TP 수준 비교→SL/TP/trailing stop, max_hold_hours→시간초과, PnL<-80%→강제청산(추정), 폴백→position_sync. strategy_name을 `stop_loss`/`take_profit`/`trailing_stop`/`forced_liquidation`/`time_expiry`/`position_sync`으로 세분화. |
+| BalanceGuard 자동 복구 (COIN-15) | 일시 정지 후 자동 복구 메커니즘 추가. `check_balance()`에서 divergence < warn_pct인 상태 N회 연속(기본 3) 감지 시 자동 `resume()`. `auto_resume_count` 설정(0=비활성). 관리자 API 3종 추가: `GET /engine/balance-guard/status`, `POST /engine/balance-guard/resume`, `POST /engine/balance-guard/sync`(내부 cash→거래소 동기화). |
 
 ### 낮은 우선순위
 
