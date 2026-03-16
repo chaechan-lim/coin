@@ -160,6 +160,20 @@ async def get_rotation_status(exchange: str = Query("bithumb")):
     )
 
 
+@router.get("/engine/v2/tier1-status")
+async def get_tier1_status():
+    """V2 Tier1 평가 사이클 운영 상태 — 관측용 (COIN-17)."""
+    eng = engine_registry.get_engine("binance_futures")
+    if not eng:
+        raise HTTPException(status_code=500, detail="Futures engine not initialized")
+
+    get_tier1 = getattr(eng, "get_tier1_status", None)
+    if not get_tier1:
+        raise HTTPException(status_code=400, detail="Engine does not support tier1 status")
+
+    return get_tier1()
+
+
 @router.get("/engine/surge-scan")
 async def get_surge_scan_status():
     """서지 엔진 스캔 상태 — 심볼별 점수/RSI/포지션 정보."""

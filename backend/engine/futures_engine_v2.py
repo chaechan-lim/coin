@@ -314,6 +314,10 @@ class FuturesEngineV2:
             "all_surge_scores": {},
         }
 
+    def get_tier1_status(self) -> dict:
+        """Tier1 운영 상태 반환 (관측용 API)."""
+        return self._tier1.get_status()
+
     def get_status(self) -> dict:
         """엔진 상태 정보 반환 (API용)."""
         regime = self._regime.current
