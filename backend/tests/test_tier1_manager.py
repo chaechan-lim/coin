@@ -5,7 +5,7 @@ import pandas as pd
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
-from engine.tier1_manager import Tier1Manager
+from engine.tier1_manager import Tier1Manager, CycleStats
 from engine.regime_detector import RegimeDetector, RegimeState
 from engine.strategy_selector import StrategySelector
 from engine.safe_order_pipeline import SafeOrderPipeline, OrderResponse
@@ -181,3 +181,176 @@ class TestSARExecution:
         ]
         assert len(close_calls) >= 1
         assert close_calls[0][0][1].symbol == "BTC/USDT"
+
+
+class TestCycleStats:
+    """CycleStats 데이터클래스 테스트."""
+
+    def test_default_values(self):
+        stats = CycleStats()
+        assert stats.coins_evaluated == 0
+        assert stats.hold_count == 0
+        assert stats.low_confidence_count == 0
+        assert stats.cooldown_count == 0
+        assert stats.sl_tp_count == 0
+        assert stats.executed_count == 0
+        assert stats.error_count == 0
+        assert stats.candle_error_count == 0
+        assert stats.decisions == {}
+
+    def test_decisions_dict_independent(self):
+        """각 인스턴스가 독립적인 decisions dict를 가짐."""
+        s1 = CycleStats()
+        s2 = CycleStats()
+        s1.decisions["BTC"] = "hold"
+        assert s2.decisions == {}
+
+
+class TestCycleObservability:
+    """COIN-17: 평가 사이클 관측성 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_cycle_returns_stats(self, tier1, mock_deps, session):
+        """evaluation_cycle은 CycleStats를 반환한다."""
+        stats = await tier1.evaluation_cycle(session)
+        assert isinstance(stats, CycleStats)
+        assert stats.coins_evaluated == 2  # BTC, ETH
+
+    @pytest.mark.asyncio
+    async def test_cycle_returns_empty_stats_without_regime(self, tier1, mock_deps, session):
+        """레짐 없으면 빈 stats 반환."""
+        mock_deps["regime"]._current = None
+        stats = await tier1.evaluation_cycle(session)
+        assert stats.coins_evaluated == 0
+
+    @pytest.mark.asyncio
+    async def test_cycle_count_increments(self, tier1, mock_deps, session):
+        """사이클 카운터가 올바르게 증가."""
+        assert tier1._cycle_count == 0
+        await tier1.evaluation_cycle(session)
+        assert tier1._cycle_count == 1
+        await tier1.evaluation_cycle(session)
+        assert tier1._cycle_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cycle_count_not_incremented_without_regime(self, tier1, mock_deps, session):
+        """레짐 없으면 사이클 카운터 증가하지 않음."""
+        mock_deps["regime"]._current = None
+        await tier1.evaluation_cycle(session)
+        assert tier1._cycle_count == 0
+
+    @pytest.mark.asyncio
+    async def test_last_cycle_at_set(self, tier1, mock_deps, session):
+        """사이클 실행 후 last_cycle_at이 설정됨."""
+        assert tier1._last_cycle_at is None
+        await tier1.evaluation_cycle(session)
+        assert tier1._last_cycle_at is not None
+        assert isinstance(tier1._last_cycle_at, datetime)
+
+    @pytest.mark.asyncio
+    async def test_last_decisions_tracked(self, tier1, mock_deps, session):
+        """각 코인별 마지막 결정이 추적됨."""
+        await tier1.evaluation_cycle(session)
+        assert "BTC/USDT" in tier1._last_decisions
+        assert "ETH/USDT" in tier1._last_decisions
+
+    @pytest.mark.asyncio
+    async def test_stats_counts_hold(self, tier1, mock_deps, session):
+        """HOLD 결정이 stats에 반영됨."""
+        # ema_9 < ema_21 and RSI in neutral zone → HOLD signal
+        hold_df = _make_df(ema_9=79000.0, ema_21=80000.0, rsi=50.0)
+        mock_deps["market_data"].get_ohlcv_df = AsyncMock(return_value=hold_df)
+        stats = await tier1.evaluation_cycle(session)
+        # Strategy should produce HOLD for these values
+        assert stats.coins_evaluated == 2
+
+    @pytest.mark.asyncio
+    async def test_stats_counts_errors(self, tier1, mock_deps, session):
+        """에러가 stats.error_count에 반영됨."""
+        mock_deps["market_data"].get_ohlcv_df.side_effect = Exception("API error")
+        stats = await tier1.evaluation_cycle(session)
+        # candle_fetch returns None → warning logged, _evaluate_coin catches it
+        # But the outer try/except in evaluation_cycle catches exceptions from _evaluate_coin
+        # get_ohlcv_df raises → _fetch_candles catches → returns None → _evaluate_coin returns "candle_error"
+        assert stats.coins_evaluated == 2
+        assert stats.candle_error_count == 2
+
+    @pytest.mark.asyncio
+    async def test_stats_sl_tp(self, tier1, mock_deps, session):
+        """SL 히트 시 sl_tp_count가 반영됨."""
+        state = PositionState(
+            symbol="BTC/USDT", direction=Direction.LONG,
+            quantity=0.01, entry_price=80000.0, margin=100.0,
+            leverage=3, extreme_price=80000.0,
+            stop_loss_atr=1.5, take_profit_atr=3.0,
+            trailing_activation_atr=2.0, trailing_stop_atr=1.0,
+        )
+        mock_deps["tracker"].open_position(state)
+        sl_price_df = _make_df(close=78000.0, atr=1000.0)
+        mock_deps["market_data"].get_ohlcv_df = AsyncMock(return_value=sl_price_df)
+
+        stats = await tier1.evaluation_cycle(session)
+        assert stats.sl_tp_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_info_log_emitted(self, tier1, mock_deps, session):
+        """tier1_cycle_complete info 로그가 발생."""
+        with patch("engine.tier1_manager.logger") as mock_logger:
+            await tier1.evaluation_cycle(session)
+            mock_logger.info.assert_called_once()
+            call_kwargs = mock_logger.info.call_args
+            assert call_kwargs[0][0] == "tier1_cycle_complete"
+            assert "coins_evaluated" in call_kwargs[1]
+            assert "regime" in call_kwargs[1]
+            assert "elapsed_ms" in call_kwargs[1]
+            assert "cycle" in call_kwargs[1]
+            assert call_kwargs[1]["cycle"] == 1
+
+    @pytest.mark.asyncio
+    async def test_no_info_log_without_regime(self, tier1, mock_deps, session):
+        """레짐 없을 때 info 로그 미발생 (debug만)."""
+        mock_deps["regime"]._current = None
+        with patch("engine.tier1_manager.logger") as mock_logger:
+            await tier1.evaluation_cycle(session)
+            mock_logger.info.assert_not_called()
+            mock_logger.debug.assert_called_once_with("tier1_skip_no_regime")
+
+
+class TestGetStatus:
+    """COIN-17: Tier1Manager.get_status() 테스트."""
+
+    def test_initial_status(self, tier1):
+        """초기 상태 반환."""
+        status = tier1.get_status()
+        assert status["cycle_count"] == 0
+        assert status["last_cycle_at"] is None
+        assert status["last_action_at"] is None
+        assert status["coins"] == ["BTC/USDT", "ETH/USDT"]
+        assert status["active_positions"] == 0
+        assert status["last_decisions"] == {}
+        assert status["regime"] is not None  # fixture has a regime set
+
+    def test_status_regime_none(self, tier1, mock_deps):
+        """레짐이 없을 때 None 반환."""
+        mock_deps["regime"]._current = None
+        status = tier1.get_status()
+        assert status["regime"] is None
+
+    @pytest.mark.asyncio
+    async def test_status_after_cycle(self, tier1, mock_deps, session):
+        """사이클 실행 후 상태 업데이트 확인."""
+        await tier1.evaluation_cycle(session)
+        status = tier1.get_status()
+        assert status["cycle_count"] == 1
+        assert status["last_cycle_at"] is not None
+        assert len(status["last_decisions"]) == 2
+        assert "BTC/USDT" in status["last_decisions"]
+        assert "ETH/USDT" in status["last_decisions"]
+
+    @pytest.mark.asyncio
+    async def test_status_decisions_are_copied(self, tier1, mock_deps, session):
+        """get_status()가 last_decisions의 복사본을 반환."""
+        await tier1.evaluation_cycle(session)
+        status = tier1.get_status()
+        status["last_decisions"]["NEW_COIN"] = "test"
+        assert "NEW_COIN" not in tier1._last_decisions

@@ -202,6 +202,31 @@ class TestAPICompatibility:
         assert rs["all_surge_scores"] == {}
 
 
+class TestTier1Status:
+    """COIN-17: get_tier1_status 테스트."""
+
+    def test_get_tier1_status(self, engine):
+        """get_tier1_status가 Tier1Manager 상태를 반환."""
+        status = engine.get_tier1_status()
+        assert isinstance(status, dict)
+        assert "cycle_count" in status
+        assert "last_cycle_at" in status
+        assert "last_action_at" in status
+        assert "coins" in status
+        assert "active_positions" in status
+        assert "last_decisions" in status
+        assert "regime" in status
+
+    def test_tier1_status_initial(self, engine):
+        """초기 상태: cycle_count=0, last_cycle_at=None."""
+        status = engine.get_tier1_status()
+        assert status["cycle_count"] == 0
+        assert status["last_cycle_at"] is None
+        assert status["last_action_at"] is None
+        assert status["active_positions"] == 0
+        assert status["last_decisions"] == {}
+
+
 class TestHealthMonitorCompat:
     """Bug COIN-13: FuturesEngineV2 health_monitor 호환성 테스트."""
 

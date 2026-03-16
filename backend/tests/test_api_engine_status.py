@@ -192,3 +192,96 @@ async def test_engine_status_schema_has_all_required_fields():
             assert field in data, f"Missing field: {field}"
     finally:
         _restore(exchange, saved)
+
+
+# ── COIN-17: tier1-status endpoint tests ──────────────────────────────────────
+
+def _mock_v2_engine() -> MagicMock:
+    """V2 엔진 mock with get_tier1_status."""
+    eng = MagicMock()
+    eng.is_running = True
+    eng.get_tier1_status = MagicMock(return_value={
+        "cycle_count": 42,
+        "last_cycle_at": "2026-03-16T12:00:00+00:00",
+        "last_action_at": "2026-03-16T11:30:00+00:00",
+        "coins": ["BTC/USDT", "ETH/USDT"],
+        "active_positions": 1,
+        "last_decisions": {"BTC/USDT": "hold", "ETH/USDT": "opened"},
+        "regime": "trending_up",
+    })
+    return eng
+
+
+@pytest.mark.asyncio
+async def test_tier1_status_endpoint():
+    """COIN-17: GET /engine/v2/tier1-status returns Tier1 operational state."""
+    exchange = "binance_futures"
+    saved = _save_and_clear(exchange)
+    eng = _mock_v2_engine()
+    _register(exchange, eng)
+    try:
+        app = _make_test_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/engine/v2/tier1-status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["cycle_count"] == 42
+        assert data["active_positions"] == 1
+        assert data["regime"] == "trending_up"
+        assert "BTC/USDT" in data["last_decisions"]
+        eng.get_tier1_status.assert_called_once()
+    finally:
+        _restore(exchange, saved)
+
+
+@pytest.mark.asyncio
+async def test_tier1_status_no_engine():
+    """COIN-17: No engine → 500 error."""
+    exchange = "binance_futures"
+    saved = _save_and_clear(exchange)
+    engine_registry._engines.pop(exchange, None)
+    try:
+        app = _make_test_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/engine/v2/tier1-status")
+        assert resp.status_code == 500
+    finally:
+        _restore(exchange, saved)
+
+
+@pytest.mark.asyncio
+async def test_tier1_status_v1_engine_no_support():
+    """COIN-17: V1 engine without get_tier1_status → 400 error."""
+    exchange = "binance_futures"
+    saved = _save_and_clear(exchange)
+    eng = _mock_engine(running=True)
+    # V1 engine doesn't have get_tier1_status
+    del eng.get_tier1_status
+    _register(exchange, eng)
+    try:
+        app = _make_test_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/engine/v2/tier1-status")
+        assert resp.status_code == 400
+    finally:
+        _restore(exchange, saved)
+
+
+@pytest.mark.asyncio
+async def test_tier1_status_required_fields():
+    """COIN-17: tier1-status response has all expected fields."""
+    exchange = "binance_futures"
+    saved = _save_and_clear(exchange)
+    eng = _mock_v2_engine()
+    _register(exchange, eng)
+    try:
+        app = _make_test_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/engine/v2/tier1-status")
+        assert resp.status_code == 200
+        data = resp.json()
+        for field in ("cycle_count", "last_cycle_at", "last_action_at", "coins",
+                      "active_positions", "last_decisions", "regime"):
+            assert field in data, f"Missing field: {field}"
+    finally:
+        _restore(exchange, saved)

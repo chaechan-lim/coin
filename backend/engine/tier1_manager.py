@@ -7,6 +7,8 @@ ATR 기반 연속 사이징: 변동성 낮으면 크게, 높으면 작게.
 import time
 import structlog
 import pandas as pd
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.enums import Direction
@@ -19,6 +21,20 @@ from strategies.regime_base import StrategyDecision
 from services.market_data import MarketDataService
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass
+class CycleStats:
+    """단일 evaluation_cycle 실행 결과 통계."""
+    coins_evaluated: int = 0
+    hold_count: int = 0
+    low_confidence_count: int = 0
+    cooldown_count: int = 0
+    sl_tp_count: int = 0
+    executed_count: int = 0
+    error_count: int = 0
+    candle_error_count: int = 0
+    decisions: dict = field(default_factory=dict)  # symbol → outcome string
 
 
 class Tier1Manager:
@@ -53,27 +69,89 @@ class Tier1Manager:
         self._cooldown_sec = cooldown_seconds
         self._last_exit_time: dict[str, float] = {}  # symbol → timestamp
 
+        # 관측용 상태 (COIN-17)
+        self._cycle_count: int = 0
+        self._last_cycle_at: datetime | None = None
+        self._last_action_at: datetime | None = None
+        self._last_decisions: dict[str, str] = {}  # symbol → 최근 결정
+
     @property
     def coins(self) -> list[str]:
         return list(self._coins)
 
-    async def evaluation_cycle(self, session: AsyncSession) -> None:
+    def get_status(self) -> dict:
+        """현재 Tier1 운영 상태 반환 (API/모니터링용)."""
+        return {
+            "cycle_count": self._cycle_count,
+            "last_cycle_at": self._last_cycle_at.isoformat() if self._last_cycle_at else None,
+            "last_action_at": self._last_action_at.isoformat() if self._last_action_at else None,
+            "coins": self._coins,
+            "active_positions": self._positions.active_count("tier1"),
+            "last_decisions": dict(self._last_decisions),
+            "regime": self._regime.current.regime.value if self._regime.current else None,
+        }
+
+    async def evaluation_cycle(self, session: AsyncSession) -> CycleStats:
         """모든 Tier 1 코인 평가 (60초마다 호출)."""
+        start_time = time.monotonic()
+        stats = CycleStats()
+
         regime_state = self._regime.current
         if regime_state is None:
             logger.debug("tier1_skip_no_regime")
-            return
+            return stats
 
         for coin in self._coins:
             try:
-                await self._evaluate_coin(session, coin, regime_state)
+                outcome = await self._evaluate_coin(session, coin, regime_state)
+                stats.coins_evaluated += 1
+                stats.decisions[coin] = outcome
+                self._last_decisions[coin] = outcome
+
+                if outcome == "hold":
+                    stats.hold_count += 1
+                elif outcome == "low_confidence":
+                    stats.low_confidence_count += 1
+                elif outcome == "cooldown":
+                    stats.cooldown_count += 1
+                elif outcome == "sl_tp":
+                    stats.sl_tp_count += 1
+                elif outcome == "candle_error":
+                    stats.candle_error_count += 1
+                elif outcome in ("opened", "closed", "sar", "flat_close"):
+                    stats.executed_count += 1
+                    self._last_action_at = datetime.now(timezone.utc)
             except Exception as e:
+                stats.error_count += 1
+                stats.decisions[coin] = "error"
+                self._last_decisions[coin] = "error"
                 logger.error("tier1_eval_error", coin=coin, error=str(e))
+
+        elapsed_ms = (time.monotonic() - start_time) * 1000
+        self._cycle_count += 1
+        self._last_cycle_at = datetime.now(timezone.utc)
+
+        logger.info(
+            "tier1_cycle_complete",
+            cycle=self._cycle_count,
+            coins_evaluated=stats.coins_evaluated,
+            hold=stats.hold_count,
+            low_conf=stats.low_confidence_count,
+            cooldown=stats.cooldown_count,
+            sl_tp=stats.sl_tp_count,
+            executed=stats.executed_count,
+            errors=stats.error_count,
+            active_positions=self._positions.active_count("tier1"),
+            regime=regime_state.regime.value,
+            elapsed_ms=round(elapsed_ms, 1),
+        )
+
+        return stats
 
     async def _evaluate_coin(
         self, session: AsyncSession, symbol: str, regime: RegimeState,
-    ) -> None:
-        """단일 코인 평가 + SAR 실행."""
+    ) -> str:
+        """단일 코인 평가 + SAR 실행. Returns outcome string."""
         # 현재 포지션 방향
         pos_state = self._positions.get(symbol)
         current_dir = pos_state.direction if pos_state else None
@@ -84,7 +162,7 @@ class Tier1Manager:
         df_1h = await self._fetch_candles(symbol, "1h", 200)
 
         if df_5m is None or len(df_5m) < 20:
-            return
+            return "candle_error"
 
         decision = await strategy.evaluate(df_5m, df_1h, regime, current_dir)
 
@@ -95,13 +173,14 @@ class Tier1Manager:
             if price > 0:
                 pos_state.update_extreme(price)
             if await self._check_sl_tp(session, symbol, pos_state, price, atr):
-                return  # SL/TP로 청산됨
+                return "sl_tp"
 
         if decision.is_hold:
-            return
+            return "hold"
 
         # SAR: 방향 전환
-        await self._execute_decision(session, symbol, decision, current_dir, df_5m)
+        outcome = await self._execute_decision(session, symbol, decision, current_dir, df_5m)
+        return outcome
 
     async def _execute_decision(
         self,
@@ -110,8 +189,8 @@ class Tier1Manager:
         decision: StrategyDecision,
         current_dir: Direction | None,
         df_5m: pd.DataFrame,
-    ) -> None:
-        """전략 결정을 실행한다."""
+    ) -> str:
+        """전략 결정을 실행한다. Returns outcome string."""
         close = self._last_close(df_5m)
         atr = self._last_atr(df_5m)
 
@@ -120,13 +199,14 @@ class Tier1Manager:
             if current_dir and current_dir != Direction.FLAT:
                 await self._close_position(session, symbol, current_dir, decision.reason)
                 self._last_exit_time[symbol] = time.time()
-            return
+                return "flat_close"
+            return "hold"
 
         # 최소 신뢰도 필터
         if decision.confidence < self._min_confidence:
             logger.debug("tier1_low_confidence", symbol=symbol,
                         confidence=decision.confidence, min=self._min_confidence)
-            return
+            return "low_confidence"
 
         if current_dir and current_dir != Direction.FLAT and decision.direction != current_dir:
             # SAR: 기존 포지션 청산 → 반대 방향 진입 (쿨다운 면제)
@@ -137,6 +217,7 @@ class Tier1Manager:
             self._last_exit_time[symbol] = time.time()
             # 새 방향 진입
             await self._open_position(session, symbol, decision, close, atr)
+            return "sar"
 
         elif current_dir is None or current_dir == Direction.FLAT:
             # 신규 진입 — 쿨다운 체크
@@ -145,8 +226,12 @@ class Tier1Manager:
             if elapsed < self._cooldown_sec:
                 remaining_h = (self._cooldown_sec - elapsed) / 3600
                 logger.debug("tier1_cooldown", symbol=symbol, remaining_h=f"{remaining_h:.1f}")
-                return
+                return "cooldown"
             await self._open_position(session, symbol, decision, close, atr)
+            return "opened"
+
+        # 같은 방향 포지션 이미 보유 중
+        return "hold"
 
     async def _open_position(
         self,
