@@ -117,6 +117,12 @@ class SafeOrderPipeline:
 
         # ── 2. 거래소 실행 ──
         try:
+            # 주문 전 레버리지 설정 (Tier2 코인 등 초기화 시 미설정된 코인 대응)
+            try:
+                await self._exchange.set_leverage(request.symbol, request.leverage)
+            except Exception:
+                pass  # 이미 설정되었거나 실패해도 주문은 진행
+
             side = self._determine_side(request)
             exec_result = await self._execute_on_exchange(
                 request.symbol, side, request.quantity,

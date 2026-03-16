@@ -200,3 +200,65 @@ class TestAPICompatibility:
         assert rs["surge_threshold"] == 0.0
         assert rs["current_surge_symbol"] is None
         assert rs["all_surge_scores"] == {}
+
+
+class TestHealthMonitorCompat:
+    """Bug COIN-13: FuturesEngineV2 health_monitor 호환성 테스트."""
+
+    def test_has_eval_error_counts(self, engine):
+        """_eval_error_counts 속성 존재."""
+        assert hasattr(engine, '_eval_error_counts')
+        assert engine._eval_error_counts == {}
+
+    def test_has_position_trackers(self, engine):
+        """_position_trackers 속성 존재."""
+        assert hasattr(engine, '_position_trackers')
+        assert engine._position_trackers == {}
+
+    def test_eval_error_counts_is_dict(self, engine):
+        """_eval_error_counts는 dict 타입이고 값 설정 가능."""
+        assert isinstance(engine._eval_error_counts, dict)
+        engine._eval_error_counts["BTC/USDT"] = 1
+        assert engine._eval_error_counts["BTC/USDT"] == 1
+
+    def test_has_pause_buying(self, engine):
+        """pause_buying 메서드 존재하고 호출 시 에러 없음."""
+        assert hasattr(engine, 'pause_buying')
+        assert callable(engine.pause_buying)
+        engine.pause_buying(["BTC/USDT"])
+
+    def test_has_resume_buying(self, engine):
+        """resume_buying 메서드 존재하고 호출 시 에러 없음."""
+        assert hasattr(engine, 'resume_buying')
+        assert callable(engine.resume_buying)
+        engine.resume_buying()
+
+    def test_health_monitor_error_rate_check(self, engine):
+        """HealthMonitor._check_error_rate_trend()가 v2 엔진에서 에러 없이 동작."""
+        from engine.health_monitor import HealthMonitor
+        hm = HealthMonitor(
+            engine=engine,
+            portfolio_manager=MagicMock(cash_balance=500.0),
+            exchange_adapter=AsyncMock(),
+            market_data=AsyncMock(),
+            exchange_name="binance_futures",
+            tracked_coins=["BTC/USDT"],
+        )
+        result = hm._check_error_rate_trend()
+        assert result.healthy is True
+
+    def test_health_monitor_error_rate_with_errors(self, engine):
+        """v2 엔진에 에러 기록 후 HealthMonitor가 감지."""
+        from engine.health_monitor import HealthMonitor
+        engine._eval_error_counts = {"BTC/USDT": 3, "ETH/USDT": 2}
+        hm = HealthMonitor(
+            engine=engine,
+            portfolio_manager=MagicMock(cash_balance=500.0),
+            exchange_adapter=AsyncMock(),
+            market_data=AsyncMock(),
+            exchange_name="binance_futures",
+            tracked_coins=["BTC/USDT"],
+        )
+        result = hm._check_error_rate_trend()
+        assert result.healthy is False
+        assert "BTC/USDT" in result.detail

@@ -313,6 +313,72 @@ class TestExecuteOrder:
         assert portfolio_manager.cash_balance < initial_cash
 
 
+class TestSetLeverage:
+    """Bug COIN-13: 주문 전 set_leverage 호출 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_set_leverage_called_before_order(self, pipeline, mock_exchange, session):
+        """주문 실행 전 set_leverage가 호출되어야 함."""
+        mock_exchange.create_market_buy.return_value = make_order_result()
+        mock_exchange.set_leverage = AsyncMock()
+        req = make_request(leverage=3)
+
+        resp = await pipeline.execute_order(session, req)
+        assert resp.success is True
+        mock_exchange.set_leverage.assert_called_once_with("BTC/USDT", 3)
+
+    @pytest.mark.asyncio
+    async def test_set_leverage_uses_request_leverage(self, pipeline, mock_exchange, session):
+        """set_leverage는 request의 leverage 값을 사용해야 함."""
+        mock_exchange.create_market_buy.return_value = make_order_result()
+        mock_exchange.set_leverage = AsyncMock()
+        req = make_request(leverage=5)
+
+        resp = await pipeline.execute_order(session, req)
+        assert resp.success is True
+        mock_exchange.set_leverage.assert_called_once_with("BTC/USDT", 5)
+
+    @pytest.mark.asyncio
+    async def test_set_leverage_failure_does_not_block_order(self, pipeline, mock_exchange, session):
+        """set_leverage 실패해도 주문은 정상 진행되어야 함."""
+        mock_exchange.create_market_buy.return_value = make_order_result()
+        mock_exchange.set_leverage = AsyncMock(side_effect=Exception("leverage error"))
+        req = make_request()
+
+        resp = await pipeline.execute_order(session, req)
+        assert resp.success is True
+        assert resp.executed_price == 80000.0
+
+    @pytest.mark.asyncio
+    async def test_set_leverage_called_for_close_order(self, pipeline, mock_exchange, session):
+        """청산 주문에서도 set_leverage가 호출되어야 함."""
+        pos = Position(
+            exchange="binance_futures",
+            symbol="BTC/USDT",
+            quantity=0.01,
+            average_buy_price=80000.0,
+            total_invested=100.0,
+            direction="long",
+            leverage=3,
+            is_paper=False,
+        )
+        session.add(pos)
+        await session.flush()
+
+        mock_exchange.create_market_sell.return_value = make_order_result(
+            price=82000.0, filled=0.01, cost=820.0, fee=0.33,
+        )
+        mock_exchange.set_leverage = AsyncMock()
+        req = make_request(
+            action="close", direction=Direction.LONG,
+            entry_price=80000.0, margin=100.0, price=82000.0,
+        )
+
+        resp = await pipeline.execute_order(session, req)
+        assert resp.success is True
+        mock_exchange.set_leverage.assert_called_once()
+
+
 class TestPnLCalculation:
     @pytest.mark.asyncio
     async def test_long_profit_pnl(self, pipeline, mock_exchange, session):
