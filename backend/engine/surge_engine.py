@@ -112,6 +112,13 @@ class SurgeEngine:
         self._mode = sc.mode
         self._scan_symbols = self.DEFAULT_SCAN_SYMBOLS[:sc.scan_symbols_count]
 
+        # COIN-20: 진입 필터 강화
+        self._min_score = sc.min_score
+        self._rsi_overbought = sc.rsi_overbought
+        self._rsi_oversold = sc.rsi_oversold
+        self._consecutive_sl_cooldown_sec = sc.consecutive_sl_cooldown_sec
+        self._min_atr_pct = sc.min_atr_pct
+
         # Runtime state
         self._running = False
         self._main_task: asyncio.Task | None = None
@@ -123,6 +130,7 @@ class SurgeEngine:
         self._candle_vol_ratios: dict[str, float] = {}
         self._candle_price_chgs: dict[str, float] = {}
         self._candle_vol_accel: dict[str, float] = {}
+        self._candle_atr_pct: dict[str, float] = {}  # COIN-20: ATR% per symbol
         self._last_candle_update: float = 0.0
         self._CANDLE_UPDATE_INTERVAL = 60  # 캔들 데이터 갱신 간격 (초)
         self._last_scan_time: datetime | None = None
@@ -133,6 +141,9 @@ class SurgeEngine:
         self._consecutive_losses = 0
         self._pause_until: datetime | None = None
         self._last_reset_date: datetime | None = None
+
+        # COIN-20: 심볼별 연속 SL 카운터 (장기 쿨다운용)
+        self._consecutive_sl_count: dict[str, int] = {}  # symbol -> count
 
         # Exchange name for DB isolation
         self._exchange_name = EXCHANGE_NAME
@@ -204,6 +215,8 @@ class SurgeEngine:
                 "vol_ratio": round(vol_ratio, 2),
                 "price_chg": round(price_chg, 3),
                 "rsi": round(self.compute_rsi(sym), 1),
+                "atr_pct": round(self._candle_atr_pct.get(sym, 0.0), 3),
+                "consecutive_sl": self._consecutive_sl_count.get(sym, 0),
                 "last_price": round(state.last_price, 4) if state else 0,
                 "has_position": pos is not None,
                 "direction": pos.direction if pos else None,
@@ -222,6 +235,10 @@ class SurgeEngine:
             "scan_interval_sec": self._scan_interval,
             "leverage": self._leverage,
             "last_scan_time": self._last_scan_time.isoformat() if self._last_scan_time else None,
+            "min_score": self._min_score,
+            "min_atr_pct": self._min_atr_pct,
+            "rsi_overbought": self._rsi_overbought,
+            "rsi_oversold": self._rsi_oversold,
             "scores": scores,
         }
 
@@ -393,6 +410,23 @@ class SurgeEngine:
                 else:
                     self._candle_vol_accel[sym] = 0.0
 
+                # COIN-20: ATR% 계산 (최근 14캔들 ATR / close)
+                atr_lookback = min(14, len(completed) - 1)
+                if atr_lookback >= 2:
+                    recent = completed[-atr_lookback - 1:]
+                    tr_sum = 0.0
+                    for j in range(1, len(recent)):
+                        hi = recent[j].high
+                        lo = recent[j].low
+                        prev_c = recent[j - 1].close
+                        tr = max(hi - lo, abs(hi - prev_c), abs(lo - prev_c))
+                        tr_sum += tr
+                    atr = tr_sum / atr_lookback
+                    close_price = completed[-1].close
+                    self._candle_atr_pct[sym] = (atr / close_price * 100) if close_price > 0 else 0.0
+                else:
+                    self._candle_atr_pct[sym] = 0.0
+
                 updated += 1
             except Exception:
                 continue
@@ -476,12 +510,17 @@ class SurgeEngine:
 
             score, vol_ratio, price_chg = self.compute_surge_score(sym)
 
-            # Threshold filters
-            if score < 0.40:
+            # COIN-20: Configurable min score filter (was hardcoded 0.40)
+            if score < self._min_score:
                 continue
             if vol_ratio < self._vol_threshold:
                 continue
             if abs(price_chg) < self._price_threshold:
+                continue
+
+            # COIN-20: ATR volatility filter (횡보장 fake surge 차단)
+            atr_pct = self._candle_atr_pct.get(sym, 0.0)
+            if atr_pct > 0 and atr_pct < self._min_atr_pct:
                 continue
 
             # Exhaustion filter: if already moved >8% skip
@@ -491,11 +530,11 @@ class SurgeEngine:
                 if old_price > 0 and abs((prices[-1] - old_price) / old_price * 100) > 8.0:
                     continue
 
-            # RSI extreme filter
+            # COIN-20: Configurable RSI filter (was hardcoded 85/15)
             rsi = self.compute_rsi(sym)
-            if price_chg > 0 and rsi > 85:
+            if price_chg > 0 and rsi > self._rsi_overbought:
                 continue
-            if price_chg < 0 and rsi < 15:
+            if price_chg < 0 and rsi < self._rsi_oversold:
                 continue
 
             # Spread filter
@@ -837,8 +876,22 @@ class SurgeEngine:
                     self._pause_until = datetime.now(timezone.utc) + timedelta(minutes=30)
                     logger.warning("surge_consecutive_loss_pause",
                                    losses=self._consecutive_losses)
+
+                # COIN-20: 심볼별 연속 SL 추적 + 장기 쿨다운
+                if reason == "SL":
+                    sl_count = self._consecutive_sl_count.get(symbol, 0) + 1
+                    self._consecutive_sl_count[symbol] = sl_count
+                    if sl_count >= 2:
+                        # 2+ 연속 SL → 장기 쿨다운 (180분 기본)
+                        extended_cooldown = timedelta(seconds=self._consecutive_sl_cooldown_sec)
+                        self._cooldowns[symbol] = datetime.now(timezone.utc) + extended_cooldown
+                        logger.warning("surge_consecutive_sl_extended_cooldown",
+                                       symbol=symbol, sl_count=sl_count,
+                                       cooldown_min=self._consecutive_sl_cooldown_sec // 60)
             else:
                 self._consecutive_losses = 0
+                # COIN-20: 수익 시 연속 SL 카운터 리셋
+                self._consecutive_sl_count.pop(symbol, None)
 
             # Remove from memory
             del self._positions[symbol]
