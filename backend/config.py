@@ -215,9 +215,9 @@ class SurgeTradingConfig(BaseSettings):
     initial_balance_usdt: float = 150.0
     max_concurrent: int = 3
     position_pct: float = 0.08
-    sl_pct: float = 2.0
-    tp_pct: float = 4.0
-    trail_activation_pct: float = 1.0
+    sl_pct: float = 2.5                  # SL % (COIN-20: 2.0→2.5, SL 과다 손절 완화)
+    tp_pct: float = 3.0                  # TP % (COIN-20: 4.0→3.0, 현실적 목표가)
+    trail_activation_pct: float = 0.5    # 트레일링 활성화 % (COIN-20: 1.0→0.5, 조기 수익 확보)
     trail_stop_pct: float = 0.8
     max_hold_minutes: int = 120
     vol_threshold: float = 4.0           # 거래량 배수 임계값 (백테스트 PF 1.42)
@@ -227,6 +227,13 @@ class SurgeTradingConfig(BaseSettings):
     scan_symbols_count: int = 30
     cooldown_per_symbol_sec: int = 3600  # 60분 (백테스트 최적 PF 1.71)
     scan_interval_sec: int = 5
+
+    # COIN-20: 진입 필터 강화
+    min_score: float = 0.55              # 최소 서지 점수 (0.40→0.55, 낮은 conf 진입 차단)
+    rsi_overbought: float = 75.0         # RSI 과매수 차단 (85→75, 이미 오른 뒤 진입 방지)
+    rsi_oversold: float = 25.0           # RSI 과매도 차단 (15→25, 이미 빠진 뒤 진입 방지)
+    consecutive_sl_cooldown_sec: int = 10800  # 연속 SL 쿨다운 180분 (동일 코인 2+연속 SL 시)
+    min_atr_pct: float = 0.5             # 최소 ATR% (횡보장 fake surge 차단)
 
     @field_validator("mode")
     @classmethod

@@ -94,9 +94,9 @@ class SurgeBacktester:
         symbols: list[str] | None = None,
         initial_balance: float = 1000.0,
         leverage: int = 2,
-        sl_pct: float = 1.5,
-        tp_pct: float = 3.0,
-        trail_activation_pct: float = 1.0,
+        sl_pct: float = 2.5,             # COIN-20: 2.0→2.5
+        tp_pct: float = 3.0,             # COIN-20: 4.0→3.0
+        trail_activation_pct: float = 0.5,  # COIN-20: 1.0→0.5
         trail_stop_pct: float = 0.8,
         max_hold_minutes: int = 120,
         volume_ratio_threshold: float = 5.0,
@@ -107,6 +107,12 @@ class SurgeBacktester:
         fee_pct: float = 0.04,  # 0.04% maker/taker
         exhaustion_filter_pct: float = 8.0,  # 이미 N% 이동 시 스킵
         long_only: bool = False,
+        # COIN-20: 진입 필터 강화
+        min_score: float = 0.55,
+        rsi_overbought: float = 75.0,
+        rsi_oversold: float = 25.0,
+        consecutive_sl_cooldown_candles: int = 36,  # 180분 / 5m = 36캔들
+        min_atr_pct: float = 0.5,
     ):
         self._exchange = exchange
         self._symbols = symbols or self.DEFAULT_COINS
@@ -126,6 +132,13 @@ class SurgeBacktester:
         self._exhaustion_pct = exhaustion_filter_pct
         self._long_only = long_only
         self._vol_lookback = 60  # 60 * 5m = 5h 평균 거래량
+
+        # COIN-20: 진입 필터 강화
+        self._min_score = min_score
+        self._rsi_overbought = rsi_overbought
+        self._rsi_oversold = rsi_oversold
+        self._consecutive_sl_cooldown_candles = consecutive_sl_cooldown_candles
+        self._min_atr_pct = min_atr_pct
 
     async def fetch_5m_data(self, symbol: str, days: int) -> pd.DataFrame | None:
         """5m 캔들 데이터 로드 (CSV 캐시)."""
@@ -266,6 +279,21 @@ class SurgeBacktester:
         rs = gains / losses
         return 100.0 - (100.0 / (1.0 + rs))
 
+    def _calc_atr_pct(self, df: pd.DataFrame, idx: int, period: int = 14) -> float:
+        """ATR% 계산 (COIN-20: 횡보장 필터)."""
+        if idx < period + 1:
+            return 0.0
+        tr_sum = 0.0
+        for j in range(idx - period + 1, idx + 1):
+            hi = df.iloc[j]["high"]
+            lo = df.iloc[j]["low"]
+            prev_c = df.iloc[j - 1]["close"]
+            tr = max(hi - lo, abs(hi - prev_c), abs(lo - prev_c))
+            tr_sum += tr
+        atr = tr_sum / period
+        close = df.iloc[idx]["close"]
+        return (atr / close * 100) if close > 0 else 0.0
+
     def _compute_surge_score(self, df: pd.DataFrame, idx: int) -> tuple[float, float, float]:
         """서지 점수 계산. (score, volume_ratio, price_change) 반환."""
         vol_ratio = self._calc_volume_ratio(df, idx)
@@ -391,6 +419,8 @@ class SurgeBacktester:
         last_reset_day = None
         consecutive_losses = 0
         pause_until_idx = 0
+        # COIN-20: 심볼별 연속 SL 카운터
+        consecutive_sl_count: dict[str, int] = {}
 
         for ts_idx, ts in enumerate(sorted_ts):
             # 일일 카운터 리셋
@@ -452,8 +482,16 @@ class SurgeBacktester:
                         consecutive_losses += 1
                         if consecutive_losses >= 3:
                             pause_until_idx = ts_idx + 6  # 30분 정지
+                        # COIN-20: 심볼별 연속 SL 추적 + 장기 쿨다운
+                        if reason == "SL":
+                            sl_count = consecutive_sl_count.get(sym, 0) + 1
+                            consecutive_sl_count[sym] = sl_count
+                            if sl_count >= 2:
+                                cooldowns[sym] = sym_idx + self._consecutive_sl_cooldown_candles
                     else:
                         consecutive_losses = 0
+                        # COIN-20: 수익 시 연속 SL 카운터 리셋
+                        consecutive_sl_count.pop(sym, None)
 
             for sym in closed_symbols:
                 del positions[sym]
@@ -503,11 +541,17 @@ class SurgeBacktester:
 
                 score, vol_ratio, price_chg = self._compute_surge_score(df, sym_idx)
 
-                if score < 0.40:  # 최소 임계값
+                # COIN-20: Configurable min score (was hardcoded 0.40)
+                if score < self._min_score:
                     continue
                 if vol_ratio < self._vol_threshold:
                     continue
                 if abs(price_chg) < self._price_threshold:
+                    continue
+
+                # COIN-20: ATR volatility filter (횡보장 fake surge 차단)
+                atr_pct = self._calc_atr_pct(df, sym_idx)
+                if atr_pct > 0 and atr_pct < self._min_atr_pct:
                     continue
 
                 # 소진 필터
@@ -515,11 +559,11 @@ class SurgeBacktester:
                 if abs(price_chg_30m) > self._exhaustion_pct:
                     continue
 
-                # RSI 극단 필터
+                # COIN-20: Configurable RSI filter (was hardcoded 85/15)
                 rsi = self._calc_rsi(df, sym_idx)
-                if price_chg > 0 and rsi > 85:
+                if price_chg > 0 and rsi > self._rsi_overbought:
                     continue
-                if price_chg < 0 and rsi < 15:
+                if price_chg < 0 and rsi < self._rsi_oversold:
                     continue
 
                 surge_candidates.append((sym, score, vol_ratio, price_chg, sym_idx))
@@ -692,9 +736,9 @@ async def main():
     parser.add_argument("--days", type=int, default=90)
     parser.add_argument("--balance", type=float, default=1000.0)
     parser.add_argument("--leverage", type=int, default=2)
-    parser.add_argument("--sl", type=float, default=1.5, help="SL %% (기본 1.5)")
-    parser.add_argument("--tp", type=float, default=3.0, help="TP %% (기본 3.0)")
-    parser.add_argument("--trail-act", type=float, default=1.0, help="트레일링 활성화 %% (기본 1.0)")
+    parser.add_argument("--sl", type=float, default=2.5, help="SL %% (기본 2.5, COIN-20)")
+    parser.add_argument("--tp", type=float, default=3.0, help="TP %% (기본 3.0, COIN-20)")
+    parser.add_argument("--trail-act", type=float, default=0.5, help="트레일링 활성화 %% (기본 0.5, COIN-20)")
     parser.add_argument("--trail-stop", type=float, default=0.8, help="트레일링 스톱 %% (기본 0.8)")
     parser.add_argument("--max-hold", type=int, default=120, help="최대 보유 분 (기본 120)")
     parser.add_argument("--vol-threshold", type=float, default=5.0, help="거래량 배수 임계 (기본 5.0)")
@@ -705,6 +749,12 @@ async def main():
     parser.add_argument("--exhaustion", type=float, default=8.0, help="소진 필터 %% (기본 8.0)")
     parser.add_argument("--cooldown", type=int, default=6, help="쿨다운 캔들 수 (기본 6 = 30분)")
     parser.add_argument("--long-only", action="store_true", default=False, help="롱만 진입")
+    # COIN-20: 진입 필터 강화 파라미터
+    parser.add_argument("--min-score", type=float, default=0.55, help="최소 서지 점수 (기본 0.55)")
+    parser.add_argument("--rsi-overbought", type=float, default=75.0, help="RSI 과매수 차단 (기본 75)")
+    parser.add_argument("--rsi-oversold", type=float, default=25.0, help="RSI 과매도 차단 (기본 25)")
+    parser.add_argument("--consecutive-sl-cooldown", type=int, default=36, help="연속 SL 쿨다운 캔들 (기본 36 = 180분)")
+    parser.add_argument("--min-atr-pct", type=float, default=0.5, help="최소 ATR%% (기본 0.5)")
     args = parser.parse_args()
 
     from exchange.binance_usdm_adapter import BinanceUSDMAdapter
@@ -733,6 +783,12 @@ async def main():
             cooldown_candles=args.cooldown,
             exhaustion_filter_pct=args.exhaustion,
             long_only=args.long_only,
+            # COIN-20: 진입 필터 강화
+            min_score=args.min_score,
+            rsi_overbought=args.rsi_overbought,
+            rsi_oversold=args.rsi_oversold,
+            consecutive_sl_cooldown_candles=args.consecutive_sl_cooldown,
+            min_atr_pct=args.min_atr_pct,
         )
 
         print(f"\n5m 데이터 로딩 ({args.days}일, {len(symbols)}코인)...")
