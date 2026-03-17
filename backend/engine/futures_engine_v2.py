@@ -64,6 +64,8 @@ class FuturesEngineV2:
             exchange_name=self.EXCHANGE_NAME,
             warn_pct=v2_cfg.balance_divergence_warn_pct,
             pause_pct=v2_cfg.balance_divergence_pause_pct,
+            auto_resync_count=v2_cfg.balance_auto_resync_count,
+            portfolio_manager=portfolio_manager,
         )
 
         self._safe_order = SafeOrderPipeline(

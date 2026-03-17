@@ -277,6 +277,7 @@ class FuturesV2Config(BaseSettings):
     balance_divergence_warn_pct: float = 3.0
     balance_divergence_pause_pct: float = 5.0
     balance_check_interval_sec: int = 300
+    balance_auto_resync_count: int = 5  # N회 연속 critical → 자동 재동기화 (0=비활성)
 
     @field_validator("mode")
     @classmethod
