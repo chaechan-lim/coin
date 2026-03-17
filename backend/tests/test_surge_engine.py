@@ -93,16 +93,24 @@ class TestSurgeEngineInit:
         assert surge_engine.is_running is False
 
     def test_default_config_values(self, surge_engine):
-        """Default SurgeTradingConfig values are applied."""
+        """Default SurgeTradingConfig values are applied (COIN-20 updated)."""
         assert surge_engine._leverage == 3
         assert surge_engine._max_concurrent == 3
-        assert surge_engine._sl_pct == 2.0
-        assert surge_engine._tp_pct == 4.0
-        assert surge_engine._trail_activation_pct == 1.0
+        assert surge_engine._sl_pct == 2.5       # COIN-20: 2.0→2.5
+        assert surge_engine._tp_pct == 3.0       # COIN-20: 4.0→3.0
+        assert surge_engine._trail_activation_pct == 0.5  # COIN-20: 1.0→0.5
         assert surge_engine._trail_stop_pct == 0.8
         assert surge_engine._max_hold_minutes == 120
         assert surge_engine._long_only is True
         assert surge_engine._daily_trade_limit == 15
+
+    def test_coin20_entry_filter_config(self, surge_engine):
+        """COIN-20: New entry filter config values are applied."""
+        assert surge_engine._min_score == 0.55
+        assert surge_engine._rsi_overbought == 75.0
+        assert surge_engine._rsi_oversold == 25.0
+        assert surge_engine._consecutive_sl_cooldown_sec == 10800  # 180 min
+        assert surge_engine._min_atr_pct == 0.5
 
     def test_tracked_coins(self, surge_engine):
         assert len(surge_engine.tracked_coins) == 30
@@ -276,9 +284,9 @@ class TestExitConditions:
         )
 
     def test_long_sl_triggered(self, surge_engine):
-        """Long stop loss at -2% (leveraged)."""
+        """Long stop loss at -2.5% (leveraged, COIN-20)."""
         pos = self._make_long_pos(entry=65000.0)
-        # SL = 2%, leverage = 3 -> price drop = 2%/3 = 0.667%
+        # SL = 2.5%, leverage = 3 -> price drop = 2.5%/3 = 0.833%
         sl_price = 65000.0 * (1 - surge_engine._sl_pct / 100 / surge_engine._leverage)
         now = datetime.now(timezone.utc)
 
@@ -287,9 +295,9 @@ class TestExitConditions:
         assert reason == "SL"
 
     def test_long_tp_triggered(self, surge_engine):
-        """Long take profit at +4% (leveraged)."""
+        """Long take profit at +3% (leveraged, COIN-20)."""
         pos = self._make_long_pos(entry=65000.0)
-        # TP = 4%, leverage = 3 -> price rise = 4%/3 = 1.333%
+        # TP = 3%, leverage = 3 -> price rise = 3%/3 = 1%
         tp_price = 65000.0 * (1 + surge_engine._tp_pct / 100 / surge_engine._leverage)
         now = datetime.now(timezone.utc)
 
@@ -298,14 +306,14 @@ class TestExitConditions:
         assert reason == "TP"
 
     def test_long_trailing_stop(self, surge_engine):
-        """Trailing activates after +1% PnL, exits on drawdown."""
+        """Trailing activates after +0.5% PnL (COIN-20), exits on drawdown."""
         pos = self._make_long_pos(entry=65000.0)
         now = datetime.now(timezone.utc)
 
-        # First, move price up to activate trailing (pnl > 1%)
+        # First, move price up to activate trailing (pnl > 0.5%)
         # pnl = (price - entry) / entry * 100 * leverage
-        # 1% = (price - 65000) / 65000 * 100 * 3
-        # price = 65000 * (1 + 1 / 300) = 65216.67
+        # 0.5% = (price - 65000) / 65000 * 100 * 3
+        # price = 65000 * (1 + 0.5 / 300) = 65108.33
         activation_price = 65000.0 * (1 + surge_engine._trail_activation_pct / 100 / surge_engine._leverage) + 10
         should_exit, _ = surge_engine._check_exit_conditions(pos, activation_price, now)
         assert pos.trailing_active is True
@@ -487,9 +495,9 @@ class TestSurgeTradingConfig:
         assert cfg.initial_balance_usdt == 150.0
         assert cfg.max_concurrent == 3
         assert cfg.position_pct == 0.08
-        assert cfg.sl_pct == 2.0
-        assert cfg.tp_pct == 4.0
-        assert cfg.trail_activation_pct == 1.0
+        assert cfg.sl_pct == 2.5       # COIN-20: 2.0→2.5
+        assert cfg.tp_pct == 3.0       # COIN-20: 4.0→3.0
+        assert cfg.trail_activation_pct == 0.5  # COIN-20: 1.0→0.5
         assert cfg.trail_stop_pct == 0.8
         assert cfg.max_hold_minutes == 120
         assert cfg.vol_threshold == 4.0
@@ -499,6 +507,15 @@ class TestSurgeTradingConfig:
         assert cfg.scan_symbols_count == 30
         assert cfg.cooldown_per_symbol_sec == 3600
         assert cfg.scan_interval_sec == 5
+
+    def test_coin20_filter_defaults(self):
+        """COIN-20: New filter config defaults."""
+        cfg = SurgeTradingConfig()
+        assert cfg.min_score == 0.55
+        assert cfg.rsi_overbought == 75.0
+        assert cfg.rsi_oversold == 25.0
+        assert cfg.consecutive_sl_cooldown_sec == 10800
+        assert cfg.min_atr_pct == 0.5
 
     def test_invalid_mode_raises(self):
         with pytest.raises(Exception):
@@ -814,3 +831,265 @@ class TestBatchTickerFetch:
         tickers = await surge_engine._fetch_tickers()
         assert "BTC/USDT" in tickers
         assert tickers["BTC/USDT"]["last"] == 65000.0
+
+
+# ── COIN-20: Test min_score entry filter ─────────────────────────
+
+class TestMinScoreFilter:
+    def test_min_score_default_is_055(self, surge_engine):
+        """COIN-20: Default min_score is 0.55 (was hardcoded 0.40)."""
+        assert surge_engine._min_score == 0.55
+
+    def test_score_below_min_blocked(self, surge_engine):
+        """Scores below min_score should be filtered out."""
+        # Set up a symbol with low score
+        surge_engine._candle_vol_ratios["BTC/USDT"] = 2.0  # low vol
+        surge_engine._candle_price_chgs["BTC/USDT"] = 0.5  # low price change
+        surge_engine._candle_vol_accel["BTC/USDT"] = 0.1
+
+        score, _, _ = surge_engine.compute_surge_score("BTC/USDT")
+        assert score < surge_engine._min_score  # score should be below 0.55
+
+    def test_score_above_min_passes(self, surge_engine):
+        """Scores above min_score should pass the filter."""
+        # Set up a symbol with high score
+        surge_engine._candle_vol_ratios["BTC/USDT"] = 10.0  # 10x volume
+        surge_engine._candle_price_chgs["BTC/USDT"] = 3.0   # +3% price
+        surge_engine._candle_vol_accel["BTC/USDT"] = 2.0
+
+        score, _, _ = surge_engine.compute_surge_score("BTC/USDT")
+        assert score >= surge_engine._min_score  # score should be >= 0.55
+
+    def test_custom_min_score_from_config(self, mock_exchange, mock_portfolio, mock_order_manager, mock_registry):
+        """Custom min_score via config is applied."""
+        config = MagicMock()
+        sc = SurgeTradingConfig(min_score=0.70)
+        config.surge_trading = sc
+        config.binance.enabled = True
+
+        engine = SurgeEngine(
+            config=config, exchange=mock_exchange,
+            futures_pm=mock_portfolio, order_manager=mock_order_manager,
+            engine_registry=mock_registry,
+        )
+        assert engine._min_score == 0.70
+
+
+# ── COIN-20: Test RSI overbought/oversold filter ────────────────
+
+class TestRSIFilterCOIN20:
+    def test_rsi_overbought_default_75(self, surge_engine):
+        """COIN-20: RSI overbought threshold is 75 (was 85)."""
+        assert surge_engine._rsi_overbought == 75.0
+
+    def test_rsi_oversold_default_25(self, surge_engine):
+        """COIN-20: RSI oversold threshold is 25 (was 15)."""
+        assert surge_engine._rsi_oversold == 25.0
+
+    def test_rsi_78_blocks_long_entry(self, surge_engine):
+        """RSI=78 should block long entry (was allowed at 85 threshold)."""
+        surge_engine._symbol_states["BTC/USDT"] = SymbolState()
+        state = surge_engine._symbol_states["BTC/USDT"]
+        # Create rising prices for RSI ~78
+        for i in range(20):
+            state.rsi_closes.append(100.0 + i * 4)  # strong uptrend
+
+        rsi = surge_engine.compute_rsi("BTC/USDT")
+        assert rsi > 75  # above new threshold
+        assert rsi > surge_engine._rsi_overbought
+
+    def test_rsi_22_blocks_short_entry(self, surge_engine):
+        """RSI=22 should block short entry (was allowed at 15 threshold)."""
+        surge_engine._symbol_states["BTC/USDT"] = SymbolState()
+        state = surge_engine._symbol_states["BTC/USDT"]
+        # Create falling prices for low RSI
+        for i in range(20):
+            state.rsi_closes.append(200.0 - i * 4)  # strong downtrend
+
+        rsi = surge_engine.compute_rsi("BTC/USDT")
+        assert rsi < 25  # below new threshold
+        assert rsi < surge_engine._rsi_oversold
+
+    def test_rsi_60_allows_long_entry(self, surge_engine):
+        """RSI=60 should still allow long entry."""
+        assert 60 < surge_engine._rsi_overbought
+
+    def test_rsi_35_allows_short_entry(self, surge_engine):
+        """RSI=35 should still allow short entry."""
+        assert 35 > surge_engine._rsi_oversold
+
+    def test_custom_rsi_thresholds(self, mock_exchange, mock_portfolio, mock_order_manager, mock_registry):
+        """Custom RSI thresholds via config."""
+        config = MagicMock()
+        sc = SurgeTradingConfig(rsi_overbought=80.0, rsi_oversold=20.0)
+        config.surge_trading = sc
+        config.binance.enabled = True
+
+        engine = SurgeEngine(
+            config=config, exchange=mock_exchange,
+            futures_pm=mock_portfolio, order_manager=mock_order_manager,
+            engine_registry=mock_registry,
+        )
+        assert engine._rsi_overbought == 80.0
+        assert engine._rsi_oversold == 20.0
+
+
+# ── COIN-20: Test consecutive SL cooldown ────────────────────────
+
+class TestConsecutiveSLCooldown:
+    def test_initial_sl_count_is_zero(self, surge_engine):
+        """No consecutive SL by default."""
+        assert surge_engine._consecutive_sl_count == {}
+
+    def test_first_sl_sets_count_to_1(self, surge_engine):
+        """First SL loss on a symbol sets count to 1."""
+        surge_engine._consecutive_sl_count["FET/USDT"] = 1
+        assert surge_engine._consecutive_sl_count["FET/USDT"] == 1
+
+    def test_two_consecutive_sl_triggers_extended_cooldown(self, surge_engine):
+        """2+ consecutive SL on same symbol triggers extended cooldown (180min)."""
+        sym = "FET/USDT"
+        # Simulate 2 consecutive SL
+        surge_engine._consecutive_sl_count[sym] = 2
+        now = datetime.now(timezone.utc)
+        extended_cooldown = timedelta(seconds=surge_engine._consecutive_sl_cooldown_sec)
+        surge_engine._cooldowns[sym] = now + extended_cooldown
+
+        # The cooldown should be ~180 minutes in the future
+        cooldown_minutes = (surge_engine._cooldowns[sym] - now).total_seconds() / 60
+        assert cooldown_minutes == pytest.approx(180.0, abs=1.0)
+
+    def test_profit_resets_sl_counter(self, surge_engine):
+        """A profitable trade resets the consecutive SL counter."""
+        surge_engine._consecutive_sl_count["FET/USDT"] = 3
+        # Simulate a profit → should pop counter
+        surge_engine._consecutive_sl_count.pop("FET/USDT", None)
+        assert "FET/USDT" not in surge_engine._consecutive_sl_count
+
+    def test_default_cooldown_sec(self, surge_engine):
+        """Default consecutive SL cooldown is 10800 seconds (180 minutes)."""
+        assert surge_engine._consecutive_sl_cooldown_sec == 10800
+
+    def test_normal_cooldown_vs_extended(self, surge_engine):
+        """Extended cooldown (180min) is longer than normal (60min)."""
+        normal = surge_engine._cooldown_sec  # 3600 = 60min
+        extended = surge_engine._consecutive_sl_cooldown_sec  # 10800 = 180min
+        assert extended > normal
+        assert extended == 3 * normal
+
+
+# ── COIN-20: Test ATR volatility filter ──────────────────────────
+
+class TestATRFilter:
+    def test_default_min_atr_pct(self, surge_engine):
+        """Default min_atr_pct is 0.5."""
+        assert surge_engine._min_atr_pct == 0.5
+
+    def test_atr_data_dict_exists(self, surge_engine):
+        """ATR% data dict is initialized."""
+        assert isinstance(surge_engine._candle_atr_pct, dict)
+        assert len(surge_engine._candle_atr_pct) == 0
+
+    def test_low_atr_would_be_blocked(self, surge_engine):
+        """ATR% below threshold (e.g. 0.2%) should block entry."""
+        atr_pct = 0.2
+        assert atr_pct < surge_engine._min_atr_pct
+
+    def test_high_atr_would_pass(self, surge_engine):
+        """ATR% above threshold (e.g. 1.5%) should pass filter."""
+        atr_pct = 1.5
+        assert atr_pct >= surge_engine._min_atr_pct
+
+    @pytest.mark.asyncio
+    async def test_candle_update_computes_atr(self, surge_engine):
+        """_update_candle_volume_data also computes ATR%."""
+        from exchange.data_models import Candle
+
+        # 60 baseline + 1 spike (completed) + 1 in-progress
+        candles = []
+        for i in range(60):
+            candles.append(Candle(
+                timestamp=datetime.now(timezone.utc),
+                open=100.0, high=101.5, low=98.5, close=100.0 + i * 0.01,
+                volume=1000.0,
+            ))
+        # Spike candle
+        candles.append(Candle(
+            timestamp=datetime.now(timezone.utc),
+            open=100.0, high=104.0, low=98.0, close=103.0,
+            volume=10000.0,
+        ))
+        # In-progress candle
+        candles.append(Candle(
+            timestamp=datetime.now(timezone.utc),
+            open=103.0, high=103.5, low=102.5, close=103.2,
+            volume=200.0,
+        ))
+
+        surge_engine._exchange.fetch_ohlcv = AsyncMock(return_value=candles)
+        surge_engine._scan_symbols = ["BTC/USDT"]
+
+        await surge_engine._update_candle_volume_data()
+
+        assert "BTC/USDT" in surge_engine._candle_atr_pct
+        # ATR% should be positive (there's price movement)
+        assert surge_engine._candle_atr_pct["BTC/USDT"] > 0
+
+    def test_custom_min_atr_pct(self, mock_exchange, mock_portfolio, mock_order_manager, mock_registry):
+        """Custom min_atr_pct via config."""
+        config = MagicMock()
+        sc = SurgeTradingConfig(min_atr_pct=1.0)
+        config.surge_trading = sc
+        config.binance.enabled = True
+
+        engine = SurgeEngine(
+            config=config, exchange=mock_exchange,
+            futures_pm=mock_portfolio, order_manager=mock_order_manager,
+            engine_registry=mock_registry,
+        )
+        assert engine._min_atr_pct == 1.0
+
+
+# ── COIN-20: Test scan_status new fields ─────────────────────────
+
+class TestScanStatusCOIN20:
+    def test_scan_status_has_min_score(self, surge_engine):
+        """scan_status includes min_score."""
+        result = surge_engine.scan_status()
+        assert "min_score" in result
+        assert result["min_score"] == 0.55
+
+    def test_scan_status_has_min_atr_pct(self, surge_engine):
+        """scan_status includes min_atr_pct."""
+        result = surge_engine.scan_status()
+        assert "min_atr_pct" in result
+        assert result["min_atr_pct"] == 0.5
+
+    def test_scan_status_has_rsi_thresholds(self, surge_engine):
+        """scan_status includes RSI threshold info."""
+        result = surge_engine.scan_status()
+        assert "rsi_overbought" in result
+        assert result["rsi_overbought"] == 75.0
+        assert "rsi_oversold" in result
+        assert result["rsi_oversold"] == 25.0
+
+    def test_scan_status_scores_have_atr_pct(self, surge_engine):
+        """Each score entry in scan_status has atr_pct field."""
+        result = surge_engine.scan_status()
+        for score_entry in result["scores"]:
+            assert "atr_pct" in score_entry
+
+    def test_scan_status_scores_have_consecutive_sl(self, surge_engine):
+        """Each score entry in scan_status has consecutive_sl field."""
+        # Set some SL count
+        surge_engine._consecutive_sl_count["BTC/USDT"] = 2
+        result = surge_engine.scan_status()
+        btc_score = next(s for s in result["scores"] if s["symbol"] == "BTC/USDT")
+        assert btc_score["consecutive_sl"] == 2
+
+    def test_scan_status_atr_from_candle_data(self, surge_engine):
+        """atr_pct in scores reflects candle ATR data."""
+        surge_engine._candle_atr_pct["ETH/USDT"] = 1.23
+        result = surge_engine.scan_status()
+        eth_score = next(s for s in result["scores"] if s["symbol"] == "ETH/USDT")
+        assert eth_score["atr_pct"] == 1.23
