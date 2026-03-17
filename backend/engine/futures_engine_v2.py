@@ -87,6 +87,7 @@ class FuturesEngineV2:
             max_position_pct=v2_cfg.tier1_max_position_pct,
             min_confidence=v2_cfg.tier1_min_confidence,
             cooldown_seconds=v2_cfg.tier1_cooldown_seconds,
+            exchange_name=self.EXCHANGE_NAME,
         )
 
         self._tier2 = Tier2Scanner(
@@ -281,7 +282,7 @@ class FuturesEngineV2:
             await asyncio.sleep(8 * 3600)
 
     async def _persist_loop(self) -> None:
-        """5분마다 포지션 상태 DB 영속화."""
+        """5분마다 포지션 상태 DB 영속화 + 포트폴리오 스냅샷."""
         await asyncio.sleep(120)
         while self._is_running:
             try:
@@ -289,6 +290,30 @@ class FuturesEngineV2:
                 async with sf() as session:
                     await self._positions.persist_to_db(session, self.EXCHANGE_NAME)
                     await session.commit()
+
+                    # 포트폴리오 스냅샷 저장 (daily_pnl 계산용)
+                    try:
+                        snap = await self._pm.take_snapshot(session)
+                        if snap is not None:
+                            await session.commit()
+                            logger.debug(
+                                "v2_snapshot_taken",
+                                total=round(snap.total_value_krw, 2),
+                                cash=round(snap.cash_balance_krw, 2),
+                            )
+
+                            # 포트폴리오 업데이트 브로드캐스트
+                            if self._broadcast_callback:
+                                summary = await self._pm.get_portfolio_summary(
+                                    session,
+                                )
+                                await self._broadcast_callback({
+                                    "event": "portfolio_update",
+                                    "exchange": self.EXCHANGE_NAME,
+                                    "data": summary,
+                                })
+                    except Exception as snap_err:
+                        logger.warning("v2_snapshot_error", error=str(snap_err))
             except Exception as e:
                 logger.warning("v2_persist_error", error=str(e))
             await asyncio.sleep(300)

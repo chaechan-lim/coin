@@ -111,6 +111,7 @@ coin/
 | BalanceGuard 자동 복구 (COIN-15) | 일시 정지 후 자동 복구 메커니즘 추가. `check_balance()`에서 divergence < warn_pct 3회 연속 안정 시 자동 `resume()`. `POST /api/v1/engine/balance-guard/resume` 수동 재개 엔드포인트 + `GET /api/v1/engine/balance-guard/status` 상태 조회 엔드포인트 추가. `get_status()`에 balance_guard 상세 정보 포함. |
 | BalanceGuard 선물 잔고 계산 수정 (COIN-19) | `_fetch_exchange_balance()` 선물 잔고 계산을 USDT.free → wallet(total-unrealizedPnL)-totalMargin으로 수정. 내부 장부 자동 재동기화 메커니즘 추가 (5회 연속 critical → resync_callback → 자동 재개). FuturesEngineV2에 resync 콜백 연결. 테스트 26개 추가. |
 | 선물 position_sync 잔고 불일치 수정 (COIN-18) | `sync_exchange_positions`에서 선물 포지션 청산 시 `invested + pnl_amount`을 `cash_balance`에 반환. 강제청산 시 `max(0)` 보호. `_realized_pnl`도 동기화. 거래소 SL/TP/트레일링으로 청산된 포지션의 마진이 내부 장부에 미반영되던 버그 해결. |
+| V2 스냅샷·전략 로그 (COIN-21) | `_persist_loop`에 `take_snapshot()` 호출 추가 (5분 간격, daily_pnl 계산용). `Tier1Manager._evaluate_coin()`에 StrategyLog 기록 추가 (HOLD 포함 모든 판단, 레짐 정보 포함, was_executed 구분). 프론트엔드 선물 성과 차트/테이블 데이터 공백 해결. 테스트 17건 추가. |
 | 서지 엔진 진입 필터 강화 (COIN-20) | 라이브 승률 38% 개선: min_score 0.40→0.55, RSI overbought 85→75/oversold 15→25, ATR 변동성 필터(min_atr_pct=0.5%), 연속 SL 쿨다운(2+연속→180분 차단), SL 2→2.5%/TP 4→3%/trailing 1→0.5%. 백테스트 CLI 파라미터 추가. 테스트 31개 추가(1178 total). |
 
 ### 낮은 우선순위
