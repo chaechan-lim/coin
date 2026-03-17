@@ -216,6 +216,8 @@ Use this structure:
    - `engine._ec.*` for exchange config, never hardcode exchange strings
    - Live indicators lowercase (`sma_20`), backtest uppercase (`SMA_20`)
 4. **Commit at logical checkpoints** with conventional prefixes.
+   - **NEVER commit `.symphony-workpad.md` or `.symphony-*.json` files** — these are
+     session-local and gitignored. Committing them causes merge conflicts.
 5. **Update the workpad** after each meaningful milestone.
 6. **Scope guard**: If you discover something that should be fixed but is outside
    the current issue scope, add it to `.symphony-followup.json`. Do NOT expand scope.
