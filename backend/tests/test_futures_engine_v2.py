@@ -138,6 +138,43 @@ class TestStatus:
         assert "tier2_positions" in status
         assert "balance_guard_paused" in status
 
+    def test_get_status_includes_balance_guard_detail(self, engine):
+        """COIN-15: get_status()에 balance_guard 상세 정보 포함."""
+        status = engine.get_status()
+        assert "balance_guard" in status
+        bg = status["balance_guard"]
+        assert "is_paused" in bg
+        assert "consecutive_stable" in bg
+        assert "auto_resume_stable_count" in bg
+
+
+class TestBalanceGuardAPI:
+    """COIN-15: BalanceGuard 수동 재개 및 상태 API 테스트."""
+
+    def test_resume_balance_guard_not_paused(self, engine):
+        """일시 정지되지 않은 상태에서 resume 호출."""
+        result = engine.resume_balance_guard()
+        assert result["was_paused"] is False
+        assert result["is_paused"] is False
+        assert "guard" in result
+
+    def test_resume_balance_guard_when_paused(self, engine):
+        """일시 정지 상태에서 resume 호출 → 재개."""
+        engine._guard._paused = True
+        result = engine.resume_balance_guard()
+        assert result["was_paused"] is True
+        assert result["is_paused"] is False
+
+    def test_get_balance_guard_status(self, engine):
+        """BalanceGuard 상태 조회."""
+        status = engine.get_balance_guard_status()
+        assert isinstance(status, dict)
+        assert "is_paused" in status
+        assert "consecutive_warnings" in status
+        assert "consecutive_stable" in status
+        assert "warn_pct" in status
+        assert "pause_pct" in status
+
 
 class TestAPICompatibility:
     """종목/로테이션 탭 및 전략 성과 탭 API 호환성 테스트."""
