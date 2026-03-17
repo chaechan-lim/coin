@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.enums import Direction
+from core.models import StrategyLog
 from engine.regime_detector import RegimeDetector, RegimeState
 from engine.strategy_selector import StrategySelector
 from engine.safe_order_pipeline import SafeOrderPipeline, OrderRequest
@@ -55,6 +56,7 @@ class Tier1Manager:
         max_position_pct: float = 0.15,
         min_confidence: float = 0.4,
         cooldown_seconds: int = 93600,  # 26h (백테스트 최적 cd312 = 312*5min)
+        exchange_name: str = "binance_futures",
     ):
         self._coins = coins
         self._safe_order = safe_order
@@ -67,6 +69,7 @@ class Tier1Manager:
         self._max_position_pct = max_position_pct
         self._min_confidence = min_confidence
         self._cooldown_sec = cooldown_seconds
+        self._exchange_name = exchange_name
         self._last_exit_time: dict[str, float] = {}  # symbol → timestamp
 
         # 관측용 상태 (COIN-17)
@@ -173,13 +176,29 @@ class Tier1Manager:
             if price > 0:
                 pos_state.update_extreme(price)
             if await self._check_sl_tp(session, symbol, pos_state, price, atr):
+                self._log_strategy_signal(
+                    session, symbol, decision, was_executed=False,
+                    regime=regime,
+                )
                 return "sl_tp"
 
         if decision.is_hold:
+            self._log_strategy_signal(
+                session, symbol, decision, was_executed=False,
+                regime=regime,
+            )
             return "hold"
 
         # SAR: 방향 전환
         outcome = await self._execute_decision(session, symbol, decision, current_dir, df_5m)
+
+        # 전략 시그널 로그 기록
+        was_executed = outcome in ("opened", "sar", "flat_close")
+        self._log_strategy_signal(
+            session, symbol, decision, was_executed=was_executed,
+            regime=regime,
+        )
+
         return outcome
 
     async def _execute_decision(
@@ -398,3 +417,55 @@ class Tier1Manager:
             return 0.0
         val = df["atr_14"].iloc[-1]
         return float(val) if pd.notna(val) else 0.0
+
+    @staticmethod
+    def _direction_to_signal_type(direction: Direction) -> str:
+        """Direction enum을 StrategyLog signal_type 문자열로 변환."""
+        if direction == Direction.LONG:
+            return "BUY"
+        elif direction == Direction.SHORT:
+            return "SELL"
+        return "HOLD"
+
+    def _log_strategy_signal(
+        self,
+        session: AsyncSession,
+        symbol: str,
+        decision: StrategyDecision,
+        *,
+        was_executed: bool,
+        regime: RegimeState,
+    ) -> None:
+        """전략 시그널을 StrategyLog 테이블에 기록.
+
+        V2 전략(mean_reversion, vol_breakout, trend_follower)의 매 평가마다
+        HOLD 포함 모든 판단을 기록하여 전략 추적 가능하게 한다.
+        """
+        signal_type = (
+            "HOLD" if decision.is_hold
+            else self._direction_to_signal_type(decision.direction)
+        )
+
+        # 지표 딕셔너리: 전략 제공 지표 + 레짐 정보
+        indicators = dict(decision.indicators) if decision.indicators else {}
+        indicators["regime"] = regime.regime.value
+        indicators["regime_confidence"] = round(regime.confidence, 3)
+        # numpy float → Python float 변환
+        cleaned = {}
+        for k, v in indicators.items():
+            try:
+                cleaned[k] = float(v) if hasattr(v, "__float__") else v
+            except (TypeError, ValueError):
+                cleaned[k] = str(v)
+
+        strategy_log = StrategyLog(
+            exchange=self._exchange_name,
+            strategy_name=decision.strategy_name,
+            symbol=symbol,
+            signal_type=signal_type,
+            confidence=float(decision.confidence) if decision.confidence is not None else None,
+            reason=decision.reason,
+            indicators=cleaned,
+            was_executed=was_executed,
+        )
+        session.add(strategy_log)

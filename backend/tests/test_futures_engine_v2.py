@@ -1,4 +1,5 @@
 """FuturesEngineV2 테스트."""
+import asyncio
 import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -324,3 +325,119 @@ class TestHealthMonitorCompat:
         result = hm._check_error_rate_trend()
         assert result.healthy is False
         assert "BTC/USDT" in result.detail
+
+
+class TestSnapshotInPersistLoop:
+    """COIN-21: _persist_loop에서 포트폴리오 스냅샷 저장 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_persist_loop_calls_take_snapshot(self, engine, mock_pm, session_factory):
+        """_persist_loop가 take_snapshot을 호출."""
+        mock_pm.take_snapshot = AsyncMock(return_value=MagicMock(
+            total_value_krw=500.0,
+            cash_balance_krw=300.0,
+        ))
+        mock_pm.get_portfolio_summary = AsyncMock(return_value={
+            "total_value_krw": 500.0,
+            "cash_balance_krw": 300.0,
+        })
+
+        engine._is_running = True
+
+        # _persist_loop를 한 번만 실행하도록 시뮬레이션
+        with patch("engine.futures_engine_v2.get_session_factory", return_value=session_factory):
+            call_count = 0
+            async def mock_sleep(seconds):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    # 첫 sleep (120초 초기 대기)은 스킵
+                    return
+                # 두 번째 sleep (300초)에서 루프 중지
+                engine._is_running = False
+
+            with patch("asyncio.sleep", side_effect=mock_sleep):
+                await engine._persist_loop()
+
+        mock_pm.take_snapshot.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_persist_loop_broadcasts_on_snapshot(self, engine, mock_pm, session_factory):
+        """스냅샷 성공 시 브로드캐스트 콜백이 호출됨."""
+        mock_pm.take_snapshot = AsyncMock(return_value=MagicMock(
+            total_value_krw=500.0,
+            cash_balance_krw=300.0,
+        ))
+        mock_pm.get_portfolio_summary = AsyncMock(return_value={
+            "total_value_krw": 500.0,
+        })
+
+        broadcast_cb = AsyncMock()
+        engine.set_broadcast_callback(broadcast_cb)
+        engine._is_running = True
+
+        with patch("engine.futures_engine_v2.get_session_factory", return_value=session_factory):
+            call_count = 0
+            async def mock_sleep(seconds):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return
+                engine._is_running = False
+
+            with patch("asyncio.sleep", side_effect=mock_sleep):
+                await engine._persist_loop()
+
+        broadcast_cb.assert_called_once()
+        call_args = broadcast_cb.call_args[0][0]
+        assert call_args["event"] == "portfolio_update"
+        assert call_args["exchange"] == "binance_futures"
+
+    @pytest.mark.asyncio
+    async def test_persist_loop_no_broadcast_when_snapshot_none(self, engine, mock_pm, session_factory):
+        """스냅샷이 None(스파이크)이면 브로드캐스트 미호출."""
+        mock_pm.take_snapshot = AsyncMock(return_value=None)
+
+        broadcast_cb = AsyncMock()
+        engine.set_broadcast_callback(broadcast_cb)
+        engine._is_running = True
+
+        with patch("engine.futures_engine_v2.get_session_factory", return_value=session_factory):
+            call_count = 0
+            async def mock_sleep(seconds):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return
+                engine._is_running = False
+
+            with patch("asyncio.sleep", side_effect=mock_sleep):
+                await engine._persist_loop()
+
+        broadcast_cb.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_persist_loop_handles_snapshot_error(self, engine, mock_pm, session_factory):
+        """스냅샷 에러 시 루프가 중단되지 않음."""
+        mock_pm.take_snapshot = AsyncMock(side_effect=Exception("DB error"))
+
+        engine._is_running = True
+
+        with patch("engine.futures_engine_v2.get_session_factory", return_value=session_factory):
+            call_count = 0
+            async def mock_sleep(seconds):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return
+                engine._is_running = False
+
+            with patch("asyncio.sleep", side_effect=mock_sleep):
+                # Should not raise
+                await engine._persist_loop()
+
+        mock_pm.take_snapshot.assert_called_once()
+
+    def test_exchange_name_passed_to_tier1(self, engine):
+        """FuturesEngineV2가 Tier1Manager에 exchange_name을 전달."""
+        assert engine._tier1._exchange_name == "binance_futures"

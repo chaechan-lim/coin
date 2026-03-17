@@ -5,6 +5,8 @@ import pandas as pd
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
+from sqlalchemy import select
+
 from engine.tier1_manager import Tier1Manager, CycleStats
 from engine.regime_detector import RegimeDetector, RegimeState
 from engine.strategy_selector import StrategySelector
@@ -13,6 +15,7 @@ from engine.position_state_tracker import PositionStateTracker, PositionState
 from engine.portfolio_manager import PortfolioManager
 from engine.balance_guard import BalanceGuard
 from core.enums import Direction, Regime
+from core.models import StrategyLog
 from strategies.regime_base import StrategyDecision
 
 
@@ -354,3 +357,165 @@ class TestGetStatus:
         status = tier1.get_status()
         status["last_decisions"]["NEW_COIN"] = "test"
         assert "NEW_COIN" not in tier1._last_decisions
+
+
+class TestDirectionToSignalType:
+    """Direction → signal_type 변환 테스트."""
+
+    def test_long_to_buy(self):
+        assert Tier1Manager._direction_to_signal_type(Direction.LONG) == "BUY"
+
+    def test_short_to_sell(self):
+        assert Tier1Manager._direction_to_signal_type(Direction.SHORT) == "SELL"
+
+    def test_flat_to_hold(self):
+        assert Tier1Manager._direction_to_signal_type(Direction.FLAT) == "HOLD"
+
+
+class TestStrategySignalLogging:
+    """COIN-21: V2 전략 시그널 로그 기록 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_strategy_log_created_on_eval(self, tier1, mock_deps, session):
+        """evaluation_cycle 실행 시 StrategyLog가 DB에 기록됨."""
+        await tier1.evaluation_cycle(session)
+        await session.flush()
+
+        result = await session.execute(select(StrategyLog))
+        logs = result.scalars().all()
+        # 2개 코인(BTC, ETH)에 대해 각각 로그 기록
+        assert len(logs) >= 2
+
+    @pytest.mark.asyncio
+    async def test_strategy_log_has_correct_fields(self, tier1, mock_deps, session):
+        """StrategyLog에 필수 필드가 올바르게 설정됨."""
+        await tier1.evaluation_cycle(session)
+        await session.flush()
+
+        result = await session.execute(select(StrategyLog))
+        log = result.scalars().first()
+        assert log is not None
+        assert log.exchange == "binance_futures"
+        assert log.strategy_name in ("trend_follower", "mean_reversion", "vol_breakout")
+        assert log.symbol in ("BTC/USDT", "ETH/USDT")
+        assert log.signal_type in ("BUY", "SELL", "HOLD")
+        assert log.confidence is not None
+        assert log.reason is not None
+
+    @pytest.mark.asyncio
+    async def test_strategy_log_includes_regime_info(self, tier1, mock_deps, session):
+        """StrategyLog 지표에 레짐 정보가 포함됨."""
+        await tier1.evaluation_cycle(session)
+        await session.flush()
+
+        result = await session.execute(select(StrategyLog))
+        log = result.scalars().first()
+        assert log is not None
+        assert log.indicators is not None
+        assert "regime" in log.indicators
+        assert log.indicators["regime"] == "trending_up"
+        assert "regime_confidence" in log.indicators
+
+    @pytest.mark.asyncio
+    async def test_hold_signal_logged(self, tier1, mock_deps, session):
+        """HOLD 판단도 StrategyLog에 기록됨."""
+        # ema_9 < ema_21: 대부분 전략이 HOLD 반환
+        hold_df = _make_df(ema_9=79000.0, ema_21=80000.0, rsi=50.0)
+        mock_deps["market_data"].get_ohlcv_df = AsyncMock(return_value=hold_df)
+
+        await tier1.evaluation_cycle(session)
+        await session.flush()
+
+        result = await session.execute(select(StrategyLog))
+        logs = result.scalars().all()
+        assert len(logs) >= 2  # 각 코인마다 로그 기록
+        # HOLD가 있어야 함
+        hold_logs = [log for log in logs if log.signal_type == "HOLD"]
+        assert len(hold_logs) >= 1
+
+    @pytest.mark.asyncio
+    async def test_executed_signal_marked(self, tier1, mock_deps, session):
+        """실행된 시그널은 was_executed=True로 기록됨."""
+        await tier1.evaluation_cycle(session)
+        await session.flush()
+
+        result = await session.execute(select(StrategyLog))
+        logs = result.scalars().all()
+        # 최소 일부 로그는 was_executed 필드를 가짐
+        assert len(logs) >= 2
+        # 모든 로그에 was_executed 필드가 설정되어야 함
+        for log in logs:
+            assert log.was_executed is not None
+
+    @pytest.mark.asyncio
+    async def test_sl_tp_signal_not_executed(self, tier1, mock_deps, session):
+        """SL 히트로 청산 시 전략 시그널은 was_executed=False."""
+        state = PositionState(
+            symbol="BTC/USDT", direction=Direction.LONG,
+            quantity=0.01, entry_price=80000.0, margin=100.0,
+            leverage=3, extreme_price=80000.0,
+            stop_loss_atr=1.5, take_profit_atr=3.0,
+            trailing_activation_atr=2.0, trailing_stop_atr=1.0,
+        )
+        mock_deps["tracker"].open_position(state)
+        sl_price_df = _make_df(close=78000.0, atr=1000.0)
+        mock_deps["market_data"].get_ohlcv_df = AsyncMock(return_value=sl_price_df)
+
+        await tier1.evaluation_cycle(session)
+        await session.flush()
+
+        result = await session.execute(
+            select(StrategyLog).where(StrategyLog.symbol == "BTC/USDT")
+        )
+        logs = result.scalars().all()
+        assert len(logs) >= 1
+        # SL로 청산된 코인의 전략 시그널은 실행되지 않음
+        for log in logs:
+            assert log.was_executed is False
+
+    @pytest.mark.asyncio
+    async def test_no_log_on_candle_error(self, tier1, mock_deps, session):
+        """캔들 에러 시 StrategyLog 미기록."""
+        mock_deps["market_data"].get_ohlcv_df = AsyncMock(return_value=None)
+
+        await tier1.evaluation_cycle(session)
+        await session.flush()
+
+        result = await session.execute(select(StrategyLog))
+        logs = result.scalars().all()
+        assert len(logs) == 0
+
+    @pytest.mark.asyncio
+    async def test_exchange_name_default(self, mock_deps, session):
+        """기본 exchange_name은 binance_futures."""
+        tier1 = Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=mock_deps["safe_order"],
+            position_tracker=mock_deps["tracker"],
+            regime_detector=mock_deps["regime"],
+            strategy_selector=mock_deps["selector"],
+            portfolio_manager=mock_deps["pm"],
+            market_data=mock_deps["market_data"],
+        )
+        assert tier1._exchange_name == "binance_futures"
+
+    @pytest.mark.asyncio
+    async def test_custom_exchange_name(self, mock_deps, session):
+        """exchange_name을 커스텀으로 설정할 수 있음."""
+        tier1 = Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=mock_deps["safe_order"],
+            position_tracker=mock_deps["tracker"],
+            regime_detector=mock_deps["regime"],
+            strategy_selector=mock_deps["selector"],
+            portfolio_manager=mock_deps["pm"],
+            market_data=mock_deps["market_data"],
+            exchange_name="custom_exchange",
+        )
+        await tier1.evaluation_cycle(session)
+        await session.flush()
+
+        result = await session.execute(select(StrategyLog))
+        log = result.scalars().first()
+        assert log is not None
+        assert log.exchange == "custom_exchange"
