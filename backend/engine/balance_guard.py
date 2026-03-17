@@ -3,15 +3,23 @@ BalanceGuard — 잔고 무결성 감시.
 
 거래소 실제 잔고와 내부 장부를 교차 검증하여
 괴리 발생 시 경고 → 일시 정지 → 복구를 자동으로 수행한다.
+
+선물 잔고 계산:
+  USDT.free에는 unrealizedPnL이 포함되어 내부 장부와 불일치 발생.
+  올바른 계산: wallet = total - unrealizedPnL, cash = wallet - totalMargin.
 """
 import structlog
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Callable, Awaitable, Optional
 
 from exchange.base import ExchangeAdapter
 from core.event_bus import emit_event
 
 logger = structlog.get_logger(__name__)
+
+# 자동 재동기화 콜백 타입: 새로운 cash 값을 받아 내부 장부를 갱신
+ResyncCallback = Callable[[float], Awaitable[None]]
 
 
 @dataclass
@@ -35,6 +43,9 @@ class BalanceGuard:
     - 자동 복구: 일시 정지 후 warn_pct 미만이 연속 N회 → 자동 재개.
     """
 
+    # 연속 N회 critical 시 자동 재동기화 트리거
+    DEFAULT_AUTO_RESYNC_COUNT = 5
+
     def __init__(
         self,
         exchange: ExchangeAdapter,
@@ -43,17 +54,24 @@ class BalanceGuard:
         pause_pct: float = 5.0,
         snapshot_spike_pct: float = 10.0,
         auto_resume_stable_count: int = 3,
+        resync_callback: Optional[ResyncCallback] = None,
+        auto_resync_count: int = DEFAULT_AUTO_RESYNC_COUNT,
     ):
         self._exchange = exchange
         self._exchange_name = exchange_name
+        self._is_futures = "futures" in exchange_name
         self._warn_pct = warn_pct
         self._pause_pct = pause_pct
         self._snapshot_spike_pct = snapshot_spike_pct
         self._auto_resume_stable_count = auto_resume_stable_count
+        self._resync_callback = resync_callback
+        self._auto_resync_count = auto_resync_count
         self._paused = False
         self._last_check: BalanceCheckResult | None = None
         self._consecutive_warnings = 0
         self._consecutive_stable = 0
+        self._consecutive_critical = 0
+        self._resync_count = 0
 
     @property
     def is_paused(self) -> bool:
@@ -67,11 +85,12 @@ class BalanceGuard:
         """재개 (수동 또는 자동 복구).
 
         Args:
-            reason: 재개 사유 ("manual" 또는 "auto_recovery").
+            reason: 재개 사유 ("manual", "auto_recovery", "resync").
         """
         self._paused = False
         self._consecutive_warnings = 0
         self._consecutive_stable = 0
+        self._consecutive_critical = 0
         logger.info(
             "balance_guard_resumed",
             exchange=self._exchange_name,
@@ -110,6 +129,7 @@ class BalanceGuard:
         if is_critical:
             self._consecutive_warnings += 1
             self._consecutive_stable = 0
+            self._consecutive_critical += 1
             self._paused = True
             logger.error(
                 "balance_guard_CRITICAL",
@@ -117,6 +137,7 @@ class BalanceGuard:
                 exchange_bal=round(exchange_balance, 4),
                 internal_bal=round(internal_balance, 4),
                 divergence_pct=result.divergence_pct,
+                consecutive_critical=self._consecutive_critical,
             )
             await emit_event(
                 "critical", "balance_guard",
@@ -124,9 +145,18 @@ class BalanceGuard:
                 detail=f"거래소: {exchange_balance:.4f}, 내부: {internal_balance:.4f}",
                 metadata={"divergence_pct": result.divergence_pct},
             )
+
+            # 자동 재동기화: N회 연속 critical → 내부 장부를 거래소 잔고로 강제 재초기화
+            if (
+                self._resync_callback
+                and self._consecutive_critical >= self._auto_resync_count
+                and exchange_balance > 0
+            ):
+                await self._trigger_resync(exchange_balance)
         elif is_warning:
             self._consecutive_warnings += 1
             self._consecutive_stable = 0
+            self._consecutive_critical = 0
             logger.warning(
                 "balance_guard_warning",
                 exchange=self._exchange_name,
@@ -144,6 +174,7 @@ class BalanceGuard:
                 )
         else:
             self._consecutive_warnings = 0
+            self._consecutive_critical = 0
             # 자동 복구: 일시 정지 상태에서 안정 체크 연속 N회 시 자동 재개
             if self._paused:
                 self._consecutive_stable += 1
@@ -238,13 +269,21 @@ class BalanceGuard:
         return True, "ok"
 
     async def _fetch_exchange_balance(self) -> float:
-        """거래소에서 실제 가용 잔고를 가져온다."""
+        """거래소에서 실제 가용 잔고를 가져온다.
+
+        선물: walletBalance - totalMargin (USDT.free는 unrealizedPnL 포함으로 부정확).
+        현물: USDT.free 또는 KRW.free.
+        """
         try:
             balance = await self._exchange.fetch_balance()
+
+            if self._is_futures:
+                return await self._calc_futures_available_cash(balance)
+
+            # 현물: free 잔고 사용
             usdt = balance.get("USDT")
             if usdt:
                 return usdt.free
-            # KRW fallback (현물)
             krw = balance.get("KRW")
             if krw:
                 return krw.free
@@ -253,6 +292,67 @@ class BalanceGuard:
             logger.warning("balance_fetch_failed", error=str(e))
             return 0.0
 
+    async def _calc_futures_available_cash(self, balance: dict) -> float:
+        """선물 가용 현금 계산.
+
+        USDT.free에는 unrealizedPnL이 포함되어 이중계산 위험.
+        올바른 계산:
+          wallet = USDT.total - sum(unrealizedPnL)
+          available_cash = wallet - sum(initialMargin)
+        """
+        cash_bal = balance.get("USDT")
+        if not cash_bal:
+            return 0.0
+
+        try:
+            raw_positions = await self._exchange._exchange.fetch_positions()
+            total_margin = 0.0
+            total_unrealized = 0.0
+            for fp in raw_positions:
+                if float(fp.get("contracts", 0) or 0) > 0:
+                    total_margin += float(fp.get("initialMargin", 0) or 0)
+                    total_unrealized += float(fp.get("unrealizedPnl", 0) or 0)
+
+            wallet = cash_bal.total - total_unrealized
+            available_cash = wallet - total_margin
+            return available_cash
+        except Exception as e:
+            logger.warning(
+                "futures_balance_calc_failed",
+                error=str(e),
+                fallback="usdt_free",
+            )
+            # 폴백: 부정확하지만 0보다 나음
+            return cash_bal.free
+
+    async def _trigger_resync(self, exchange_balance: float) -> None:
+        """내부 장부를 거래소 잔고로 강제 재동기화 + 자동 재개."""
+        try:
+            await self._resync_callback(exchange_balance)
+            self._resync_count += 1
+            self.resume(reason="resync")
+            logger.warning(
+                "balance_guard_resync_triggered",
+                exchange=self._exchange_name,
+                new_cash=round(exchange_balance, 4),
+                resync_count=self._resync_count,
+            )
+            await emit_event(
+                "warning", "balance_guard",
+                f"내부 장부 재동기화 #{self._resync_count} — 자동 재개",
+                detail=f"새 잔고: {exchange_balance:.4f} USDT",
+                metadata={
+                    "exchange_balance": exchange_balance,
+                    "resync_count": self._resync_count,
+                },
+            )
+        except Exception as e:
+            logger.error(
+                "balance_guard_resync_failed",
+                exchange=self._exchange_name,
+                error=str(e),
+            )
+
     def get_status(self) -> dict:
         """BalanceGuard 상태 정보 반환 (API용)."""
         last = self._last_check
@@ -260,7 +360,11 @@ class BalanceGuard:
             "is_paused": self._paused,
             "consecutive_warnings": self._consecutive_warnings,
             "consecutive_stable": self._consecutive_stable,
+            "consecutive_critical": self._consecutive_critical,
             "auto_resume_stable_count": self._auto_resume_stable_count,
+            "auto_resync_count": self._auto_resync_count,
+            "resync_count": self._resync_count,
+            "is_futures": self._is_futures,
             "warn_pct": self._warn_pct,
             "pause_pct": self._pause_pct,
             "last_check": {
