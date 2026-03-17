@@ -2781,3 +2781,285 @@ class TestIsFuturesCaching:
         # 선물은 reconcile을 건너뜀 → cash 변화 없음
         await pm.reconcile_cash_from_db(session)
         assert pm.cash_balance == original_cash
+
+
+# ── COIN-18: 선물 position_sync 청산 시 cash 반환 테스트 ─────────────
+
+
+@pytest.mark.asyncio
+async def test_futures_sync_returns_cash_on_tp_clearance(session):
+    """선물 포지션이 TP로 청산되면 margin + PnL이 cash에 반환되어야 한다."""
+    from exchange.base import Balance
+
+    initial_cash = 1000.0
+    pm = PortfolioManager(
+        market_data=_make_market_data({"ADA/USDT": 0.55}),
+        initial_balance_krw=initial_cash,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+    # cash를 포지션 진입 후 상태로 설정 (마진 차감)
+    invested = 8.65
+    pm.cash_balance = initial_cash - invested  # 991.35
+
+    # DB에 ADA/USDT long 포지션 (entry 0.50, 현재가 0.55, lev 3)
+    # pnl_pct = (0.55-0.50)/0.50 * 3 * 100 = +30%
+    session.add(Position(
+        exchange="binance_futures", symbol="ADA/USDT",
+        quantity=51.9, average_buy_price=0.50,
+        total_invested=invested, is_paper=False,
+        direction="long", leverage=3, margin_used=invested,
+        stop_loss_pct=5.0, take_profit_pct=10.0,
+    ))
+    await session.flush()
+
+    # 거래소: 포지션 없음 (TP로 청산됨)
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=1000, used=0, total=1000),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    cash_before = pm.cash_balance
+    await pm.sync_exchange_positions(session, adapter, ["ADA/USDT"])
+    await session.flush()
+
+    # pnl_amount = 8.65 * 30 / 100 = 2.595
+    # cash_returned = 8.65 + 2.595 = 11.245
+    expected_pnl = invested * 30.0 / 100
+    expected_cash_returned = invested + expected_pnl
+    assert pm.cash_balance == pytest.approx(cash_before + expected_cash_returned, abs=0.01)
+    # realized_pnl도 업데이트됨
+    assert pm._realized_pnl == pytest.approx(expected_pnl, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_futures_sync_returns_cash_on_sl_clearance(session):
+    """선물 포지션이 SL로 청산되면 margin - 손실이 cash에 반환되어야 한다."""
+    from exchange.base import Balance
+
+    initial_cash = 500.0
+    pm = PortfolioManager(
+        market_data=_make_market_data({"AVAX/USDT": 19.0}),
+        initial_balance_krw=initial_cash,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+    invested = 6.9
+    pm.cash_balance = initial_cash - invested  # 493.1
+
+    # DB에 AVAX/USDT long 포지션 (entry 20, 현재가 19, lev 3)
+    # pnl_pct = (19-20)/20 * 3 * 100 = -15%
+    session.add(Position(
+        exchange="binance_futures", symbol="AVAX/USDT",
+        quantity=1.035, average_buy_price=20.0,
+        total_invested=invested, is_paper=False,
+        direction="long", leverage=3, margin_used=invested,
+        stop_loss_pct=5.0, take_profit_pct=10.0,
+    ))
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=499, used=0, total=499),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    cash_before = pm.cash_balance
+    await pm.sync_exchange_positions(session, adapter, ["AVAX/USDT"])
+    await session.flush()
+
+    # pnl_amount = 6.9 * (-15) / 100 = -1.035
+    # cash_returned = 6.9 + (-1.035) = 5.865 (margin minus loss)
+    expected_pnl = invested * (-15.0) / 100
+    expected_cash_returned = invested + expected_pnl
+    assert expected_cash_returned > 0  # SL loss is less than margin
+    assert pm.cash_balance == pytest.approx(cash_before + expected_cash_returned, abs=0.01)
+    assert pm._realized_pnl == pytest.approx(expected_pnl, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_futures_sync_cash_zero_on_liquidation(session):
+    """강제청산(PnL > -100%)이면 cash 반환 0 (max(invested+pnl, 0))."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"ETH/USDT": 1300.0}),
+        initial_balance_krw=500,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    invested = 66.7
+    pm.cash_balance = 500 - invested  # 433.3
+
+    # entry 2000, 현재가 1300, lev 3 → pnl_pct = -105%
+    session.add(Position(
+        exchange="binance_futures", symbol="ETH/USDT",
+        quantity=0.1, average_buy_price=2000.0,
+        total_invested=invested, is_paper=False,
+        direction="long", leverage=3, margin_used=invested,
+    ))
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=200, used=0, total=200),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    cash_before = pm.cash_balance
+    await pm.sync_exchange_positions(session, adapter, ["ETH/USDT"])
+    await session.flush()
+
+    # pnl_pct = -105%, pnl_amount = 66.7 * -105/100 = -70.035
+    # cash_returned = max(66.7 + (-70.035), 0) = max(-3.335, 0) = 0
+    assert pm.cash_balance == pytest.approx(cash_before, abs=0.01)
+    # realized_pnl still updated with the loss
+    pnl_amount = invested * (-105.0) / 100
+    assert pm._realized_pnl == pytest.approx(pnl_amount, abs=0.5)
+
+
+@pytest.mark.asyncio
+async def test_futures_sync_returns_cash_multiple_positions(session):
+    """여러 선물 포지션이 동시에 청산되면 각각의 margin+PnL이 반환되어야 한다."""
+    from exchange.base import Balance
+
+    initial_cash = 500.0
+    pm = PortfolioManager(
+        market_data=_make_market_data({
+            "ADA/USDT": 0.55,   # pnl +30% (long, entry 0.50, lev 3)
+            "FIL/USDT": 5.5,    # pnl +10% (long, entry 5.33, lev 3)
+        }),
+        initial_balance_krw=initial_cash,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    invested_ada = 8.65
+    invested_fil = 8.62
+    total_invested = invested_ada + invested_fil
+    pm.cash_balance = initial_cash - total_invested  # 482.73
+
+    session.add(Position(
+        exchange="binance_futures", symbol="ADA/USDT",
+        quantity=51.9, average_buy_price=0.50,
+        total_invested=invested_ada, is_paper=False,
+        direction="long", leverage=3, margin_used=invested_ada,
+        stop_loss_pct=5.0, take_profit_pct=10.0,
+    ))
+    session.add(Position(
+        exchange="binance_futures", symbol="FIL/USDT",
+        quantity=4.85, average_buy_price=5.33,
+        total_invested=invested_fil, is_paper=False,
+        direction="long", leverage=3, margin_used=invested_fil,
+        stop_loss_pct=5.0, take_profit_pct=10.0,
+    ))
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=500, used=0, total=500),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    cash_before = pm.cash_balance
+    await pm.sync_exchange_positions(session, adapter, ["ADA/USDT", "FIL/USDT"])
+    await session.flush()
+
+    # ADA: pnl_pct = (0.55-0.50)/0.50*3*100 = +30%, pnl_amount = 8.65*30/100 = 2.595
+    # FIL: pnl_pct = (5.5-5.33)/5.33*3*100 ≈ +9.57%, pnl_amount = 8.62*9.57/100 ≈ 0.825
+    pnl_ada = invested_ada * ((0.55 - 0.50) / 0.50 * 3 * 100) / 100
+    pnl_fil = invested_fil * ((5.5 - 5.33) / 5.33 * 3 * 100) / 100
+    total_cash_returned = (invested_ada + pnl_ada) + (invested_fil + pnl_fil)
+
+    assert pm.cash_balance == pytest.approx(cash_before + total_cash_returned, abs=0.1)
+    assert pm._realized_pnl == pytest.approx(pnl_ada + pnl_fil, abs=0.1)
+    assert len(pm._cleared_positions) == 2
+
+
+@pytest.mark.asyncio
+async def test_futures_sync_short_position_cash_return(session):
+    """숏 포지션이 청산되면 올바른 PnL 방향으로 cash 반환."""
+    from exchange.base import Balance
+
+    initial_cash = 1000.0
+    pm = PortfolioManager(
+        market_data=_make_market_data({"BTC/USDT": 48000.0}),
+        initial_balance_krw=initial_cash,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+    invested = 50.0
+    pm.cash_balance = initial_cash - invested  # 950
+
+    # short entry 50000, 현재가 48000 → 수익
+    # pnl_pct = (50000-48000)/50000 * 3 * 100 = +12%
+    session.add(Position(
+        exchange="binance_futures", symbol="BTC/USDT",
+        quantity=0.003, average_buy_price=50000.0,
+        total_invested=invested, is_paper=False,
+        direction="short", leverage=3, margin_used=invested,
+        stop_loss_pct=5.0, take_profit_pct=10.0,
+    ))
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=1000, used=0, total=1000),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    cash_before = pm.cash_balance
+    await pm.sync_exchange_positions(session, adapter, ["BTC/USDT"])
+    await session.flush()
+
+    # pnl_pct = (50000-48000)/50000 * 3 * 100 = +12%
+    # pnl_amount = 50 * 12 / 100 = 6.0
+    # cash_returned = 50 + 6 = 56
+    expected_pnl = invested * 12.0 / 100
+    expected_cash_returned = invested + expected_pnl
+    assert pm.cash_balance == pytest.approx(cash_before + expected_cash_returned, abs=0.01)
+    assert pm._realized_pnl == pytest.approx(expected_pnl, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_spot_sync_no_cash_return_on_clearance(session):
+    """현물 position_sync 청산은 기존 방식(actual_cash 덮어쓰기)으로 처리."""
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"MOCA/KRW": 23.1}),
+        initial_balance_krw=500_000,
+        is_paper=False,
+        exchange_name="bithumb",
+    )
+
+    session.add(Position(
+        exchange="bithumb", symbol="MOCA/KRW",
+        quantity=43.56, average_buy_price=23.1,
+        total_invested=1007, is_paper=False,
+    ))
+    await session.flush()
+
+    # 거래소에는 KRW만 있고 MOCA 없음
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "KRW": Balance(currency="KRW", free=315_000, used=0, total=315_000),
+    })
+
+    await pm.sync_exchange_positions(session, adapter, ["BTC/KRW"])
+    await session.flush()
+
+    # 현물: actual_cash로 덮어씀 (315,000)
+    assert pm.cash_balance == 315_000

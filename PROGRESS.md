@@ -110,6 +110,7 @@ coin/
 | V2 Tier1 평가 사이클 관측성 (COIN-17) | `evaluation_cycle()` 완료 시 `tier1_cycle_complete` info 로그 추가 (coins_evaluated, hold/low_conf/cooldown/sl_tp/executed 카운트, regime, elapsed_ms). `CycleStats` 데이터클래스로 사이클 결과 구조화. `Tier1Manager.get_status()` 메서드 + `GET /api/v1/engine/v2/tier1-status` 엔드포인트 추가 (cycle_count, last_cycle_at, last_action_at, last_decisions, active_positions, regime). |
 | BalanceGuard 자동 복구 (COIN-15) | 일시 정지 후 자동 복구 메커니즘 추가. `check_balance()`에서 divergence < warn_pct 3회 연속 안정 시 자동 `resume()`. `POST /api/v1/engine/balance-guard/resume` 수동 재개 엔드포인트 + `GET /api/v1/engine/balance-guard/status` 상태 조회 엔드포인트 추가. `get_status()`에 balance_guard 상세 정보 포함. |
 | BalanceGuard 선물 잔고 계산 수정 (COIN-19) | `_fetch_exchange_balance()` 선물 잔고 계산을 USDT.free → wallet(total-unrealizedPnL)-totalMargin으로 수정. 내부 장부 자동 재동기화 메커니즘 추가 (5회 연속 critical → resync_callback → 자동 재개). FuturesEngineV2에 resync 콜백 연결. 테스트 26개 추가. |
+| 선물 position_sync 잔고 불일치 수정 (COIN-18) | `sync_exchange_positions`에서 선물 포지션 청산 시 `invested + pnl_amount`을 `cash_balance`에 반환. 강제청산 시 `max(0)` 보호. `_realized_pnl`도 동기화. 거래소 SL/TP/트레일링으로 청산된 포지션의 마진이 내부 장부에 미반영되던 버그 해결. |
 
 ### 낮은 우선순위
 
