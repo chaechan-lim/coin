@@ -896,6 +896,13 @@ class SurgeEngine:
             # Remove from memory
             del self._positions[symbol]
 
+            # COIN-22: Set cooldown after exit (was missing — allowed immediate re-entry)
+            # Don't override longer extended cooldown (COIN-20 consecutive SL: 180min > 60min)
+            normal_cooldown_time = datetime.now(timezone.utc) + timedelta(seconds=self._cooldown_sec)
+            existing_cooldown = self._cooldowns.get(symbol)
+            if existing_cooldown is None or existing_cooldown < normal_cooldown_time:
+                self._cooldowns[symbol] = normal_cooldown_time
+
             hold_min = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
 
             logger.info("surge_exit",

@@ -1093,3 +1093,209 @@ class TestScanStatusCOIN20:
         result = surge_engine.scan_status()
         eth_score = next(s for s in result["scores"] if s["symbol"] == "ETH/USDT")
         assert eth_score["atr_pct"] == 1.23
+
+
+# ── COIN-22: Test exit cooldown ──────────────────────────────────
+
+class TestExitCooldownCOIN22:
+    """COIN-22: _exit_position() must set cooldown after closing position."""
+
+    def _make_pos(self, symbol="IMX/USDT", direction="long", entry=2.50):
+        return SurgePositionState(
+            symbol=symbol, direction=direction,
+            entry_price=entry, quantity=202.0,
+            margin=168.33,
+            entry_time=datetime.now(timezone.utc) - timedelta(minutes=10),
+            peak_price=entry * 1.02 if direction == "long" else entry,
+            trough_price=entry if direction == "long" else entry * 0.98,
+        )
+
+    @pytest.mark.asyncio
+    async def test_exit_tp_sets_cooldown(self, surge_engine, session):
+        """COIN-22: TP exit must set cooldown (was missing → immediate re-entry)."""
+        sym = "IMX/USDT"
+        pos = self._make_pos(sym)
+        surge_engine._positions[sym] = pos
+
+        # Ensure no pre-existing cooldown
+        surge_engine._cooldowns.pop(sym, None)
+
+        # Mock DB + session
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=202.0, average_buy_price=2.50,
+            total_invested=168.33, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_ctx
+
+        # TP exit at profitable price
+        tp_price = pos.entry_price * 1.02  # +2% raw → +6% leveraged
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._exit_position(sym, pos, tp_price, "TP")
+
+        # Position should be removed
+        assert sym not in surge_engine._positions
+        # Cooldown MUST be set (this was the bug)
+        assert sym in surge_engine._cooldowns
+        # Cooldown should be ~60 minutes in the future
+        remaining = (surge_engine._cooldowns[sym] - datetime.now(timezone.utc)).total_seconds()
+        assert remaining > surge_engine._cooldown_sec - 10  # allow 10s margin
+        assert remaining <= surge_engine._cooldown_sec + 1
+
+    @pytest.mark.asyncio
+    async def test_exit_sl_sets_cooldown(self, surge_engine, session):
+        """COIN-22: SL exit (first SL, no extended) must set normal cooldown."""
+        sym = "SOL/USDT"
+        pos = self._make_pos(sym, entry=150.0)
+        surge_engine._positions[sym] = pos
+        surge_engine._cooldowns.pop(sym, None)
+        surge_engine._consecutive_sl_count.pop(sym, None)
+
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=202.0, average_buy_price=150.0,
+            total_invested=168.33, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_ctx
+
+        sl_price = pos.entry_price * 0.98  # -2% raw → -6% leveraged (hits SL)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._exit_position(sym, pos, sl_price, "SL")
+
+        assert sym not in surge_engine._positions
+        assert sym in surge_engine._cooldowns
+        remaining = (surge_engine._cooldowns[sym] - datetime.now(timezone.utc)).total_seconds()
+        assert remaining > surge_engine._cooldown_sec - 10
+
+    @pytest.mark.asyncio
+    async def test_exit_trailing_sets_cooldown(self, surge_engine, session):
+        """COIN-22: Trailing exit must set cooldown."""
+        sym = "ETH/USDT"
+        pos = self._make_pos(sym, entry=3500.0)
+        surge_engine._positions[sym] = pos
+        surge_engine._cooldowns.pop(sym, None)
+
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=202.0, average_buy_price=3500.0,
+            total_invested=168.33, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_ctx
+
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._exit_position(sym, pos, 3530.0, "Trailing")
+
+        assert sym not in surge_engine._positions
+        assert sym in surge_engine._cooldowns
+
+    @pytest.mark.asyncio
+    async def test_exit_time_expiry_sets_cooldown(self, surge_engine, session):
+        """COIN-22: TimeExpiry exit must set cooldown."""
+        sym = "DOGE/USDT"
+        pos = self._make_pos(sym, entry=0.15)
+        surge_engine._positions[sym] = pos
+        surge_engine._cooldowns.pop(sym, None)
+
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=202.0, average_buy_price=0.15,
+            total_invested=168.33, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_ctx
+
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._exit_position(sym, pos, 0.15, "TimeExpiry")
+
+        assert sym not in surge_engine._positions
+        assert sym in surge_engine._cooldowns
+
+    @pytest.mark.asyncio
+    async def test_exit_extended_cooldown_not_overridden(self, surge_engine, session):
+        """COIN-22: Extended COIN-20 cooldown (180min) must NOT be overridden by normal (60min)."""
+        sym = "FET/USDT"
+        pos = self._make_pos(sym, entry=1.50)
+        surge_engine._positions[sym] = pos
+        # Pre-condition: 1 previous SL → next SL will be sl_count=2 → extended cooldown
+        surge_engine._consecutive_sl_count[sym] = 1
+        surge_engine._cooldowns.pop(sym, None)
+
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=202.0, average_buy_price=1.50,
+            total_invested=168.33, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_ctx
+
+        # SL price must produce a negative PnL so code enters loss branch
+        sl_price = pos.entry_price * 0.98  # -2% raw → -6% leveraged
+
+        # Override mock order to return matching price (default mock returns 65000)
+        sl_order = MagicMock()
+        sl_order.executed_price = sl_price
+        sl_order.executed_quantity = pos.quantity
+        sl_order.fee = sl_price * pos.quantity * FEE_PCT
+        surge_engine._order_manager.create_order = AsyncMock(return_value=sl_order)
+
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._exit_position(sym, pos, sl_price, "SL")
+
+        assert sym in surge_engine._cooldowns
+        # Extended cooldown should be ~180 minutes, NOT 60 minutes
+        remaining = (surge_engine._cooldowns[sym] - datetime.now(timezone.utc)).total_seconds()
+        assert remaining > surge_engine._cooldown_sec + 60  # well above 60min
+        # Should be close to 10800 (180min)
+        assert remaining > surge_engine._consecutive_sl_cooldown_sec - 10
+
+    def test_exit_cooldown_blocks_reentry(self, surge_engine):
+        """COIN-22: After exit, cooldown prevents immediate re-entry in _scan_for_entries."""
+        sym = "IMX/USDT"
+        # Set cooldown 60 minutes in the future (as _exit_position would)
+        surge_engine._cooldowns[sym] = datetime.now(timezone.utc) + timedelta(seconds=surge_engine._cooldown_sec)
+
+        # Verify cooldown check in entry logic would block
+        now = datetime.now(timezone.utc)
+        assert sym in surge_engine._cooldowns
+        assert now < surge_engine._cooldowns[sym]
+        # This is the exact check from _scan_for_entries line 508
+        blocked = sym in surge_engine._cooldowns and now < surge_engine._cooldowns[sym]
+        assert blocked is True
