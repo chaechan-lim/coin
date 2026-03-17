@@ -1090,6 +1090,24 @@ class PortfolioManager:
                 db_pos.quantity = 0
                 db_pos.last_sell_at = now
                 synced_count += 1
+
+                # 선물: 청산된 포지션의 마진 + PnL을 내부 cash에 반환
+                # (거래소에서는 SL/TP/trailing 등으로 이미 정산 완료)
+                if is_futures and invested > 0:
+                    cash_returned = invested + pnl_amount
+                    # 강제청산 시 마진 전액 손실 가능 → 최소 0
+                    cash_returned = max(cash_returned, 0.0)
+                    self._cash_balance += cash_returned
+                    self._realized_pnl += pnl_amount
+                    logger.info(
+                        "futures_sync_cash_returned",
+                        symbol=db_sym,
+                        invested=round(invested, 2),
+                        pnl_amount=round(pnl_amount, 2),
+                        cash_returned=round(cash_returned, 2),
+                        cash_balance=round(self._cash_balance, 2),
+                    )
+
                 self._cleared_positions.append({
                     "symbol": db_sym,
                     "quantity": 0,
