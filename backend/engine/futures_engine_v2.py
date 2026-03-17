@@ -64,6 +64,7 @@ class FuturesEngineV2:
             exchange_name=self.EXCHANGE_NAME,
             warn_pct=v2_cfg.balance_divergence_warn_pct,
             pause_pct=v2_cfg.balance_divergence_pause_pct,
+            resync_callback=self._resync_cash,
         )
 
         self._safe_order = SafeOrderPipeline(
@@ -146,6 +147,17 @@ class FuturesEngineV2:
     def resume_buying(self, coins: list[str] | None = None) -> None:
         """health_monitor 호환: API 복구 시 매수 재개 (v2는 no-op 로그)."""
         logger.info("v2_buying_resumed", coins=coins)
+
+    async def _resync_cash(self, new_cash: float) -> None:
+        """BalanceGuard가 호출하는 내부 장부 재동기화 콜백."""
+        old_cash = self._pm.cash_balance
+        self._pm._cash_balance = new_cash
+        logger.warning(
+            "v2_cash_resynced",
+            old_cash=round(old_cash, 4),
+            new_cash=round(new_cash, 4),
+            diff=round(new_cash - old_cash, 4),
+        )
 
     # ── 시작/중지 ──────────────────────────────
 
