@@ -113,6 +113,7 @@ coin/
 | 선물 position_sync 잔고 불일치 수정 (COIN-18) | `sync_exchange_positions`에서 선물 포지션 청산 시 `invested + pnl_amount`을 `cash_balance`에 반환. 강제청산 시 `max(0)` 보호. `_realized_pnl`도 동기화. 거래소 SL/TP/트레일링으로 청산된 포지션의 마진이 내부 장부에 미반영되던 버그 해결. |
 | V2 스냅샷·전략 로그 (COIN-21) | `_persist_loop`에 `take_snapshot()` 호출 추가 (5분 간격, daily_pnl 계산용). `Tier1Manager._evaluate_coin()`에 StrategyLog 기록 추가 (HOLD 포함 모든 판단, 레짐 정보 포함, was_executed 구분). 프론트엔드 선물 성과 차트/테이블 데이터 공백 해결. 테스트 17건 추가. |
 | 서지 엔진 진입 필터 강화 (COIN-20) | 라이브 승률 38% 개선: min_score 0.40→0.55, RSI overbought 85→75/oversold 15→25, ATR 변동성 필터(min_atr_pct=0.5%), 연속 SL 쿨다운(2+연속→180분 차단), SL 2→2.5%/TP 4→3%/trailing 1→0.5%. 백테스트 CLI 파라미터 추가. 테스트 31개 추가(1178 total). |
+| 서지 엔진 종료 후 쿨다운 미적용 수정 (COIN-22) | `_exit_position()`에서 포지션 삭제 후 `self._cooldowns[symbol]` 미설정 → 즉시 재진입 가능 버그 수정. TP/SL/Trailing/TimeExpiry 모든 종료에서 60분 쿨다운 적용. COIN-20 장기 쿨다운(180분) 보호. 테스트 7개 추가. |
 
 ### 낮은 우선순위
 
