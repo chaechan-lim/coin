@@ -186,7 +186,7 @@ class TestDirectionEvaluatorProtocol:
             def eval_interval_sec(self):
                 return 60
 
-            async def evaluate(self, symbol, current_position):
+            async def evaluate(self, symbol, current_position, **kwargs):
                 pass
 
         assert isinstance(MockEval(), DirectionEvaluator)

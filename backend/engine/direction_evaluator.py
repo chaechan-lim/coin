@@ -8,7 +8,7 @@ DirectionEvaluator — 방향별 독립 평가 프로토콜.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from core.enums import Direction
 from engine.position_state_tracker import PositionState
@@ -22,6 +22,11 @@ class DirectionDecision:
         'open'  — 신규 포지션 진입
         'close' — 기존 포지션 청산
         'hold'  — 유지 (아무 행동 없음)
+
+    Note:
+        frozen=True이지만 ``indicators`` dict는 내부 값이 변경 가능하다.
+        새로운 key/value를 추가해야 할 경우 ``dict(d.indicators)`` 로
+        복사 후 사용할 것 (regime_evaluators.py 참고).
     """
 
     action: Literal["open", "close", "hold"]
@@ -58,12 +63,17 @@ class DirectionEvaluator(Protocol):
         self,
         symbol: str,
         current_position: PositionState | None,
+        *,
+        df_5m: Any = None,
+        df_1h: Any = None,
     ) -> DirectionDecision:
         """주어진 심볼에 대해 방향 결정을 반환한다.
 
         Args:
             symbol: 거래 심볼 (e.g., "BTC/USDT")
             current_position: 현재 포지션 상태 (없으면 None)
+            df_5m: 사전 조회된 5분 캔들 (None이면 내부에서 조회)
+            df_1h: 사전 조회된 1시간 캔들 (None이면 내부에서 조회)
 
         Returns:
             DirectionDecision: open/close/hold 결정

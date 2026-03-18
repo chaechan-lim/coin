@@ -57,8 +57,16 @@ class _RegimeDirectionEvaluator:
         self,
         symbol: str,
         current_position: PositionState | None,
+        *,
+        df_5m: pd.DataFrame | None = None,
+        df_1h: pd.DataFrame | None = None,
     ) -> DirectionDecision:
-        """방향 평가. 반대 방향 시그널은 hold로 변환."""
+        """방향 평가. 반대 방향 시그널은 hold로 변환.
+
+        Args:
+            df_5m: 사전 조회된 5분 캔들 (None이면 내부에서 조회)
+            df_1h: 사전 조회된 1시간 캔들 (None이면 내부에서 조회)
+        """
         regime = self._regime.current
         if regime is None:
             return _hold_decision("no_regime", self._label)
@@ -66,14 +74,21 @@ class _RegimeDirectionEvaluator:
         current_dir = current_position.direction if current_position else None
         strategy = self._selector.select(regime.regime)
 
-        df_5m = await self._fetch_candles(symbol, "5m", 200)
-        df_1h = await self._fetch_candles(symbol, "1h", 200)
+        # 사전 조회된 캔들이 없으면 직접 조회
+        if df_5m is None:
+            df_5m = await self._fetch_candles(symbol, "5m", 200)
+        if df_1h is None:
+            df_1h = await self._fetch_candles(symbol, "1h", 200)
         if df_5m is None or len(df_5m) < 20 or df_1h is None or len(df_1h) < 20:
             return _hold_decision("candle_error", strategy.name)
 
         decision = await strategy.evaluate(df_5m, df_1h, regime, current_dir)
 
         # 5m 캔들에서 close/atr 추출 (Tier1Manager가 재사용)
+        if "close" not in df_5m.columns:
+            logger.warning(f"{self._label}_missing_close_column", symbol=symbol)
+        if "atr_14" not in df_5m.columns:
+            logger.warning(f"{self._label}_missing_atr_column", symbol=symbol)
         last_close = float(df_5m["close"].iloc[-1]) if "close" in df_5m.columns else 0.0
         last_atr = float(df_5m["atr_14"].iloc[-1]) if "atr_14" in df_5m.columns else 0.0
 

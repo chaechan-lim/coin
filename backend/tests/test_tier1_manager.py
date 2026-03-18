@@ -118,9 +118,10 @@ class MockLongEvaluator:
     def eval_interval_sec(self) -> int:
         return 60
 
-    async def evaluate(self, symbol, current_position):
+    async def evaluate(self, symbol, current_position, **kwargs):
         self.call_count += 1
         self.call_args.append((symbol, current_position))
+        self.last_kwargs = kwargs
         return self._decisions.get(symbol, self._default)
 
     def set_decision(self, symbol, decision):
@@ -140,9 +141,10 @@ class MockShortEvaluator:
     def eval_interval_sec(self) -> int:
         return 60
 
-    async def evaluate(self, symbol, current_position):
+    async def evaluate(self, symbol, current_position, **kwargs):
         self.call_count += 1
         self.call_args.append((symbol, current_position))
+        self.last_kwargs = kwargs
         return self._decisions.get(symbol, self._default)
 
     def set_decision(self, symbol, decision):
@@ -920,8 +922,10 @@ class TestStrategySignalLogging:
         )
         logs = result.scalars().all()
         # SL 히트로 인한 청산은 전략 로그가 없음 (SL은 이밸류에이터가 아닌 SL/TP 체크로 발동)
-        # SL 히트 시 이밸류에이터 미호출
-        assert all(not log.was_executed for log in logs)
+        # SL 히트 시 이밸류에이터 미호출 → 로그 0건
+        assert len(logs) == 0, (
+            f"Expected no strategy logs for SL/TP hit, got {len(logs)}"
+        )
 
     @pytest.mark.asyncio
     async def test_exchange_name_default(self, mock_deps, session):
@@ -1029,6 +1033,99 @@ class TestStrategySignalLogging:
         log = result.scalars().first()
         assert log is not None
         assert log.exchange == "custom_exchange"
+
+
+class TestCachedIndicators:
+    """캐시된 indicators를 통한 _open_position_from_decision 경로 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_open_uses_cached_close_atr(self, tier1, mock_deps, session):
+        """indicators에 close/atr가 있으면 캔들 재조회 없이 사용."""
+        decision_with_cache = DirectionDecision(
+            action="open",
+            direction=Direction.LONG,
+            confidence=0.8,
+            sizing_factor=0.7,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            reason="long_signal",
+            strategy_name="trend_follower",
+            indicators={"close": 80000.0, "atr": 1000.0},
+        )
+        mock_deps["long_eval"].set_decision("BTC/USDT", decision_with_cache)
+
+        # 캔들 조회 호출 횟수 기록 (evaluation_cycle에서 사전 조회 2회)
+        initial_call_count = mock_deps["market_data"].get_ohlcv_df.call_count
+        await tier1.evaluation_cycle(session)
+
+        # 사전 조회 (5m + 1h) * 2코인 = 4회. indicators 캐시 덕분에
+        # _open_position_from_decision에서 추가 조회 없음
+        total_calls = mock_deps["market_data"].get_ohlcv_df.call_count - initial_call_count
+        assert total_calls == 4, (
+            f"Expected 4 candle fetches (2 per coin), got {total_calls}. "
+            "indicators cache should prevent extra fetch in _open_position_from_decision"
+        )
+
+        # 주문이 실행되었는지 확인
+        open_calls = [
+            c
+            for c in mock_deps["safe_order"].execute_order.call_args_list
+            if c[0][1].action == "open" and c[0][1].symbol == "BTC/USDT"
+        ]
+        assert len(open_calls) >= 1
+
+    @pytest.mark.asyncio
+    async def test_open_fallback_without_cached_indicators(
+        self, tier1, mock_deps, session
+    ):
+        """indicators에 close/atr가 없으면 캔들 재조회 (fallback)."""
+        decision_no_cache = DirectionDecision(
+            action="open",
+            direction=Direction.LONG,
+            confidence=0.8,
+            sizing_factor=0.7,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            reason="long_signal",
+            strategy_name="trend_follower",
+            indicators={},  # close/atr 없음
+        )
+        mock_deps["long_eval"].set_decision("BTC/USDT", decision_no_cache)
+
+        initial_call_count = mock_deps["market_data"].get_ohlcv_df.call_count
+        await tier1.evaluation_cycle(session)
+
+        # 사전 조회 4회 + BTC fallback 1회 = 5회
+        total_calls = mock_deps["market_data"].get_ohlcv_df.call_count - initial_call_count
+        assert total_calls == 5, (
+            f"Expected 5 candle fetches (4 pre-fetch + 1 fallback), got {total_calls}"
+        )
+
+
+class TestPreFetchedCandles:
+    """사전 조회된 캔들이 이밸류에이터에 전달되는지 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_evaluators_receive_prefetched_candles(
+        self, tier1, mock_deps, session
+    ):
+        """이밸류에이터가 df_5m, df_1h kwargs를 받는지 확인."""
+        await tier1.evaluation_cycle(session)
+
+        # 이밸류에이터의 마지막 호출에 df_5m, df_1h가 전달되어야 함
+        assert hasattr(mock_deps["long_eval"], "last_kwargs")
+        assert "df_5m" in mock_deps["long_eval"].last_kwargs
+        assert "df_1h" in mock_deps["long_eval"].last_kwargs
+        assert mock_deps["long_eval"].last_kwargs["df_5m"] is not None
+
+    @pytest.mark.asyncio
+    async def test_single_candle_fetch_per_coin(self, tier1, mock_deps, session):
+        """코인당 캔들 조회가 1회씩만 발생 (5m + 1h)."""
+        mock_deps["market_data"].get_ohlcv_df.reset_mock()
+        await tier1.evaluation_cycle(session)
+
+        # 2코인 × (5m + 1h) = 4회
+        assert mock_deps["market_data"].get_ohlcv_df.call_count == 4
 
 
 class TestResolveEntry:

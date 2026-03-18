@@ -173,13 +173,17 @@ class Tier1Manager:
         pos_state = self._positions.get(symbol)
         current_dir = pos_state.direction if pos_state else None
 
+        # 캔들을 한 번만 조회하여 SL/TP 체크 + 이밸류에이터에서 공유
+        df_5m = await self._fetch_candles(symbol, "5m", 200)
+        if df_5m is None or len(df_5m) < 20:
+            return "candle_error"
+        df_1h = await self._fetch_candles(symbol, "1h", 200)
+
+        price = self._last_close(df_5m)
+        atr = self._last_atr(df_5m)
+
         # 1. SL/TP/trailing 체크는 전략 시그널과 무관하게 항상 수행
         if pos_state:
-            df_5m = await self._fetch_candles(symbol, "5m", 200)
-            if df_5m is None or len(df_5m) < 20:
-                return "candle_error"
-            price = self._last_close(df_5m)
-            atr = self._last_atr(df_5m)
             if price > 0:
                 pos_state.update_extreme(price)
             if await self._check_sl_tp(session, symbol, pos_state, price, atr):
@@ -187,7 +191,9 @@ class Tier1Manager:
 
         # 2. 포지션 방향에 따라 해당 이밸류에이터의 청산 시그널 체크
         if current_dir == Direction.LONG:
-            long_decision = await self._long_evaluator.evaluate(symbol, pos_state)
+            long_decision = await self._long_evaluator.evaluate(
+                symbol, pos_state, df_5m=df_5m, df_1h=df_1h,
+            )
             if long_decision.is_close:
                 await self._close_position(
                     session, symbol, pos_state.direction, long_decision.reason
@@ -210,9 +216,12 @@ class Tier1Manager:
                 regime=regime,
                 was_executed=False,
             )
+            return "hold"
 
         elif current_dir == Direction.SHORT:
-            short_decision = await self._short_evaluator.evaluate(symbol, pos_state)
+            short_decision = await self._short_evaluator.evaluate(
+                symbol, pos_state, df_5m=df_5m, df_1h=df_1h,
+            )
             if short_decision.is_close:
                 await self._close_position(
                     session, symbol, pos_state.direction, short_decision.reason
@@ -235,73 +244,75 @@ class Tier1Manager:
                 regime=regime,
                 was_executed=False,
             )
+            return "hold"
 
         # 3. 포지션 없으면 양쪽 이밸류에이터에서 진입 시그널 탐색
-        if current_dir is None or current_dir == Direction.FLAT:
-            long_decision = await self._long_evaluator.evaluate(symbol, None)
-            short_decision = await self._short_evaluator.evaluate(symbol, None)
+        #    사전 조회된 캔들을 전달하여 중복 API 호출 방지
+        long_decision = await self._long_evaluator.evaluate(
+            symbol, None, df_5m=df_5m, df_1h=df_1h,
+        )
+        short_decision = await self._short_evaluator.evaluate(
+            symbol, None, df_5m=df_5m, df_1h=df_1h,
+        )
 
-            # 진입 시그널 선택
-            decision = self._resolve_entry(long_decision, short_decision)
-            if decision is None:
-                # 양쪽 다 hold — 둘 다 로깅
-                self._log_direction_decision(
-                    session,
-                    symbol,
-                    long_decision,
-                    regime=regime,
-                    was_executed=False,
-                )
-                self._log_direction_decision(
-                    session,
-                    symbol,
-                    short_decision,
-                    regime=regime,
-                    was_executed=False,
-                )
-                return "hold"
+        # 진입 시그널 선택
+        decision = self._resolve_entry(long_decision, short_decision)
+        if decision is None:
+            # 양쪽 다 hold — 둘 다 로깅
+            self._log_direction_decision(
+                session,
+                symbol,
+                long_decision,
+                regime=regime,
+                was_executed=False,
+            )
+            self._log_direction_decision(
+                session,
+                symbol,
+                short_decision,
+                regime=regime,
+                was_executed=False,
+            )
+            return "hold"
 
-            # 최소 신뢰도 필터
-            if decision.confidence < self._min_confidence:
-                self._log_direction_decision(
-                    session,
-                    symbol,
-                    decision,
-                    regime=regime,
-                    was_executed=False,
-                )
-                logger.debug(
-                    "tier1_low_confidence",
-                    symbol=symbol,
-                    confidence=decision.confidence,
-                    min=self._min_confidence,
-                )
-                return "low_confidence"
-
-            # 쿨다운 체크
-            if self._in_cooldown(symbol):
-                self._log_direction_decision(
-                    session,
-                    symbol,
-                    decision,
-                    regime=regime,
-                    was_executed=False,
-                )
-                return "cooldown"
-
-            # 진입 실행
-            await self._open_position_from_decision(session, symbol, decision)
+        # 최소 신뢰도 필터
+        if decision.confidence < self._min_confidence:
             self._log_direction_decision(
                 session,
                 symbol,
                 decision,
                 regime=regime,
-                was_executed=True,
+                was_executed=False,
             )
-            return "opened"
+            logger.debug(
+                "tier1_low_confidence",
+                symbol=symbol,
+                confidence=decision.confidence,
+                min=self._min_confidence,
+            )
+            return "low_confidence"
 
-        # 같은 방향 포지션 보유 중, 해당 이밸류에이터가 hold 반환
-        return "hold"
+        # 쿨다운 체크
+        if self._in_cooldown(symbol):
+            self._log_direction_decision(
+                session,
+                symbol,
+                decision,
+                regime=regime,
+                was_executed=False,
+            )
+            return "cooldown"
+
+        # 진입 실행
+        await self._open_position_from_decision(session, symbol, decision)
+        self._log_direction_decision(
+            session,
+            symbol,
+            decision,
+            regime=regime,
+            was_executed=True,
+        )
+        return "opened"
 
     def _resolve_entry(
         self,
