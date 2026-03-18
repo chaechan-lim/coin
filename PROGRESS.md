@@ -114,6 +114,7 @@ coin/
 | V2 스냅샷·전략 로그 (COIN-21) | `_persist_loop`에 `take_snapshot()` 호출 추가 (5분 간격, daily_pnl 계산용). `Tier1Manager._evaluate_coin()`에 StrategyLog 기록 추가 (HOLD 포함 모든 판단, 레짐 정보 포함, was_executed 구분). 프론트엔드 선물 성과 차트/테이블 데이터 공백 해결. 테스트 17건 추가. |
 | 서지 엔진 진입 필터 강화 (COIN-20) | 라이브 승률 38% 개선: min_score 0.40→0.55, RSI overbought 85→75/oversold 15→25, ATR 변동성 필터(min_atr_pct=0.5%), 연속 SL 쿨다운(2+연속→180분 차단), SL 2→2.5%/TP 4→3%/trailing 1→0.5%. 백테스트 CLI 파라미터 추가. 테스트 31개 추가(1178 total). |
 | 서지 엔진 종료 후 쿨다운 미적용 수정 (COIN-22) | `_exit_position()`에서 포지션 삭제 후 `self._cooldowns[symbol]` 미설정 → 즉시 재진입 가능 버그 수정. TP/SL/Trailing/TimeExpiry 모든 종료에서 60분 쿨다운 적용. COIN-20 장기 쿨다운(180분) 보호. 테스트 7개 추가. |
+| Tier2Scanner 진입 필터 + SL/TP 조정 (COIN-23) | surge_backtest 안전 필터 포팅: RSI 필터(75/25), ATR% 횡보 차단(0.5%), 가속도 25% 가중치, 소진 필터(8%+), 연속 SL 쿨다운(2연속→180분). 정규화 점수(vol*0.40+price*0.35+accel*0.25, min_score 0.55). SL 2→3.5%, TP 4→4.5%, trail 1.0/0.8→1.5/1.0, concurrent 5→3, cooldown 30→60분. 테스트 41개 추가(1245 total). |
 
 ### 낮은 우선순위
 
