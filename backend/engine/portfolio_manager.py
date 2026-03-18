@@ -1027,11 +1027,28 @@ class PortfolioManager:
                 exchange_symbols.add(fp_sym.replace(":USDT", ""))
         for db_sym, db_pos in db_positions.items():
             if db_pos.quantity > 0 and db_sym not in exchange_symbols:
-                # 추정 PnL 계산
-                entry = db_pos.average_buy_price or 0
-                invested = db_pos.total_invested or 0
-                direction = getattr(db_pos, "direction", "long")
-                leverage = getattr(db_pos, "leverage", 1) or 1
+                # 레이스 컨디션 방지: DB를 다시 읽어서 이미 청산됐는지 확인
+                # (sync 도중 surge/trading 엔진이 포지션을 닫았을 수 있음)
+                fresh = await session.execute(
+                    select(Position).where(
+                        Position.exchange == self._exchange_name,
+                        Position.symbol == db_sym,
+                    )
+                )
+                fresh_pos = fresh.scalar_one_or_none()
+                if fresh_pos is None or fresh_pos.quantity <= 0:
+                    logger.info(
+                        "sync_skip_already_closed",
+                        symbol=db_sym,
+                        reason="position already closed by engine",
+                    )
+                    continue
+
+                # 추정 PnL 계산 (fresh_pos 사용 — 최신 DB 상태)
+                entry = fresh_pos.average_buy_price or 0
+                invested = fresh_pos.total_invested or 0
+                direction = getattr(fresh_pos, "direction", "long")
+                leverage = getattr(fresh_pos, "leverage", 1) or 1
                 try:
                     current_price = await self._market_data.get_current_price(db_sym)
                 except Exception:
@@ -1044,10 +1061,10 @@ class PortfolioManager:
 
                 # 실제 청산 사유 판별
                 strategy_name, reason = await self._determine_close_reason(
-                    db_sym, db_pos, current_price, pnl_pct, exchange_adapter,
+                    db_sym, fresh_pos, current_price, pnl_pct, exchange_adapter,
                 )
 
-                old_qty = db_pos.quantity
+                old_qty = fresh_pos.quantity
                 now = datetime.now(timezone.utc)
 
                 logger.warning(
@@ -1073,7 +1090,7 @@ class PortfolioManager:
                     executed_quantity=old_qty,
                     fee=0.0,
                     fee_currency="USDT" if is_futures else cash_symbol,
-                    is_paper=db_pos.is_paper or False,
+                    is_paper=fresh_pos.is_paper or False,
                     direction=direction,
                     leverage=leverage,
                     margin_used=invested,
@@ -1087,8 +1104,8 @@ class PortfolioManager:
                 )
                 session.add(order)
 
-                db_pos.quantity = 0
-                db_pos.last_sell_at = now
+                fresh_pos.quantity = 0
+                fresh_pos.last_sell_at = now
                 synced_count += 1
 
                 # 선물: 청산된 포지션의 마진 + PnL을 내부 cash에 반환

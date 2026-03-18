@@ -3063,3 +3063,108 @@ async def test_spot_sync_no_cash_return_on_clearance(session):
 
     # 현물: actual_cash로 덮어씀 (315,000)
     assert pm.cash_balance == 315_000
+
+
+@pytest.mark.asyncio
+async def test_futures_sync_skip_already_closed_position(session):
+    """레이스 컨디션: 엔진이 이미 청산한 포지션을 sync가 이중 청산하지 않아야 한다.
+
+    시나리오:
+    1. sync_exchange_positions()가 DB 포지션 스냅샷을 읽음 (qty=3.0)
+    2. 서지 엔진이 포지션을 청산 (qty=0) + cash 반환
+    3. sync가 거래소에서 포지션이 없음을 확인
+    4. sync가 DB를 다시 읽으면 qty=0 → 이중 청산 스킵
+    """
+    from exchange.base import Balance
+
+    initial_cash = 1000.0
+    invested = 10.0
+    pm = PortfolioManager(
+        market_data=_make_market_data({"AVAX/USDT": 10.2}),
+        initial_balance_krw=initial_cash,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+    # 서지 엔진이 이미 포지션을 닫고 cash를 반환한 상태
+    pm.cash_balance = initial_cash - invested + invested  # 마진 차감 후 반환 완료
+
+    # DB에 포지션이 있지만 qty=0 (서지 엔진이 이미 청산)
+    session.add(Position(
+        exchange="binance_futures", symbol="AVAX/USDT",
+        quantity=0, average_buy_price=10.194,
+        total_invested=invested, is_paper=False,
+        direction="short", leverage=3, margin_used=invested,
+    ))
+    await session.flush()
+
+    # 거래소: 포지션 없음
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=1000, used=0, total=1000),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    cash_before = pm.cash_balance
+    await pm.sync_exchange_positions(session, adapter, ["AVAX/USDT"])
+    await session.flush()
+
+    # cash가 변하지 않아야 함 — qty=0이므로 이미 청산된 포지션
+    assert pm.cash_balance == pytest.approx(cash_before, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_futures_sync_race_condition_no_double_cash(session):
+    """sync 도중 엔진이 포지션을 닫으면 이중 cash 반환이 발생하지 않아야 한다.
+
+    sync가 DB 스냅샷(qty>0) 읽은 후, 실제 DB 재확인 시 qty=0이면 스킵.
+    """
+    from exchange.base import Balance
+
+    initial_cash = 240.0
+    invested = 10.23
+    pm = PortfolioManager(
+        market_data=_make_market_data({"AVAX/USDT": 10.215}),
+        initial_balance_krw=300.0,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+    pm.cash_balance = initial_cash  # 엔진이 이미 포지션 청산 후 cash 반환
+
+    # DB 포지션: qty>0로 시작 (sync 스냅샷 시점)
+    pos = Position(
+        exchange="binance_futures", symbol="AVAX/USDT",
+        quantity=3.0, average_buy_price=10.194,
+        total_invested=invested, is_paper=False,
+        direction="short", leverage=3, margin_used=invested,
+    )
+    session.add(pos)
+    await session.flush()
+
+    # 서지 엔진이 sync 실행 중에 포지션을 닫는 것을 시뮬레이션:
+    # fetch_balance 호출 후 (sync 시작), DB의 포지션 qty를 0으로 변경
+    original_fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=240, used=0, total=240),
+    })
+
+    async def fetch_balance_and_close_position():
+        """fetch_balance 호출 시 엔진이 포지션을 닫는 것을 시뮬레이션."""
+        result = await original_fetch_balance()
+        # 엔진이 포지션을 닫음
+        pos.quantity = 0
+        await session.flush()
+        return result
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = fetch_balance_and_close_position
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    cash_before = pm.cash_balance
+    await pm.sync_exchange_positions(session, adapter, ["AVAX/USDT"])
+    await session.flush()
+
+    # cash가 변하지 않아야 함 — 엔진이 이미 처리
+    assert pm.cash_balance == pytest.approx(cash_before, abs=0.01)
