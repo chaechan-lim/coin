@@ -262,17 +262,27 @@ class FuturesV2Config(BaseSettings):
     tier1_min_confidence: float = 0.4
     tier1_cooldown_seconds: int = 93600  # 26h (백테스트 최적)
 
-    # Tier 2
+    # Tier 2 (COIN-23: 필터 추가 + 파라미터 조정)
     tier2_enabled: bool = True
-    tier2_max_concurrent: int = 5
+    tier2_max_concurrent: int = 3          # 5 → 3 (노이즈 거래 제거)
     tier2_max_position_pct: float = 0.05
     tier2_max_hold_minutes: int = 120
     tier2_scan_interval_sec: int = 60
     tier2_vol_threshold: float = 5.0
     tier2_price_threshold: float = 1.5
-    tier2_sl_pct: float = 2.0
-    tier2_tp_pct: float = 4.0
+    tier2_sl_pct: float = 3.5             # 2.0 → 3.5 (3x에서 가격 1.17% 여유)
+    tier2_tp_pct: float = 4.5             # 4.0 → 4.5
+    tier2_trail_activation_pct: float = 1.5  # 1.0 → 1.5
+    tier2_trail_stop_pct: float = 1.0     # 0.8 → 1.0
     tier2_daily_trade_limit: int = 20
+    tier2_cooldown_per_symbol_sec: int = 3600  # 1800 → 3600 (60분)
+    # COIN-23: 신규 필터 파라미터
+    tier2_rsi_overbought: float = 75.0
+    tier2_rsi_oversold: float = 25.0
+    tier2_min_atr_pct: float = 0.5
+    tier2_exhaustion_pct: float = 8.0
+    tier2_min_score: float = 0.55
+    tier2_consecutive_sl_cooldown_sec: int = 10800  # 180분
 
     # Regime detector
     regime_adx_enter: float = 27.0

@@ -3,9 +3,17 @@ Tier2Scanner — 기회 포착 스캐너 (SurgeEngine 흡수).
 
 거래량 급등 + 모멘텀 감지 → 단기 포지션.
 Tier 1과 별도로 30개 코인을 스캔.
+
+COIN-23: surge_backtest에서 안전 필터 포팅
+- RSI 필터: 과매수(75) 롱 차단, 과매도(25) 숏 차단
+- ATR% 필터: 0.5% 이하 횡보장 진입 차단
+- 가속도(acceleration): 점수 계산에 25% 가중치
+- 소진(exhaustion) 필터: 이미 8%+ 이동한 코인 차단
+- 연속 SL 쿨다운: 2연속 SL → 180분 장기 쿨다운
+- 정규화 점수: vol_signal*0.40 + price_signal*0.35 + accel_signal*0.25
+- SL 3.5%, TP 4.5%, trail 1.5%/1.0%, max_concurrent 3, cooldown 60분
 """
 import structlog
-import pandas as pd
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -40,6 +48,8 @@ class ScanScore:
     score: float
     direction: Direction
     rsi: float = 50.0
+    acceleration: float = 0.0
+    atr_pct: float = 0.0
 
 
 class Tier2Scanner:
@@ -53,18 +63,25 @@ class Tier2Scanner:
         portfolio_manager: PortfolioManager,
         *,
         scan_coins: list[str] | None = None,
-        max_concurrent: int = 5,
+        max_concurrent: int = 3,
         max_position_pct: float = 0.05,
         max_hold_minutes: int = 120,
         vol_threshold: float = 5.0,
         price_threshold: float = 1.5,
-        sl_pct: float = 2.0,
-        tp_pct: float = 4.0,
-        trail_activation_pct: float = 1.0,
-        trail_stop_pct: float = 0.8,
+        sl_pct: float = 3.5,
+        tp_pct: float = 4.5,
+        trail_activation_pct: float = 1.5,
+        trail_stop_pct: float = 1.0,
         daily_trade_limit: int = 20,
-        cooldown_per_symbol_sec: int = 1800,
+        cooldown_per_symbol_sec: int = 3600,
         leverage: int = 3,
+        # COIN-23: 신규 필터 파라미터
+        rsi_overbought: float = 75.0,
+        rsi_oversold: float = 25.0,
+        min_atr_pct: float = 0.5,
+        exhaustion_pct: float = 8.0,
+        min_score: float = 0.55,
+        consecutive_sl_cooldown_sec: int = 10800,  # 180분
     ):
         self._safe_order = safe_order
         self._positions = position_tracker
@@ -84,7 +101,17 @@ class Tier2Scanner:
         self._cooldown_sec = cooldown_per_symbol_sec
         self._leverage = leverage
 
+        # COIN-23: 필터 파라미터
+        self._rsi_overbought = rsi_overbought
+        self._rsi_oversold = rsi_oversold
+        self._min_atr_pct = min_atr_pct
+        self._exhaustion_pct = exhaustion_pct
+        self._min_score = min_score
+        self._consecutive_sl_cooldown_sec = consecutive_sl_cooldown_sec
+
         self._cooldowns: dict[str, datetime] = {}
+        self._cooldown_override_map: dict[str, datetime] = {}  # 연속 SL 장기 쿨다운
+        self._consecutive_sl_count: dict[str, int] = {}  # 심볼별 연속 SL 횟수
         self._daily_trades = 0
         self._scores: list[ScanScore] = []
 
@@ -95,6 +122,49 @@ class Tier2Scanner:
     @property
     def daily_trades(self) -> int:
         return self._daily_trades
+
+    # ─── 필터 계산 (staticmethod — 테스트 용이) ───
+
+    @staticmethod
+    def _calc_rsi(closes: list[float], period: int = 14) -> float:
+        """간단 RSI 계산 (surge_backtest 포팅)."""
+        if len(closes) < period + 1:
+            return 50.0
+        deltas = [closes[i] - closes[i - 1] for i in range(len(closes) - period, len(closes))]
+        gains = sum(d for d in deltas if d > 0) / period
+        losses = sum(-d for d in deltas if d < 0) / period
+        if losses == 0:
+            return 100.0
+        rs = gains / losses
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    @staticmethod
+    def _calc_atr_pct(candles: list, period: int = 14) -> float:
+        """ATR% 계산 — 횡보장 필터 (surge_backtest 포팅)."""
+        if len(candles) < period + 1:
+            return 0.0
+        tr_sum = 0.0
+        for i in range(len(candles) - period, len(candles)):
+            hi = candles[i].high
+            lo = candles[i].low
+            prev_c = candles[i - 1].close
+            tr = max(hi - lo, abs(hi - prev_c), abs(lo - prev_c))
+            tr_sum += tr
+        atr = tr_sum / period
+        close = candles[-1].close
+        return (atr / close * 100) if close > 0 else 0.0
+
+    @staticmethod
+    def _calc_acceleration(volumes: list[float], vol_avg: float) -> float:
+        """거래량 가속도: 현재 ratio vs 2캔들 전 ratio."""
+        if len(volumes) < 3 or vol_avg <= 0:
+            return 0.0
+        ratio_now = volumes[-1] / vol_avg
+        # 2캔들 전 ratio (avg에서 마지막 2개 제외하면 약간 부정확하지만 근사)
+        ratio_prev = volumes[-3] / vol_avg
+        return ratio_now - ratio_prev
+
+    # ─── 스캔 사이클 ───
 
     async def scan_cycle(self, session: AsyncSession) -> None:
         """Tier 2 스캔 사이클."""
@@ -114,11 +184,15 @@ class Tier2Scanner:
         for score in self._scores:
             if tier2_count >= self._max_concurrent:
                 break
-            if score.score < self._vol_threshold:
+            # COIN-23: min_score 임계값 (정규화 점수 기반)
+            if score.score < self._min_score:
                 continue
             if self._positions.has_position(score.symbol):
                 continue
             if self._in_cooldown(score.symbol):
+                continue
+            # COIN-23: RSI 필터
+            if not self._pass_rsi_filter(score):
                 continue
 
             await self._enter_position(session, score)
@@ -159,7 +233,36 @@ class Tier2Scanner:
         price_last = closes[-1]
         price_chg = (price_last - price_first) / price_first * 100 if price_first > 0 else 0.0
 
-        score = vol_ratio * 0.6 + abs(price_chg) * 0.4
+        # COIN-23: ATR% 필터 — 횡보장 차단
+        atr_pct = self._calc_atr_pct(candles)
+        if atr_pct > 0 and atr_pct < self._min_atr_pct:
+            return None
+
+        # COIN-23: 소진(exhaustion) 필터 — 30분(6캔들) 변동 8%+ 차단
+        lookback_30m = min(6, len(closes) - 1)
+        if lookback_30m > 0:
+            price_30m_ago = closes[-(lookback_30m + 1)]
+            price_chg_30m = (price_last - price_30m_ago) / price_30m_ago * 100 if price_30m_ago > 0 else 0.0
+            if abs(price_chg_30m) > self._exhaustion_pct:
+                return None
+
+        # COIN-23: RSI 계산
+        rsi = self._calc_rsi(closes)
+
+        # COIN-23: 가속도 계산
+        accel = self._calc_acceleration(volumes, vol_avg)
+
+        # COIN-23: 정규화 점수 (surge_backtest 포팅)
+        vol_signal = min(vol_ratio / 10.0, 1.0)
+        price_signal = min(abs(price_chg) / 5.0, 1.0)
+        accel_signal = max(0, min(accel / 3.0, 1.0))
+
+        score = (
+            0.40 * vol_signal
+            + 0.35 * price_signal
+            + 0.25 * accel_signal
+        )
+
         direction = Direction.LONG if price_chg > 0 else Direction.SHORT
 
         return ScanScore(
@@ -168,7 +271,30 @@ class Tier2Scanner:
             price_chg_pct=price_chg,
             score=score,
             direction=direction,
+            rsi=rsi,
+            acceleration=accel,
+            atr_pct=atr_pct,
         )
+
+    def _pass_rsi_filter(self, score: ScanScore) -> bool:
+        """RSI 필터: 과매수 롱 차단, 과매도 숏 차단."""
+        if score.direction == Direction.LONG and score.rsi > self._rsi_overbought:
+            logger.debug(
+                "tier2_rsi_filter",
+                symbol=score.symbol,
+                direction="LONG",
+                rsi=round(score.rsi, 1),
+            )
+            return False
+        if score.direction == Direction.SHORT and score.rsi < self._rsi_oversold:
+            logger.debug(
+                "tier2_rsi_filter",
+                symbol=score.symbol,
+                direction="SHORT",
+                rsi=round(score.rsi, 1),
+            )
+            return False
+        return True
 
     async def _enter_position(self, session: AsyncSession, score: ScanScore) -> None:
         """Tier 2 포지션 진입."""
@@ -197,7 +323,7 @@ class Tier2Scanner:
             margin=margin,
             leverage=self._leverage,
             strategy_name="tier2_surge",
-            confidence=min(1.0, score.score / 10.0),
+            confidence=min(1.0, score.score / 1.0),  # 정규화 점수 그대로 사용
             tier="tier2",
         )
 
@@ -225,7 +351,9 @@ class Tier2Scanner:
                 "tier2_entered",
                 symbol=score.symbol,
                 direction=score.direction.value,
-                score=round(score.score, 2),
+                score=round(score.score, 3),
+                rsi=round(score.rsi, 1),
+                atr_pct=round(score.atr_pct, 2),
             )
 
     async def _check_exits(self, session: AsyncSession) -> None:
@@ -303,13 +431,46 @@ class Tier2Scanner:
         resp = await self._safe_order.execute_order(session, request)
         if resp.success:
             self._positions.close_position(symbol)
+
+            # COIN-23: 연속 SL 카운트 + 장기 쿨다운
+            is_sl = reason.startswith("SL:")
+            if is_sl:
+                count = self._consecutive_sl_count.get(symbol, 0) + 1
+                self._consecutive_sl_count[symbol] = count
+                if count >= 2:
+                    self._cooldown_override_map[symbol] = datetime.now(timezone.utc)
+                    logger.warning(
+                        "tier2_consecutive_sl_cooldown",
+                        symbol=symbol,
+                        consecutive_sl=count,
+                        cooldown_min=self._consecutive_sl_cooldown_sec // 60,
+                    )
+            else:
+                # SL이 아닌 경우 연속 카운트 리셋
+                self._consecutive_sl_count.pop(symbol, None)
+
             logger.info("tier2_closed", symbol=symbol, reason=reason)
 
     def _in_cooldown(self, symbol: str) -> bool:
+        """쿨다운 확인 (일반 + 연속 SL 장기)."""
+        now = datetime.now(timezone.utc)
+
+        # 연속 SL 장기 쿨다운 (우선)
+        override = self._cooldown_override_map.get(symbol)
+        if override is not None:
+            elapsed = (now - override).total_seconds()
+            if elapsed < self._consecutive_sl_cooldown_sec:
+                return True
+            else:
+                # 장기 쿨다운 만료 → 정리
+                del self._cooldown_override_map[symbol]
+                self._consecutive_sl_count.pop(symbol, None)
+
+        # 일반 쿨다운
         last = self._cooldowns.get(symbol)
         if last is None:
             return False
-        elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+        elapsed = (now - last).total_seconds()
         return elapsed < self._cooldown_sec
 
     def reset_daily(self) -> None:
