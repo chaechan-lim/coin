@@ -102,8 +102,18 @@ class FuturesEngineV2:
             price_threshold=v2_cfg.tier2_price_threshold,
             sl_pct=v2_cfg.tier2_sl_pct,
             tp_pct=v2_cfg.tier2_tp_pct,
+            trail_activation_pct=v2_cfg.tier2_trail_activation_pct,
+            trail_stop_pct=v2_cfg.tier2_trail_stop_pct,
             daily_trade_limit=v2_cfg.tier2_daily_trade_limit,
+            cooldown_per_symbol_sec=v2_cfg.tier2_cooldown_per_symbol_sec,
             leverage=v2_cfg.leverage,
+            # COIN-23: 신규 필터 파라미터
+            rsi_overbought=v2_cfg.tier2_rsi_overbought,
+            rsi_oversold=v2_cfg.tier2_rsi_oversold,
+            min_atr_pct=v2_cfg.tier2_min_atr_pct,
+            exhaustion_pct=v2_cfg.tier2_exhaustion_pct,
+            min_score=v2_cfg.tier2_min_score,
+            consecutive_sl_cooldown_sec=v2_cfg.tier2_consecutive_sl_cooldown_sec,
         )
 
         self._pm = portfolio_manager
