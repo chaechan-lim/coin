@@ -9,9 +9,10 @@ from datetime import datetime, timezone, timedelta
 from engine.tier2_scanner import Tier2Scanner, ScanScore
 from engine.safe_order_pipeline import SafeOrderPipeline, OrderResponse
 from engine.position_state_tracker import PositionStateTracker, PositionState
+from engine.regime_detector import RegimeDetector, RegimeState
 from engine.portfolio_manager import PortfolioManager
 from exchange.data_models import Candle, Ticker, Balance
-from core.enums import Direction
+from core.enums import Direction, Regime
 
 
 def _make_candles(
@@ -786,6 +787,114 @@ class TestDefaultParams:
             portfolio_manager=MagicMock(),
         )
         assert scanner._consecutive_sl_cooldown_sec == 10800
+
+
+class TestRegimeFilter:
+    """Tier2는 RANGING 레짐에서 신규 진입을 하지 않아야 함."""
+
+    @pytest.fixture
+    def regime_detector(self):
+        rd = MagicMock(spec=RegimeDetector)
+        return rd
+
+    @pytest.fixture
+    def tier2_with_regime(self, mock_exchange, regime_detector):
+        safe_order = AsyncMock(spec=SafeOrderPipeline)
+        safe_order.execute_order = AsyncMock(return_value=OrderResponse(
+            success=True, order_id=1, executed_price=80800.0,
+            executed_quantity=0.01, fee=0.32,
+        ))
+        tracker = PositionStateTracker()
+        pm = MagicMock(spec=PortfolioManager)
+        pm.cash_balance = 500.0
+        pm._is_paper = False
+
+        return Tier2Scanner(
+            safe_order=safe_order,
+            position_tracker=tracker,
+            exchange=mock_exchange,
+            portfolio_manager=pm,
+            regime_detector=regime_detector,
+            scan_coins=["BTC/USDT"],
+            max_concurrent=2,
+            daily_trade_limit=10,
+            leverage=3,
+        )
+
+    @pytest.mark.asyncio
+    async def test_skip_entry_during_ranging(self, tier2_with_regime, regime_detector, session):
+        """RANGING 레짐 → 신규 진입 스킵."""
+        regime_detector.current = RegimeState(
+            regime=Regime.RANGING,
+            confidence=0.8,
+            adx=18.0,
+            bb_width=2.0,
+            atr_pct=1.5,
+            volume_ratio=0.9,
+            trend_direction=0,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        await tier2_with_regime.scan_cycle(session)
+        # RANGING이므로 scan도 하지 않고 exit 체크 후 바로 return
+        open_calls = [
+            c for c in tier2_with_regime._safe_order.execute_order.call_args_list
+            if c[0][1].action == "open"
+        ]
+        assert len(open_calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_allows_entry_during_trending(self, tier2_with_regime, regime_detector, session):
+        """TRENDING_UP 레짐 → 진입 허용."""
+        regime_detector.current = RegimeState(
+            regime=Regime.TRENDING_UP,
+            confidence=0.8,
+            adx=30.0,
+            bb_width=3.0,
+            atr_pct=2.0,
+            volume_ratio=1.2,
+            trend_direction=1,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        await tier2_with_regime.scan_cycle(session)
+        # TRENDING이므로 스캔 + 진입 시도 진행
+        assert tier2_with_regime._scores is not None
+
+    @pytest.mark.asyncio
+    async def test_exit_still_works_during_ranging(
+        self, tier2_with_regime, regime_detector, mock_exchange, session,
+    ):
+        """RANGING에서도 기존 포지션 exit 체크는 수행."""
+        regime_detector.current = RegimeState(
+            regime=Regime.RANGING,
+            confidence=0.8,
+            adx=18.0,
+            bb_width=2.0,
+            atr_pct=1.5,
+            volume_ratio=0.9,
+            trend_direction=0,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        # 시간 초과된 기존 tier2 포지션
+        state = PositionState(
+            symbol="BTC/USDT", direction=Direction.LONG, quantity=0.01,
+            entry_price=80000.0, margin=25.0, leverage=3,
+            extreme_price=80000.0, stop_loss_atr=2.0, take_profit_atr=4.0,
+            trailing_activation_atr=1.0, trailing_stop_atr=0.8,
+            tier="tier2",
+            entered_at=datetime.now(timezone.utc) - timedelta(minutes=130),
+        )
+        tier2_with_regime._positions.open_position(state)
+
+        await tier2_with_regime.scan_cycle(session)
+        # exit 체크로 청산 주문 발생해야 함
+        close_calls = [
+            c for c in tier2_with_regime._safe_order.execute_order.call_args_list
+            if c[0][1].action == "close"
+        ]
+        assert len(close_calls) > 0
 
 
 class TestResetDaily:

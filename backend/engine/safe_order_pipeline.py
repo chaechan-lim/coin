@@ -330,8 +330,11 @@ class SafeOrderPipeline:
 
         # 포지션 + 잔고 반영
         if request.action == "open":
+            # 선물: margin만 차감 (notional cost가 아닌 실제 증거금)
+            # 현물: 전체 cost 차감
+            invested = request.margin if self._pm._is_futures else cost
             await self._pm.update_position_on_buy(
-                session, request.symbol, exec_qty, exec_price, cost, fee,
+                session, request.symbol, exec_qty, exec_price, invested, fee,
                 is_surge=(request.tier == "tier2"),
                 strategy_name=request.strategy_name,
             )

@@ -95,6 +95,7 @@ class FuturesEngineV2:
             position_tracker=self._positions,
             exchange=exchange,
             portfolio_manager=portfolio_manager,
+            regime_detector=self._regime,
             max_concurrent=v2_cfg.tier2_max_concurrent,
             max_position_pct=v2_cfg.tier2_max_position_pct,
             max_hold_minutes=v2_cfg.tier2_max_hold_minutes,

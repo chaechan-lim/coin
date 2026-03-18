@@ -19,9 +19,10 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.enums import Direction
+from core.enums import Direction, Regime
 from engine.safe_order_pipeline import SafeOrderPipeline, OrderRequest
 from engine.position_state_tracker import PositionStateTracker, PositionState
+from engine.regime_detector import RegimeDetector
 from engine.portfolio_manager import PortfolioManager
 from exchange.base import ExchangeAdapter
 
@@ -61,6 +62,7 @@ class Tier2Scanner:
         position_tracker: PositionStateTracker,
         exchange: ExchangeAdapter,
         portfolio_manager: PortfolioManager,
+        regime_detector: RegimeDetector | None = None,
         *,
         scan_coins: list[str] | None = None,
         max_concurrent: int = 3,
@@ -87,6 +89,7 @@ class Tier2Scanner:
         self._positions = position_tracker
         self._exchange = exchange
         self._pm = portfolio_manager
+        self._regime = regime_detector
         self._scan_coins = scan_coins or DEFAULT_SCAN_COINS
         self._max_concurrent = max_concurrent
         self._max_position_pct = max_position_pct
@@ -171,10 +174,17 @@ class Tier2Scanner:
         # 1. 기존 포지션 exit 체크
         await self._check_exits(session)
 
-        # 2. 캔들 스캔 + 점수 계산
+        # 2. 레짐 체크 — RANGING에서는 신규 진입 금지 (exit만 수행)
+        if self._regime is not None:
+            regime_state = self._regime.current
+            if regime_state and regime_state.regime == Regime.RANGING:
+                logger.debug("tier2_skip_ranging", regime="RANGING")
+                return
+
+        # 3. 캔들 스캔 + 점수 계산
         self._scores = await self._scan_all()
 
-        # 3. 진입
+        # 4. 진입
         tier2_count = self._positions.active_count("tier2")
         if tier2_count >= self._max_concurrent:
             return

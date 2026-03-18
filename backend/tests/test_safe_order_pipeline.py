@@ -379,6 +379,85 @@ class TestSetLeverage:
         mock_exchange.set_leverage.assert_called_once()
 
 
+class TestFuturesMarginDeduction:
+    """선물 주문 시 notional이 아닌 margin만 차감되는지 확인."""
+
+    @pytest.mark.asyncio
+    async def test_futures_open_deducts_margin_not_cost(
+        self, pipeline, mock_exchange, session, portfolio_manager,
+    ):
+        """선물 open: cash에서 margin(100)만 차감, notional(800)이 아님."""
+        initial_cash = portfolio_manager.cash_balance  # 500
+        mock_exchange.create_market_buy.return_value = make_order_result(
+            price=80000.0, filled=0.01, cost=800.0, fee=0.32,
+        )
+        req = make_request(margin=100.0, quantity=0.01, price=80000.0)
+
+        resp = await pipeline.execute_order(session, req)
+        assert resp.success is True
+        # margin(100) + fee(0.32) 만 차감되어야 함, cost(800)가 아님
+        expected_cash = initial_cash - 100.0 - 0.32
+        assert abs(portfolio_manager.cash_balance - expected_cash) < 0.01
+
+    @pytest.mark.asyncio
+    async def test_futures_open_total_invested_is_margin(
+        self, pipeline, mock_exchange, session, portfolio_manager,
+    ):
+        """선물 포지션의 total_invested가 margin 기반이어야 함."""
+        mock_exchange.create_market_buy.return_value = make_order_result(
+            price=80000.0, filled=0.01, cost=800.0, fee=0.32,
+        )
+        req = make_request(margin=100.0, quantity=0.01, price=80000.0)
+
+        await pipeline.execute_order(session, req)
+
+        from sqlalchemy import select
+        pos = (await session.execute(
+            select(Position).where(Position.symbol == "BTC/USDT")
+        )).scalar_one()
+        # total_invested = margin + fee = 100.32, NOT cost + fee = 800.32
+        assert pos.total_invested < 200.0  # 확실히 margin 기반
+        assert abs(pos.total_invested - (100.0 + 0.32)) < 0.01
+
+    @pytest.mark.asyncio
+    async def test_spot_open_deducts_full_cost(self, mock_exchange, session, mock_market_data):
+        """현물은 기존대로 full cost 차감."""
+        spot_pm = PortfolioManager(
+            market_data=mock_market_data,
+            initial_balance_krw=1000.0,
+            is_paper=False,
+            exchange_name="binance_spot",
+        )
+        guard = BalanceGuard(
+            exchange=mock_exchange,
+            exchange_name="binance_spot",
+        )
+        om = OrderManager(
+            exchange=mock_exchange,
+            is_paper=False,
+            exchange_name="binance_spot",
+            fee_currency="USDT",
+        )
+        spot_pipeline = SafeOrderPipeline(
+            order_manager=om,
+            portfolio_manager=spot_pm,
+            balance_guard=guard,
+            exchange=mock_exchange,
+            leverage=1,
+        )
+
+        mock_exchange.create_market_buy.return_value = make_order_result(
+            price=100.0, filled=5.0, cost=500.0, fee=0.50,
+        )
+        req = make_request(margin=500.0, quantity=5.0, price=100.0, leverage=1)
+
+        resp = await spot_pipeline.execute_order(session, req)
+        assert resp.success is True
+        # 현물: cost(500) + fee(0.50) 차감
+        expected_cash = 1000.0 - 500.0 - 0.50
+        assert abs(spot_pm.cash_balance - expected_cash) < 0.01
+
+
 class TestPnLCalculation:
     @pytest.mark.asyncio
     async def test_long_profit_pnl(self, pipeline, mock_exchange, session):
