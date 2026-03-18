@@ -1132,33 +1132,225 @@ class TestResolveEntry:
     """_resolve_entry 충돌 해소 로직 단위 테스트."""
 
     def test_both_hold(self, tier1):
-        result = tier1._resolve_entry(_hold_decision(), _hold_decision())
-        assert result is None
+        winner, loser = tier1._resolve_entry(_hold_decision(), _hold_decision())
+        assert winner is None
+        assert loser is None
 
     def test_long_only(self, tier1):
-        result = tier1._resolve_entry(_long_open_decision(), _hold_decision())
-        assert result is not None
-        assert result.direction == Direction.LONG
+        winner, loser = tier1._resolve_entry(_long_open_decision(), _hold_decision())
+        assert winner is not None
+        assert winner.direction == Direction.LONG
+        assert loser is None  # 충돌 아님
 
     def test_short_only(self, tier1):
-        result = tier1._resolve_entry(_hold_decision(), _short_open_decision())
-        assert result is not None
-        assert result.direction == Direction.SHORT
+        winner, loser = tier1._resolve_entry(_hold_decision(), _short_open_decision())
+        assert winner is not None
+        assert winner.direction == Direction.SHORT
+        assert loser is None  # 충돌 아님
 
     def test_both_open_long_wins(self, tier1):
         long_d = _long_open_decision(confidence=0.9)
         short_d = _short_open_decision(confidence=0.7)
-        result = tier1._resolve_entry(long_d, short_d)
-        assert result.direction == Direction.LONG
+        winner, loser = tier1._resolve_entry(long_d, short_d)
+        assert winner.direction == Direction.LONG
+        assert loser is not None
+        assert loser.direction == Direction.SHORT
 
     def test_both_open_short_wins(self, tier1):
         long_d = _long_open_decision(confidence=0.5)
         short_d = _short_open_decision(confidence=0.8)
-        result = tier1._resolve_entry(long_d, short_d)
-        assert result.direction == Direction.SHORT
+        winner, loser = tier1._resolve_entry(long_d, short_d)
+        assert winner.direction == Direction.SHORT
+        assert loser is not None
+        assert loser.direction == Direction.LONG
 
     def test_equal_confidence_long_wins(self, tier1):
         long_d = _long_open_decision(confidence=0.7)
         short_d = _short_open_decision(confidence=0.7)
-        result = tier1._resolve_entry(long_d, short_d)
-        assert result.direction == Direction.LONG
+        winner, loser = tier1._resolve_entry(long_d, short_d)
+        assert winner.direction == Direction.LONG
+        assert loser is not None
+        assert loser.direction == Direction.SHORT
+
+
+class TestConflictObservability:
+    """충돌 해소 시 탈락한 결정의 관측성 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_loser_decision_logged_to_db(self, tier1, mock_deps, session):
+        """충돌 시 탈락한 결정도 StrategyLog에 기록됨."""
+        mock_deps["long_eval"].set_decision(
+            "BTC/USDT", _long_open_decision(confidence=0.9)
+        )
+        mock_deps["short_eval"].set_decision(
+            "BTC/USDT", _short_open_decision(confidence=0.7)
+        )
+
+        await tier1.evaluation_cycle(session)
+        await session.flush()
+
+        result = await session.execute(
+            select(StrategyLog).where(StrategyLog.symbol == "BTC/USDT")
+        )
+        logs = result.scalars().all()
+
+        # 실행된 BUY (long winner) + 탈락한 SELL (short loser) = 최소 2건
+        assert len(logs) >= 2, (
+            f"Expected at least 2 logs (winner + loser), got {len(logs)}"
+        )
+        buy_logs = [lg for lg in logs if lg.signal_type == "BUY"]
+        sell_logs = [lg for lg in logs if lg.signal_type == "SELL"]
+        assert len(buy_logs) >= 1, "Winner (LONG/BUY) should be logged"
+        assert len(sell_logs) >= 1, "Loser (SHORT/SELL) should be logged"
+
+        # 탈락한 결정은 was_executed=False
+        loser_log = sell_logs[0]
+        assert loser_log.was_executed is False
+
+    @pytest.mark.asyncio
+    async def test_conflict_info_log_emitted(self, tier1, mock_deps, session):
+        """충돌 해소 시 tier1_conflict_resolved 로그가 발생."""
+        mock_deps["long_eval"].set_decision(
+            "BTC/USDT", _long_open_decision(confidence=0.9)
+        )
+        mock_deps["short_eval"].set_decision(
+            "BTC/USDT", _short_open_decision(confidence=0.7)
+        )
+
+        with patch("engine.tier1_manager.logger") as mock_logger:
+            await tier1.evaluation_cycle(session)
+
+            conflict_calls = [
+                c
+                for c in mock_logger.info.call_args_list
+                if c[0][0] == "tier1_conflict_resolved"
+            ]
+            assert len(conflict_calls) >= 1, (
+                "tier1_conflict_resolved log should be emitted on conflict"
+            )
+            kwargs = conflict_calls[0][1]
+            assert kwargs["symbol"] == "BTC/USDT"
+            assert kwargs["winner_direction"] == Direction.LONG.value
+            assert kwargs["winner_confidence"] == 0.9
+            assert kwargs["loser_direction"] == Direction.SHORT.value
+            assert kwargs["loser_confidence"] == 0.7
+
+    @pytest.mark.asyncio
+    async def test_no_conflict_log_when_single_open(self, tier1, mock_deps, session):
+        """충돌이 아닌 경우 tier1_conflict_resolved 로그 미발생."""
+        mock_deps["long_eval"].set_decision(
+            "BTC/USDT", _long_open_decision(confidence=0.8)
+        )
+        # short_eval returns hold (default)
+
+        with patch("engine.tier1_manager.logger") as mock_logger:
+            await tier1.evaluation_cycle(session)
+
+            conflict_calls = [
+                c
+                for c in mock_logger.info.call_args_list
+                if c[0][0] == "tier1_conflict_resolved"
+            ]
+            assert len(conflict_calls) == 0, (
+                "No conflict log when only one evaluator returns open"
+            )
+
+
+class TestSLTPCooldown:
+    """SL/TP 청산 후 쿨다운 설정 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_sl_sets_cooldown(self, tier1, mock_deps, session):
+        """SL 히트로 청산 후 쿨다운이 설정됨."""
+        state = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+        )
+        mock_deps["tracker"].open_position(state)
+
+        # SL 가격으로 설정
+        sl_price_df = _make_df(close=78000.0, atr=1000.0)
+        mock_deps["market_data"].get_ohlcv_df = AsyncMock(return_value=sl_price_df)
+
+        assert "BTC/USDT" not in tier1._last_exit_time
+        await tier1.evaluation_cycle(session)
+
+        # SL 히트 후 쿨다운 타이머가 설정되어야 함
+        assert "BTC/USDT" in tier1._last_exit_time
+        assert tier1._last_exit_time["BTC/USDT"] > 0
+
+    @pytest.mark.asyncio
+    async def test_sl_blocks_immediate_reentry(self, tier1, mock_deps, session):
+        """SL 청산 후 쿨다운 동안 재진입이 차단됨."""
+        state = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+        )
+        mock_deps["tracker"].open_position(state)
+
+        # 1차: SL 가격으로 청산
+        sl_price_df = _make_df(close=78000.0, atr=1000.0)
+        mock_deps["market_data"].get_ohlcv_df = AsyncMock(return_value=sl_price_df)
+        await tier1.evaluation_cycle(session)
+
+        # 2차: 정상 가격 복원, 롱 시그널 발생 → 쿨다운으로 차단
+        mock_deps["market_data"].get_ohlcv_df = AsyncMock(return_value=_make_df())
+        mock_deps["long_eval"].set_decision("BTC/USDT", _long_open_decision())
+
+        stats = await tier1.evaluation_cycle(session)
+
+        btc_open = [
+            c
+            for c in mock_deps["safe_order"].execute_order.call_args_list
+            if c[0][1].action == "open" and c[0][1].symbol == "BTC/USDT"
+        ]
+        assert len(btc_open) == 0, (
+            "Should not re-enter BTC/USDT during cooldown after SL hit"
+        )
+        assert stats.cooldown_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_tp_sets_cooldown(self, tier1, mock_deps, session):
+        """TP 히트로 청산 후 쿨다운이 설정됨."""
+        state = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+        )
+        mock_deps["tracker"].open_position(state)
+
+        # TP 가격 설정 (entry + atr * tp_atr = 80000 + 1000*3 = 83000 이상)
+        tp_price_df = _make_df(close=84000.0, atr=1000.0)
+        mock_deps["market_data"].get_ohlcv_df = AsyncMock(return_value=tp_price_df)
+
+        assert "BTC/USDT" not in tier1._last_exit_time
+        await tier1.evaluation_cycle(session)
+
+        # TP 히트 후 쿨다운 타이머가 설정되어야 함
+        assert "BTC/USDT" in tier1._last_exit_time

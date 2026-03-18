@@ -256,7 +256,7 @@ class Tier1Manager:
         )
 
         # 진입 시그널 선택
-        decision = self._resolve_entry(long_decision, short_decision)
+        decision, loser = self._resolve_entry(long_decision, short_decision)
         if decision is None:
             # 양쪽 다 hold — 둘 다 로깅
             self._log_direction_decision(
@@ -274,6 +274,26 @@ class Tier1Manager:
                 was_executed=False,
             )
             return "hold"
+
+        # 충돌로 탈락한 결정 로깅 (관측성)
+        if loser is not None:
+            logger.info(
+                "tier1_conflict_resolved",
+                symbol=symbol,
+                winner_direction=decision.direction.value if decision.direction else None,
+                winner_confidence=decision.confidence,
+                winner_strategy=decision.strategy_name,
+                loser_direction=loser.direction.value if loser.direction else None,
+                loser_confidence=loser.confidence,
+                loser_strategy=loser.strategy_name,
+            )
+            self._log_direction_decision(
+                session,
+                symbol,
+                loser,
+                regime=regime,
+                was_executed=False,
+            )
 
         # 최소 신뢰도 필터
         if decision.confidence < self._min_confidence:
@@ -318,12 +338,16 @@ class Tier1Manager:
         self,
         long_decision: DirectionDecision,
         short_decision: DirectionDecision,
-    ) -> DirectionDecision | None:
+    ) -> tuple[DirectionDecision | None, DirectionDecision | None]:
         """양쪽 이밸류에이터의 진입 시그널 충돌 해소.
 
         둘 다 open이면 confidence 높은 쪽 선택.
         하나만 open이면 그쪽 선택.
-        둘 다 hold이면 None 반환.
+        둘 다 hold이면 (None, None) 반환.
+
+        Returns:
+            (winner, loser): winner는 실행할 결정, loser는 충돌로 탈락한 결정.
+            충돌이 없으면 loser는 None.
         """
         long_open = long_decision.is_open
         short_open = short_decision.is_open
@@ -331,13 +355,13 @@ class Tier1Manager:
         if long_open and short_open:
             # 충돌 방지: confidence 높은 쪽 선택
             if long_decision.confidence >= short_decision.confidence:
-                return long_decision
-            return short_decision
+                return long_decision, short_decision
+            return short_decision, long_decision
         elif long_open:
-            return long_decision
+            return long_decision, None
         elif short_open:
-            return short_decision
-        return None
+            return short_decision, None
+        return None, None
 
     def _in_cooldown(self, symbol: str) -> bool:
         """쿨다운 체크."""
@@ -456,7 +480,7 @@ class Tier1Manager:
         price: float,
         atr: float,
     ) -> bool:
-        """SL/TP/trailing 체크. 히트 시 청산. Returns True if closed."""
+        """SL/TP/trailing 체크. 히트 시 청산 + 쿨다운 설정. Returns True if closed."""
         if price <= 0 or atr <= 0:
             return False
 
@@ -469,6 +493,7 @@ class Tier1Manager:
                 state.direction,
                 f"SL hit: price={price:.2f}",
             )
+            self._last_exit_time[symbol] = time.time()
             return True
 
         if state.check_trailing_stop(price, atr):
@@ -478,6 +503,7 @@ class Tier1Manager:
                 state.direction,
                 f"Trailing stop hit: price={price:.2f}",
             )
+            self._last_exit_time[symbol] = time.time()
             return True
 
         if state.check_take_profit(price, atr):
@@ -487,6 +513,7 @@ class Tier1Manager:
                 state.direction,
                 f"TP hit: price={price:.2f}",
             )
+            self._last_exit_time[symbol] = time.time()
             return True
 
         return False
