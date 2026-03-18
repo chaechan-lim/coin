@@ -188,13 +188,6 @@ class Tier1Manager:
         # 2. 포지션 방향에 따라 해당 이밸류에이터의 청산 시그널 체크
         if current_dir == Direction.LONG:
             long_decision = await self._long_evaluator.evaluate(symbol, pos_state)
-            self._log_direction_decision(
-                session,
-                symbol,
-                long_decision,
-                regime=regime,
-                was_executed=False,
-            )
             if long_decision.is_close:
                 await self._close_position(
                     session, symbol, pos_state.direction, long_decision.reason
@@ -206,19 +199,20 @@ class Tier1Manager:
                     long_decision,
                     regime=regime,
                     was_executed=True,
-                    override_log=True,
+                    closing_direction=Direction.LONG,
                 )
                 return "flat_close"
-
-        elif current_dir == Direction.SHORT:
-            short_decision = await self._short_evaluator.evaluate(symbol, pos_state)
+            # hold — 포지션 유지, 결정 로깅
             self._log_direction_decision(
                 session,
                 symbol,
-                short_decision,
+                long_decision,
                 regime=regime,
                 was_executed=False,
             )
+
+        elif current_dir == Direction.SHORT:
+            short_decision = await self._short_evaluator.evaluate(symbol, pos_state)
             if short_decision.is_close:
                 await self._close_position(
                     session, symbol, pos_state.direction, short_decision.reason
@@ -230,9 +224,17 @@ class Tier1Manager:
                     short_decision,
                     regime=regime,
                     was_executed=True,
-                    override_log=True,
+                    closing_direction=Direction.SHORT,
                 )
                 return "flat_close"
+            # hold — 포지션 유지, 결정 로깅
+            self._log_direction_decision(
+                session,
+                symbol,
+                short_decision,
+                regime=regime,
+                was_executed=False,
+            )
 
         # 3. 포지션 없으면 양쪽 이밸류에이터에서 진입 시그널 탐색
         if current_dir is None or current_dir == Direction.FLAT:
@@ -277,7 +279,7 @@ class Tier1Manager:
                 return "low_confidence"
 
             # 쿨다운 체크
-            if self._in_cooldown(symbol, decision.direction):
+            if self._in_cooldown(symbol):
                 self._log_direction_decision(
                     session,
                     symbol,
@@ -326,7 +328,7 @@ class Tier1Manager:
             return short_decision
         return None
 
-    def _in_cooldown(self, symbol: str, direction: Direction | None) -> bool:
+    def _in_cooldown(self, symbol: str) -> bool:
         """쿨다운 체크."""
         last_exit = self._last_exit_time.get(symbol, 0)
         elapsed = time.time() - last_exit
@@ -344,12 +346,20 @@ class Tier1Manager:
         symbol: str,
         decision: DirectionDecision,
     ) -> None:
-        """DirectionDecision으로 포지션 오픈."""
-        df_5m = await self._fetch_candles(symbol, "5m", 200)
-        if df_5m is None or len(df_5m) < 20:
-            return
-        close = self._last_close(df_5m)
-        atr = self._last_atr(df_5m)
+        """DirectionDecision으로 포지션 오픈.
+
+        이밸류에이터가 캔들을 이미 조회했으므로, indicators에 close/atr가 있으면
+        그 값을 재사용하여 불필요한 API 호출을 줄인다.
+        """
+        close = decision.indicators.get("close", 0.0)
+        atr = decision.indicators.get("atr", 0.0)
+        if close <= 0 or atr <= 0:
+            # fallback: indicators에 없으면 직접 조회
+            df_5m = await self._fetch_candles(symbol, "5m", 200)
+            if df_5m is None or len(df_5m) < 20:
+                return
+            close = self._last_close(df_5m)
+            atr = self._last_atr(df_5m)
 
         margin = self._calc_margin(decision, close, atr)
         if margin <= 0:
@@ -543,26 +553,24 @@ class Tier1Manager:
         *,
         was_executed: bool,
         regime: RegimeState,
-        override_log: bool = False,
+        closing_direction: Direction | None = None,
     ) -> None:
         """DirectionDecision을 StrategyLog 테이블에 기록.
 
         V2 전략의 매 평가마다 HOLD 포함 모든 판단을 기록하여
         전략 추적 가능하게 한다.
 
-        override_log=True이면 이전 로그를 덮어쓰기 위한 재호출 — 스킵.
-        (실제 실행 여부가 확정된 후 was_executed를 업데이트하는 용도)
+        closing_direction: 청산 시 닫히는 포지션의 방향. close 결정의
+            direction은 None이므로, 포지션 방향을 별도로 전달하여
+            올바른 signal_type(SELL for LONG close, BUY for SHORT close)을 기록.
         """
-        if override_log:
-            # 이전에 was_executed=False로 기록한 로그의 업데이트 목적
-            # 간단히 새 로그를 하나 더 추가하지 않고 스킵
-            return
-
-        signal_type = (
-            "HOLD"
-            if decision.is_hold
-            else self._direction_to_signal_type(decision.direction)
-        )
+        if decision.is_hold:
+            signal_type = "HOLD"
+        elif decision.is_close and closing_direction is not None:
+            # 청산 시그널: 롱 청산 → SELL, 숏 청산 → BUY (방향 반전)
+            signal_type = "SELL" if closing_direction == Direction.LONG else "BUY"
+        else:
+            signal_type = self._direction_to_signal_type(decision.direction)
 
         # 지표 딕셔너리: 전략 제공 지표 + 레짐 정보
         indicators = dict(decision.indicators) if decision.indicators else {}

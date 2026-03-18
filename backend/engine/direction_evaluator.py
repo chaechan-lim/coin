@@ -8,7 +8,7 @@ DirectionEvaluator — 방향별 독립 평가 프로토콜.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from core.enums import Direction
 from engine.position_state_tracker import PositionState
@@ -24,7 +24,7 @@ class DirectionDecision:
         'hold'  — 유지 (아무 행동 없음)
     """
 
-    action: str  # 'open', 'close', 'hold'
+    action: Literal["open", "close", "hold"]
     direction: Direction | None  # LONG or SHORT (open 시 필수)
     confidence: float  # 0.0-1.0
     sizing_factor: float  # 0.0-1.0

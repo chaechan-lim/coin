@@ -543,7 +543,7 @@ class TestSLTPCheck:
 
         # BTC/USDT에 대해 long_eval이 호출되지 않아야 함 (SL이 먼저 발동)
         btc_calls = [
-            (s, p) for s, p in mock_deps["long_eval"].call_args if s == "BTC/USDT"
+            args for args in mock_deps["long_eval"].call_args if args[0] == "BTC/USDT"
         ]
         assert len(btc_calls) == 0
 
@@ -937,6 +937,75 @@ class TestStrategySignalLogging:
             short_evaluator=mock_deps["short_eval"],
         )
         assert tier1._exchange_name == "binance_futures"
+
+    @pytest.mark.asyncio
+    async def test_executed_close_logged_as_executed(self, tier1, mock_deps, session):
+        """실행된 청산 시그널은 was_executed=True로 기록됨."""
+        state = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+        )
+        mock_deps["tracker"].open_position(state)
+        mock_deps["long_eval"].set_decision("BTC/USDT", _close_decision())
+
+        await tier1.evaluation_cycle(session)
+        await session.flush()
+
+        result = await session.execute(
+            select(StrategyLog).where(StrategyLog.symbol == "BTC/USDT")
+        )
+        logs = result.scalars().all()
+        assert len(logs) >= 1
+        # 청산 시그널은 was_executed=True로 기록되어야 함
+        sell_executed = [
+            lg
+            for lg in logs
+            if lg.signal_type == "SELL" and lg.was_executed
+        ]
+        assert len(sell_executed) >= 1, (
+            "Close signal should be logged with was_executed=True"
+        )
+
+    @pytest.mark.asyncio
+    async def test_position_held_hold_logged(self, tier1, mock_deps, session):
+        """포지션 보유 중 hold 결정도 StrategyLog에 기록됨."""
+        state = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+        )
+        mock_deps["tracker"].open_position(state)
+        # long_eval returns hold (default) → keep holding
+
+        await tier1.evaluation_cycle(session)
+        await session.flush()
+
+        result = await session.execute(
+            select(StrategyLog).where(StrategyLog.symbol == "BTC/USDT")
+        )
+        logs = result.scalars().all()
+        # 포지션 유지 중 hold 판단도 로깅되어야 함
+        hold_logs = [lg for lg in logs if lg.signal_type == "HOLD"]
+        assert len(hold_logs) >= 1, (
+            "Hold decision for held position should also be logged"
+        )
 
     @pytest.mark.asyncio
     async def test_custom_exchange_name(self, mock_deps, session):
