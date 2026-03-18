@@ -47,10 +47,20 @@ def config():
     return cfg
 
 
+def _make_balance(free: float = 100.0) -> MagicMock:
+    """Balance-like mock with .free attribute."""
+    bal = MagicMock()
+    bal.free = free
+    bal.total = free
+    return bal
+
+
 @pytest.fixture
 def mock_exchange():
     ex = AsyncMock()
     ex.fetch_ticker = AsyncMock(return_value=MagicMock(last=50000, ask=50100))
+    # 매도 시 실잔고 클램핑에 사용 — 기본은 충분한 잔고
+    ex.fetch_balance = AsyncMock(return_value={"ETH": _make_balance(100.0), "BTC": _make_balance(100.0)})
     return ex
 
 
@@ -88,6 +98,8 @@ def mock_order_mgr():
     filled_order.fee = 50
     filled_order.id = 1
     filled_order.exchange_order_id = "ex-123"
+    filled_order.executed_quantity = 2.0  # amount_krw(100000) / price(50000) = 2.0
+    filled_order.executed_price = 50000
     om.create_order = AsyncMock(return_value=filled_order)
     om.cancel_order_by_id = AsyncMock()
     return om

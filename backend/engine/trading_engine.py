@@ -1187,6 +1187,16 @@ class TradingEngine:
         reason: str,
     ) -> None:
         """SL/TP/trailing에 의한 전량 매도."""
+        # 방어: DB 수량이 거래소 실잔고보다 클 수 있음 (매수 시 stepSize/수수료 차이)
+        # 실잔고 기준으로 매도 수량 클램핑
+        sell_qty = position.quantity
+        sell_qty = await self._clamp_sell_qty_to_balance(symbol, sell_qty)
+
+        if sell_qty <= 0:
+            logger.warning("stop_sell_zero_balance", symbol=symbol,
+                           db_qty=position.quantity, reason=reason)
+            return
+
         # 시스템 생성 매도 시그널
         sell_signal = Signal(
             strategy_name="risk_management",
@@ -1196,7 +1206,7 @@ class TradingEngine:
         )
 
         order = await self._order_manager.create_order(
-            session, symbol, "sell", position.quantity, price, sell_signal,
+            session, symbol, "sell", sell_qty, price, sell_signal,
             order_type="market",
             entry_price=position.average_buy_price if position.average_buy_price and position.average_buy_price > 0 else None,
         )
@@ -1213,8 +1223,8 @@ class TradingEngine:
             raise RuntimeError(f"sell_order_not_filled: {order.status}")
 
         await self._portfolio_manager.update_position_on_sell(
-            session, symbol, position.quantity, price,
-            position.quantity * price, order.fee
+            session, symbol, sell_qty, price,
+            sell_qty * price, order.fee
         )
 
         # 트래커 제거
@@ -1240,6 +1250,37 @@ class TradingEngine:
                     "reason": reason,
                 },
             })
+
+    # ── 매도 수량 방어 (거래소 실잔고 클램핑) ────────────────────────
+
+    async def _clamp_sell_qty_to_balance(self, symbol: str, qty: float) -> float:
+        """DB 수량이 거래소 실잔고보다 클 경우 실잔고로 클램핑.
+
+        매수 시 stepSize 내림, 수수료 차감 등으로 DB qty > 실잔고가 될 수 있다.
+        매도 시 DB qty 그대로 전달하면 insufficient balance 에러 발생.
+        """
+        try:
+            balances = await self._exchange.fetch_balance()
+            # symbol: "BTC/USDT" → base: "BTC"
+            base = symbol.split("/")[0]
+            bal = balances.get(base)
+            if bal is None:
+                return qty
+
+            actual_free = bal.free
+            if actual_free < qty:
+                logger.warning(
+                    "sell_qty_clamped_to_balance",
+                    symbol=symbol,
+                    db_qty=qty,
+                    exchange_free=actual_free,
+                    diff=round(qty - actual_free, 10),
+                )
+                return actual_free
+        except Exception as e:
+            # fetch_balance 실패 시 원래 수량 유지 (거래소에서 reject하면 에러 핸들링)
+            logger.warning("clamp_sell_balance_fetch_failed", symbol=symbol, error=str(e))
+        return qty
 
     # ── 포트폴리오 리밸런싱 ─────────────────────────────────────────
 
@@ -1816,15 +1857,20 @@ class TradingEngine:
                         pass
                 return
 
+            # 거래소 실제 체결 수량/가격 사용
+            executed_qty = float(order.executed_quantity) if order.executed_quantity else amount
+            executed_price = float(order.executed_price) if order.executed_price else price
+            actual_cost = executed_qty * executed_price
+
             await self._portfolio_manager.update_position_on_buy(
-                session, symbol, amount, price, amount_krw, order.fee,
+                session, symbol, executed_qty, executed_price, actual_cost, order.fee,
                 is_surge=True,
             )
 
             # 서지 전용 포지션 트래커 (백테스트 C 프로필)
             self._position_trackers[symbol] = PositionTracker(
-                entry_price=price,
-                extreme_price=price,
+                entry_price=executed_price,
+                extreme_price=executed_price,
                 stop_loss_pct=4.0,
                 take_profit_pct=8.0,
                 trailing_activation_pct=1.5,
@@ -1842,12 +1888,13 @@ class TradingEngine:
             logger.info(
                 "rotation_buy",
                 symbol=symbol,
-                price=price,
+                price=executed_price,
+                executed_qty=executed_qty,
                 surge_score=round(surge_score, 1),
                 confidence=round(confidence, 3),
                 sl_pct=4.0,
             )
-            await emit_event("info", "rotation", f"로테이션 매수: {symbol}", metadata={"surge_score": round(surge_score, 1), "price": price})
+            await emit_event("info", "rotation", f"로테이션 매수: {symbol}", metadata={"surge_score": round(surge_score, 1), "price": executed_price})
 
             if self._broadcast_callback:
                 await self._broadcast_callback({
@@ -2074,20 +2121,25 @@ class TradingEngine:
                         pass
                 return
 
+            # 거래소 실제 체결 수량/가격 사용 (요청값 ≠ 체결값: stepSize 내림, 수수료 차감 등)
+            executed_qty = float(order.executed_quantity) if order.executed_quantity else amount
+            executed_price = float(order.executed_price) if order.executed_price else price
+            actual_cost = executed_qty * executed_price
+
             await self._portfolio_manager.update_position_on_buy(
-                session, symbol, amount, price, amount_krw, order.fee,
+                session, symbol, executed_qty, executed_price, actual_cost, order.fee,
                 strategy_name=primary_signal.strategy_name,
             )
 
             # 포지션 트래커 생성 (SL/TP/trailing 추적 시작)
             try:
                 df = await self._market_data.get_candles(symbol, "4h", 200)
-                sl_pct = self._calc_dynamic_sl(df, price, self._market_state)
+                sl_pct = self._calc_dynamic_sl(df, executed_price, self._market_state)
             except Exception:
                 sl_pct = 3.0
             self._position_trackers[symbol] = PositionTracker(
-                entry_price=price,
-                extreme_price=price,
+                entry_price=executed_price,
+                extreme_price=executed_price,
                 stop_loss_pct=sl_pct,
             )
             await self._save_tracker_to_db(session, symbol, self._position_trackers[symbol])
@@ -2095,19 +2147,20 @@ class TradingEngine:
             logger.info(
                 "position_opened",
                 symbol=symbol,
-                price=price,
+                price=executed_price,
+                executed_qty=executed_qty,
                 sl_pct=round(sl_pct, 2),
                 market_state=self._market_state,
             )
             tracker = self._position_trackers[symbol]
-            sl_price = round(price * (1 - tracker.stop_loss_pct / 100))
-            tp_price = round(price * (1 + tracker.take_profit_pct / 100))
+            sl_price = round(executed_price * (1 - tracker.stop_loss_pct / 100))
+            tp_price = round(executed_price * (1 + tracker.take_profit_pct / 100))
             await emit_event("info", "trade", f"매수: {symbol}", metadata={
-                "price": price, "sl_pct": round(sl_pct, 2),
+                "price": executed_price, "sl_pct": round(sl_pct, 2),
                 "sl_price": sl_price, "tp_price": tp_price,
                 "strategy": primary_signal.strategy_name,
                 "confidence": round(decision.combined_confidence, 2),
-                "amount_krw": round(amount_krw, 0),
+                "amount_krw": round(actual_cost, 0),
                 "market_state": self._market_state,
             })
 
@@ -2119,12 +2172,18 @@ class TradingEngine:
             if not position or position.quantity <= 0:
                 return
 
+            # 방어: 실잔고 기준으로 매도 수량 클램핑
+            sell_qty = await self._clamp_sell_qty_to_balance(symbol, position.quantity)
+            if sell_qty <= 0:
+                logger.warning("sell_zero_balance", symbol=symbol, db_qty=position.quantity)
+                return
+
             ep = position.average_buy_price if position.average_buy_price and position.average_buy_price > 0 else None
 
             if self._recovery_manager:
                 order = await self._execute_with_retry(
                     lambda: self._order_manager.create_order(
-                        session, symbol, "sell", position.quantity, price, primary_signal, decision,
+                        session, symbol, "sell", sell_qty, price, primary_signal, decision,
                         order_type="market", entry_price=ep,
                     ),
                     context="sell_order", symbol=symbol,
@@ -2134,7 +2193,7 @@ class TradingEngine:
             else:
                 try:
                     order = await self._order_manager.create_order(
-                        session, symbol, "sell", position.quantity, price, primary_signal, decision,
+                        session, symbol, "sell", sell_qty, price, primary_signal, decision,
                         order_type="market", entry_price=ep,
                     )
                 except Exception as e:
@@ -2158,8 +2217,8 @@ class TradingEngine:
             pnl_pct = (price - entry_price) / entry_price * 100 if entry_price > 0 else 0
 
             await self._portfolio_manager.update_position_on_sell(
-                session, symbol, position.quantity, price,
-                position.quantity * price, order.fee
+                session, symbol, sell_qty, price,
+                sell_qty * price, order.fee
             )
             await emit_event("info", "trade", f"매도: {symbol}", metadata={
                 "price": price,
