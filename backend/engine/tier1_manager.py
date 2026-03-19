@@ -208,7 +208,7 @@ class Tier1Manager:
                     closing_direction=Direction.LONG,
                 )
                 return "flat_close"
-            # hold — 포지션 유지, 결정 로깅
+            # open 또는 hold — 이미 같은 방향 포지션 보유 중이므로 유지
             self._log_direction_decision(
                 session,
                 symbol,
@@ -236,7 +236,7 @@ class Tier1Manager:
                     closing_direction=Direction.SHORT,
                 )
                 return "flat_close"
-            # hold — 포지션 유지, 결정 로깅
+            # open 또는 hold — 이미 같은 방향 포지션 보유 중이므로 유지
             self._log_direction_decision(
                 session,
                 symbol,

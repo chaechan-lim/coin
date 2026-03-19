@@ -696,10 +696,10 @@ class TestCycleObservability:
         # Make the long_eval raise for BTC
         original_eval = mock_deps["long_eval"].evaluate
 
-        async def raising_eval(symbol, pos):
+        async def raising_eval(symbol, pos, **kwargs):
             if symbol == "BTC/USDT":
                 raise RuntimeError("test error")
-            return await original_eval(symbol, pos)
+            return await original_eval(symbol, pos, **kwargs)
 
         mock_deps["long_eval"].evaluate = raising_eval
 

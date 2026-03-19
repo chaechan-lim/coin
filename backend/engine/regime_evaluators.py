@@ -89,8 +89,16 @@ class _RegimeDirectionEvaluator:
             logger.warning(f"{self._label}_missing_close_column", symbol=symbol)
         if "atr_14" not in df_5m.columns:
             logger.warning(f"{self._label}_missing_atr_column", symbol=symbol)
-        last_close = float(df_5m["close"].iloc[-1]) if "close" in df_5m.columns else 0.0
-        last_atr = float(df_5m["atr_14"].iloc[-1]) if "atr_14" in df_5m.columns else 0.0
+        last_close = (
+            float(df_5m["close"].iloc[-1])
+            if "close" in df_5m.columns and pd.notna(df_5m["close"].iloc[-1])
+            else 0.0
+        )
+        last_atr = (
+            float(df_5m["atr_14"].iloc[-1])
+            if "atr_14" in df_5m.columns and pd.notna(df_5m["atr_14"].iloc[-1])
+            else 0.0
+        )
 
         # HOLD → hold
         if decision.is_hold:
