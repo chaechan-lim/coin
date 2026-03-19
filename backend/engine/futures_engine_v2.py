@@ -19,6 +19,7 @@ from db.session import get_session_factory
 from engine.regime_detector import RegimeDetector
 from engine.strategy_selector import StrategySelector
 from engine.regime_evaluators import RegimeLongEvaluator, RegimeShortEvaluator
+from engine.spot_long_evaluator import SpotLongEvaluator
 from engine.tier1_manager import Tier1Manager
 from engine.tier2_scanner import Tier2Scanner
 from engine.safe_order_pipeline import SafeOrderPipeline
@@ -28,6 +29,11 @@ from engine.order_manager import OrderManager
 from engine.portfolio_manager import PortfolioManager
 from exchange.base import ExchangeAdapter
 from services.market_data import MarketDataService
+from strategies.combiner import SignalCombiner
+from strategies.cis_momentum import CISMomentumStrategy
+from strategies.bnf_deviation import BNFDeviationStrategy
+from strategies.donchian_channel import DonchianChannelStrategy
+from strategies.larry_williams import LarryWilliamsStrategy
 
 logger = structlog.get_logger(__name__)
 
@@ -77,11 +83,30 @@ class FuturesEngineV2:
         )
 
         # 듀얼 이밸류에이터: 롱/숏 독립 평가 (COIN-25)
-        self._long_evaluator = RegimeLongEvaluator(
-            strategy_selector=self._strategies,
-            regime_detector=self._regime,
+        # 롱: 현물 4전략 기반 (COIN-26)
+        spot_strategies = [
+            CISMomentumStrategy(),
+            BNFDeviationStrategy(),
+            DonchianChannelStrategy(),
+            LarryWilliamsStrategy(),
+        ]
+        spot_combiner = SignalCombiner(
+            strategy_weights=SignalCombiner.SPOT_WEIGHTS.copy(),
+            min_confidence=v2_cfg.tier1_long_min_confidence,
+            directional_weights=False,
+            exchange_name=self.EXCHANGE_NAME,
+        )
+        self._long_evaluator = SpotLongEvaluator(
+            strategies=spot_strategies,
+            combiner=spot_combiner,
             market_data=market_data,
-            eval_interval=v2_cfg.tier1_eval_interval_sec,
+            eval_interval=v2_cfg.tier1_long_eval_interval_sec,
+            min_confidence=v2_cfg.tier1_long_min_confidence,
+            cooldown_hours=v2_cfg.tier1_long_cooldown_hours,
+            sl_pct=v2_cfg.tier1_long_sl_pct,
+            tp_pct=v2_cfg.tier1_long_tp_pct,
+            trail_activation_pct=v2_cfg.tier1_long_trail_activation_pct,
+            trail_stop_pct=v2_cfg.tier1_long_trail_stop_pct,
         )
         self._short_evaluator = RegimeShortEvaluator(
             strategy_selector=self._strategies,

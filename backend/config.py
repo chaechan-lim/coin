@@ -262,6 +262,15 @@ class FuturesV2Config(BaseSettings):
     tier1_min_confidence: float = 0.4
     tier1_cooldown_seconds: int = 93600  # 26h (백테스트 최적)
 
+    # Long evaluator — 현물 4전략 기반 (COIN-26)
+    tier1_long_eval_interval_sec: int = 300       # 5분 (현물과 동일)
+    tier1_long_min_confidence: float = 0.50       # 현물 라이브 동일
+    tier1_long_cooldown_hours: float = 60.0       # 현물 Optuna 최적 (cd15)
+    tier1_long_sl_pct: float = 5.0                # 동적 SL
+    tier1_long_tp_pct: float = 14.0
+    tier1_long_trail_activation_pct: float = 3.0
+    tier1_long_trail_stop_pct: float = 1.5
+
     # Tier 2 (COIN-23: 필터 추가 + 파라미터 조정)
     tier2_enabled: bool = True
     tier2_max_concurrent: int = 3          # 5 → 3 (노이즈 거래 제거)
