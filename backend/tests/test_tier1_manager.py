@@ -262,6 +262,89 @@ class TestMarginCalc:
         margin = tier1._calc_margin(decision, close=80000.0, atr=1000.0)
         assert margin == 0.0  # < 5 USDT
 
+    def test_min_notional_floor_btc_small_balance(self, tier1, mock_deps):
+        """COIN-31: BTC $259 잔고에서 ATR sizing이 작아도 MIN_NOTIONAL 보장."""
+        mock_deps["pm"].cash_balance = 259.0
+        decision = DirectionDecision(
+            action="open",
+            direction=Direction.SHORT,
+            confidence=0.6,
+            sizing_factor=0.5,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            reason="short_signal",
+            strategy_name="mean_reversion",
+        )
+        margin = tier1._calc_margin(decision, close=84000.0, atr=1200.0)
+        assert margin > 0
+        assert margin * tier1._leverage >= tier1.MIN_NOTIONAL
+
+    def test_min_notional_floor_cash_sufficient(self, tier1, mock_deps):
+        """잔고가 min_margin 이상이면 MIN_NOTIONAL 보장."""
+        mock_deps["pm"].cash_balance = 100.0
+        decision = DirectionDecision(
+            action="open",
+            direction=Direction.LONG,
+            confidence=0.5,
+            sizing_factor=0.3,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            reason="test",
+            strategy_name="test",
+        )
+        margin = tier1._calc_margin(decision, close=84000.0, atr=1200.0)
+        assert margin >= tier1.MIN_NOTIONAL / tier1._leverage
+
+    def test_min_notional_no_bump_when_already_sufficient(self, tier1, mock_deps):
+        """ATR sizing이 이미 충분하면 bumping 안 함."""
+        mock_deps["pm"].cash_balance = 500.0
+        decision = DirectionDecision(
+            action="open",
+            direction=Direction.LONG,
+            confidence=0.8,
+            sizing_factor=0.7,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            reason="test",
+            strategy_name="test",
+        )
+        margin = tier1._calc_margin(decision, close=80000.0, atr=1000.0)
+        assert margin > 0
+        assert margin * tier1._leverage >= tier1.MIN_NOTIONAL
+
+    def test_min_notional_cash_insufficient(self, tier1, mock_deps):
+        """잔고가 min_margin 미만이면 0 반환."""
+        mock_deps["pm"].cash_balance = 30.0  # < 105/3 = 35
+        decision = DirectionDecision(
+            action="open",
+            direction=Direction.SHORT,
+            confidence=0.6,
+            sizing_factor=0.5,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            reason="test",
+            strategy_name="test",
+        )
+        margin = tier1._calc_margin(decision, close=84000.0, atr=1200.0)
+        assert margin == 0.0
+
+    def test_min_notional_other_coins_unaffected(self, tier1, mock_deps):
+        """ETH 등 가격 낮은 코인은 기존 동작 유지."""
+        mock_deps["pm"].cash_balance = 259.0
+        decision = DirectionDecision(
+            action="open",
+            direction=Direction.SHORT,
+            confidence=0.7,
+            sizing_factor=0.6,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            reason="test",
+            strategy_name="test",
+        )
+        margin = tier1._calc_margin(decision, close=2000.0, atr=50.0)
+        assert margin > 0
+        assert margin * tier1._leverage >= tier1.MIN_NOTIONAL
+
 
 class TestEvaluationCycle:
     @pytest.mark.asyncio

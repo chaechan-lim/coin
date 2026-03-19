@@ -1303,7 +1303,7 @@ class BinanceFuturesEngine(TradingEngine):
                 return float(min_cost)
         except Exception:
             pass
-        return 5.0  # Binance USDM 기본값
+        return 100.0  # Binance USDM 최소 notional
 
     def _adjust_amount(self, symbol: str, amount: float) -> float | None:
         """거래소 최소 수량 정밀도에 맞게 수량 보정. 최소 미만이면 None."""

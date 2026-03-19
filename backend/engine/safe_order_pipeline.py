@@ -10,6 +10,8 @@ SafeOrderPipeline — 모든 주문의 단일 검증 경로.
 
 실패 시 자동 롤백하여 고아 포지션/잔고 스파이크를 방지.
 """
+import asyncio
+import math
 import structlog
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -64,6 +66,8 @@ class SafeOrderPipeline:
     직접 OrderManager.create_order()를 호출하면 안 됨.
     """
 
+    MIN_NOTIONAL = 105.0  # 바이낸스 USDM 최소 notional $100 + 여유
+
     def __init__(
         self,
         order_manager: OrderManager,
@@ -114,6 +118,37 @@ class SafeOrderPipeline:
             return OrderResponse(
                 success=False, error="balance_guard_paused", cash_before=cash_before,
             )
+
+        # ── 1b. 수량 정밀도 보정 + 최소 notional 보장 (open 시) ──
+        if request.action == "open":
+            adjusted = self._adjust_quantity_for_exchange(
+                request.symbol, request.quantity, request.price,
+            )
+            if adjusted is None:
+                return OrderResponse(
+                    success=False,
+                    error="below_min_notional_after_precision",
+                    cash_before=cash_before,
+                )
+            if adjusted != request.quantity:
+                new_notional = adjusted * request.price
+                new_margin = new_notional / request.leverage
+                if new_margin > cash_before:
+                    return OrderResponse(
+                        success=False,
+                        error=f"insufficient_cash_for_min_notional: "
+                              f"need {new_margin:.2f}, have {cash_before:.2f}",
+                        cash_before=cash_before,
+                    )
+                logger.info(
+                    "quantity_adjusted_for_notional",
+                    symbol=request.symbol,
+                    qty_before=round(request.quantity, 8),
+                    qty_after=round(adjusted, 8),
+                    notional=round(new_notional, 2),
+                )
+                request.quantity = adjusted
+                request.margin = new_margin
 
         # ── 2. 거래소 실행 ──
         try:
@@ -233,6 +268,63 @@ class SafeOrderPipeline:
         if req.price <= 0:
             return False, "invalid_price"
         return True, "ok"
+
+    def _adjust_quantity_for_exchange(
+        self, symbol: str, quantity: float, price: float,
+    ) -> float | None:
+        """거래소 정밀도에 맞게 수량 보정 + 최소 notional 보장.
+
+        BTC처럼 가격이 높은 코인은 수량 절삭(step_size)으로 인해
+        notional이 $100 미만으로 떨어질 수 있다. 이 경우 올림 처리.
+
+        Returns:
+            보정된 수량. 최소 notional 불가 시 None.
+        """
+        ccxt_exchange = self._exchange
+        raw = getattr(ccxt_exchange, '_exchange', None)
+        if raw is not None:
+            ccxt_exchange = raw
+
+        # ccxt amount_to_precision 적용 (truncation)
+        try:
+            result = ccxt_exchange.amount_to_precision(symbol, quantity)
+            # ccxt는 동기 메서드로 str 반환. 비동기(mock 등)면 스킵.
+            if asyncio.iscoroutine(result):
+                result.close()  # 코루틴 경고 방지
+                return quantity
+            if not isinstance(result, (str, int, float)):
+                return quantity
+            adjusted = float(result)
+        except Exception:
+            return quantity  # 정밀도 정보 없으면 원본 반환 (거래소가 처리)
+
+        if adjusted <= 0:
+            adjusted = 0.0
+
+        # 최소 notional 체크
+        notional = adjusted * price
+        if notional >= self.MIN_NOTIONAL:
+            return adjusted
+
+        # notional 부족: 최소 notional을 충족하는 수량으로 올림
+        try:
+            market = ccxt_exchange.market(symbol)
+            precision = market.get("precision", {}).get("amount")
+            if precision is not None:
+                # ccxt precision: 정수면 소수점 자릿수, 소수면 step_size
+                if isinstance(precision, int) and precision >= 0:
+                    step_size = 10 ** (-precision)
+                else:
+                    step_size = float(precision)
+
+                min_qty = self.MIN_NOTIONAL / price
+                rounded_up = math.ceil(min_qty / step_size) * step_size
+                if rounded_up * price >= self.MIN_NOTIONAL:
+                    return rounded_up
+        except Exception:
+            pass
+
+        return None
 
     def _determine_side(self, req: OrderRequest) -> str:
         """주문 방향 결정 (거래소 side)."""

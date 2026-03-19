@@ -45,6 +45,7 @@ class Tier1Manager:
     """Tier 1 코인의 상시 포지션 관리 — 듀얼 이밸류에이터."""
 
     BASE_RISK_PCT = 0.02  # 1회 리스크: 계좌의 2%
+    MIN_NOTIONAL = 105.0  # 바이낸스 USDM 최소 notional $100 + 여유
 
     def __init__(
         self,
@@ -740,6 +741,12 @@ class Tier1Manager:
         adjusted = raw_margin * decision.sizing_factor * decision.confidence
         max_margin = cash * self._max_position_pct
         final = min(adjusted, max_margin)
+
+        # 최소 notional 보장: margin × leverage >= MIN_NOTIONAL
+        # BTC처럼 가격이 높은 코인은 precision 절삭으로 notional이 $100 미만으로 떨어질 수 있음
+        min_margin = self.MIN_NOTIONAL / self._leverage
+        if final < min_margin and cash >= min_margin:
+            final = min_margin
 
         return final if final >= 5.0 else 0.0
 
