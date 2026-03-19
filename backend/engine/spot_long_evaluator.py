@@ -124,7 +124,10 @@ class SpotLongEvaluator:
 
         if current_dir == Direction.LONG:
             # 롱 보유 중: SELL 시그널이면 청산
-            if combined.action == SignalType.SELL and combined.combined_confidence >= self._min_confidence:
+            if (
+                combined.action == SignalType.SELL
+                and combined.combined_confidence >= self._min_confidence
+            ):
                 return DirectionDecision(
                     action="close",
                     direction=None,
@@ -144,7 +147,10 @@ class SpotLongEvaluator:
 
         if current_position is None:
             # 포지션 없음: BUY 시그널이면 롱 진입
-            if combined.action == SignalType.BUY and combined.combined_confidence >= self._min_confidence:
+            if (
+                combined.action == SignalType.BUY
+                and combined.combined_confidence >= self._min_confidence
+            ):
                 if self._in_cooldown(symbol):
                     logger.debug(
                         "spot_long_cooldown",

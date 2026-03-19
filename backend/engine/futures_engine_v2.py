@@ -18,7 +18,7 @@ from core.event_bus import emit_event
 from db.session import get_session_factory
 from engine.regime_detector import RegimeDetector
 from engine.strategy_selector import StrategySelector
-from engine.regime_evaluators import RegimeLongEvaluator, RegimeShortEvaluator
+from engine.regime_evaluators import RegimeShortEvaluator
 from engine.spot_long_evaluator import SpotLongEvaluator
 from engine.tier1_manager import Tier1Manager
 from engine.tier2_scanner import Tier2Scanner
