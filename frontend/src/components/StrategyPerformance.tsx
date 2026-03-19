@@ -18,6 +18,17 @@ const STRATEGY_KR: Record<string, string> = {
   stop_loss: '손절',
   take_profit: '익절',
   trailing_stop: '트레일링 스탑',
+  forced_liquidation: '강제 청산',
+  time_expiry: '시간 만료',
+  position_sync: '포지션 동기화',
+  // 레거시 V1 전략
+  bollinger_rsi: '볼린저 RSI',
+  rsi: 'RSI',
+  ma_crossover: '이동평균 교차',
+  macd_crossover: 'MACD 교차',
+  stochastic_rsi: '스토캐스틱 RSI',
+  obv_divergence: 'OBV 다이버전스',
+  bb_squeeze: 'BB 스퀴즈',
 }
 
 const PERIODS = ['7d', '30d', '90d'] as const

@@ -1,3 +1,5 @@
+from collections import defaultdict, OrderedDict
+
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
@@ -17,6 +19,7 @@ from core.schemas import (
     StrategySignalItem,
 )
 from api.dependencies import engine_registry, ExchangeNameType
+from strategies.combiner import SignalCombiner
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -77,8 +80,6 @@ async def get_strategy_performance(
     all_orders = list(result.scalars().all())
 
     # 2) 심볼별 로트 추적 (Lot-based FIFO — 진입 전략에 PnL 귀속)
-    from collections import defaultdict
-
     is_futures = "futures" in exchange
 
     # 각 로트: {"strategy": str, "qty": float, "cost": float, "time": datetime}
@@ -306,12 +307,23 @@ def _compute_combined_signal(
     weights: dict[str, float],
     min_confidence: float,
 ) -> tuple[str, float]:
-    """Compute combined signal for a set of strategy logs.
+    """Compute a **simplified/approximate** combined signal for display purposes.
 
-    Mirrors SignalCombiner.combine() logic (backend/strategies/combiner.py).
-    HOLD = abstain (not counted in active weight).
+    Uses the same HOLD-as-abstain model and weighted voting as
+    ``SignalCombiner.combine()`` (backend/strategies/combiner.py), but omits
+    several features of the real combiner:
+
+    * Adaptive profiles (market-state-dependent weight adjustments)
+    * Directional weights (separate BUY_WEIGHTS / SELL_WEIGHTS with
+      per-direction normalization)
+    * Crash market override (MIN_ACTIVE_WEIGHT relaxed to 0.06)
+    * MIN_SELL_ACTIVE_WEIGHT single-strategy short blocking
+
+    The actual combined signal used at evaluation time is computed by the
+    combiner instance; this function is only for API display of historical
+    log groups.
     """
-    MIN_ACTIVE_WEIGHT = 0.12
+    MIN_ACTIVE_WEIGHT = SignalCombiner.MIN_ACTIVE_WEIGHT
     buy_score = 0.0
     sell_score = 0.0
     buy_active = 0.0
@@ -355,11 +367,17 @@ async def get_grouped_strategy_logs(
 
     같은 timestamp(1분 버킷) + symbol 기준으로 묶어서 반환.
     각 그룹에 최종 combined signal, confidence, 개별 전략 판단 포함.
+
+    Pagination operates on complete groups (not raw rows) to prevent
+    cycles from being split across page boundaries.  We fetch enough
+    raw rows to cover all groups up to the requested page, group in
+    Python, then slice the correct page of groups.
     """
-    # Fetch enough raw logs to fill `size` groups.
-    # Each cycle has ~4 strategy logs, fetch extra to account for pagination.
-    raw_limit = size * 8
-    raw_offset = (page - 1) * raw_limit
+    # Fetch enough raw rows to cover all groups through the requested page.
+    # Each evaluation cycle produces ~4-8 strategy logs.  Over-fetch with
+    # a generous multiplier and buffer to guarantee we never split a cycle.
+    total_groups_needed = page * size
+    raw_limit = total_groups_needed * 8 + 16  # buffer for partial trailing group
 
     query = (
         select(StrategyLog)
@@ -369,13 +387,12 @@ async def get_grouped_strategy_logs(
     if symbol:
         query = query.where(StrategyLog.symbol == symbol)
 
-    query = query.offset(raw_offset).limit(raw_limit)
-    result = await session.execute(query)
-    logs = list(result.scalars().all())
+    # No raw offset — always fetch from the start so grouping is correct.
+    query = query.limit(raw_limit)
+    db_result = await session.execute(query)
+    logs = list(db_result.scalars().all())
 
     # Group by symbol + 1-minute time bucket
-    from collections import OrderedDict
-
     groups: OrderedDict[str, list] = OrderedDict()
     for log in logs:
         # Truncate to minute for bucket key
@@ -391,12 +408,14 @@ async def get_grouped_strategy_logs(
     weights = comb.weights if comb else {}
     min_confidence = getattr(comb, "min_confidence", 0.55) if comb else 0.55
 
-    # Build response — limit to `size` groups
-    result_groups: list[SignalCycleGroupResponse] = []
-    for _key, group_logs in groups.items():
-        if len(result_groups) >= size:
-            break
+    # Slice groups for the requested page (pagination on complete groups)
+    all_group_items = list(groups.items())
+    start_idx = (page - 1) * size
+    page_items = all_group_items[start_idx : start_idx + size]
 
+    # Build response from the page slice
+    result_groups: list[SignalCycleGroupResponse] = []
+    for _key, group_logs in page_items:
         first_log = group_logs[0]
         combined_action, combined_conf = _compute_combined_signal(
             group_logs,

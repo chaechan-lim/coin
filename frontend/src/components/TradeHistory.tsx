@@ -22,6 +22,14 @@ const STRATEGY_COLORS: Record<string, string> = {
   forced_liquidation: 'bg-red-800 text-red-200',
   time_expiry: 'bg-gray-600 text-gray-200',
   position_sync: 'bg-gray-700 text-gray-300',
+  // 레거시 V1 전략 (과거 이력에 존재)
+  bollinger_rsi: 'bg-indigo-800 text-indigo-200',
+  rsi: 'bg-violet-800 text-violet-200',
+  ma_crossover: 'bg-teal-800 text-teal-200',
+  macd_crossover: 'bg-cyan-800 text-cyan-200',
+  stochastic_rsi: 'bg-purple-800 text-purple-200',
+  obv_divergence: 'bg-blue-800 text-blue-200',
+  bb_squeeze: 'bg-pink-800 text-pink-200',
 }
 
 function StrategyBadge({ name }: { name: string }) {
@@ -269,18 +277,32 @@ export function TradeHistory({ exchange = 'bithumb' }: { exchange?: ExchangeName
               onChange={(e) => { setStrategy(e.target.value); setPage(1) }}
             >
               <option value="">전략</option>
-              {/* 활성 전략 (V2 하이브리드 엔진) */}
-              <option value="bnf_deviation">BNF 이격도</option>
-              <option value="cis_momentum">CIS 모멘텀</option>
-              <option value="larry_williams">래리 윌리엄스</option>
-              <option value="donchian_channel">돈치안 채널</option>
-              <option value="spot_eval">현물 시그널</option>
-              <option value="tier2_surge">서지 스캐너</option>
-              {/* 운영 전략 (SL/TP/리스크) */}
-              <option value="stop_loss">손절</option>
-              <option value="take_profit">익절</option>
-              <option value="trailing_stop">트레일링 스탑</option>
-              <option value="risk_management">리스크 관리</option>
+              <optgroup label="활성 전략">
+                <option value="bnf_deviation">BNF 이격도</option>
+                <option value="cis_momentum">CIS 모멘텀</option>
+                <option value="larry_williams">래리 윌리엄스</option>
+                <option value="donchian_channel">돈치안 채널</option>
+                <option value="spot_eval">현물 시그널</option>
+                <option value="tier2_surge">서지 스캐너</option>
+              </optgroup>
+              <optgroup label="운영">
+                <option value="stop_loss">손절</option>
+                <option value="take_profit">익절</option>
+                <option value="trailing_stop">트레일링 스탑</option>
+                <option value="forced_liquidation">강제 청산</option>
+                <option value="time_expiry">시간 만료</option>
+                <option value="position_sync">포지션 동기화</option>
+                <option value="risk_management">리스크 관리</option>
+              </optgroup>
+              <optgroup label="레거시 (V1)">
+                <option value="bollinger_rsi">볼린저 RSI</option>
+                <option value="rsi">RSI</option>
+                <option value="ma_crossover">이동평균 교차</option>
+                <option value="macd_crossover">MACD 교차</option>
+                <option value="stochastic_rsi">스토캐스틱 RSI</option>
+                <option value="obv_divergence">OBV 다이버전스</option>
+                <option value="bb_squeeze">BB 스퀴즈</option>
+              </optgroup>
             </select>
             <select
               className="bg-gray-700 text-white text-xs px-2 py-1.5 rounded border border-gray-600"

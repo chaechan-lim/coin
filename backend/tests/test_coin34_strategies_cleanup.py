@@ -152,6 +152,42 @@ async def _db_with_logs():
     await engine.dispose()
 
 
+async def _db_with_many_cycles():
+    """DB session pre-populated with 5 distinct evaluation cycles for pagination tests."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(
+        bind=engine, class_=AsyncSession, expire_on_commit=False
+    )
+    async with factory() as sess:
+        base = datetime(2026, 3, 19, 12, 0, 0, tzinfo=timezone.utc)
+        symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
+        for idx, sym in enumerate(symbols):
+            cycle_time = base + timedelta(minutes=idx * 5)
+            for strat, sig, conf in [
+                ("cis_momentum", "BUY", 0.70 + idx * 0.01),
+                ("bnf_deviation", "BUY", 0.65 + idx * 0.01),
+                ("donchian_channel", "HOLD", 0.45),
+                ("larry_williams", "SELL", 0.60),
+            ]:
+                sess.add(
+                    StrategyLog(
+                        exchange="binance_futures",
+                        strategy_name=strat,
+                        symbol=sym,
+                        signal_type=sig,
+                        confidence=conf,
+                        reason=f"{strat} signal",
+                        was_executed=False,
+                        logged_at=cycle_time + timedelta(seconds=1),
+                    )
+                )
+        await sess.commit()
+        yield sess
+    await engine.dispose()
+
+
 # ── 1. FuturesEngineV2.strategies — only active 4 strategies ────────────────
 
 
@@ -565,6 +601,80 @@ async def test_grouped_logs_pagination():
             )
         data = resp.json()
         assert len(data) == 1  # Only first group
+    finally:
+        _restore(exchange, saved)
+
+
+@pytest.mark.asyncio
+async def test_grouped_logs_multipage_pagination_no_duplicates():
+    """Pages return disjoint, complete groups — no split cycles or duplicates.
+
+    Inserts 5 evaluation cycles. page=1,size=2 and page=2,size=2 must
+    return 4 distinct, complete groups with no overlap.  page=3,size=2
+    returns the remaining 1 group.
+    """
+    exchange = "binance_futures"
+    saved = _save_and_clear(exchange)
+    eng = _mock_engine()
+    comb = _mock_combiner()
+    _register(exchange, eng, combiner=comb)
+    try:
+        from db.session import get_db
+
+        app = _make_test_app()
+        app.dependency_overrides[get_db] = _db_with_many_cycles
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            # Page 1: first 2 groups
+            resp1 = await client.get(
+                "/strategies/logs/grouped",
+                params={"exchange": exchange, "page": 1, "size": 2},
+            )
+            assert resp1.status_code == 200
+            page1 = resp1.json()
+            assert len(page1) == 2
+
+            # Page 2: next 2 groups
+            resp2 = await client.get(
+                "/strategies/logs/grouped",
+                params={"exchange": exchange, "page": 2, "size": 2},
+            )
+            assert resp2.status_code == 200
+            page2 = resp2.json()
+            assert len(page2) == 2
+
+            # Page 3: remaining 1 group
+            resp3 = await client.get(
+                "/strategies/logs/grouped",
+                params={"exchange": exchange, "page": 3, "size": 2},
+            )
+            assert resp3.status_code == 200
+            page3 = resp3.json()
+            assert len(page3) == 1
+
+        # All groups should have 4 strategies each (no split cycles)
+        all_groups = page1 + page2 + page3
+        for group in all_groups:
+            assert group["strategy_count"] == 4, (
+                f"Cycle for {group['symbol']} has {group['strategy_count']} "
+                f"strategies, expected 4 (split cycle bug?)"
+            )
+
+        # Symbols across pages should be disjoint (no duplicates)
+        page1_symbols = {g["symbol"] for g in page1}
+        page2_symbols = {g["symbol"] for g in page2}
+        page3_symbols = {g["symbol"] for g in page3}
+        assert page1_symbols.isdisjoint(page2_symbols), (
+            f"Page 1 and 2 overlap: {page1_symbols & page2_symbols}"
+        )
+        assert page2_symbols.isdisjoint(page3_symbols), (
+            f"Page 2 and 3 overlap: {page2_symbols & page3_symbols}"
+        )
+
+        # All 5 symbols should be accounted for
+        all_symbols = page1_symbols | page2_symbols | page3_symbols
+        assert len(all_symbols) == 5
     finally:
         _restore(exchange, saved)
 
