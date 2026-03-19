@@ -84,6 +84,8 @@ class FuturesEngineV2:
 
         # 듀얼 이밸류에이터: 롱/숏 독립 평가 (COIN-25)
         # 롱: 현물 4전략 기반 (COIN-26)
+        # 별도 인스턴스 생성: StrategySelector는 선물 7전략을 보유하며,
+        # 현물 4전략과 종류가 다르다. 전략은 stateless이므로 메모리 오버헤드 미미.
         spot_strategies = [
             CISMomentumStrategy(),
             BNFDeviationStrategy(),
@@ -103,10 +105,10 @@ class FuturesEngineV2:
             eval_interval=v2_cfg.tier1_long_eval_interval_sec,
             min_confidence=v2_cfg.tier1_long_min_confidence,
             cooldown_hours=v2_cfg.tier1_long_cooldown_hours,
-            sl_pct=v2_cfg.tier1_long_sl_pct,
-            tp_pct=v2_cfg.tier1_long_tp_pct,
-            trail_activation_pct=v2_cfg.tier1_long_trail_activation_pct,
-            trail_stop_pct=v2_cfg.tier1_long_trail_stop_pct,
+            sl_atr_mult=v2_cfg.tier1_long_sl_atr_mult,
+            tp_atr_mult=v2_cfg.tier1_long_tp_atr_mult,
+            trail_activation_atr_mult=v2_cfg.tier1_long_trail_activation_atr_mult,
+            trail_stop_atr_mult=v2_cfg.tier1_long_trail_stop_atr_mult,
         )
         self._short_evaluator = RegimeShortEvaluator(
             strategy_selector=self._strategies,

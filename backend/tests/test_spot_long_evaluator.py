@@ -137,8 +137,10 @@ def _make_evaluator(
     eval_interval=300,
     min_confidence=0.50,
     cooldown_hours=60.0,
-    sl_pct=5.0,
-    tp_pct=14.0,
+    sl_atr_mult=5.0,
+    tp_atr_mult=14.0,
+    trail_activation_atr_mult=3.0,
+    trail_stop_atr_mult=1.5,
 ) -> SpotLongEvaluator:
     """테스트용 SpotLongEvaluator 생성."""
     if strategies is None:
@@ -157,8 +159,10 @@ def _make_evaluator(
         eval_interval=eval_interval,
         min_confidence=min_confidence,
         cooldown_hours=cooldown_hours,
-        sl_pct=sl_pct,
-        tp_pct=tp_pct,
+        sl_atr_mult=sl_atr_mult,
+        tp_atr_mult=tp_atr_mult,
+        trail_activation_atr_mult=trail_activation_atr_mult,
+        trail_stop_atr_mult=trail_stop_atr_mult,
     )
 
 
@@ -923,9 +927,9 @@ class TestConfigParams:
     """설정 파라미터가 올바르게 전달되는지 테스트."""
 
     def test_sl_tp_params(self):
-        evaluator = _make_evaluator(sl_pct=5.0, tp_pct=14.0)
-        assert evaluator._sl_pct == 5.0
-        assert evaluator._tp_pct == 14.0
+        evaluator = _make_evaluator(sl_atr_mult=5.0, tp_atr_mult=14.0)
+        assert evaluator._sl_atr_mult == 5.0
+        assert evaluator._tp_atr_mult == 14.0
 
     def test_cooldown_hours_to_seconds(self):
         evaluator = _make_evaluator(cooldown_hours=60.0)
@@ -951,8 +955,8 @@ class TestConfigParams:
         evaluator = _make_evaluator(
             strategies=[strategy],
             combiner=combiner,
-            sl_pct=5.0,
-            tp_pct=14.0,
+            sl_atr_mult=5.0,
+            tp_atr_mult=14.0,
         )
 
         decision = await evaluator.evaluate("BTC/USDT", None)
@@ -1029,7 +1033,326 @@ class TestFuturesV2ConfigIntegration:
         assert cfg.tier1_long_eval_interval_sec == 300
         assert cfg.tier1_long_min_confidence == 0.50
         assert cfg.tier1_long_cooldown_hours == 60.0
-        assert cfg.tier1_long_sl_pct == 5.0
-        assert cfg.tier1_long_tp_pct == 14.0
-        assert cfg.tier1_long_trail_activation_pct == 3.0
-        assert cfg.tier1_long_trail_stop_pct == 1.5
+        assert cfg.tier1_long_sl_atr_mult == 5.0
+        assert cfg.tier1_long_tp_atr_mult == 14.0
+        assert cfg.tier1_long_trail_activation_atr_mult == 3.0
+        assert cfg.tier1_long_trail_stop_atr_mult == 1.5
+
+
+# ──── 트레일링 파라미터 indicators 전달 테스트 ────────
+
+
+class TestTrailingParamsInIndicators:
+    """trailing_activation_atr / trailing_stop_atr가 indicators에 포함되는지 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_open_decision_includes_trailing_params(self):
+        """open 결정에 trailing 파라미터가 indicators에 포함되어야 한다."""
+        strategy = MagicMock()
+        strategy.name = "cis_momentum"
+        strategy.analyze = AsyncMock(return_value=_buy_signal())
+
+        combiner = MagicMock(spec=SignalCombiner)
+        combiner.combine = MagicMock(
+            return_value=CombinedDecision(
+                action=SignalType.BUY,
+                combined_confidence=0.75,
+                contributing_signals=[_buy_signal()],
+                final_reason="buy",
+            )
+        )
+
+        evaluator = _make_evaluator(
+            strategies=[strategy],
+            combiner=combiner,
+            trail_activation_atr_mult=3.0,
+            trail_stop_atr_mult=1.5,
+        )
+
+        decision = await evaluator.evaluate("BTC/USDT", None)
+
+        assert decision.is_open
+        assert decision.indicators["trailing_activation_atr"] == 3.0
+        assert decision.indicators["trailing_stop_atr"] == 1.5
+
+    @pytest.mark.asyncio
+    async def test_custom_trailing_params_propagated(self):
+        """커스텀 trailing 값이 올바르게 전달된다."""
+        strategy = MagicMock()
+        strategy.name = "cis_momentum"
+        strategy.analyze = AsyncMock(return_value=_buy_signal())
+
+        combiner = MagicMock(spec=SignalCombiner)
+        combiner.combine = MagicMock(
+            return_value=CombinedDecision(
+                action=SignalType.BUY,
+                combined_confidence=0.75,
+                contributing_signals=[_buy_signal()],
+                final_reason="buy",
+            )
+        )
+
+        evaluator = _make_evaluator(
+            strategies=[strategy],
+            combiner=combiner,
+            trail_activation_atr_mult=5.0,
+            trail_stop_atr_mult=2.5,
+        )
+
+        decision = await evaluator.evaluate("BTC/USDT", None)
+
+        assert decision.indicators["trailing_activation_atr"] == 5.0
+        assert decision.indicators["trailing_stop_atr"] == 2.5
+
+    @pytest.mark.asyncio
+    async def test_close_decision_no_trailing_params(self):
+        """close 결정에는 trailing 파라미터가 불필요하다."""
+        strategy = MagicMock()
+        strategy.name = "cis_momentum"
+        strategy.analyze = AsyncMock(return_value=_sell_signal())
+
+        combiner = MagicMock(spec=SignalCombiner)
+        combiner.combine = MagicMock(
+            return_value=CombinedDecision(
+                action=SignalType.SELL,
+                combined_confidence=0.70,
+                contributing_signals=[_sell_signal()],
+                final_reason="sell",
+            )
+        )
+
+        evaluator = _make_evaluator(
+            strategies=[strategy],
+            combiner=combiner,
+        )
+
+        decision = await evaluator.evaluate("BTC/USDT", _long_position())
+
+        assert decision.is_close
+        assert "trailing_activation_atr" not in decision.indicators
+        assert "trailing_stop_atr" not in decision.indicators
+
+
+# ──── 청산 시 자동 쿨다운 테스트 ────────────────────
+
+
+class TestAutoSetCooldownOnClose:
+    """청산 결정 시 자동으로 쿨다운이 설정되는지 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_close_decision_auto_sets_cooldown(self):
+        """SELL → close 결정 시 자동으로 쿨다운이 설정된다."""
+        strategy = MagicMock()
+        strategy.name = "cis_momentum"
+        strategy.analyze = AsyncMock(return_value=_sell_signal())
+
+        combiner = MagicMock(spec=SignalCombiner)
+        combiner.combine = MagicMock(
+            return_value=CombinedDecision(
+                action=SignalType.SELL,
+                combined_confidence=0.70,
+                contributing_signals=[_sell_signal()],
+                final_reason="sell",
+            )
+        )
+
+        evaluator = _make_evaluator(
+            strategies=[strategy],
+            combiner=combiner,
+            cooldown_hours=60.0,
+        )
+
+        # 청산 전 쿨다운 없음
+        assert "BTC/USDT" not in evaluator._cooldowns
+
+        # 청산 결정
+        decision = await evaluator.evaluate("BTC/USDT", _long_position())
+        assert decision.is_close
+
+        # 자동 쿨다운 설정됨
+        assert "BTC/USDT" in evaluator._cooldowns
+
+    @pytest.mark.asyncio
+    async def test_cooldown_blocks_reentry_after_close(self):
+        """청산 후 쿨다운으로 즉시 재진입이 차단된다."""
+        strategy = MagicMock()
+        strategy.name = "cis_momentum"
+
+        combiner = MagicMock(spec=SignalCombiner)
+
+        evaluator = _make_evaluator(
+            strategies=[strategy],
+            combiner=combiner,
+            cooldown_hours=60.0,
+        )
+
+        # 1단계: SELL 시그널로 청산
+        strategy.analyze = AsyncMock(return_value=_sell_signal())
+        combiner.combine = MagicMock(
+            return_value=CombinedDecision(
+                action=SignalType.SELL,
+                combined_confidence=0.70,
+                contributing_signals=[_sell_signal()],
+                final_reason="sell",
+            )
+        )
+
+        close_decision = await evaluator.evaluate("BTC/USDT", _long_position())
+        assert close_decision.is_close
+
+        # 2단계: 즉시 BUY 시그널 — 쿨다운으로 차단되어야 함
+        strategy.analyze = AsyncMock(return_value=_buy_signal())
+        combiner.combine = MagicMock(
+            return_value=CombinedDecision(
+                action=SignalType.BUY,
+                combined_confidence=0.75,
+                contributing_signals=[_buy_signal()],
+                final_reason="buy",
+            )
+        )
+
+        reentry_decision = await evaluator.evaluate("BTC/USDT", None)
+        assert reentry_decision.is_hold
+        assert "spot_long_cooldown" in reentry_decision.reason
+
+
+# ──── 4h fallback 유효성 검증 테스트 ────────────────
+
+
+class TestFourHourFallbackValidation:
+    """4h 캔들 fallback 경로의 close/atr 유효성 검증 테스트."""
+
+    def test_4h_atr_zero_returns_zeros(self):
+        """4h atr가 0이면 (0, 0)으로 fallthrough."""
+        df_4h = pd.DataFrame({
+            "close": [80000.0],
+            "atr_14": [0.0],
+        })
+
+        close, atr = SpotLongEvaluator._extract_close_atr(None, df_4h)
+        assert close == 0.0
+        assert atr == 0.0
+
+    def test_4h_close_zero_returns_zeros(self):
+        """4h close가 0이면 (0, 0)으로 fallthrough."""
+        df_4h = pd.DataFrame({
+            "close": [0.0],
+            "atr_14": [1000.0],
+        })
+
+        close, atr = SpotLongEvaluator._extract_close_atr(None, df_4h)
+        assert close == 0.0
+        assert atr == 0.0
+
+    def test_4h_atr_nan_returns_zeros(self):
+        """4h atr가 NaN이면 (0, 0)으로 fallthrough."""
+        df_4h = pd.DataFrame({
+            "close": [80000.0],
+            "atr_14": [float("nan")],
+        })
+
+        close, atr = SpotLongEvaluator._extract_close_atr(None, df_4h)
+        assert close == 0.0
+        assert atr == 0.0
+
+    def test_4h_valid_values_returned(self):
+        """4h close와 atr 모두 유효하면 정상 반환."""
+        df_4h = _make_df_4h(close=80000.0, atr=1000.0)
+
+        close, atr = SpotLongEvaluator._extract_close_atr(None, df_4h)
+        assert close == 80000.0
+        assert atr == 1000.0
+
+
+# ──── SignalCombiner + SPOT_WEIGHTS 통합 테스트 ────────
+
+
+class TestSpotWeightsIntegration:
+    """실제 SignalCombiner + SPOT_WEIGHTS를 사용한 통합 테스트.
+
+    모든 4전략 이름이 SPOT_WEIGHTS 키와 일치하는지 검증.
+    """
+
+    @pytest.mark.asyncio
+    async def test_real_combiner_with_spot_weights(self):
+        """실제 SignalCombiner(SPOT_WEIGHTS)로 시그널 결합이 동작한다."""
+        real_combiner = SignalCombiner(
+            strategy_weights=SignalCombiner.SPOT_WEIGHTS.copy(),
+            min_confidence=0.50,
+            directional_weights=False,
+            exchange_name="binance_futures",
+        )
+
+        # 4전략 이름이 SPOT_WEIGHTS 키와 일치해야 한다
+        strategy_names = list(SignalCombiner.SPOT_WEIGHTS.keys())
+        assert set(strategy_names) == {
+            "cis_momentum", "bnf_deviation",
+            "donchian_channel", "larry_williams",
+        }
+
+        # BUY 시그널 2개 + HOLD 2개 → BUY 결정
+        signals = [
+            Signal(
+                signal_type=SignalType.BUY,
+                confidence=0.80,
+                strategy_name="cis_momentum",       # weight 0.42
+                reason="cis buy",
+            ),
+            Signal(
+                signal_type=SignalType.BUY,
+                confidence=0.70,
+                strategy_name="bnf_deviation",       # weight 0.25
+                reason="bnf buy",
+            ),
+            Signal(
+                signal_type=SignalType.HOLD,
+                confidence=0.0,
+                strategy_name="donchian_channel",    # weight 0.24
+                reason="hold",
+            ),
+            Signal(
+                signal_type=SignalType.HOLD,
+                confidence=0.0,
+                strategy_name="larry_williams",      # weight 0.10
+                reason="hold",
+            ),
+        ]
+
+        combined = real_combiner.combine(signals, symbol="BTC/USDT")
+
+        assert combined.action == SignalType.BUY
+        assert combined.combined_confidence >= 0.50
+
+    @pytest.mark.asyncio
+    async def test_real_combiner_evaluator_end_to_end(self):
+        """SpotLongEvaluator + 실제 SignalCombiner로 end-to-end 동작 검증."""
+        real_combiner = SignalCombiner(
+            strategy_weights=SignalCombiner.SPOT_WEIGHTS.copy(),
+            min_confidence=0.50,
+            directional_weights=False,
+            exchange_name="binance_futures",
+        )
+
+        # 4전략 모두 BUY → 강한 롱 진입 시그널
+        strategies = []
+        for name in ["cis_momentum", "bnf_deviation", "donchian_channel", "larry_williams"]:
+            s = MagicMock()
+            s.name = name
+            s.analyze = AsyncMock(return_value=Signal(
+                signal_type=SignalType.BUY,
+                confidence=0.75,
+                strategy_name=name,
+                reason=f"{name} buy",
+            ))
+            strategies.append(s)
+
+        evaluator = _make_evaluator(
+            strategies=strategies,
+            combiner=real_combiner,
+        )
+
+        decision = await evaluator.evaluate("BTC/USDT", None)
+
+        assert decision.is_open
+        assert decision.direction == Direction.LONG
+        assert decision.confidence >= 0.50

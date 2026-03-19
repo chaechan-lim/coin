@@ -46,10 +46,10 @@ class SpotLongEvaluator:
         eval_interval: int = 300,
         min_confidence: float = 0.50,
         cooldown_hours: float = 60.0,
-        sl_pct: float = 5.0,
-        tp_pct: float = 14.0,
-        trail_activation_pct: float = 3.0,
-        trail_stop_pct: float = 1.5,
+        sl_atr_mult: float = 5.0,
+        tp_atr_mult: float = 14.0,
+        trail_activation_atr_mult: float = 3.0,
+        trail_stop_atr_mult: float = 1.5,
     ) -> None:
         self._strategies = strategies
         self._combiner = combiner
@@ -57,10 +57,10 @@ class SpotLongEvaluator:
         self._eval_interval = eval_interval
         self._min_confidence = min_confidence
         self._cooldown_sec = cooldown_hours * 3600
-        self._sl_pct = sl_pct
-        self._tp_pct = tp_pct
-        self._trail_activation_pct = trail_activation_pct
-        self._trail_stop_pct = trail_stop_pct
+        self._sl_atr_mult = sl_atr_mult
+        self._tp_atr_mult = tp_atr_mult
+        self._trail_activation_atr_mult = trail_activation_atr_mult
+        self._trail_stop_atr_mult = trail_stop_atr_mult
         self._cooldowns: dict[str, float] = {}  # symbol → timestamp
 
     @property
@@ -128,6 +128,8 @@ class SpotLongEvaluator:
                 combined.action == SignalType.SELL
                 and combined.combined_confidence >= self._min_confidence
             ):
+                # 청산 시 쿨다운 자동 설정 (Tier1Manager가 별도 호출 불필요)
+                self.set_cooldown(symbol)
                 return DirectionDecision(
                     action="close",
                     direction=None,
@@ -167,11 +169,16 @@ class SpotLongEvaluator:
                     direction=Direction.LONG,
                     confidence=combined.combined_confidence,
                     sizing_factor=min(combined.combined_confidence, 1.0),
-                    stop_loss_atr=self._sl_pct,
-                    take_profit_atr=self._tp_pct,
+                    stop_loss_atr=self._sl_atr_mult,
+                    take_profit_atr=self._tp_atr_mult,
                     reason=f"spot_buy: {combined.final_reason}",
                     strategy_name=self._top_strategy(combined),
-                    indicators={"close": last_close, "atr": last_atr},
+                    indicators={
+                        "close": last_close,
+                        "atr": last_atr,
+                        "trailing_activation_atr": self._trail_activation_atr_mult,
+                        "trailing_stop_atr": self._trail_stop_atr_mult,
+                    },
                 )
 
         # 숏 포지션이거나, 시그널 미달 → hold
@@ -264,7 +271,8 @@ class SpotLongEvaluator:
                 if "atr_14" in df_4h.columns and pd.notna(df_4h["atr_14"].iloc[-1])
                 else 0.0
             )
-            return close, atr
+            if close > 0 and atr > 0:
+                return close, atr
 
         return 0.0, 0.0
 

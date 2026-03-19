@@ -424,6 +424,14 @@ class Tier1Manager:
 
         resp = await self._safe_order.execute_order(session, request)
         if resp.success:
+            # 이밸류에이터가 indicators에 trailing 값을 제공하면 사용,
+            # 없으면 SL/TP 기반 기본 공식 적용 (숏 이밸류에이터 등)
+            trail_act = decision.indicators.get(
+                "trailing_activation_atr", decision.take_profit_atr * 0.5,
+            )
+            trail_stop = decision.indicators.get(
+                "trailing_stop_atr", decision.stop_loss_atr * 0.7,
+            )
             state = PositionState(
                 symbol=symbol,
                 direction=decision.direction,
@@ -434,8 +442,8 @@ class Tier1Manager:
                 extreme_price=resp.executed_price,
                 stop_loss_atr=decision.stop_loss_atr,
                 take_profit_atr=decision.take_profit_atr,
-                trailing_activation_atr=decision.take_profit_atr * 0.5,
-                trailing_stop_atr=decision.stop_loss_atr * 0.7,
+                trailing_activation_atr=trail_act,
+                trailing_stop_atr=trail_stop,
                 tier="tier1",
                 strategy_name=decision.strategy_name,
                 confidence=decision.confidence,

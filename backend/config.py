@@ -266,10 +266,10 @@ class FuturesV2Config(BaseSettings):
     tier1_long_eval_interval_sec: int = 300       # 5분 (현물과 동일)
     tier1_long_min_confidence: float = 0.50       # 현물 라이브 동일
     tier1_long_cooldown_hours: float = 60.0       # 현물 Optuna 최적 (cd15)
-    tier1_long_sl_pct: float = 5.0                # 동적 SL
-    tier1_long_tp_pct: float = 14.0
-    tier1_long_trail_activation_pct: float = 3.0
-    tier1_long_trail_stop_pct: float = 1.5
+    tier1_long_sl_atr_mult: float = 5.0           # ATR 배수 기반 SL (5× ATR)
+    tier1_long_tp_atr_mult: float = 14.0          # ATR 배수 기반 TP (14× ATR)
+    tier1_long_trail_activation_atr_mult: float = 3.0   # 트레일링 활성화 (3× ATR)
+    tier1_long_trail_stop_atr_mult: float = 1.5         # 트레일링 스탑 (1.5× ATR)
 
     # Tier 2 (COIN-23: 필터 추가 + 파라미터 조정)
     tier2_enabled: bool = True
