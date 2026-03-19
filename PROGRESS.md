@@ -118,6 +118,7 @@ coin/
 | 현물 매수 DB 수량 불일치 수정 (COIN-24) | 매수 시 요청 수량 대신 `order.executed_quantity`/`executed_price`로 DB 포지션 갱신. 매도 시 `_clamp_sell_qty_to_balance()` 방어 로직 추가 (실잔고 < DB qty 시 실잔고 기준 매도). PositionTracker도 체결 가격으로 생성. 테스트 14개 추가(1259 total). |
 | Tier1Manager 듀얼 이밸류에이터 (COIN-25) | `DirectionEvaluator` 프로토콜 + `DirectionDecision` 데이터클래스 신규. `RegimeLongEvaluator`/`RegimeShortEvaluator`가 StrategySelector를 방향별로 래핑. Tier1Manager가 `long_evaluator`/`short_evaluator` 주입받아 독립 평가. SAR 로직 제거, 충돌 시 confidence 높은 쪽 선택. 테스트 47개 추가(1298 total). |
 | SpotLongEvaluator 현물 4전략 롱 경로 (COIN-26) | 현물 4전략(cis_momentum, bnf_deviation, donchian_channel, larry_williams)을 선물 롱 시그널 소스로 사용하는 `SpotLongEvaluator` 구현. 4h 캔들 기반, SignalCombiner(SPOT_WEIGHTS)로 가중 투표. BUY→롱 진입, SELL→롱 청산. FuturesEngineV2에서 long_evaluator로 주입. 파라미터: min_confidence 0.50, cooldown 60h, SL 5%/TP 14%/trail 3-1.5, eval 300s. FuturesV2Config에 tier1_long_* 필드 추가. 테스트 39개 추가(1366 total). |
+| SAR + 방향별 쿨다운 (COIN-27) | Tier1Manager에 SAR(Stop And Reverse) 로직 추가: LONG 보유 중 short open → close LONG + open SHORT (역방향도 동일). SAR은 쿨다운 면제. 방향별 쿨다운: 롱 SL/TP → 12h 롱 재진입 금지, 숏 SL/TP → 26h 숏 재진입 금지 (반대 방향은 허용). FuturesV2Config에 tier1_sl_long/short_cooldown_hours 추가. FuturesEngineV2가 방향별 쿨다운을 Tier1Manager에 전달. 테스트 28개 추가(1405 total). |
 
 ### 낮은 우선순위
 

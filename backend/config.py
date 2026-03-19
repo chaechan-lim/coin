@@ -271,6 +271,10 @@ class FuturesV2Config(BaseSettings):
     tier1_long_trail_activation_atr_mult: float = 3.0   # 트레일링 활성화 (3× ATR)
     tier1_long_trail_stop_atr_mult: float = 1.5         # 트레일링 스탑 (1.5× ATR)
 
+    # Direction-specific Tier1 cooldowns — SL/TP 후 같은 방향 재진입 금지 (COIN-27)
+    tier1_sl_long_cooldown_hours: float = 12.0    # 롱 SL/TP → 롱 재진입 금지 12h
+    tier1_sl_short_cooldown_hours: float = 26.0   # 숏 SL/TP → 숏 재진입 금지 26h
+
     # Tier 2 (COIN-23: 필터 추가 + 파라미터 조정)
     tier2_enabled: bool = True
     tier2_max_concurrent: int = 3          # 5 → 3 (노이즈 거래 제거)
