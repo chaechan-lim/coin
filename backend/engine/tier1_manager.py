@@ -77,8 +77,16 @@ class Tier1Manager:
         self._max_position_pct = max_position_pct
         self._min_confidence = min_confidence
         # Direction-specific cooldowns (COIN-27): fallback to single cooldown_seconds
-        self._long_cooldown_sec = long_cooldown_seconds if long_cooldown_seconds is not None else cooldown_seconds
-        self._short_cooldown_sec = short_cooldown_seconds if short_cooldown_seconds is not None else cooldown_seconds
+        self._long_cooldown_sec = (
+            long_cooldown_seconds
+            if long_cooldown_seconds is not None
+            else cooldown_seconds
+        )
+        self._short_cooldown_sec = (
+            short_cooldown_seconds
+            if short_cooldown_seconds is not None
+            else cooldown_seconds
+        )
         self._exchange_name = exchange_name
         self._last_exit_time: dict[str, float] = {}  # symbol → timestamp
         self._last_exit_direction: dict[str, Direction] = {}  # symbol → exit direction
@@ -199,7 +207,10 @@ class Tier1Manager:
         # 2. 포지션 방향에 따라 해당 이밸류에이터의 청산 시그널 체크
         if current_dir == Direction.LONG:
             long_decision = await self._long_evaluator.evaluate(
-                symbol, pos_state, df_5m=df_5m, df_1h=df_1h,
+                symbol,
+                pos_state,
+                df_5m=df_5m,
+                df_1h=df_1h,
             )
             if long_decision.is_close:
                 await self._close_position(
@@ -218,19 +229,32 @@ class Tier1Manager:
 
             # SAR 체크: 같은 방향 evaluator가 hold일 때만 반대 evaluator 시그널 확인.
             # is_open(현재 방향 재확인)이면 SAR하지 않음 — 포지션 유지.
-            if long_decision.is_hold:
+            # 같은 인스턴스면 SAR 불가 — close 미달 시그널로 open도 불가 (COIN-29).
+            if (
+                long_decision.is_hold
+                and self._long_evaluator is not self._short_evaluator
+            ):
                 short_decision = await self._short_evaluator.evaluate(
-                    symbol, None, df_5m=df_5m, df_1h=df_1h,
+                    symbol,
+                    None,
+                    df_5m=df_5m,
+                    df_1h=df_1h,
                 )
-                if short_decision.is_open and short_decision.confidence >= self._min_confidence:
+                if (
+                    short_decision.is_open
+                    and short_decision.confidence >= self._min_confidence
+                ):
                     sar_outcome = await self._execute_sar(
                         session, symbol, pos_state.direction, short_decision
                     )
                     if sar_outcome is not None:
                         if sar_outcome == "sar":
                             self._log_direction_decision(
-                                session, symbol, short_decision,
-                                regime=regime, was_executed=True,
+                                session,
+                                symbol,
+                                short_decision,
+                                regime=regime,
+                                was_executed=True,
                             )
                         return sar_outcome
 
@@ -246,7 +270,10 @@ class Tier1Manager:
 
         elif current_dir == Direction.SHORT:
             short_decision = await self._short_evaluator.evaluate(
-                symbol, pos_state, df_5m=df_5m, df_1h=df_1h,
+                symbol,
+                pos_state,
+                df_5m=df_5m,
+                df_1h=df_1h,
             )
             if short_decision.is_close:
                 await self._close_position(
@@ -265,19 +292,32 @@ class Tier1Manager:
 
             # SAR 체크: 같은 방향 evaluator가 hold일 때만 반대 evaluator 시그널 확인.
             # is_open(현재 방향 재확인)이면 SAR하지 않음 — 포지션 유지.
-            if short_decision.is_hold:
+            # 같은 인스턴스면 SAR 불가 — close 미달 시그널로 open도 불가 (COIN-29).
+            if (
+                short_decision.is_hold
+                and self._long_evaluator is not self._short_evaluator
+            ):
                 long_decision = await self._long_evaluator.evaluate(
-                    symbol, None, df_5m=df_5m, df_1h=df_1h,
+                    symbol,
+                    None,
+                    df_5m=df_5m,
+                    df_1h=df_1h,
                 )
-                if long_decision.is_open and long_decision.confidence >= self._min_confidence:
+                if (
+                    long_decision.is_open
+                    and long_decision.confidence >= self._min_confidence
+                ):
                     sar_outcome = await self._execute_sar(
                         session, symbol, pos_state.direction, long_decision
                     )
                     if sar_outcome is not None:
                         if sar_outcome == "sar":
                             self._log_direction_decision(
-                                session, symbol, long_decision,
-                                regime=regime, was_executed=True,
+                                session,
+                                symbol,
+                                long_decision,
+                                regime=regime,
+                                was_executed=True,
                             )
                         return sar_outcome
 
@@ -295,19 +335,25 @@ class Tier1Manager:
         #    사전 조회된 캔들을 전달하여 중복 API 호출 방지
         #    같은 인스턴스면 1번만 호출 (COIN-28 최적화: API 중복 방지)
         long_decision = await self._long_evaluator.evaluate(
-            symbol, None, df_5m=df_5m, df_1h=df_1h,
+            symbol,
+            None,
+            df_5m=df_5m,
+            df_1h=df_1h,
         )
         if self._long_evaluator is self._short_evaluator:
             short_decision = long_decision
         else:
             short_decision = await self._short_evaluator.evaluate(
-                symbol, None, df_5m=df_5m, df_1h=df_1h,
+                symbol,
+                None,
+                df_5m=df_5m,
+                df_1h=df_1h,
             )
 
         # 진입 시그널 선택
         decision, loser = self._resolve_entry(long_decision, short_decision)
         if decision is None:
-            # 양쪽 다 hold — 둘 다 로깅
+            # 양쪽 다 hold — 같은 인스턴스면 1회만 로깅 (COIN-29)
             self._log_direction_decision(
                 session,
                 symbol,
@@ -315,13 +361,14 @@ class Tier1Manager:
                 regime=regime,
                 was_executed=False,
             )
-            self._log_direction_decision(
-                session,
-                symbol,
-                short_decision,
-                regime=regime,
-                was_executed=False,
-            )
+            if self._long_evaluator is not self._short_evaluator:
+                self._log_direction_decision(
+                    session,
+                    symbol,
+                    short_decision,
+                    regime=regime,
+                    was_executed=False,
+                )
             return "hold"
 
         # 충돌로 탈락한 결정 로깅 (관측성)
@@ -329,7 +376,9 @@ class Tier1Manager:
             logger.info(
                 "tier1_conflict_resolved",
                 symbol=symbol,
-                winner_direction=decision.direction.value if decision.direction else None,
+                winner_direction=decision.direction.value
+                if decision.direction
+                else None,
                 winner_confidence=decision.confidence,
                 winner_strategy=decision.strategy_name,
                 loser_direction=loser.direction.value if loser.direction else None,
@@ -412,7 +461,9 @@ class Tier1Manager:
             return short_decision, None
         return None, None
 
-    def _in_cooldown(self, symbol: str, entry_direction: Direction | None = None) -> bool:
+    def _in_cooldown(
+        self, symbol: str, entry_direction: Direction | None = None
+    ) -> bool:
         """Direction-aware 쿨다운 체크.
 
         SL/TP 후 같은 방향 재진입만 차단. 반대 방향은 허용.
@@ -424,7 +475,11 @@ class Tier1Manager:
 
         # 방향 체크: 마지막 exit 방향과 다르면 쿨다운 면제
         exit_dir = self._last_exit_direction.get(symbol)
-        if entry_direction is not None and exit_dir is not None and entry_direction != exit_dir:
+        if (
+            entry_direction is not None
+            and exit_dir is not None
+            and entry_direction != exit_dir
+        ):
             return False
 
         # 방향에 따라 쿨다운 시간 결정
@@ -498,10 +553,12 @@ class Tier1Manager:
             # 이밸류에이터가 indicators에 trailing 값을 제공하면 사용,
             # 없으면 SL/TP 기반 기본 공식 적용 (숏 이밸류에이터 등)
             trail_act = decision.indicators.get(
-                "trailing_activation_atr", decision.take_profit_atr * 0.5,
+                "trailing_activation_atr",
+                decision.take_profit_atr * 0.5,
             )
             trail_stop = decision.indicators.get(
-                "trailing_stop_atr", decision.stop_loss_atr * 0.7,
+                "trailing_stop_atr",
+                decision.stop_loss_atr * 0.7,
             )
             state = PositionState(
                 symbol=symbol,
@@ -630,7 +687,9 @@ class Tier1Manager:
         """
         # 1. 현재 포지션 청산
         closed = await self._close_position(
-            session, symbol, current_direction,
+            session,
+            symbol,
+            current_direction,
             f"SAR: {current_direction.value} → {new_decision.direction.value}",
         )
         if not closed:
