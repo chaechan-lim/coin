@@ -632,7 +632,10 @@ class TestMarginInsufficient:
 
     @pytest.mark.asyncio
     async def test_margin_insufficient_logged_not_executed(
-        self, tier1, mock_deps, session,
+        self,
+        tier1,
+        mock_deps,
+        session,
     ):
         """마진 부족 시 StrategyLog에 was_executed=False로 기록됨."""
         mock_deps["pm"].cash_balance = 0.0
@@ -658,8 +661,11 @@ class TestMarginInsufficient:
         """주문 실패 시 was_executed=False."""
         mock_deps["safe_order"].execute_order = AsyncMock(
             return_value=OrderResponse(
-                success=False, order_id=None, executed_price=0.0,
-                executed_quantity=0.0, fee=0.0,
+                success=False,
+                order_id=None,
+                executed_price=0.0,
+                executed_quantity=0.0,
+                fee=0.0,
             )
         )
         mock_deps["long_eval"].set_decision(
@@ -1054,9 +1060,7 @@ class TestStrategySignalLogging:
         assert len(logs) >= 1
         # 청산 시그널은 was_executed=True로 기록되어야 함
         sell_executed = [
-            lg
-            for lg in logs
-            if lg.signal_type == "SELL" and lg.was_executed
+            lg for lg in logs if lg.signal_type == "SELL" and lg.was_executed
         ]
         assert len(sell_executed) >= 1, (
             "Close signal should be logged with was_executed=True"
@@ -1143,7 +1147,9 @@ class TestCachedIndicators:
 
         # 사전 조회 (5m + 1h) * 2코인 = 4회. indicators 캐시 덕분에
         # _open_position_from_decision에서 추가 조회 없음
-        total_calls = mock_deps["market_data"].get_ohlcv_df.call_count - initial_call_count
+        total_calls = (
+            mock_deps["market_data"].get_ohlcv_df.call_count - initial_call_count
+        )
         assert total_calls == 4, (
             f"Expected 4 candle fetches (2 per coin), got {total_calls}. "
             "indicators cache should prevent extra fetch in _open_position_from_decision"
@@ -1179,7 +1185,9 @@ class TestCachedIndicators:
         await tier1.evaluation_cycle(session)
 
         # 사전 조회 4회 + BTC fallback 1회 = 5회
-        total_calls = mock_deps["market_data"].get_ohlcv_df.call_count - initial_call_count
+        total_calls = (
+            mock_deps["market_data"].get_ohlcv_df.call_count - initial_call_count
+        )
         assert total_calls == 5, (
             f"Expected 5 candle fetches (4 pre-fetch + 1 fallback), got {total_calls}"
         )
@@ -1466,7 +1474,11 @@ class TestSameInstanceDedup:
 
     @pytest.mark.asyncio
     async def test_no_position_calls_evaluate_once(
-        self, tier1_shared, shared_eval, mock_deps, session,
+        self,
+        tier1_shared,
+        shared_eval,
+        mock_deps,
+        session,
     ):
         """포지션 없을 때 같은 인스턴스면 evaluate()를 1번만 호출."""
         shared_eval.set_decision("BTC/USDT", _hold_decision("spot_eval"))
@@ -1478,7 +1490,10 @@ class TestSameInstanceDedup:
 
     @pytest.mark.asyncio
     async def test_no_position_different_instances_calls_twice(
-        self, tier1, mock_deps, session,
+        self,
+        tier1,
+        mock_deps,
+        session,
     ):
         """다른 인스턴스면 evaluate()를 2번 호출 (기존 동작 유지)."""
         mock_deps["long_eval"].set_decision("BTC/USDT", _hold_decision("long_eval"))
@@ -1492,7 +1507,11 @@ class TestSameInstanceDedup:
 
     @pytest.mark.asyncio
     async def test_shared_instance_open_long(
-        self, tier1_shared, shared_eval, mock_deps, session,
+        self,
+        tier1_shared,
+        shared_eval,
+        mock_deps,
+        session,
     ):
         """같은 인스턴스: BUY 시그널 → LONG 진입 정상 동작."""
         shared_eval.set_decision("BTC/USDT", _long_open_decision(confidence=0.8))
@@ -1504,7 +1523,11 @@ class TestSameInstanceDedup:
 
     @pytest.mark.asyncio
     async def test_shared_instance_open_short(
-        self, tier1_shared, shared_eval, mock_deps, session,
+        self,
+        tier1_shared,
+        shared_eval,
+        mock_deps,
+        session,
     ):
         """같은 인스턴스: SHORT open 시그널 → SHORT 진입 정상 동작."""
         shared_eval.set_decision("BTC/USDT", _short_open_decision(confidence=0.8))
@@ -1513,3 +1536,210 @@ class TestSameInstanceDedup:
 
         assert shared_eval.call_count == 1
         assert stats.executed_count == 1
+
+    @pytest.mark.asyncio
+    async def test_shared_instance_long_hold_skips_sar(
+        self,
+        tier1_shared,
+        shared_eval,
+        mock_deps,
+        session,
+    ):
+        """같은 인스턴스 + LONG 보유 + hold → SAR evaluate() 호출 안 함 (COIN-29)."""
+        # LONG 포지션 주입
+        state = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+        )
+        mock_deps["tracker"].open_position(state)
+
+        # evaluator가 hold 반환 → SAR 분기로 진입하지만, 같은 인스턴스이므로 skip
+        shared_eval.set_decision("BTC/USDT", _hold_decision("spot_eval"))
+
+        stats = await tier1_shared.evaluation_cycle(session)
+
+        # 같은 인스턴스: LONG 평가 1회만 (SAR용 추가 호출 없음)
+        assert shared_eval.call_count == 1
+        assert stats.hold_count == 1
+
+    @pytest.mark.asyncio
+    async def test_shared_instance_short_hold_skips_sar(
+        self,
+        tier1_shared,
+        shared_eval,
+        mock_deps,
+        session,
+    ):
+        """같은 인스턴스 + SHORT 보유 + hold → SAR evaluate() 호출 안 함 (COIN-29)."""
+        # SHORT 포지션 주입
+        state = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.SHORT,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+        )
+        mock_deps["tracker"].open_position(state)
+
+        shared_eval.set_decision("BTC/USDT", _hold_decision("spot_eval"))
+
+        stats = await tier1_shared.evaluation_cycle(session)
+
+        # 같은 인스턴스: SHORT 평가 1회만 (SAR용 추가 호출 없음)
+        assert shared_eval.call_count == 1
+        assert stats.hold_count == 1
+
+    @pytest.mark.asyncio
+    async def test_shared_instance_long_close_still_works(
+        self,
+        tier1_shared,
+        shared_eval,
+        mock_deps,
+        session,
+    ):
+        """같은 인스턴스 + LONG 보유 + close 시그널 → 정상 청산."""
+        state = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+        )
+        mock_deps["tracker"].open_position(state)
+
+        shared_eval.set_decision("BTC/USDT", _close_decision("spot_eval"))
+
+        stats = await tier1_shared.evaluation_cycle(session)
+
+        assert shared_eval.call_count == 1
+        assert stats.executed_count == 1
+
+    @pytest.mark.asyncio
+    async def test_shared_instance_short_close_still_works(
+        self,
+        tier1_shared,
+        shared_eval,
+        mock_deps,
+        session,
+    ):
+        """같은 인스턴스 + SHORT 보유 + close 시그널 → 정상 청산."""
+        state = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.SHORT,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+        )
+        mock_deps["tracker"].open_position(state)
+
+        shared_eval.set_decision("BTC/USDT", _close_decision("spot_eval"))
+
+        stats = await tier1_shared.evaluation_cycle(session)
+
+        assert shared_eval.call_count == 1
+        assert stats.executed_count == 1
+
+
+class TestDifferentInstanceSARPreserved:
+    """다른 인스턴스일 때 SAR 로직이 여전히 동작하는지 확인 (COIN-29 회귀 방지)."""
+
+    @pytest.mark.asyncio
+    async def test_different_instance_long_hold_calls_sar(
+        self,
+        tier1,
+        mock_deps,
+        session,
+    ):
+        """다른 인스턴스 + LONG 보유 + long=hold + short=open → SAR 호출."""
+        state = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+        )
+        mock_deps["tracker"].open_position(state)
+
+        mock_deps["long_eval"].set_decision("BTC/USDT", _hold_decision("long_eval"))
+        mock_deps["short_eval"].set_decision(
+            "BTC/USDT",
+            _short_open_decision(confidence=0.8),
+        )
+
+        stats = await tier1.evaluation_cycle(session)
+
+        # long 1회 + short SAR 1회 = 2회 호출
+        assert mock_deps["long_eval"].call_count >= 1
+        assert mock_deps["short_eval"].call_count >= 1
+        # SAR 실행됨
+        assert stats.executed_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_different_instance_short_hold_calls_sar(
+        self,
+        tier1,
+        mock_deps,
+        session,
+    ):
+        """다른 인스턴스 + SHORT 보유 + short=hold + long=open → SAR 호출."""
+        state = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.SHORT,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+        )
+        mock_deps["tracker"].open_position(state)
+
+        mock_deps["short_eval"].set_decision("BTC/USDT", _hold_decision("short_eval"))
+        mock_deps["long_eval"].set_decision(
+            "BTC/USDT",
+            _long_open_decision(confidence=0.8),
+        )
+
+        stats = await tier1.evaluation_cycle(session)
+
+        # short 1회 + long SAR 1회 = 2회 호출
+        assert mock_deps["short_eval"].call_count >= 1
+        assert mock_deps["long_eval"].call_count >= 1
+        # SAR 실행됨
+        assert stats.executed_count >= 1
