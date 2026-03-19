@@ -6,6 +6,7 @@ the previous code used max(scores, key=scores.get) which always
 picked the first key in dict order (uptrend) due to Python dict
 ordering. The fix uses current_price vs SMA20 as a tiebreaker.
 """
+
 import os
 
 os.environ.setdefault("DB_URL", "sqlite+aiosqlite:///:memory:")
@@ -89,17 +90,11 @@ class TestTiebreakerPriceBelowSMA20:
         """
         agent = _make_agent()
 
-        # price < sma_20 → downtrend +1.5 (factor 1)
-        # sma_20 < sma_50 → downtrend +1 (factor 2)
-        # RSI 43 < 45 → downtrend +1 (factor 3)
-        # weekly +7.1% > 3% → uptrend +1.5 (factor 4)
-        # Total: uptrend=1.5, downtrend=3.5 (not exactly 2.5:2.5 with these params)
-        # Let's set up a proper tie scenario:
         # price < sma_20 → downtrend +1.5
         # sma_20 > sma_50 → uptrend +1, strong_uptrend +0.5
-        # RSI 43 → downtrend +1
-        # weekly +7.1% → uptrend +1.5
-        # → uptrend=2.5, downtrend=2.5, strong_uptrend=0.5
+        # RSI 43 (<45) → downtrend +1
+        # weekly +7.1% (>3%) → uptrend +1.5
+        # → uptrend=2.5, downtrend=2.5, strong_uptrend=0.5 — TIE
         df_1h = _make_df(
             close_base=70_613,
             sma_20=71_174,
@@ -121,27 +116,11 @@ class TestTiebreakerPriceBelowSMA20:
         """Generic tie scenario with price below SMA20."""
         agent = _make_agent()
 
-        # Set up: price below SMA20 slightly, neutral RSI, small positive weekly
-        # price < sma_20 → downtrend +1.5
-        # sma_20 > sma_50 → uptrend +1, strong_uptrend +0.5
-        # RSI 50 (neutral 45-55) → sideways +1.5
-        # weekly +5% → uptrend +1.5
-        # → uptrend=2.5, downtrend=1.5, sideways=1.5, strong_uptrend=0.5
-        # Not a tie. Let me craft a proper tie.
-
-        # price < sma_20 → downtrend +1.5
-        # sma_20 > sma_50 → uptrend +1, strong_uptrend +0.5
-        # RSI=56 (>55) → uptrend +1
-        # weekly -5% → downtrend +1.5
-        # → uptrend=2, downtrend=3
-        # Still not a tie. Let me think more carefully.
-
         # price < sma_20 → downtrend +1.5
         # sma_20 > sma_50 → uptrend +1, strong_uptrend +0.5
         # RSI=43 (<45) → downtrend +1
-        # weekly +7% (>3) → uptrend +1.5
-        # → uptrend=2.5, downtrend=2.5, strong_uptrend=0.5
-        # This is a tie!
+        # weekly +7% (>3%) → uptrend +1.5
+        # → uptrend=2.5, downtrend=2.5, strong_uptrend=0.5 — TIE
         df_1h = _make_df(
             close_base=69_000,
             sma_20=70_000,
@@ -197,48 +176,8 @@ class TestTiebreakerPriceAboveSMA20:
         """When tied and price == SMA20, uptrend should win (>= condition)."""
         agent = _make_agent()
 
-        # price == sma_20 → no score from factor 1 (neither > nor <)
-        # sma_20 > sma_50 → uptrend +1, strong_uptrend +0.5
-        # RSI=43 (<45) → downtrend +1
-        # weekly +0% → sideways +2
-        # → uptrend=1, downtrend=1, sideways=2, strong_uptrend=0.5
-        # Not a tie between uptrend/downtrend. Sideways wins.
-        # Let me force a different scenario.
-
-        # price == sma_20 → no factor 1 score
-        # sma_20 > sma_50 → uptrend +1, strong_uptrend +0.5
-        # RSI=43 → downtrend +1
-        # weekly +5% → uptrend +1.5
-        # → uptrend=2.5, downtrend=1
-        # No tie. Need different approach.
-
-        # price == sma_20 → no factor 1 score
-        # sma_20 < sma_50 → downtrend +1
-        # RSI=56 → uptrend +1
-        # weekly +0% → sideways +2
-        # → uptrend=1, downtrend=1, sideways=2
-        # Sideways wins, not a tie at top.
-
-        # Let's use: price == sma_20, no sma_50
-        # no factor 1 score
-        # no factor 2 score
-        # RSI=56 → uptrend +1
-        # weekly -5% → downtrend +1.5
-        # → uptrend=1, downtrend=1.5 — downtrend wins
-        # Not a tie.
-
-        # Harder to force exact tie with price==SMA20.
-        # Let's test the >= boundary directly by checking behavior when price == sma_20
-        # and we can orchestrate a 3-way tie.
-        # price == sma_20 → no factor 1 score
-        # sma_20 < sma_50 → downtrend +1
-        # RSI=56 → uptrend +1
-        # weekly +0% → sideways +2
-        # → uptrend=1, downtrend=1, sideways=2 → sideways wins
-
-        # Actually let's just test the boundary with a simpler setup:
-        # Only provide minimal indicators to force a tie.
-        # No sma_50, no volume_sma_20, short daily df.
+        # Minimal indicators to force all-zero scores (5-way tie).
+        # No sma_50, no RSI, no volume_sma_20, short daily df (no weekly factor).
         df_1h = _make_df(
             close_base=70_000,
             sma_20=70_000,
