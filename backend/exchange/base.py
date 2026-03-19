@@ -81,6 +81,30 @@ class ExchangeAdapter(ABC):
         """Fetch order status."""
         ...
 
+    # ── 정밀도 / 마켓 정보 (ccxt 위임 — SafeOrderPipeline 등에서 사용) ──
+
+    def amount_to_precision(self, symbol: str, amount: float) -> str:
+        """Apply exchange-specific amount precision (truncation).
+
+        Default delegates to the underlying ccxt exchange object.
+        Subclasses may override if the internal attribute differs.
+        """
+        raw = getattr(self, '_exchange', None)
+        if raw is not None:
+            return raw.amount_to_precision(symbol, amount)
+        raise NotImplementedError("amount_to_precision not available")
+
+    def market(self, symbol: str) -> dict:
+        """Return market info dict for a symbol.
+
+        Default delegates to the underlying ccxt exchange object.
+        Subclasses may override if needed.
+        """
+        raw = getattr(self, '_exchange', None)
+        if raw is not None:
+            return raw.market(symbol)
+        raise NotImplementedError("market info not available")
+
     # ── 선물 전용 (Optional — 현물 어댑터는 NotImplementedError) ──
 
     async def set_leverage(self, symbol: str, leverage: int) -> dict:

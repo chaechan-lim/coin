@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.constants import MIN_NOTIONAL
 from core.enums import Direction
 from core.models import Order, Trade
 from core.event_bus import emit_event
@@ -65,8 +66,6 @@ class SafeOrderPipeline:
     모든 v2 엔진의 주문은 이 파이프라인을 통과해야 한다.
     직접 OrderManager.create_order()를 호출하면 안 됨.
     """
-
-    MIN_NOTIONAL = 105.0  # 바이낸스 USDM 최소 notional $100 + 여유
 
     def __init__(
         self,
@@ -130,9 +129,9 @@ class SafeOrderPipeline:
                     error="below_min_notional_after_precision",
                     cash_before=cash_before,
                 )
-            if adjusted != request.quantity:
+            if abs(adjusted - request.quantity) > 1e-12:
                 new_notional = adjusted * request.price
-                new_margin = new_notional / request.leverage
+                new_margin = new_notional / self._leverage
                 if new_margin > cash_before:
                     return OrderResponse(
                         success=False,
@@ -280,14 +279,9 @@ class SafeOrderPipeline:
         Returns:
             보정된 수량. 최소 notional 불가 시 None.
         """
-        ccxt_exchange = self._exchange
-        raw = getattr(ccxt_exchange, '_exchange', None)
-        if raw is not None:
-            ccxt_exchange = raw
-
-        # ccxt amount_to_precision 적용 (truncation)
+        # ExchangeAdapter ABC의 amount_to_precision 사용 (ccxt 내부 접근 불필요)
         try:
-            result = ccxt_exchange.amount_to_precision(symbol, quantity)
+            result = self._exchange.amount_to_precision(symbol, quantity)
             # ccxt는 동기 메서드로 str 반환. 비동기(mock 등)면 스킵.
             if asyncio.iscoroutine(result):
                 result.close()  # 코루틴 경고 방지
@@ -303,13 +297,13 @@ class SafeOrderPipeline:
 
         # 최소 notional 체크
         notional = adjusted * price
-        if notional >= self.MIN_NOTIONAL:
+        if notional >= MIN_NOTIONAL:
             return adjusted
 
         # notional 부족: 최소 notional을 충족하는 수량으로 올림
         try:
-            market = ccxt_exchange.market(symbol)
-            precision = market.get("precision", {}).get("amount")
+            market_info = self._exchange.market(symbol)
+            precision = market_info.get("precision", {}).get("amount")
             if precision is not None:
                 # ccxt precision: 정수면 소수점 자릿수, 소수면 step_size
                 if isinstance(precision, int) and precision >= 0:
@@ -317,9 +311,11 @@ class SafeOrderPipeline:
                 else:
                     step_size = float(precision)
 
-                min_qty = self.MIN_NOTIONAL / price
-                rounded_up = math.ceil(min_qty / step_size) * step_size
-                if rounded_up * price >= self.MIN_NOTIONAL:
+                min_qty = MIN_NOTIONAL / price
+                # 1e-9 보정: 부동소수점 오차로 정확한 배수가 올림되는 것 방지
+                # 예: 0.002/0.001 → 2.0000000000000004 → ceil=3 (오류)
+                rounded_up = math.ceil(min_qty / step_size - 1e-9) * step_size
+                if rounded_up * price >= MIN_NOTIONAL:
                     return rounded_up
         except Exception:
             pass
