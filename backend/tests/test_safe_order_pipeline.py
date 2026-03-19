@@ -9,6 +9,7 @@ from engine.balance_guard import BalanceGuard
 from engine.portfolio_manager import PortfolioManager
 from engine.order_manager import OrderManager
 from exchange.data_models import OrderResult, Balance
+from core.constants import MIN_NOTIONAL
 from core.enums import Direction
 from core.models import Position, Order, Trade
 
@@ -530,3 +531,145 @@ class TestPnLCalculation:
         from sqlalchemy import select
         order = (await session.execute(select(Order))).scalars().first()
         assert order.realized_pnl_pct > 0  # 숏 수익 (가격 하락)
+
+
+class TestQuantityPrecisionAdjustment:
+    """COIN-31: BTC 최소 notional $100 보장 테스트."""
+
+    def test_adjust_quantity_no_exchange_precision(self, pipeline):
+        """거래소 precision 정보 없으면 원본 반환."""
+        result = pipeline._adjust_quantity_for_exchange(
+            "BTC/USDT", 0.00125, 84000.0,
+        )
+        assert result == 0.00125
+
+    def test_adjust_quantity_btc_truncation_below_min(self, pipeline, mock_exchange):
+        """BTC qty 0.00125 → 0.001 절삭 시 notional $84 < $100 → 올림."""
+        mock_exchange.amount_to_precision = MagicMock(return_value="0.001")
+        mock_exchange.market = MagicMock(return_value={
+            "precision": {"amount": 3},
+        })
+
+        result = pipeline._adjust_quantity_for_exchange(
+            "BTC/USDT", 0.00125, 84000.0,
+        )
+        assert result == 0.002
+        assert result * 84000.0 >= MIN_NOTIONAL
+
+    def test_adjust_quantity_btc_sufficient_notional(self, pipeline, mock_exchange):
+        """절삭 후에도 notional >= 105 이면 그대로 반환."""
+        mock_exchange.amount_to_precision = MagicMock(return_value="0.002")
+        mock_exchange.market = MagicMock(return_value={"precision": {"amount": 3}})
+
+        result = pipeline._adjust_quantity_for_exchange(
+            "BTC/USDT", 0.0025, 84000.0,
+        )
+        assert result == 0.002
+
+    def test_adjust_quantity_eth_no_issue(self, pipeline, mock_exchange):
+        """ETH는 가격 낮아서 precision 절삭해도 notional 충분."""
+        mock_exchange.amount_to_precision = MagicMock(return_value="0.05")
+        mock_exchange.market = MagicMock(return_value={"precision": {"amount": 2}})
+
+        result = pipeline._adjust_quantity_for_exchange(
+            "ETH/USDT", 0.055, 2200.0,
+        )
+        assert result == 0.05
+
+    def test_adjust_quantity_precision_as_float_step(self, pipeline, mock_exchange):
+        """ccxt precision이 float step_size로 제공되는 경우."""
+        mock_exchange.amount_to_precision = MagicMock(return_value="0.001")
+        mock_exchange.market = MagicMock(return_value={"precision": {"amount": 0.001}})
+
+        result = pipeline._adjust_quantity_for_exchange(
+            "BTC/USDT", 0.00125, 84000.0,
+        )
+        assert result == 0.002
+
+    def test_adjust_quantity_ceil_float_precision_guard(self, pipeline, mock_exchange):
+        """부동소수점 오차로 정확한 배수가 잘못 올림되지 않는지 검증.
+
+        min_qty가 step_size의 정확한 배수일 때
+        0.002/0.001 → 2.0000000000000004 같은 오차가 ceil을 3으로 만들면 안 됨.
+        """
+        # MIN_NOTIONAL=105, price=52500 → min_qty=0.002 (정확히 step_size*2)
+        mock_exchange.amount_to_precision = MagicMock(return_value="0.001")
+        mock_exchange.market = MagicMock(return_value={"precision": {"amount": 0.001}})
+
+        result = pipeline._adjust_quantity_for_exchange(
+            "BTC/USDT", 0.0015, 52500.0,
+        )
+        # 0.002가 되어야 함 (0.003이 아님)
+        assert result == 0.002
+
+    @pytest.mark.asyncio
+    async def test_execute_order_adjusts_quantity_and_margin(
+        self, pipeline, mock_exchange, session,
+    ):
+        """주문 실행 시 precision 보정 + margin 갱신 확인."""
+        mock_exchange.amount_to_precision = MagicMock(return_value="0.001")
+        mock_exchange.market = MagicMock(return_value={"precision": {"amount": 3}})
+
+        mock_exchange.create_market_sell.return_value = make_order_result(
+            price=84000.0, filled=0.002, cost=168.0, fee=0.067,
+        )
+
+        req = make_request(
+            direction=Direction.SHORT,
+            margin=35.0,
+            quantity=0.00125,
+            price=84000.0,
+        )
+
+        resp = await pipeline.execute_order(session, req)
+        assert resp.success is True
+        mock_exchange.create_market_sell.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_execute_order_rejects_when_cash_insufficient_after_adjust(
+        self, pipeline, mock_exchange, session, portfolio_manager,
+    ):
+        """올림 후 margin이 cash 초과 시 거부."""
+        # adjusted qty 0.002 * 84000 / leverage 3 = 56.0 > cash 50.0
+        portfolio_manager.cash_balance = 50.0
+
+        mock_exchange.amount_to_precision = MagicMock(return_value="0.001")
+        mock_exchange.market = MagicMock(return_value={"precision": {"amount": 3}})
+
+        req = make_request(margin=35.0, quantity=0.00125, price=84000.0)
+
+        resp = await pipeline.execute_order(session, req)
+        assert resp.success is False
+        assert "insufficient_cash_for_min_notional" in resp.error
+
+    @pytest.mark.asyncio
+    async def test_close_order_not_adjusted(self, pipeline, mock_exchange, session):
+        """청산 주문은 precision 보정 안 함."""
+        pos = Position(
+            exchange="binance_futures",
+            symbol="BTC/USDT",
+            quantity=0.001,
+            average_buy_price=84000.0,
+            total_invested=28.0,
+            direction="short",
+            leverage=3,
+            is_paper=False,
+        )
+        session.add(pos)
+        await session.flush()
+
+        mock_exchange.create_market_buy.return_value = make_order_result(
+            price=82000.0, filled=0.001, cost=82.0, fee=0.033,
+        )
+
+        req = make_request(
+            action="close",
+            direction=Direction.SHORT,
+            quantity=0.001,
+            price=82000.0,
+            entry_price=84000.0,
+            margin=28.0,
+        )
+
+        resp = await pipeline.execute_order(session, req)
+        assert resp.success is True

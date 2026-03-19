@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.constants import MIN_NOTIONAL
 from core.enums import Direction
 from core.models import StrategyLog
 from engine.direction_evaluator import DirectionDecision, DirectionEvaluator
@@ -740,6 +741,24 @@ class Tier1Manager:
         adjusted = raw_margin * decision.sizing_factor * decision.confidence
         max_margin = cash * self._max_position_pct
         final = min(adjusted, max_margin)
+
+        # 최소 notional 보장: margin × leverage >= MIN_NOTIONAL
+        # BTC처럼 가격이 높은 코인은 precision 절삭으로 notional이 $100 미만으로 떨어질 수 있음
+        min_margin = MIN_NOTIONAL / self._leverage
+        if final < min_margin:
+            if max_margin < min_margin:
+                # 계좌가 이 코인을 이 레버리지로 안전하게 거래하기엔 너무 작음
+                logger.warning(
+                    "min_notional_overrides_max_margin",
+                    cash=round(cash, 2),
+                    max_margin=round(max_margin, 2),
+                    min_margin=round(min_margin, 2),
+                    leverage=self._leverage,
+                    min_notional=MIN_NOTIONAL,
+                )
+                return 0.0
+            if cash >= min_margin:
+                final = min_margin
 
         return final if final >= 5.0 else 0.0
 
