@@ -93,6 +93,7 @@ coin/
 | ML Signal Filter (v0.37) | LightGBM 23피처, 선물 시그널 사전 필터링 (strategies/ml_filter.py) |
 | 서지 엔진 (v0.37) | 거래량 급등 감지 단기 매매, 선물 PM 잔고 공유, exchange="binance_surge" |
 | 버그 수정 11건 (v0.38) | entry_price=0 가드, cash race condition, DB 인덱스, API 검증, fire-and-forget 에러 핸들링 |
+| MarketAnalyzer 동점 편향 수정 | `_classify_market()` 동점 시 dict 순서 대신 현재가 vs SMA20 타이브레이크 (COIN-30) |
 | 현물 Optuna 바이낸스 재최적화 (v0.39) | 빗썸 KRW→바이낸스 USDT 데이터로 재최적화 (PF 1.56, +22.48%), cis_momentum 지배적, SL5/TP14/trail3-1.5, cd15(60h) |
 | 트레일링 스탑 알림 반복 버그 수정 | `_execute_stop_sell`: 미체결 주문 시 `return` → `raise RuntimeError` — cooldown pop 오동작 방지, 30초마다 알림 폭주 해결 |
 | 서지 엔진 거래량 감지 수정 (v0.40) | ticker 24h volume→5m 캔들 OHLCV 기반, 배치 ticker(USDM 키 정규화), 좀비 포지션 자동 청산 |

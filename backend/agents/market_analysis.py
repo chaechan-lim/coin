@@ -201,8 +201,19 @@ class MarketAnalysisAgent:
                     scores[MarketState.DOWNTREND] += 0.5
                     reasons.append(f"거래량 {vol_ratio:.1f}x (급증)")
 
-        # Find winning state
-        best_state = max(scores, key=scores.get)
+        # Find winning state (with SMA20 tiebreaker)
+        max_score = max(scores.values())
+        tied = [s for s, v in scores.items() if v == max_score]
+        if len(tied) > 1 and sma_20 is not None and not pd.isna(sma_20):
+            if current_price < sma_20:
+                pref = [MarketState.DOWNTREND, MarketState.SIDEWAYS, MarketState.CRASH,
+                        MarketState.UPTREND, MarketState.STRONG_UPTREND]
+            else:
+                pref = [MarketState.UPTREND, MarketState.STRONG_UPTREND, MarketState.SIDEWAYS,
+                        MarketState.DOWNTREND, MarketState.CRASH]
+            best_state = next((s for s in pref if s in tied), tied[0])
+        else:
+            best_state = max(scores, key=scores.get)
         total = sum(scores.values())
         confidence = scores[best_state] / total if total > 0 else 0.3
 
