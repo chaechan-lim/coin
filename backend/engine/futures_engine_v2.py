@@ -130,6 +130,8 @@ class FuturesEngineV2:
             max_position_pct=v2_cfg.tier1_max_position_pct,
             min_confidence=v2_cfg.tier1_min_confidence,
             cooldown_seconds=v2_cfg.tier1_cooldown_seconds,
+            long_cooldown_seconds=int(v2_cfg.tier1_sl_long_cooldown_hours * 3600),
+            short_cooldown_seconds=int(v2_cfg.tier1_sl_short_cooldown_hours * 3600),
             exchange_name=self.EXCHANGE_NAME,
         )
 
