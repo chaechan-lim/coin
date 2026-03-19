@@ -293,12 +293,16 @@ class Tier1Manager:
 
         # 3. 포지션 없으면 양쪽 이밸류에이터에서 진입 시그널 탐색
         #    사전 조회된 캔들을 전달하여 중복 API 호출 방지
+        #    같은 인스턴스면 1번만 호출 (COIN-28 최적화: API 중복 방지)
         long_decision = await self._long_evaluator.evaluate(
             symbol, None, df_5m=df_5m, df_1h=df_1h,
         )
-        short_decision = await self._short_evaluator.evaluate(
-            symbol, None, df_5m=df_5m, df_1h=df_1h,
-        )
+        if self._long_evaluator is self._short_evaluator:
+            short_decision = long_decision
+        else:
+            short_decision = await self._short_evaluator.evaluate(
+                symbol, None, df_5m=df_5m, df_1h=df_1h,
+            )
 
         # 진입 시그널 선택
         decision, loser = self._resolve_entry(long_decision, short_decision)
