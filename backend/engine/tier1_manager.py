@@ -216,20 +216,23 @@ class Tier1Manager:
                 )
                 return "flat_close"
 
-            # SAR 체크: 같은 방향 evaluator가 hold → 반대 evaluator가 open 시그널?
-            short_decision = await self._short_evaluator.evaluate(
-                symbol, None, df_5m=df_5m, df_1h=df_1h,
-            )
-            if short_decision.is_open and short_decision.confidence >= self._min_confidence:
-                sar_result = await self._execute_sar(
-                    session, symbol, pos_state.direction, short_decision
+            # SAR 체크: 같은 방향 evaluator가 hold일 때만 반대 evaluator 시그널 확인.
+            # is_open(현재 방향 재확인)이면 SAR하지 않음 — 포지션 유지.
+            if long_decision.is_hold:
+                short_decision = await self._short_evaluator.evaluate(
+                    symbol, None, df_5m=df_5m, df_1h=df_1h,
                 )
-                if sar_result:
-                    self._log_direction_decision(
-                        session, symbol, short_decision,
-                        regime=regime, was_executed=True,
+                if short_decision.is_open and short_decision.confidence >= self._min_confidence:
+                    sar_outcome = await self._execute_sar(
+                        session, symbol, pos_state.direction, short_decision
                     )
-                    return "sar"
+                    if sar_outcome is not None:
+                        if sar_outcome == "sar":
+                            self._log_direction_decision(
+                                session, symbol, short_decision,
+                                regime=regime, was_executed=True,
+                            )
+                        return sar_outcome
 
             # open 또는 hold — 이미 같은 방향 포지션 보유 중이므로 유지
             self._log_direction_decision(
@@ -260,20 +263,23 @@ class Tier1Manager:
                 )
                 return "flat_close"
 
-            # SAR 체크: 같은 방향 evaluator가 hold → 반대 evaluator가 open 시그널?
-            long_decision = await self._long_evaluator.evaluate(
-                symbol, None, df_5m=df_5m, df_1h=df_1h,
-            )
-            if long_decision.is_open and long_decision.confidence >= self._min_confidence:
-                sar_result = await self._execute_sar(
-                    session, symbol, pos_state.direction, long_decision
+            # SAR 체크: 같은 방향 evaluator가 hold일 때만 반대 evaluator 시그널 확인.
+            # is_open(현재 방향 재확인)이면 SAR하지 않음 — 포지션 유지.
+            if short_decision.is_hold:
+                long_decision = await self._long_evaluator.evaluate(
+                    symbol, None, df_5m=df_5m, df_1h=df_1h,
                 )
-                if sar_result:
-                    self._log_direction_decision(
-                        session, symbol, long_decision,
-                        regime=regime, was_executed=True,
+                if long_decision.is_open and long_decision.confidence >= self._min_confidence:
+                    sar_outcome = await self._execute_sar(
+                        session, symbol, pos_state.direction, long_decision
                     )
-                    return "sar"
+                    if sar_outcome is not None:
+                        if sar_outcome == "sar":
+                            self._log_direction_decision(
+                                session, symbol, long_decision,
+                                regime=regime, was_executed=True,
+                            )
+                        return sar_outcome
 
             # open 또는 hold — 이미 같은 방향 포지션 보유 중이므로 유지
             self._log_direction_decision(
@@ -423,7 +429,8 @@ class Tier1Manager:
         elif exit_dir == Direction.SHORT:
             cooldown_sec = self._short_cooldown_sec
         else:
-            cooldown_sec = self._long_cooldown_sec  # fallback
+            # exit_dir 불명 시 보수적으로 긴 쪽 적용
+            cooldown_sec = max(self._long_cooldown_sec, self._short_cooldown_sec)
 
         elapsed = time.time() - last_exit
         if elapsed < cooldown_sec:
@@ -519,15 +526,15 @@ class Tier1Manager:
         symbol: str,
         direction: Direction,
         reason: str,
-    ) -> None:
-        """포지션 청산."""
+    ) -> bool:
+        """포지션 청산. Returns True if successfully closed."""
         pos_state = self._positions.get(symbol)
         if not pos_state:
-            return
+            return False
 
         price = await self._get_price(symbol)
         if price <= 0:
-            return
+            return False
 
         request = OrderRequest(
             symbol=symbol,
@@ -546,6 +553,8 @@ class Tier1Manager:
         resp = await self._safe_order.execute_order(session, request)
         if resp.success:
             self._positions.close_position(symbol)
+            return True
+        return False
 
     async def _check_sl_tp(
         self,
@@ -605,17 +614,29 @@ class Tier1Manager:
         symbol: str,
         current_direction: Direction,
         new_decision: DirectionDecision,
-    ) -> bool:
+    ) -> str | None:
         """Stop And Reverse: 현재 포지션 청산 + 반대 포지션 즉시 오픈.
 
         SAR은 쿨다운을 설정하지 않는다 — 전략적 방향 전환이므로.
-        Returns True if both close + open succeeded.
+
+        Returns:
+            "sar" — 청산 + 오픈 모두 성공.
+            "flat_close" — 청산 성공, 오픈 실패 (포지션 flat 상태).
+            None — 청산 실패, 아무 변경 없음.
         """
         # 1. 현재 포지션 청산
-        await self._close_position(
+        closed = await self._close_position(
             session, symbol, current_direction,
             f"SAR: {current_direction.value} → {new_decision.direction.value}",
         )
+        if not closed:
+            logger.warning(
+                "tier1_sar_close_failed",
+                symbol=symbol,
+                from_dir=current_direction.value,
+                to_dir=new_decision.direction.value,
+            )
+            return None
         # SAR은 쿨다운 면제 — _set_exit_cooldown 호출 안 함
 
         # 2. 반대 방향 즉시 오픈
@@ -628,6 +649,7 @@ class Tier1Manager:
                 to_dir=new_decision.direction.value,
                 confidence=new_decision.confidence,
             )
+            return "sar"
         else:
             logger.warning(
                 "tier1_sar_open_failed",
@@ -635,7 +657,7 @@ class Tier1Manager:
                 from_dir=current_direction.value,
                 to_dir=new_decision.direction.value,
             )
-        return opened
+            return "flat_close"
 
     def _calc_margin(
         self,

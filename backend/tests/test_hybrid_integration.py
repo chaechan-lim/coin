@@ -286,8 +286,8 @@ class TestSAROpenFails:
     """SAR 시 open이 실패하면 (마진 부족 등)."""
 
     @pytest.mark.asyncio
-    async def test_sar_open_fails_returns_hold(self, deps):
-        """SAR open 실패 → close는 수행되고 결과는 hold (sar가 아님)."""
+    async def test_sar_open_fails_returns_flat_close(self, deps):
+        """SAR open 실패 → close는 수행, 결과는 flat_close (포지션 flat)."""
         tier1 = _make_tier1(deps)
         _inject_long_position(deps["tracker"])
         deps["long_eval"].set("BTC/USDT", _hold())
@@ -297,15 +297,38 @@ class TestSAROpenFails:
 
         session = AsyncMock()
         outcome = await tier1._evaluate_coin(session, "BTC/USDT", _regime_state())
-        # _execute_sar returns False → not "sar", falls through to "hold"
+        # _execute_sar: close succeeded, open failed → "flat_close"
+        assert outcome == "flat_close"
+
+    @pytest.mark.asyncio
+    async def test_sar_close_fails_returns_hold(self, deps):
+        """SAR close 실패 → 아무 변경 없음, hold 반환."""
+        tier1 = _make_tier1(deps)
+        _inject_long_position(deps["tracker"])
+        deps["long_eval"].set("BTC/USDT", _hold())
+        deps["short_eval"].set("BTC/USDT", _short_open(0.7))
+        # close 실패: execute_order returns success=False
+        deps["safe_order"].execute_order = AsyncMock(
+            return_value=OrderResponse(
+                success=False, order_id=0,
+                executed_price=0, executed_quantity=0, fee=0,
+            )
+        )
+
+        session = AsyncMock()
+        outcome = await tier1._evaluate_coin(session, "BTC/USDT", _regime_state())
+        # _execute_sar: close failed → None → falls through to "hold"
         assert outcome == "hold"
+        # Position should still be tracked
+        assert deps["tracker"].get("BTC/USDT") is not None
 
 
-class TestSARBothHold:
-    """양쪽 evaluator 모두 hold → SAR 안 함."""
+class TestSARGuardCondition:
+    """SAR은 같은 방향 evaluator가 hold일 때만 발동."""
 
     @pytest.mark.asyncio
     async def test_both_hold_no_sar(self, deps):
+        """양쪽 evaluator 모두 hold → SAR 안 함."""
         tier1 = _make_tier1(deps)
         _inject_long_position(deps["tracker"])
         deps["long_eval"].set("BTC/USDT", _hold())
@@ -314,6 +337,42 @@ class TestSARBothHold:
         session = AsyncMock()
         outcome = await tier1._evaluate_coin(session, "BTC/USDT", _regime_state())
         assert outcome == "hold"
+
+    @pytest.mark.asyncio
+    async def test_sar_skipped_when_long_evaluator_says_open(self, deps):
+        """LONG 보유 + long_eval=open(bullish) + short_eval=open → SAR 안 함.
+
+        같은 방향 evaluator가 여전히 진입 시그널을 보내고 있으면
+        반대 evaluator의 시그널과 관계없이 포지션 유지.
+        """
+        tier1 = _make_tier1(deps)
+        _inject_long_position(deps["tracker"])
+        deps["long_eval"].set("BTC/USDT", _long_open(0.8))  # still bullish
+        deps["short_eval"].set("BTC/USDT", _short_open(0.7))
+
+        session = AsyncMock()
+        outcome = await tier1._evaluate_coin(session, "BTC/USDT", _regime_state())
+        assert outcome == "hold"  # Should NOT SAR
+        # Position should still be intact
+        assert deps["tracker"].get("BTC/USDT") is not None
+
+    @pytest.mark.asyncio
+    async def test_sar_skipped_when_short_evaluator_says_open(self, deps):
+        """SHORT 보유 + short_eval=open(bearish) + long_eval=open → SAR 안 함.
+
+        같은 방향 evaluator가 여전히 진입 시그널을 보내고 있으면
+        반대 evaluator의 시그널과 관계없이 포지션 유지.
+        """
+        tier1 = _make_tier1(deps)
+        _inject_short_position(deps["tracker"])
+        deps["short_eval"].set("BTC/USDT", _short_open(0.7))  # still bearish
+        deps["long_eval"].set("BTC/USDT", _long_open(0.8))
+
+        session = AsyncMock()
+        outcome = await tier1._evaluate_coin(session, "BTC/USDT", _regime_state())
+        assert outcome == "hold"  # Should NOT SAR
+        # Position should still be intact
+        assert deps["tracker"].get("BTC/USDT") is not None
 
 
 # ── Direction-Specific Cooldown Tests ────────────────────────────
@@ -390,6 +449,19 @@ class TestDirectionalCooldown:
         tier1._set_exit_cooldown("BTC/USDT", Direction.LONG)
 
         assert tier1._in_cooldown("BTC/USDT", None) is True
+
+    def test_unknown_exit_dir_uses_max_cooldown(self, deps):
+        """exit_dir 불명 시 max(long, short) 쿨다운 적용 (보수적)."""
+        tier1 = _make_tier1(deps, long_cd=43200, short_cd=93600)
+        # exit_dir 없이 exit_time만 설정 (edge case)
+        tier1._last_exit_time["BTC/USDT"] = time.time() - 50000  # ~14h
+        # exit_direction 미설정 → fallback to max(43200, 93600) = 93600
+        # 50000 < 93600 → 쿨다운 중
+        assert tier1._in_cooldown("BTC/USDT", Direction.LONG) is True
+
+        # 93601초 경과 → 해제
+        tier1._last_exit_time["BTC/USDT"] = time.time() - 93601
+        assert tier1._in_cooldown("BTC/USDT", Direction.LONG) is False
 
 
 class TestSetExitCooldown:
