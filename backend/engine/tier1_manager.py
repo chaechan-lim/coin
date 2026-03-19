@@ -133,6 +133,8 @@ class Tier1Manager:
                     stats.sl_tp_count += 1
                 elif outcome == "candle_error":
                     stats.candle_error_count += 1
+                elif outcome == "margin_insufficient":
+                    stats.low_confidence_count += 1  # 마진 부족도 미실행 카운트
                 elif outcome in ("opened", "closed", "sar", "flat_close"):
                     stats.executed_count += 1
                     self._last_action_at = datetime.now(timezone.utc)
@@ -324,15 +326,15 @@ class Tier1Manager:
             return "cooldown"
 
         # 진입 실행
-        await self._open_position_from_decision(session, symbol, decision)
+        opened = await self._open_position_from_decision(session, symbol, decision)
         self._log_direction_decision(
             session,
             symbol,
             decision,
             regime=regime,
-            was_executed=True,
+            was_executed=opened,
         )
-        return "opened"
+        return "opened" if opened else "margin_insufficient"
 
     def _resolve_entry(
         self,
@@ -380,11 +382,14 @@ class Tier1Manager:
         session: AsyncSession,
         symbol: str,
         decision: DirectionDecision,
-    ) -> None:
+    ) -> bool:
         """DirectionDecision으로 포지션 오픈.
 
         이밸류에이터가 캔들을 이미 조회했으므로, indicators에 close/atr가 있으면
         그 값을 재사용하여 불필요한 API 호출을 줄인다.
+
+        Returns:
+            True if position was successfully opened, False otherwise.
         """
         close = decision.indicators.get("close", 0.0)
         atr = decision.indicators.get("atr", 0.0)
@@ -392,17 +397,17 @@ class Tier1Manager:
             # fallback: indicators에 없으면 직접 조회
             df_5m = await self._fetch_candles(symbol, "5m", 200)
             if df_5m is None or len(df_5m) < 20:
-                return
+                return False
             close = self._last_close(df_5m)
             atr = self._last_atr(df_5m)
 
         margin = self._calc_margin(decision, close, atr)
         if margin <= 0:
-            return
+            return False
 
         quantity = (margin * self._leverage) / close if close > 0 else 0.0
         if quantity <= 0:
-            return
+            return False
 
         request = OrderRequest(
             symbol=symbol,
@@ -437,6 +442,8 @@ class Tier1Manager:
                 sizing_factor=decision.sizing_factor,
             )
             self._positions.open_position(state)
+            return True
+        return False
 
     async def _close_position(
         self,
@@ -480,11 +487,12 @@ class Tier1Manager:
         price: float,
         atr: float,
     ) -> bool:
-        """SL/TP/trailing 체크. 히트 시 청산 + 쿨다운 설정. Returns True if closed."""
+        """SL/TP/trailing 체크. 히트 시 청산 + 쿨다운 설정. Returns True if closed.
+
+        Note: update_extreme(price)는 호출 전에 _evaluate_coin에서 이미 수행됨.
+        """
         if price <= 0 or atr <= 0:
             return False
-
-        state.update_extreme(price)
 
         if state.check_stop_loss(price, atr):
             await self._close_position(

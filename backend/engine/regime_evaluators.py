@@ -86,9 +86,9 @@ class _RegimeDirectionEvaluator:
 
         # 5m 캔들에서 close/atr 추출 (Tier1Manager가 재사용)
         if "close" not in df_5m.columns:
-            logger.warning(f"{self._label}_missing_close_column", symbol=symbol)
+            logger.warning("evaluator_missing_close_column", evaluator=self._label, symbol=symbol)
         if "atr_14" not in df_5m.columns:
-            logger.warning(f"{self._label}_missing_atr_column", symbol=symbol)
+            logger.warning("evaluator_missing_atr_column", evaluator=self._label, symbol=symbol)
         last_close = (
             float(df_5m["close"].iloc[-1])
             if "close" in df_5m.columns and pd.notna(df_5m["close"].iloc[-1])
@@ -158,7 +158,8 @@ class _RegimeDirectionEvaluator:
             return await self._market_data.get_ohlcv_df(symbol, timeframe, limit)
         except Exception as e:
             logger.warning(
-                f"{self._label}_candle_error",
+                "evaluator_candle_error",
+                evaluator=self._label,
                 symbol=symbol,
                 tf=timeframe,
                 error=str(e),

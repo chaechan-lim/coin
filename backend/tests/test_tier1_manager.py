@@ -607,6 +607,89 @@ class TestLowConfidence:
         assert stats.low_confidence_count >= 1
 
 
+class TestMarginInsufficient:
+    """마진 부족 시 was_executed=False 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_margin_insufficient_not_executed(self, tier1, mock_deps, session):
+        """마진 부족(cash=0) 시 was_executed=False, outcome=margin_insufficient."""
+        mock_deps["pm"].cash_balance = 0.0
+        mock_deps["long_eval"].set_decision("BTC/USDT", _long_open_decision())
+
+        stats = await tier1.evaluation_cycle(session)
+
+        # 주문 미실행
+        btc_open = [
+            c
+            for c in mock_deps["safe_order"].execute_order.call_args_list
+            if c[0][1].action == "open" and c[0][1].symbol == "BTC/USDT"
+        ]
+        assert len(btc_open) == 0
+
+        # stats에 margin_insufficient 반영 (low_confidence_count에 합산)
+        assert stats.low_confidence_count >= 1
+        assert stats.decisions.get("BTC/USDT") == "margin_insufficient"
+
+    @pytest.mark.asyncio
+    async def test_margin_insufficient_logged_not_executed(
+        self, tier1, mock_deps, session,
+    ):
+        """마진 부족 시 StrategyLog에 was_executed=False로 기록됨."""
+        mock_deps["pm"].cash_balance = 0.0
+        mock_deps["long_eval"].set_decision("BTC/USDT", _long_open_decision())
+
+        await tier1.evaluation_cycle(session)
+        await session.flush()
+
+        result = await session.execute(
+            select(StrategyLog).where(StrategyLog.symbol == "BTC/USDT")
+        )
+        logs = result.scalars().all()
+        assert len(logs) >= 1
+        # 마진 부족이므로 실행되지 않아야 함
+        buy_logs = [lg for lg in logs if lg.signal_type == "BUY"]
+        assert len(buy_logs) >= 1
+        assert buy_logs[0].was_executed is False, (
+            "Margin insufficient should log was_executed=False"
+        )
+
+    @pytest.mark.asyncio
+    async def test_order_failure_not_executed(self, tier1, mock_deps, session):
+        """주문 실패 시 was_executed=False."""
+        mock_deps["safe_order"].execute_order = AsyncMock(
+            return_value=OrderResponse(
+                success=False, order_id=None, executed_price=0.0,
+                executed_quantity=0.0, fee=0.0,
+            )
+        )
+        mock_deps["long_eval"].set_decision(
+            "BTC/USDT",
+            DirectionDecision(
+                action="open",
+                direction=Direction.LONG,
+                confidence=0.8,
+                sizing_factor=0.7,
+                stop_loss_atr=1.5,
+                take_profit_atr=3.0,
+                reason="long_signal",
+                strategy_name="trend_follower",
+                indicators={"close": 80000.0, "atr": 1000.0},
+            ),
+        )
+
+        stats = await tier1.evaluation_cycle(session)
+        assert stats.decisions.get("BTC/USDT") == "margin_insufficient"
+
+        await session.flush()
+        result = await session.execute(
+            select(StrategyLog).where(StrategyLog.symbol == "BTC/USDT")
+        )
+        logs = result.scalars().all()
+        buy_logs = [lg for lg in logs if lg.signal_type == "BUY"]
+        assert len(buy_logs) >= 1
+        assert buy_logs[0].was_executed is False
+
+
 class TestCycleStats:
     """CycleStats 데이터클래스 테스트."""
 
