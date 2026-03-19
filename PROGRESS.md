@@ -1,6 +1,6 @@
 # 코인 자동 매매 시스템 — 운영 참조
 
-> 최종 업데이트: 2026-03-15
+> 최종 업데이트: 2026-03-19
 > 완료된 Phase 1-5 상세 및 버전 이력은 `CHANGELOG.md` 참고.
 
 ---
@@ -10,7 +10,7 @@
 빗썸(현물, 비활성) + 바이낸스 현물(live) + 바이낸스 USDM 선물(live, 3x) + 서지 **쿼드 엔진** 24시간 자동 트레이딩 시스템.
 가중 투표 (HOLD=기권) + ML 시그널 필터 + 5요소 시장 감지 + 적응형 가중치, AI 에이전트 5종, Discord 봇(자연어 제어), React 대시보드(8탭).
 **현물 4전략** (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + **선물 7전략** (MA, RSI, MACD, 볼린저RSI, 스토캐스틱RSI, OBV, BB스퀴즈).
-**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **1021 유닛 테스트**.
+**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **1366 유닛 테스트**.
 
 ---
 
@@ -46,7 +46,7 @@ coin/
 │   ├── agents/        (market_analysis, risk_management, trade_review, performance_analytics, strategy_advisor, diagnostic_agent, coordinator)
 │   ├── engine/        (trading_engine, futures_engine, surge_engine, order_manager, portfolio_manager, recovery, health_monitor, capital_sync, scheduler)
 │   ├── api/           (router, dependencies, dashboard, portfolio, trades, strategies, events, capital, websocket)
-│   └── tests/         (1021 tests)
+│   └── tests/         (1366 tests)
 └── frontend/
     └── src/           (Dashboard, 8탭 컴포넌트, hooks, types)
 ```
@@ -117,6 +117,7 @@ coin/
 | Tier2Scanner 진입 필터 + SL/TP 조정 (COIN-23) | surge_backtest 안전 필터 포팅: RSI 필터(75/25), ATR% 횡보 차단(0.5%), 가속도 25% 가중치, 소진 필터(8%+), 연속 SL 쿨다운(2연속→180분). 정규화 점수(vol*0.40+price*0.35+accel*0.25, min_score 0.55). SL 2→3.5%, TP 4→4.5%, trail 1.0/0.8→1.5/1.0, concurrent 5→3, cooldown 30→60분. 테스트 41개 추가(1245 total). |
 | 현물 매수 DB 수량 불일치 수정 (COIN-24) | 매수 시 요청 수량 대신 `order.executed_quantity`/`executed_price`로 DB 포지션 갱신. 매도 시 `_clamp_sell_qty_to_balance()` 방어 로직 추가 (실잔고 < DB qty 시 실잔고 기준 매도). PositionTracker도 체결 가격으로 생성. 테스트 14개 추가(1259 total). |
 | Tier1Manager 듀얼 이밸류에이터 (COIN-25) | `DirectionEvaluator` 프로토콜 + `DirectionDecision` 데이터클래스 신규. `RegimeLongEvaluator`/`RegimeShortEvaluator`가 StrategySelector를 방향별로 래핑. Tier1Manager가 `long_evaluator`/`short_evaluator` 주입받아 독립 평가. SAR 로직 제거, 충돌 시 confidence 높은 쪽 선택. 테스트 47개 추가(1298 total). |
+| SpotLongEvaluator 현물 4전략 롱 경로 (COIN-26) | 현물 4전략(cis_momentum, bnf_deviation, donchian_channel, larry_williams)을 선물 롱 시그널 소스로 사용하는 `SpotLongEvaluator` 구현. 4h 캔들 기반, SignalCombiner(SPOT_WEIGHTS)로 가중 투표. BUY→롱 진입, SELL→롱 청산. FuturesEngineV2에서 long_evaluator로 주입. 파라미터: min_confidence 0.50, cooldown 60h, SL 5%/TP 14%/trail 3-1.5, eval 300s. FuturesV2Config에 tier1_long_* 필드 추가. 테스트 39개 추가(1366 total). |
 
 ### 낮은 우선순위
 
