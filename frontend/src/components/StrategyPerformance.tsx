@@ -22,6 +22,9 @@ const STRATEGY_KR: Record<string, string> = {
   trend_follower: '추세 추종',
   mean_reversion: '평균 회귀',
   vol_breakout: '변동성 돌파 v2',
+  // v2 SpotEvaluator / Tier2Scanner
+  spot_eval: '현물 시그널',
+  tier2_surge: '서지 스캐너',
 }
 
 const PERIODS = ['7d', '30d', '90d'] as const
