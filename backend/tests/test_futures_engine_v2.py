@@ -194,18 +194,18 @@ class TestAPICompatibility:
         assert "donchian_channel" in strategy_names
         assert "larry_williams" in strategy_names
 
-    def test_strategies_contains_v2_regime_names(self, engine):
-        """v2 레짐 전략 3종 이름도 포함되어야 함."""
+    def test_strategies_excludes_v2_regime_names(self, engine):
+        """COIN-34: v2 레짐 전략 3종은 비활성이므로 제외되어야 함."""
         strats = engine.strategies
         strategy_names = set(strats.keys())
-        assert "trend_follower" in strategy_names
-        assert "mean_reversion" in strategy_names
-        assert "vol_breakout" in strategy_names
+        assert "trend_follower" not in strategy_names
+        assert "mean_reversion" not in strategy_names
+        assert "vol_breakout" not in strategy_names
 
     def test_strategies_total_count(self, engine):
-        """현물 4전략 + 레짐 3전략 = 총 7종."""
+        """COIN-34: 현물 4전략만 반환 (레짐 전략 제외)."""
         strats = engine.strategies
-        assert len(strats) == 7
+        assert len(strats) == 4
 
     def test_strategies_values_have_name_attr(self, engine):
         """각 전략 객체에는 name 속성이 있어야 함."""

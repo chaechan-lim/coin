@@ -5,26 +5,30 @@ import { compareStrategies } from '../api/client'
 import type { ExchangeName } from '../types'
 
 const STRATEGY_KR: Record<string, string> = {
-  volatility_breakout: '변동성 돌파',
-  ma_crossover: 'MA 크로스',
-  rsi: 'RSI',
-  macd_crossover: 'MACD',
-  bollinger_rsi: '볼린저+RSI',
-  bb_squeeze: 'BB 스퀴즈',
-  stochastic_rsi: '스토캐스틱RSI',
-  obv_divergence: 'OBV 다이버전스',
+  // 활성 전략 (V2 하이브리드 엔진 — 현물 4전략)
   bnf_deviation: 'BNF 이격도',
   cis_momentum: 'CIS 모멘텀',
   larry_williams: '래리 윌리엄스',
   donchian_channel: '돈치안 채널',
-  risk_management: '리스크 관리',
-  // v2 레짐 전략
-  trend_follower: '추세 추종',
-  mean_reversion: '평균 회귀',
-  vol_breakout: '변동성 돌파 v2',
-  // v2 SpotEvaluator / Tier2Scanner
+  // V2 SpotEvaluator / Tier2Scanner
   spot_eval: '현물 시그널',
   tier2_surge: '서지 스캐너',
+  // 운영 전략
+  risk_management: '리스크 관리',
+  stop_loss: '손절',
+  take_profit: '익절',
+  trailing_stop: '트레일링 스탑',
+  forced_liquidation: '강제 청산',
+  time_expiry: '시간 만료',
+  position_sync: '포지션 동기화',
+  // 레거시 V1 전략
+  bollinger_rsi: '볼린저 RSI',
+  rsi: 'RSI',
+  ma_crossover: '이동평균 교차',
+  macd_crossover: 'MACD 교차',
+  stochastic_rsi: '스토캐스틱 RSI',
+  obv_divergence: 'OBV 다이버전스',
+  bb_squeeze: 'BB 스퀴즈',
 }
 
 const PERIODS = ['7d', '30d', '90d'] as const

@@ -145,6 +145,31 @@ class StrategyLogResponse(BaseModel):
     logged_at: datetime
 
 
+class StrategySignalItem(BaseModel):
+    """평가 사이클 내 개별 전략 판단."""
+
+    strategy_name: str
+    signal_type: Optional[str]
+    confidence: Optional[float]
+    reason: Optional[str]
+    was_executed: bool
+
+
+class SignalCycleGroupResponse(BaseModel):
+    """평가 사이클 단위로 그룹핑된 신호 로그.
+
+    같은 timestamp(1분 버킷) + symbol 기준으로 묶인 전략 판단 그룹.
+    """
+
+    symbol: str
+    cycle_time: datetime
+    combined_signal: str  # BUY / SELL / HOLD
+    combined_confidence: float
+    strategy_count: int
+    executed: bool  # 이 사이클에서 실제 거래 발생 여부
+    signals: list[StrategySignalItem]
+
+
 # -- Agents --
 class MarketAnalysisResponse(BaseModel):
     state: str

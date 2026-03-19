@@ -381,25 +381,21 @@ class FuturesEngineV2:
 
     @property
     def strategies(self) -> dict:
-        """v2 전략 이름 → 전략 객체 매핑 (전략 성과/비교 탭용).
+        """v2 활성 전략 이름 → 전략 객체 매핑 (전략 성과/비교 탭용).
 
-        SpotEvaluator의 현물 4전략이 실제 주문 생성에 사용되므로 우선 반환.
+        SpotEvaluator의 현물 4전략만 반환 — 실제 주문 생성에 사용되는 전략.
         주문의 strategy_name이 이 전략 이름으로 기록되므로 /strategies/comparison이
         올바른 성과 데이터를 조회할 수 있다.
-        레짐 전략(trend_follower 등)도 포함 (향후 활용 가능).
+        V1 7전략(bollinger_rsi 등)과 V2 레짐 전략(trend_follower 등)은 비활성이므로 제외.
         """
         seen: dict[str, object] = {}
-        # 1. SpotEvaluator의 현물 전략들 (실제 주문에 사용되는 전략명)
+        # SpotEvaluator의 현물 전략들 (실제 주문에 사용되는 전략명)
         evaluator = self._long_evaluator
         if hasattr(evaluator, "_strategies"):
             for strategy in evaluator._strategies:
                 name = getattr(strategy, "name", None)
                 if name and name not in seen:
                     seen[name] = strategy
-        # 2. 레짐 전략들 (폴백/향후용)
-        for strategy in self._strategies._strategies.values():
-            if strategy.name not in seen:
-                seen[strategy.name] = strategy
         return seen
 
     @property

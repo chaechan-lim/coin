@@ -159,95 +159,110 @@ export function OrderLog({ exchange = 'bithumb' }: { exchange?: ExchangeName }) 
         <div className="p-8 text-center text-gray-500">로그 없음</div>
       ) : (
         <>
-          <div className="divide-y divide-gray-700">
-            {grouped.map(({ symbol: sym, logs }) => (
-              <div key={`${sym}::${logs[0]?.logged_at.slice(0, 16)}`} className="px-3 md:px-4 py-3">
-                {/* Coin header */}
-                <div className="flex items-center gap-2 mb-2 flex-wrap">
-                  <span className="text-white font-semibold text-sm">
-                    {sym.replace(/\/(KRW|USDT)/, '')}
-                  </span>
-                  <span className="text-gray-500 text-xs">{sym.match(/\/(KRW|USDT)/)?.[0]?.replace('/', '') ?? ''}</span>
-                  <span className="text-gray-600 text-xs ml-1">
-                    {formatTs(logs[0].logged_at, 'MM/dd HH:mm')}
-                  </span>
+          <div className="p-2 md:p-3 space-y-2">
+            {grouped.map(({ symbol: sym, logs }) => {
+              const verdict = computeCombinedSignal(logs, weightsMap, minConfidence)
+              const borderColor = verdict.action === 'BUY'
+                ? 'border-green-700/60'
+                : verdict.action === 'SELL'
+                  ? 'border-red-700/60'
+                  : 'border-gray-700/60'
+              const bgColor = verdict.action === 'BUY'
+                ? 'bg-green-900/10'
+                : verdict.action === 'SELL'
+                  ? 'bg-red-900/10'
+                  : ''
+              const vs = VERDICT_STYLE[verdict.action] ?? VERDICT_STYLE.HOLD
 
-                  {/* Final combined verdict */}
-                  {(() => {
-                    const verdict = computeCombinedSignal(logs, weightsMap, minConfidence)
-                    const vs = VERDICT_STYLE[verdict.action] ?? VERDICT_STYLE.HOLD
-                    return (
-                      <div className="ml-auto flex items-center gap-1.5">
-                        <span className="text-gray-500 text-xs">최종</span>
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded border ${vs}`}>
-                          {verdict.action}
-                          {verdict.confidence > 0 && (
-                            <span className="ml-1 font-normal opacity-80">
-                              {(verdict.confidence * 100).toFixed(0)}%
-                            </span>
-                          )}
-                        </span>
-                      </div>
-                    )
-                  })()}
-                </div>
+              return (
+                <div
+                  key={`${sym}::${logs[0]?.logged_at.slice(0, 16)}`}
+                  className={`rounded-lg border ${borderColor} ${bgColor} overflow-hidden`}
+                >
+                  {/* Cycle card header */}
+                  <div className="flex items-center gap-2 px-3 py-2.5 flex-wrap bg-gray-800/50">
+                    <span className="text-white font-semibold text-sm">
+                      {sym.replace(/\/(KRW|USDT)/, '')}
+                    </span>
+                    <span className="text-gray-500 text-xs">{sym.match(/\/(KRW|USDT)/)?.[0]?.replace('/', '') ?? ''}</span>
+                    <span className="text-gray-600 text-xs">
+                      {formatTs(logs[0].logged_at, 'MM/dd HH:mm')}
+                    </span>
+                    <span className="text-gray-600 text-xs">
+                      {logs.length}전략
+                    </span>
 
-                {/* Strategy signals for this coin */}
-                <div className="flex flex-col gap-1.5 pl-2 border-l border-gray-700">
-                  {logs.map((log: StrategyLog) => {
-                    const signalStyle = SIGNAL_STYLE[log.signal_type ?? 'HOLD'] ?? SIGNAL_STYLE.HOLD
-                    return (
-                      <div key={log.id} className="hover:bg-gray-700/20 rounded px-2 py-1.5">
-                        <div className="flex items-center gap-2 flex-wrap mb-1">
-                          <span className={`text-xs font-bold border px-1.5 py-0.5 rounded ${signalStyle}`}>
-                            {log.signal_type ?? '?'}
+                    {/* Final combined verdict badge */}
+                    <div className="ml-auto flex items-center gap-1.5">
+                      <span className="text-gray-500 text-xs">최종</span>
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded border ${vs}`}>
+                        {verdict.action}
+                        {verdict.confidence > 0 && (
+                          <span className="ml-1 font-normal opacity-80">
+                            {(verdict.confidence * 100).toFixed(0)}%
                           </span>
-                          <span className="text-gray-400 text-xs">{log.strategy_name.replace(/_/g, ' ')}</span>
-                          {log.was_executed && (
-                            <span className="text-green-400 text-xs font-medium">✓ 체결</span>
+                        )}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Strategy signals grid */}
+                  <div className="px-3 py-2 space-y-1.5">
+                    {logs.map((log: StrategyLog) => {
+                      const signalStyle = SIGNAL_STYLE[log.signal_type ?? 'HOLD'] ?? SIGNAL_STYLE.HOLD
+                      return (
+                        <div key={log.id} className="hover:bg-gray-700/20 rounded px-2 py-1.5">
+                          <div className="flex items-center gap-2 flex-wrap mb-1">
+                            <span className={`text-xs font-bold border px-1.5 py-0.5 rounded ${signalStyle}`}>
+                              {log.signal_type ?? '?'}
+                            </span>
+                            <span className="text-gray-400 text-xs">{log.strategy_name.replace(/_/g, ' ')}</span>
+                            {log.was_executed && (
+                              <span className="text-green-400 text-xs font-medium">✓ 체결</span>
+                            )}
+                            {log.confidence != null && (
+                              <span className={`text-xs ml-auto ${log.confidence >= minConfidence ? 'text-gray-300' : 'text-gray-500'}`}>
+                                {(log.confidence * 100).toFixed(0)}%
+                              </span>
+                            )}
+                          </div>
+
+                          {log.confidence != null && (
+                            <div className="flex items-center gap-2 mb-1">
+                              <div className="relative flex-1 max-w-32 bg-gray-700 rounded-full h-1.5">
+                                <div
+                                  className={`h-1.5 rounded-full ${log.signal_type === 'BUY' ? 'bg-green-500' : log.signal_type === 'SELL' ? 'bg-red-500' : 'bg-gray-500'}`}
+                                  style={{ width: `${Math.min(log.confidence * 100, 100)}%` }}
+                                />
+                                <div
+                                  className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 bg-yellow-400/80"
+                                  style={{ left: `${minConfidence * 100}%` }}
+                                  title={`임계값: ${(minConfidence * 100).toFixed(0)}%`}
+                                />
+                              </div>
+                            </div>
+                          )}
+
+                          {log.reason && (
+                            <div className="text-gray-400 text-xs leading-relaxed">{log.reason}</div>
+                          )}
+
+                          {log.indicators && Object.keys(log.indicators).length > 0 && (
+                            <div className="flex flex-wrap gap-1.5 mt-1">
+                              {Object.entries(log.indicators).map(([k, v]) => (
+                                <span key={k} className="text-xs bg-gray-700 px-1.5 py-0.5 rounded text-gray-400">
+                                  {k}: {typeof v === 'number' ? v.toLocaleString() : String(v)}
+                                </span>
+                              ))}
+                            </div>
                           )}
                         </div>
-
-                        {log.confidence != null && (
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-gray-500 text-xs">신뢰도</span>
-                            <div className="relative w-24 bg-gray-700 rounded-full h-1.5">
-                              <div
-                                className={`h-1.5 rounded-full ${log.signal_type === 'BUY' ? 'bg-green-500' : log.signal_type === 'SELL' ? 'bg-red-500' : 'bg-gray-500'}`}
-                                style={{ width: `${log.confidence * 100}%` }}
-                              />
-                              {/* Threshold marker */}
-                              <div
-                                className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 bg-yellow-400/80"
-                                style={{ left: `${minConfidence * 100}%` }}
-                                title={`임계값: ${(minConfidence * 100).toFixed(0)}%`}
-                              />
-                            </div>
-                            <span className={`text-xs font-medium ${log.confidence >= minConfidence ? 'text-gray-300' : 'text-gray-500'}`}>
-                              {(log.confidence * 100).toFixed(0)}%
-                            </span>
-                          </div>
-                        )}
-
-                        {log.reason && (
-                          <div className="text-gray-400 text-xs leading-relaxed">{log.reason}</div>
-                        )}
-
-                        {log.indicators && Object.keys(log.indicators).length > 0 && (
-                          <div className="flex flex-wrap gap-1.5 mt-1">
-                            {Object.entries(log.indicators).map(([k, v]) => (
-                              <span key={k} className="text-xs bg-gray-700 px-1.5 py-0.5 rounded text-gray-400">
-                                {k}: {typeof v === 'number' ? v.toLocaleString() : String(v)}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })}
+                      )
+                    })}
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
           <div className="flex justify-center gap-2 p-3">
             <button
