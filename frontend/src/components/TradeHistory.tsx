@@ -18,6 +18,14 @@ const STRATEGY_COLORS: Record<string, string> = {
   larry_williams: 'bg-rose-800 text-rose-200',
   donchian_channel: 'bg-sky-800 text-sky-200',
   risk_management: 'bg-yellow-800 text-yellow-200',
+  // v2 레짐 전략
+  bb_squeeze: 'bg-violet-800 text-violet-200',
+  trend_follower: 'bg-green-800 text-green-200',
+  mean_reversion: 'bg-red-800 text-red-200',
+  vol_breakout: 'bg-orange-900 text-orange-200',
+  // v2 SpotEvaluator / Tier2Scanner
+  spot_eval: 'bg-lime-800 text-lime-200',
+  tier2_surge: 'bg-fuchsia-800 text-fuchsia-200',
 }
 
 function StrategyBadge({ name }: { name: string }) {
@@ -273,8 +281,14 @@ export function TradeHistory({ exchange = 'bithumb' }: { exchange?: ExchangeName
               <option value="rsi">RSI</option>
               <option value="macd_crossover">MACD</option>
               <option value="bollinger_rsi">볼린저+RSI</option>
+              <option value="bb_squeeze">BB 스퀴즈</option>
               <option value="stochastic_rsi">스토캐스틱RSI</option>
               <option value="obv_divergence">OBV 다이버전스</option>
+              <option value="spot_eval">현물 시그널</option>
+              <option value="tier2_surge">서지 스캐너</option>
+              <option value="trend_follower">추세 추종</option>
+              <option value="mean_reversion">평균 회귀</option>
+              <option value="vol_breakout">변동성 돌파 v2</option>
               <option value="risk_management">리스크 관리</option>
               <option value="futures_stop">선물 스탑</option>
               <option value="rotation_surge">로테이션</option>

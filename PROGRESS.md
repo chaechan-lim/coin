@@ -123,6 +123,7 @@ coin/
 | SpotEvaluator 양방향 확장 (COIN-28) | `SpotLongEvaluator` → `SpotEvaluator`로 리네이밍 및 양방향 지원. SELL 시그널+포지션 없음→SHORT 진입(spot_sell_short), SHORT 보유+BUY→숏 청산(spot_buy_close_short). 방향별 독립 쿨다운(_long_cooldowns, _short_cooldowns). SL/TP/trail 숏에도 동일 적용(5/14/3-1.5 ATR). FuturesEngineV2에서 SpotEvaluator 하나로 long+short evaluator 모두 담당. RegimeShortEvaluator는 유지(향후 재활용). backward compat alias(spot_long_evaluator.py). 테스트 21개 추가(1430 total). |
 | SpotEvaluator 동일 인스턴스 중복 evaluate() 최적화 (COIN-29) | 포지션 보유 시 SAR 분기에서 동일 인스턴스(`long_evaluator is short_evaluator`) 감지 → SAR evaluate() 호출 스킵 (close 미달 시그널로 open도 불가). 포지션 없을 때 hold 로깅 중복 제거 (1회만 기록). 각 evaluate() = 4h 캔들+ticker+4전략 API 호출이므로 포지션 보유 시 ~50% API 절감. 다른 인스턴스(RegimeShortEvaluator) SAR 경로는 유지. 테스트 10개 추가(1440 total). |
 | BTC 선물 최소 notional 보장 (COIN-31) | 바이낸스 USDM 최소 notional $100 미달로 BTC 주문 실패하던 버그 수정. 2중 방어: (1) Tier1Manager._calc_margin에 MIN_NOTIONAL/leverage 마진 하한 추가, (2) SafeOrderPipeline에 수량 precision 절삭 후 올림 보정 + notional 검증 추가. FuturesEngine V1 _get_min_notional 폴백 5.0→100.0 수정. 테스트 13개 추가(1453 total). |
+| 프론트엔드 선물 V2 전략 표시 업데이트 (COIN-32) | STRATEGY_KR에 `spot_eval`(현물 시그널), `tier2_surge`(서지 스캐너) 추가. STRATEGY_COLORS에 V2 전략 6종 색상 추가(bb_squeeze, trend_follower, mean_reversion, vol_breakout, spot_eval, tier2_surge). TradeHistory 필터 드롭다운에 V2 전략 7종 추가. FuturesEngineV2.strategies 프로퍼티가 SpotEvaluator 현물 4전략을 포함하도록 수정 (주문 strategy_name과 일치 → /strategies/comparison 정확한 성과 데이터 반환). 테스트 2개 순증(1471 total). |
 
 ### 낮은 우선순위
 

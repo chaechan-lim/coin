@@ -185,16 +185,27 @@ class TestAPICompatibility:
         strats = engine.strategies
         assert isinstance(strats, dict)
 
-    def test_strategies_contains_v2_strategy_names(self, engine):
-        """v2 레짐 전략 3종 이름이 포함되어야 함."""
+    def test_strategies_contains_spot_strategy_names(self, engine):
+        """SpotEvaluator의 현물 4전략 이름이 포함되어야 함 (주문에 사용되는 전략명)."""
         strats = engine.strategies
         strategy_names = set(strats.keys())
-        # TrendFollower는 TRENDING_UP과 TRENDING_DOWN에 동일 인스턴스가 매핑되므로
-        # deduplicate 후 3종
+        assert "cis_momentum" in strategy_names
+        assert "bnf_deviation" in strategy_names
+        assert "donchian_channel" in strategy_names
+        assert "larry_williams" in strategy_names
+
+    def test_strategies_contains_v2_regime_names(self, engine):
+        """v2 레짐 전략 3종 이름도 포함되어야 함."""
+        strats = engine.strategies
+        strategy_names = set(strats.keys())
         assert "trend_follower" in strategy_names
         assert "mean_reversion" in strategy_names
         assert "vol_breakout" in strategy_names
-        assert len(strategy_names) == 3
+
+    def test_strategies_total_count(self, engine):
+        """현물 4전략 + 레짐 3전략 = 총 7종."""
+        strats = engine.strategies
+        assert len(strats) == 7
 
     def test_strategies_values_have_name_attr(self, engine):
         """각 전략 객체에는 name 속성이 있어야 함."""
