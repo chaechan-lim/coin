@@ -1437,3 +1437,79 @@ class TestSLTPCooldown:
 
         # TP 히트 후 쿨다운 타이머가 설정되어야 함
         assert "BTC/USDT" in tier1._last_exit_time
+
+
+class TestSameInstanceDedup:
+    """같은 이밸류에이터 인스턴스 사용 시 중복 호출 방지 (COIN-28)."""
+
+    @pytest.fixture
+    def shared_eval(self):
+        """롱/숏 모두 담당하는 단일 이밸류에이터."""
+        eval_ = MockLongEvaluator()
+        return eval_
+
+    @pytest.fixture
+    def tier1_shared(self, mock_deps, shared_eval):
+        """같은 인스턴스를 long/short 양쪽에 할당한 Tier1Manager."""
+        return Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=mock_deps["safe_order"],
+            position_tracker=mock_deps["tracker"],
+            regime_detector=mock_deps["regime"],
+            portfolio_manager=mock_deps["pm"],
+            market_data=mock_deps["market_data"],
+            long_evaluator=shared_eval,
+            short_evaluator=shared_eval,
+            leverage=3,
+            max_position_pct=0.15,
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_position_calls_evaluate_once(
+        self, tier1_shared, shared_eval, mock_deps, session,
+    ):
+        """포지션 없을 때 같은 인스턴스면 evaluate()를 1번만 호출."""
+        shared_eval.set_decision("BTC/USDT", _hold_decision("spot_eval"))
+
+        await tier1_shared.evaluation_cycle(session)
+
+        # 같은 인스턴스이므로 1번만 호출되어야 함 (2번이 아님)
+        assert shared_eval.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_no_position_different_instances_calls_twice(
+        self, tier1, mock_deps, session,
+    ):
+        """다른 인스턴스면 evaluate()를 2번 호출 (기존 동작 유지)."""
+        mock_deps["long_eval"].set_decision("BTC/USDT", _hold_decision("long_eval"))
+        mock_deps["short_eval"].set_decision("BTC/USDT", _hold_decision("short_eval"))
+
+        await tier1.evaluation_cycle(session)
+
+        # BTC/USDT + ETH/USDT = 2코인, 각각 long+short = 4번
+        assert mock_deps["long_eval"].call_count == 2
+        assert mock_deps["short_eval"].call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_shared_instance_open_long(
+        self, tier1_shared, shared_eval, mock_deps, session,
+    ):
+        """같은 인스턴스: BUY 시그널 → LONG 진입 정상 동작."""
+        shared_eval.set_decision("BTC/USDT", _long_open_decision(confidence=0.8))
+
+        stats = await tier1_shared.evaluation_cycle(session)
+
+        assert shared_eval.call_count == 1
+        assert stats.executed_count == 1
+
+    @pytest.mark.asyncio
+    async def test_shared_instance_open_short(
+        self, tier1_shared, shared_eval, mock_deps, session,
+    ):
+        """같은 인스턴스: SHORT open 시그널 → SHORT 진입 정상 동작."""
+        shared_eval.set_decision("BTC/USDT", _short_open_decision(confidence=0.8))
+
+        stats = await tier1_shared.evaluation_cycle(session)
+
+        assert shared_eval.call_count == 1
+        assert stats.executed_count == 1

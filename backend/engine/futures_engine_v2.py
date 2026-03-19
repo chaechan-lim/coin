@@ -18,8 +18,7 @@ from core.event_bus import emit_event
 from db.session import get_session_factory
 from engine.regime_detector import RegimeDetector
 from engine.strategy_selector import StrategySelector
-from engine.regime_evaluators import RegimeShortEvaluator
-from engine.spot_long_evaluator import SpotLongEvaluator
+from engine.spot_evaluator import SpotEvaluator
 from engine.tier1_manager import Tier1Manager
 from engine.tier2_scanner import Tier2Scanner
 from engine.safe_order_pipeline import SafeOrderPipeline
@@ -82,10 +81,9 @@ class FuturesEngineV2:
             leverage=v2_cfg.leverage,
         )
 
-        # 듀얼 이밸류에이터: 롱/숏 독립 평가 (COIN-25)
-        # 롱: 현물 4전략 기반 (COIN-26)
-        # 별도 인스턴스 생성: StrategySelector는 선물 7전략을 보유하며,
-        # 현물 4전략과 종류가 다르다. 전략은 stateless이므로 메모리 오버헤드 미미.
+        # 양방향 SpotEvaluator: 현물 4전략 기반 롱+숏 (COIN-28)
+        # 하나의 SpotEvaluator 인스턴스가 long_evaluator + short_evaluator 모두 담당.
+        # BUY → 롱 진입 / 숏 청산, SELL → 숏 진입 / 롱 청산.
         spot_strategies = [
             CISMomentumStrategy(),
             BNFDeviationStrategy(),
@@ -98,7 +96,7 @@ class FuturesEngineV2:
             directional_weights=False,
             exchange_name=self.EXCHANGE_NAME,
         )
-        self._long_evaluator = SpotLongEvaluator(
+        spot_evaluator = SpotEvaluator(
             strategies=spot_strategies,
             combiner=spot_combiner,
             market_data=market_data,
@@ -110,12 +108,8 @@ class FuturesEngineV2:
             trail_activation_atr_mult=v2_cfg.tier1_long_trail_activation_atr_mult,
             trail_stop_atr_mult=v2_cfg.tier1_long_trail_stop_atr_mult,
         )
-        self._short_evaluator = RegimeShortEvaluator(
-            strategy_selector=self._strategies,
-            regime_detector=self._regime,
-            market_data=market_data,
-            eval_interval=v2_cfg.tier1_eval_interval_sec,
-        )
+        self._long_evaluator = spot_evaluator
+        self._short_evaluator = spot_evaluator
 
         self._tier1 = Tier1Manager(
             coins=list(v2_cfg.tier1_coins),
