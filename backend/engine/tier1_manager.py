@@ -38,6 +38,7 @@ class CycleStats:
     executed_count: int = 0
     error_count: int = 0
     candle_error_count: int = 0
+    margin_insufficient_count: int = 0  # 마진 부족 / 주문 실패 전용 카운터
     decisions: dict = field(default_factory=dict)  # symbol → outcome string
 
 
@@ -133,8 +134,13 @@ class Tier1Manager:
                     stats.sl_tp_count += 1
                 elif outcome == "candle_error":
                     stats.candle_error_count += 1
-                elif outcome == "margin_insufficient":
-                    stats.low_confidence_count += 1  # 마진 부족도 미실행 카운트
+                elif outcome in (
+                    "margin_insufficient",
+                    "candle_fallback_error",
+                    "zero_quantity",
+                    "order_rejected",
+                ):
+                    stats.margin_insufficient_count += 1
                 elif outcome in ("opened", "closed", "sar", "flat_close"):
                     stats.executed_count += 1
                     self._last_action_at = datetime.now(timezone.utc)
@@ -157,6 +163,7 @@ class Tier1Manager:
             cooldown=stats.cooldown_count,
             sl_tp=stats.sl_tp_count,
             executed=stats.executed_count,
+            margin_insufficient=stats.margin_insufficient_count,
             errors=stats.error_count,
             active_positions=self._positions.active_count("tier1"),
             regime=regime_state.regime.value,
@@ -249,12 +256,14 @@ class Tier1Manager:
             return "hold"
 
         # 3. 포지션 없으면 양쪽 이밸류에이터에서 진입 시그널 탐색
-        #    사전 조회된 캔들을 전달하여 중복 API 호출 방지
+        #    사전 조회된 캔들을 전달하여 중복 API 호출 방지.
+        #    .copy()로 방어적 복사 — 전략의 evaluate()가 DataFrame을 in-place
+        #    변경할 경우 두 번째 이밸류에이터에 영향을 주지 않도록 보호.
         long_decision = await self._long_evaluator.evaluate(
-            symbol, None, df_5m=df_5m, df_1h=df_1h,
+            symbol, None, df_5m=df_5m.copy(), df_1h=df_1h.copy() if df_1h is not None else None,
         )
         short_decision = await self._short_evaluator.evaluate(
-            symbol, None, df_5m=df_5m, df_1h=df_1h,
+            symbol, None, df_5m=df_5m.copy(), df_1h=df_1h.copy() if df_1h is not None else None,
         )
 
         # 진입 시그널 선택
@@ -326,15 +335,18 @@ class Tier1Manager:
             return "cooldown"
 
         # 진입 실행
-        opened = await self._open_position_from_decision(session, symbol, decision)
+        open_result = await self._open_position_from_decision(
+            session, symbol, decision,
+        )
+        was_executed = open_result == "opened"
         self._log_direction_decision(
             session,
             symbol,
             decision,
             regime=regime,
-            was_executed=opened,
+            was_executed=was_executed,
         )
-        return "opened" if opened else "margin_insufficient"
+        return open_result
 
     def _resolve_entry(
         self,
@@ -346,6 +358,12 @@ class Tier1Manager:
         둘 다 open이면 confidence 높은 쪽 선택.
         하나만 open이면 그쪽 선택.
         둘 다 hold이면 (None, None) 반환.
+
+        Note: 현재 RegimeLongEvaluator/RegimeShortEvaluator는 동일한
+        StrategySelector를 래핑하므로, 결정론적 전략에서는 양쪽이
+        동시에 open을 반환하지 않는다 (한쪽이 open이면 반대쪽은 hold).
+        충돌 해소 분기는 향후 독립 이밸류에이터(COIN-26 등)를 위한
+        전방 호환성으로 존재한다.
 
         Returns:
             (winner, loser): winner는 실행할 결정, loser는 충돌로 탈락한 결정.
@@ -382,14 +400,19 @@ class Tier1Manager:
         session: AsyncSession,
         symbol: str,
         decision: DirectionDecision,
-    ) -> bool:
+    ) -> str:
         """DirectionDecision으로 포지션 오픈.
 
         이밸류에이터가 캔들을 이미 조회했으므로, indicators에 close/atr가 있으면
         그 값을 재사용하여 불필요한 API 호출을 줄인다.
 
         Returns:
-            True if position was successfully opened, False otherwise.
+            Outcome string:
+            - "opened" — 포지션 오픈 성공
+            - "candle_fallback_error" — 캔들 fallback 조회 실패
+            - "margin_insufficient" — 마진 계산 결과 0 (잔고 부족)
+            - "zero_quantity" — 수량 계산 결과 0
+            - "order_rejected" — 거래소 주문 실패 (네트워크, 점검 등)
         """
         close = decision.indicators.get("close", 0.0)
         atr = decision.indicators.get("atr", 0.0)
@@ -397,17 +420,17 @@ class Tier1Manager:
             # fallback: indicators에 없으면 직접 조회
             df_5m = await self._fetch_candles(symbol, "5m", 200)
             if df_5m is None or len(df_5m) < 20:
-                return False
+                return "candle_fallback_error"
             close = self._last_close(df_5m)
             atr = self._last_atr(df_5m)
 
         margin = self._calc_margin(decision, close, atr)
         if margin <= 0:
-            return False
+            return "margin_insufficient"
 
         quantity = (margin * self._leverage) / close if close > 0 else 0.0
         if quantity <= 0:
-            return False
+            return "zero_quantity"
 
         request = OrderRequest(
             symbol=symbol,
@@ -442,8 +465,8 @@ class Tier1Manager:
                 sizing_factor=decision.sizing_factor,
             )
             self._positions.open_position(state)
-            return True
-        return False
+            return "opened"
+        return "order_rejected"
 
     async def _close_position(
         self,

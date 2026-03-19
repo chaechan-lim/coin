@@ -66,6 +66,14 @@ class _RegimeDirectionEvaluator:
         Args:
             df_5m: 사전 조회된 5분 캔들 (None이면 내부에서 조회)
             df_1h: 사전 조회된 1시간 캔들 (None이면 내부에서 조회)
+
+        Note on HOLD semantics:
+            ``StrategyDecision.is_hold`` is ``sizing_factor == 0.0``이므로,
+            ``direction=LONG, sizing_factor=0.0`` 같은 "시그널은 있으나 사이징 0"
+            케이스도 hold로 처리된다. 이는 기존 계약과 일치하지만,
+            ``DirectionDecision``의 ``is_hold``는 ``action == "hold"``로 판단하므로
+            의미론이 다르다. 이 메서드가 StrategyDecision→DirectionDecision 변환 시
+            이 차이를 올바르게 매핑한다.
         """
         regime = self._regime.current
         if regime is None:
@@ -86,9 +94,17 @@ class _RegimeDirectionEvaluator:
 
         # 5m 캔들에서 close/atr 추출 (Tier1Manager가 재사용)
         if "close" not in df_5m.columns:
-            logger.warning("evaluator_missing_close_column", evaluator=self._label, symbol=symbol)
+            logger.warning(
+                "evaluator_missing_close_column",
+                evaluator=self._label,
+                symbol=symbol,
+            )
         if "atr_14" not in df_5m.columns:
-            logger.warning("evaluator_missing_atr_column", evaluator=self._label, symbol=symbol)
+            logger.warning(
+                "evaluator_missing_atr_column",
+                evaluator=self._label,
+                symbol=symbol,
+            )
         last_close = (
             float(df_5m["close"].iloc[-1])
             if "close" in df_5m.columns and pd.notna(df_5m["close"].iloc[-1])

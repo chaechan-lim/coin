@@ -626,8 +626,9 @@ class TestMarginInsufficient:
         ]
         assert len(btc_open) == 0
 
-        # stats에 margin_insufficient 반영 (low_confidence_count에 합산)
-        assert stats.low_confidence_count >= 1
+        # stats에 margin_insufficient 전용 카운터 반영
+        assert stats.margin_insufficient_count >= 1
+        assert stats.low_confidence_count == 0  # 마진 부족은 별도 카운터
         assert stats.decisions.get("BTC/USDT") == "margin_insufficient"
 
     @pytest.mark.asyncio
@@ -655,7 +656,7 @@ class TestMarginInsufficient:
 
     @pytest.mark.asyncio
     async def test_order_failure_not_executed(self, tier1, mock_deps, session):
-        """주문 실패 시 was_executed=False."""
+        """주문 실패 시 was_executed=False, outcome=order_rejected."""
         mock_deps["safe_order"].execute_order = AsyncMock(
             return_value=OrderResponse(
                 success=False, order_id=None, executed_price=0.0,
@@ -678,7 +679,9 @@ class TestMarginInsufficient:
         )
 
         stats = await tier1.evaluation_cycle(session)
-        assert stats.decisions.get("BTC/USDT") == "margin_insufficient"
+        # 주문 실패는 order_rejected로 구분됨
+        assert stats.decisions.get("BTC/USDT") == "order_rejected"
+        assert stats.margin_insufficient_count >= 1
 
         await session.flush()
         result = await session.execute(
@@ -703,6 +706,7 @@ class TestCycleStats:
         assert stats.executed_count == 0
         assert stats.error_count == 0
         assert stats.candle_error_count == 0
+        assert stats.margin_insufficient_count == 0
         assert stats.decisions == {}
 
     def test_decisions_dict_independent(self):
@@ -1437,3 +1441,104 @@ class TestSLTPCooldown:
 
         # TP 히트 후 쿨다운 타이머가 설정되어야 함
         assert "BTC/USDT" in tier1._last_exit_time
+
+
+class TestDistinctFailureModes:
+    """_open_position_from_decision의 실패 사유별 분류 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_candle_fallback_error_outcome(self, tier1, mock_deps, session):
+        """indicators에 close/atr 없고 캔들 재조회도 실패 → candle_fallback_error."""
+        decision_no_cache = DirectionDecision(
+            action="open",
+            direction=Direction.LONG,
+            confidence=0.8,
+            sizing_factor=0.7,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            reason="long_signal",
+            strategy_name="trend_follower",
+            indicators={},  # close/atr 없음
+        )
+        mock_deps["long_eval"].set_decision("BTC/USDT", decision_no_cache)
+
+        # _evaluate_coin에서 초기 캔들 조회는 성공하지만,
+        # _open_position_from_decision의 fallback 조회는 실패하도록 설정.
+        # 초기 조회: (symbol, "5m"), (symbol, "1h") 패턴.
+        # fallback 조회: (symbol, "5m") — 이 때만 실패하도록 호출 순서 추적.
+        call_log = []
+        original_df = _make_df()
+
+        async def selective_fetch(symbol, tf, limit):
+            call_log.append((symbol, tf))
+            # BTC/USDT 5m의 3번째 이상 호출(fallback)은 실패
+            btc_5m_count = sum(
+                1 for s, t in call_log if s == symbol and t == tf
+            )
+            if symbol == "BTC/USDT" and tf == "5m" and btc_5m_count > 1:
+                return None
+            return original_df
+
+        mock_deps["market_data"].get_ohlcv_df = selective_fetch
+
+        stats = await tier1.evaluation_cycle(session)
+        assert stats.decisions.get("BTC/USDT") == "candle_fallback_error"
+        assert stats.margin_insufficient_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_order_rejected_distinct_from_margin(
+        self, tier1, mock_deps, session
+    ):
+        """주문 거부(order_rejected)와 마진 부족(margin_insufficient)이 구분됨."""
+        # 마진 부족 테스트
+        mock_deps["pm"].cash_balance = 0.0
+        mock_deps["long_eval"].set_decision("BTC/USDT", _long_open_decision())
+
+        stats1 = await tier1.evaluation_cycle(session)
+        assert stats1.decisions.get("BTC/USDT") == "margin_insufficient"
+
+        # 주문 거부 테스트 (cash 복원 + 주문 실패)
+        mock_deps["pm"].cash_balance = 500.0
+        mock_deps["safe_order"].execute_order = AsyncMock(
+            return_value=OrderResponse(
+                success=False, order_id=None, executed_price=0.0,
+                executed_quantity=0.0, fee=0.0,
+            )
+        )
+        mock_deps["long_eval"].set_decision(
+            "BTC/USDT",
+            DirectionDecision(
+                action="open",
+                direction=Direction.LONG,
+                confidence=0.8,
+                sizing_factor=0.7,
+                stop_loss_atr=1.5,
+                take_profit_atr=3.0,
+                reason="long_signal",
+                strategy_name="trend_follower",
+                indicators={"close": 80000.0, "atr": 1000.0},
+            ),
+        )
+
+        stats2 = await tier1.evaluation_cycle(session)
+        assert stats2.decisions.get("BTC/USDT") == "order_rejected"
+
+    @pytest.mark.asyncio
+    async def test_margin_insufficient_count_separate_from_low_confidence(
+        self, tier1, mock_deps, session
+    ):
+        """margin_insufficient_count와 low_confidence_count가 독립적으로 집계."""
+        # BTC: 마진 부족, ETH: low confidence
+        mock_deps["pm"].cash_balance = 0.0
+        mock_deps["long_eval"].set_decision("BTC/USDT", _long_open_decision())
+        mock_deps["long_eval"].set_decision(
+            "ETH/USDT", _long_open_decision(confidence=0.1)
+        )
+
+        stats = await tier1.evaluation_cycle(session)
+        # BTC는 margin_insufficient (cash=0), ETH는 low_confidence (conf < 0.4)
+        assert stats.margin_insufficient_count >= 1
+        assert stats.low_confidence_count >= 1
+        # 서로 섞이지 않음
+        assert stats.decisions.get("BTC/USDT") == "margin_insufficient"
+        assert stats.decisions.get("ETH/USDT") == "low_confidence"
