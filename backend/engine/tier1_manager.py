@@ -1,9 +1,12 @@
 """
 Tier1Manager — Tier 1 코인 상시 포지션 관리.
 
-SAR(Stop-and-Reverse): 항상 포지션 유지, 방향 즉시 전환, 쿨다운 없음.
+듀얼 이밸류에이터 아키텍처: 롱/숏 독립 평가.
+각 방향(롱/숏)의 진입/청산을 독립적인 이밸류에이터가 판단한다.
+
 ATR 기반 연속 사이징: 변동성 낮으면 크게, 높으면 작게.
 """
+
 import time
 import structlog
 import pandas as pd
@@ -13,12 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.enums import Direction
 from core.models import StrategyLog
+from engine.direction_evaluator import DirectionDecision, DirectionEvaluator
 from engine.regime_detector import RegimeDetector, RegimeState
-from engine.strategy_selector import StrategySelector
 from engine.safe_order_pipeline import SafeOrderPipeline, OrderRequest
 from engine.position_state_tracker import PositionStateTracker, PositionState
 from engine.portfolio_manager import PortfolioManager
-from strategies.regime_base import StrategyDecision
 from services.market_data import MarketDataService
 
 logger = structlog.get_logger(__name__)
@@ -27,6 +29,7 @@ logger = structlog.get_logger(__name__)
 @dataclass
 class CycleStats:
     """단일 evaluation_cycle 실행 결과 통계."""
+
     coins_evaluated: int = 0
     hold_count: int = 0
     low_confidence_count: int = 0
@@ -39,7 +42,7 @@ class CycleStats:
 
 
 class Tier1Manager:
-    """Tier 1 코인의 상시 포지션 관리."""
+    """Tier 1 코인의 상시 포지션 관리 — 듀얼 이밸류에이터."""
 
     BASE_RISK_PCT = 0.02  # 1회 리스크: 계좌의 2%
 
@@ -49,9 +52,11 @@ class Tier1Manager:
         safe_order: SafeOrderPipeline,
         position_tracker: PositionStateTracker,
         regime_detector: RegimeDetector,
-        strategy_selector: StrategySelector,
         portfolio_manager: PortfolioManager,
         market_data: MarketDataService,
+        *,
+        long_evaluator: DirectionEvaluator,
+        short_evaluator: DirectionEvaluator,
         leverage: int = 3,
         max_position_pct: float = 0.15,
         min_confidence: float = 0.4,
@@ -62,7 +67,8 @@ class Tier1Manager:
         self._safe_order = safe_order
         self._positions = position_tracker
         self._regime = regime_detector
-        self._strategies = strategy_selector
+        self._long_evaluator = long_evaluator
+        self._short_evaluator = short_evaluator
         self._pm = portfolio_manager
         self._market_data = market_data
         self._leverage = leverage
@@ -86,12 +92,18 @@ class Tier1Manager:
         """현재 Tier1 운영 상태 반환 (API/모니터링용)."""
         return {
             "cycle_count": self._cycle_count,
-            "last_cycle_at": self._last_cycle_at.isoformat() if self._last_cycle_at else None,
-            "last_action_at": self._last_action_at.isoformat() if self._last_action_at else None,
+            "last_cycle_at": self._last_cycle_at.isoformat()
+            if self._last_cycle_at
+            else None,
+            "last_action_at": self._last_action_at.isoformat()
+            if self._last_action_at
+            else None,
             "coins": self._coins,
             "active_positions": self._positions.active_count("tier1"),
             "last_decisions": dict(self._last_decisions),
-            "regime": self._regime.current.regime.value if self._regime.current else None,
+            "regime": self._regime.current.regime.value
+            if self._regime.current
+            else None,
         }
 
     async def evaluation_cycle(self, session: AsyncSession) -> CycleStats:
@@ -121,6 +133,8 @@ class Tier1Manager:
                     stats.sl_tp_count += 1
                 elif outcome == "candle_error":
                     stats.candle_error_count += 1
+                elif outcome == "margin_insufficient":
+                    stats.low_confidence_count += 1  # 마진 부족도 미실행 카운트
                 elif outcome in ("opened", "closed", "sar", "flat_close"):
                     stats.executed_count += 1
                     self._last_action_at = datetime.now(timezone.utc)
@@ -152,122 +166,248 @@ class Tier1Manager:
         return stats
 
     async def _evaluate_coin(
-        self, session: AsyncSession, symbol: str, regime: RegimeState,
+        self,
+        session: AsyncSession,
+        symbol: str,
+        regime: RegimeState,
     ) -> str:
-        """단일 코인 평가 + SAR 실행. Returns outcome string."""
-        # 현재 포지션 방향
+        """단일 코인 평가 — 듀얼 이밸류에이터. Returns outcome string."""
         pos_state = self._positions.get(symbol)
         current_dir = pos_state.direction if pos_state else None
 
-        # 전략 선택 + 시그널 생성
-        strategy = self._strategies.select(regime.regime)
+        # 캔들을 한 번만 조회하여 SL/TP 체크 + 이밸류에이터에서 공유
         df_5m = await self._fetch_candles(symbol, "5m", 200)
-        df_1h = await self._fetch_candles(symbol, "1h", 200)
-
         if df_5m is None or len(df_5m) < 20:
             return "candle_error"
+        df_1h = await self._fetch_candles(symbol, "1h", 200)
 
-        decision = await strategy.evaluate(df_5m, df_1h, regime, current_dir)
+        price = self._last_close(df_5m)
+        atr = self._last_atr(df_5m)
 
-        # SL/TP 체크는 전략 시그널과 무관하게 항상 수행
+        # 1. SL/TP/trailing 체크는 전략 시그널과 무관하게 항상 수행
         if pos_state:
-            price = self._last_close(df_5m)
-            atr = self._last_atr(df_5m)
             if price > 0:
                 pos_state.update_extreme(price)
             if await self._check_sl_tp(session, symbol, pos_state, price, atr):
-                self._log_strategy_signal(
-                    session, symbol, decision, was_executed=False,
-                    regime=regime,
-                )
                 return "sl_tp"
 
-        if decision.is_hold:
-            self._log_strategy_signal(
-                session, symbol, decision, was_executed=False,
+        # 2. 포지션 방향에 따라 해당 이밸류에이터의 청산 시그널 체크
+        if current_dir == Direction.LONG:
+            long_decision = await self._long_evaluator.evaluate(
+                symbol, pos_state, df_5m=df_5m, df_1h=df_1h,
+            )
+            if long_decision.is_close:
+                await self._close_position(
+                    session, symbol, pos_state.direction, long_decision.reason
+                )
+                self._last_exit_time[symbol] = time.time()
+                self._log_direction_decision(
+                    session,
+                    symbol,
+                    long_decision,
+                    regime=regime,
+                    was_executed=True,
+                    closing_direction=Direction.LONG,
+                )
+                return "flat_close"
+            # open 또는 hold — 이미 같은 방향 포지션 보유 중이므로 유지
+            self._log_direction_decision(
+                session,
+                symbol,
+                long_decision,
                 regime=regime,
+                was_executed=False,
             )
             return "hold"
 
-        # SAR: 방향 전환
-        outcome = await self._execute_decision(session, symbol, decision, current_dir, df_5m)
+        elif current_dir == Direction.SHORT:
+            short_decision = await self._short_evaluator.evaluate(
+                symbol, pos_state, df_5m=df_5m, df_1h=df_1h,
+            )
+            if short_decision.is_close:
+                await self._close_position(
+                    session, symbol, pos_state.direction, short_decision.reason
+                )
+                self._last_exit_time[symbol] = time.time()
+                self._log_direction_decision(
+                    session,
+                    symbol,
+                    short_decision,
+                    regime=regime,
+                    was_executed=True,
+                    closing_direction=Direction.SHORT,
+                )
+                return "flat_close"
+            # open 또는 hold — 이미 같은 방향 포지션 보유 중이므로 유지
+            self._log_direction_decision(
+                session,
+                symbol,
+                short_decision,
+                regime=regime,
+                was_executed=False,
+            )
+            return "hold"
 
-        # 전략 시그널 로그 기록
-        was_executed = outcome in ("opened", "sar", "flat_close")
-        self._log_strategy_signal(
-            session, symbol, decision, was_executed=was_executed,
-            regime=regime,
+        # 3. 포지션 없으면 양쪽 이밸류에이터에서 진입 시그널 탐색
+        #    사전 조회된 캔들을 전달하여 중복 API 호출 방지
+        long_decision = await self._long_evaluator.evaluate(
+            symbol, None, df_5m=df_5m, df_1h=df_1h,
+        )
+        short_decision = await self._short_evaluator.evaluate(
+            symbol, None, df_5m=df_5m, df_1h=df_1h,
         )
 
-        return outcome
-
-    async def _execute_decision(
-        self,
-        session: AsyncSession,
-        symbol: str,
-        decision: StrategyDecision,
-        current_dir: Direction | None,
-        df_5m: pd.DataFrame,
-    ) -> str:
-        """전략 결정을 실행한다. Returns outcome string."""
-        close = self._last_close(df_5m)
-        atr = self._last_atr(df_5m)
-
-        if decision.direction == Direction.FLAT:
-            # 포지션 청산
-            if current_dir and current_dir != Direction.FLAT:
-                await self._close_position(session, symbol, current_dir, decision.reason)
-                self._last_exit_time[symbol] = time.time()
-                return "flat_close"
+        # 진입 시그널 선택
+        decision, loser = self._resolve_entry(long_decision, short_decision)
+        if decision is None:
+            # 양쪽 다 hold — 둘 다 로깅
+            self._log_direction_decision(
+                session,
+                symbol,
+                long_decision,
+                regime=regime,
+                was_executed=False,
+            )
+            self._log_direction_decision(
+                session,
+                symbol,
+                short_decision,
+                regime=regime,
+                was_executed=False,
+            )
             return "hold"
+
+        # 충돌로 탈락한 결정 로깅 (관측성)
+        if loser is not None:
+            logger.info(
+                "tier1_conflict_resolved",
+                symbol=symbol,
+                winner_direction=decision.direction.value if decision.direction else None,
+                winner_confidence=decision.confidence,
+                winner_strategy=decision.strategy_name,
+                loser_direction=loser.direction.value if loser.direction else None,
+                loser_confidence=loser.confidence,
+                loser_strategy=loser.strategy_name,
+            )
+            self._log_direction_decision(
+                session,
+                symbol,
+                loser,
+                regime=regime,
+                was_executed=False,
+            )
 
         # 최소 신뢰도 필터
         if decision.confidence < self._min_confidence:
-            logger.debug("tier1_low_confidence", symbol=symbol,
-                        confidence=decision.confidence, min=self._min_confidence)
+            self._log_direction_decision(
+                session,
+                symbol,
+                decision,
+                regime=regime,
+                was_executed=False,
+            )
+            logger.debug(
+                "tier1_low_confidence",
+                symbol=symbol,
+                confidence=decision.confidence,
+                min=self._min_confidence,
+            )
             return "low_confidence"
 
-        if current_dir and current_dir != Direction.FLAT and decision.direction != current_dir:
-            # SAR: 기존 포지션 청산 → 반대 방향 진입 (쿨다운 면제)
-            await self._close_position(
-                session, symbol, current_dir,
-                f"SAR: {current_dir.value}→{decision.direction.value}",
+        # 쿨다운 체크
+        if self._in_cooldown(symbol):
+            self._log_direction_decision(
+                session,
+                symbol,
+                decision,
+                regime=regime,
+                was_executed=False,
             )
-            self._last_exit_time[symbol] = time.time()
-            # 새 방향 진입
-            await self._open_position(session, symbol, decision, close, atr)
-            return "sar"
+            return "cooldown"
 
-        elif current_dir is None or current_dir == Direction.FLAT:
-            # 신규 진입 — 쿨다운 체크
-            last_exit = self._last_exit_time.get(symbol, 0)
-            elapsed = time.time() - last_exit
-            if elapsed < self._cooldown_sec:
-                remaining_h = (self._cooldown_sec - elapsed) / 3600
-                logger.debug("tier1_cooldown", symbol=symbol, remaining_h=f"{remaining_h:.1f}")
-                return "cooldown"
-            await self._open_position(session, symbol, decision, close, atr)
-            return "opened"
+        # 진입 실행
+        opened = await self._open_position_from_decision(session, symbol, decision)
+        self._log_direction_decision(
+            session,
+            symbol,
+            decision,
+            regime=regime,
+            was_executed=opened,
+        )
+        return "opened" if opened else "margin_insufficient"
 
-        # 같은 방향 포지션 이미 보유 중
-        return "hold"
+    def _resolve_entry(
+        self,
+        long_decision: DirectionDecision,
+        short_decision: DirectionDecision,
+    ) -> tuple[DirectionDecision | None, DirectionDecision | None]:
+        """양쪽 이밸류에이터의 진입 시그널 충돌 해소.
 
-    async def _open_position(
+        둘 다 open이면 confidence 높은 쪽 선택.
+        하나만 open이면 그쪽 선택.
+        둘 다 hold이면 (None, None) 반환.
+
+        Returns:
+            (winner, loser): winner는 실행할 결정, loser는 충돌로 탈락한 결정.
+            충돌이 없으면 loser는 None.
+        """
+        long_open = long_decision.is_open
+        short_open = short_decision.is_open
+
+        if long_open and short_open:
+            # 충돌 방지: confidence 높은 쪽 선택
+            if long_decision.confidence >= short_decision.confidence:
+                return long_decision, short_decision
+            return short_decision, long_decision
+        elif long_open:
+            return long_decision, None
+        elif short_open:
+            return short_decision, None
+        return None, None
+
+    def _in_cooldown(self, symbol: str) -> bool:
+        """쿨다운 체크."""
+        last_exit = self._last_exit_time.get(symbol, 0)
+        elapsed = time.time() - last_exit
+        if elapsed < self._cooldown_sec:
+            remaining_h = (self._cooldown_sec - elapsed) / 3600
+            logger.debug(
+                "tier1_cooldown", symbol=symbol, remaining_h=f"{remaining_h:.1f}"
+            )
+            return True
+        return False
+
+    async def _open_position_from_decision(
         self,
         session: AsyncSession,
         symbol: str,
-        decision: StrategyDecision,
-        close: float,
-        atr: float,
-    ) -> None:
-        """포지션 오픈."""
+        decision: DirectionDecision,
+    ) -> bool:
+        """DirectionDecision으로 포지션 오픈.
+
+        이밸류에이터가 캔들을 이미 조회했으므로, indicators에 close/atr가 있으면
+        그 값을 재사용하여 불필요한 API 호출을 줄인다.
+
+        Returns:
+            True if position was successfully opened, False otherwise.
+        """
+        close = decision.indicators.get("close", 0.0)
+        atr = decision.indicators.get("atr", 0.0)
+        if close <= 0 or atr <= 0:
+            # fallback: indicators에 없으면 직접 조회
+            df_5m = await self._fetch_candles(symbol, "5m", 200)
+            if df_5m is None or len(df_5m) < 20:
+                return False
+            close = self._last_close(df_5m)
+            atr = self._last_atr(df_5m)
+
         margin = self._calc_margin(decision, close, atr)
         if margin <= 0:
-            return
+            return False
 
         quantity = (margin * self._leverage) / close if close > 0 else 0.0
         if quantity <= 0:
-            return
+            return False
 
         request = OrderRequest(
             symbol=symbol,
@@ -302,9 +442,15 @@ class Tier1Manager:
                 sizing_factor=decision.sizing_factor,
             )
             self._positions.open_position(state)
+            return True
+        return False
 
     async def _close_position(
-        self, session: AsyncSession, symbol: str, direction: Direction, reason: str,
+        self,
+        session: AsyncSession,
+        symbol: str,
+        direction: Direction,
+        reason: str,
     ) -> None:
         """포지션 청산."""
         pos_state = self._positions.get(symbol)
@@ -341,37 +487,50 @@ class Tier1Manager:
         price: float,
         atr: float,
     ) -> bool:
-        """SL/TP/trailing 체크. 히트 시 청산. Returns True if closed."""
+        """SL/TP/trailing 체크. 히트 시 청산 + 쿨다운 설정. Returns True if closed.
+
+        Note: update_extreme(price)는 호출 전에 _evaluate_coin에서 이미 수행됨.
+        """
         if price <= 0 or atr <= 0:
             return False
 
-        state.update_extreme(price)
-
         if state.check_stop_loss(price, atr):
             await self._close_position(
-                session, symbol, state.direction,
+                session,
+                symbol,
+                state.direction,
                 f"SL hit: price={price:.2f}",
             )
+            self._last_exit_time[symbol] = time.time()
             return True
 
         if state.check_trailing_stop(price, atr):
             await self._close_position(
-                session, symbol, state.direction,
+                session,
+                symbol,
+                state.direction,
                 f"Trailing stop hit: price={price:.2f}",
             )
+            self._last_exit_time[symbol] = time.time()
             return True
 
         if state.check_take_profit(price, atr):
             await self._close_position(
-                session, symbol, state.direction,
+                session,
+                symbol,
+                state.direction,
                 f"TP hit: price={price:.2f}",
             )
+            self._last_exit_time[symbol] = time.time()
             return True
 
         return False
 
     def _calc_margin(
-        self, decision: StrategyDecision, close: float, atr: float,
+        self,
+        decision: DirectionDecision,
+        close: float,
+        atr: float,
     ) -> float:
         """ATR 기반 마진 계산."""
         cash = self._pm.cash_balance
@@ -389,13 +548,18 @@ class Tier1Manager:
         return final if final >= 5.0 else 0.0
 
     async def _fetch_candles(
-        self, symbol: str, timeframe: str, limit: int,
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int,
     ) -> pd.DataFrame | None:
         """캔들 데이터 가져오기."""
         try:
             return await self._market_data.get_ohlcv_df(symbol, timeframe, limit)
         except Exception as e:
-            logger.warning("candle_fetch_error", symbol=symbol, tf=timeframe, error=str(e))
+            logger.warning(
+                "candle_fetch_error", symbol=symbol, tf=timeframe, error=str(e)
+            )
             return None
 
     async def _get_price(self, symbol: str) -> float:
@@ -419,7 +583,7 @@ class Tier1Manager:
         return float(val) if pd.notna(val) else 0.0
 
     @staticmethod
-    def _direction_to_signal_type(direction: Direction) -> str:
+    def _direction_to_signal_type(direction: Direction | None) -> str:
         """Direction enum을 StrategyLog signal_type 문자열로 변환."""
         if direction == Direction.LONG:
             return "BUY"
@@ -427,24 +591,32 @@ class Tier1Manager:
             return "SELL"
         return "HOLD"
 
-    def _log_strategy_signal(
+    def _log_direction_decision(
         self,
         session: AsyncSession,
         symbol: str,
-        decision: StrategyDecision,
+        decision: DirectionDecision,
         *,
         was_executed: bool,
         regime: RegimeState,
+        closing_direction: Direction | None = None,
     ) -> None:
-        """전략 시그널을 StrategyLog 테이블에 기록.
+        """DirectionDecision을 StrategyLog 테이블에 기록.
 
-        V2 전략(mean_reversion, vol_breakout, trend_follower)의 매 평가마다
-        HOLD 포함 모든 판단을 기록하여 전략 추적 가능하게 한다.
+        V2 전략의 매 평가마다 HOLD 포함 모든 판단을 기록하여
+        전략 추적 가능하게 한다.
+
+        closing_direction: 청산 시 닫히는 포지션의 방향. close 결정의
+            direction은 None이므로, 포지션 방향을 별도로 전달하여
+            올바른 signal_type(SELL for LONG close, BUY for SHORT close)을 기록.
         """
-        signal_type = (
-            "HOLD" if decision.is_hold
-            else self._direction_to_signal_type(decision.direction)
-        )
+        if decision.is_hold:
+            signal_type = "HOLD"
+        elif decision.is_close and closing_direction is not None:
+            # 청산 시그널: 롱 청산 → SELL, 숏 청산 → BUY (방향 반전)
+            signal_type = "SELL" if closing_direction == Direction.LONG else "BUY"
+        else:
+            signal_type = self._direction_to_signal_type(decision.direction)
 
         # 지표 딕셔너리: 전략 제공 지표 + 레짐 정보
         indicators = dict(decision.indicators) if decision.indicators else {}
@@ -463,7 +635,9 @@ class Tier1Manager:
             strategy_name=decision.strategy_name,
             symbol=symbol,
             signal_type=signal_type,
-            confidence=float(decision.confidence) if decision.confidence is not None else None,
+            confidence=float(decision.confidence)
+            if decision.confidence is not None
+            else None,
             reason=decision.reason,
             indicators=cleaned,
             was_executed=was_executed,

@@ -9,15 +9,16 @@ FuturesEngineV2 — 레짐 적응형 선물 엔진.
 TradingEngine을 상속하지 않음 (완전 독립).
 SurgeEngine을 대체 (Tier 2로 통합).
 """
+
 import asyncio
 import structlog
-from datetime import datetime, timezone
 
 from config import AppConfig
 from core.event_bus import emit_event
 from db.session import get_session_factory
 from engine.regime_detector import RegimeDetector
 from engine.strategy_selector import StrategySelector
+from engine.regime_evaluators import RegimeLongEvaluator, RegimeShortEvaluator
 from engine.tier1_manager import Tier1Manager
 from engine.tier2_scanner import Tier2Scanner
 from engine.safe_order_pipeline import SafeOrderPipeline
@@ -75,14 +76,29 @@ class FuturesEngineV2:
             leverage=v2_cfg.leverage,
         )
 
+        # 듀얼 이밸류에이터: 롱/숏 독립 평가 (COIN-25)
+        self._long_evaluator = RegimeLongEvaluator(
+            strategy_selector=self._strategies,
+            regime_detector=self._regime,
+            market_data=market_data,
+            eval_interval=v2_cfg.tier1_eval_interval_sec,
+        )
+        self._short_evaluator = RegimeShortEvaluator(
+            strategy_selector=self._strategies,
+            regime_detector=self._regime,
+            market_data=market_data,
+            eval_interval=v2_cfg.tier1_eval_interval_sec,
+        )
+
         self._tier1 = Tier1Manager(
             coins=list(v2_cfg.tier1_coins),
             safe_order=self._safe_order,
             position_tracker=self._positions,
             regime_detector=self._regime,
-            strategy_selector=self._strategies,
             portfolio_manager=portfolio_manager,
             market_data=market_data,
+            long_evaluator=self._long_evaluator,
+            short_evaluator=self._short_evaluator,
             leverage=v2_cfg.leverage,
             max_position_pct=v2_cfg.tier1_max_position_pct,
             min_confidence=v2_cfg.tier1_min_confidence,
@@ -183,7 +199,8 @@ class FuturesEngineV2:
         for symbol in self.tracked_coins:
             try:
                 await self._exchange.set_leverage(
-                    symbol, self._config.futures_v2.leverage,
+                    symbol,
+                    self._config.futures_v2.leverage,
                 )
             except Exception:
                 pass
@@ -230,10 +247,14 @@ class FuturesEngineV2:
                         if coin == "BTC/USDT":
                             continue
                         try:
-                            coin_df = await self._market_data.get_ohlcv_df(coin, "1h", 200)
+                            coin_df = await self._market_data.get_ohlcv_df(
+                                coin, "1h", 200
+                            )
                             if coin_df is not None and len(coin_df) >= 50:
                                 self._regime.detect(coin_df)
-                                self._regime._per_coin[coin] = self._regime.detect(coin_df)
+                                self._regime._per_coin[coin] = self._regime.detect(
+                                    coin_df
+                                )
                         except Exception:
                             pass
             except Exception as e:
@@ -277,7 +298,9 @@ class FuturesEngineV2:
             try:
                 result = await self._guard.periodic_reconcile(self._pm.cash_balance)
                 if result.is_critical:
-                    logger.critical("v2_balance_critical", divergence=result.divergence_pct)
+                    logger.critical(
+                        "v2_balance_critical", divergence=result.divergence_pct
+                    )
             except Exception as e:
                 logger.warning("v2_guard_error", error=str(e))
             await asyncio.sleep(self._config.futures_v2.balance_check_interval_sec)
@@ -318,11 +341,13 @@ class FuturesEngineV2:
                                 summary = await self._pm.get_portfolio_summary(
                                     session,
                                 )
-                                await self._broadcast_callback({
-                                    "event": "portfolio_update",
-                                    "exchange": self.EXCHANGE_NAME,
-                                    "data": summary,
-                                })
+                                await self._broadcast_callback(
+                                    {
+                                        "event": "portfolio_update",
+                                        "exchange": self.EXCHANGE_NAME,
+                                        "data": summary,
+                                    }
+                                )
                     except Exception as snap_err:
                         logger.warning("v2_snapshot_error", error=str(snap_err))
             except Exception as e:
