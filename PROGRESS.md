@@ -125,6 +125,7 @@ coin/
 | BTC 선물 최소 notional 보장 (COIN-31) | 바이낸스 USDM 최소 notional $100 미달로 BTC 주문 실패하던 버그 수정. 2중 방어: (1) Tier1Manager._calc_margin에 MIN_NOTIONAL/leverage 마진 하한 추가, (2) SafeOrderPipeline에 수량 precision 절삭 후 올림 보정 + notional 검증 추가. FuturesEngine V1 _get_min_notional 폴백 5.0→100.0 수정. 테스트 13개 추가(1453 total). |
 | 프론트엔드 선물 V2 전략 표시 업데이트 (COIN-32) | STRATEGY_KR에 `spot_eval`(현물 시그널), `tier2_surge`(서지 스캐너) 추가. STRATEGY_COLORS에 V2 전략 6종 색상 추가(bb_squeeze, trend_follower, mean_reversion, vol_breakout, spot_eval, tier2_surge). TradeHistory 필터 드롭다운에 V2 전략 7종 추가. FuturesEngineV2.strategies 프로퍼티가 SpotEvaluator 현물 4전략을 포함하도록 수정 (주문 strategy_name과 일치 → /strategies/comparison 정확한 성과 데이터 반환). 테스트 2개 순증(1471 total). |
 | 선물 신호 로그 사이클 그룹핑 + 비활성 전략 정리 (COIN-34) | FuturesEngineV2.strategies에서 비활성 V2 레짐 전략(trend_follower, mean_reversion, vol_breakout) 제거 → 활성 4전략만 노출. 새 API `GET /strategies/logs/grouped`: 평가 사이클 단위(1분 버킷+symbol)로 신호 로그 그룹핑, combined signal/confidence/개별 전략 판단 포함. 프론트엔드: TradeHistory 드롭다운 비활성 전략 제거, StrategyPerformance STRATEGY_KR 정리, OrderLog 사이클 그룹 카드 UI 개선(색상 보더, 전략 수 표시). 테스트 23개 추가(1494 total). |
+| 전략 성과 FIFO→realized_pnl 전환 (COIN-35) | `GET /strategies/{name}/performance` FIFO 로트 매칭을 `realized_pnl` 기반 계산으로 교체. V1→V2 전환 시 고아 로트가 FIFO 큐를 오염하여 V2 전략 승/패가 누락되던 버그 수정. 청산 주문의 `realized_pnl`을 직접 사용하여 승/패 판정 → 고아 로트 문제 근본 해결. 테스트 5개 순증(1500 total). |
 
 ### 낮은 우선순위
 

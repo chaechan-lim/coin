@@ -1,6 +1,7 @@
 """
 Shared test fixtures: in-memory SQLite, async sessions, FastAPI test client.
 """
+
 import os
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -39,7 +40,9 @@ async def db_engine():
 @pytest_asyncio.fixture
 async def session(db_engine):
     """Provide a fresh async session per test."""
-    factory = async_sessionmaker(bind=db_engine, class_=AsyncSession, expire_on_commit=False)
+    factory = async_sessionmaker(
+        bind=db_engine, class_=AsyncSession, expire_on_commit=False
+    )
     async with factory() as sess:
         yield sess
         await sess.rollback()
@@ -48,10 +51,13 @@ async def session(db_engine):
 @pytest_asyncio.fixture
 async def session_factory(db_engine):
     """Provide the session factory itself."""
-    return async_sessionmaker(bind=db_engine, class_=AsyncSession, expire_on_commit=False)
+    return async_sessionmaker(
+        bind=db_engine, class_=AsyncSession, expire_on_commit=False
+    )
 
 
 # ── Helpers to create test data ──────────────────────────────
+
 
 def make_order(
     *,
@@ -67,6 +73,9 @@ def make_order(
     created_at=None,
     exchange="bithumb",
     direction=None,
+    entry_price=None,
+    realized_pnl=None,
+    realized_pnl_pct=None,
 ) -> Order:
     return Order(
         exchange=exchange,
@@ -86,6 +95,9 @@ def make_order(
         signal_reason="test",
         created_at=created_at or datetime.now(timezone.utc),
         direction=direction,
+        entry_price=entry_price,
+        realized_pnl=realized_pnl,
+        realized_pnl_pct=realized_pnl_pct,
     )
 
 

@@ -1,11 +1,11 @@
-from collections import defaultdict, OrderedDict
+from collections import OrderedDict
 
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc
 from typing import Optional
 from datetime import timedelta
-from core.utils import utcnow, ensure_aware
+from core.utils import utcnow
 
 from db.session import get_db
 from core.models import StrategyLog, Order
@@ -71,20 +71,21 @@ async def get_strategy_performance(
     days = period_map.get(period, 30)
     start = now - timedelta(days=days)
 
-    # 1) 모든 체결 주문을 시간순 조회 (매수 원가 계산을 위해 전체 기간)
-    result = await session.execute(
-        select(Order)
-        .where(Order.status == "filled", Order.exchange == exchange)
-        .order_by(Order.created_at)
-    )
-    all_orders = list(result.scalars().all())
-
-    # 2) 심볼별 로트 추적 (Lot-based FIFO — 진입 전략에 PnL 귀속)
     is_futures = "futures" in exchange
 
-    # 각 로트: {"strategy": str, "qty": float, "cost": float, "time": datetime}
-    long_lots: dict[str, list[dict]] = defaultdict(list)
-    short_lots: dict[str, list[dict]] = defaultdict(list)
+    # realized_pnl 기반 계산: 청산 주문의 realized_pnl을 직접 사용하여 승/패 판정.
+    # FIFO 로트 매칭 불필요 → V1 고아 로트 문제 근본 해결.
+    result = await session.execute(
+        select(Order)
+        .where(
+            Order.status == "filled",
+            Order.exchange == exchange,
+            Order.strategy_name == name,
+            Order.created_at >= start,
+        )
+        .order_by(Order.created_at)
+    )
+    orders = list(result.scalars().all())
 
     winning = 0
     losing = 0
@@ -92,11 +93,9 @@ async def get_strategy_performance(
     returns: list[float] = []
     trade_count = 0
 
-    for order in all_orders:
-        sym = order.symbol
+    for order in orders:
         qty = order.executed_quantity or order.requested_quantity
         price = order.executed_price or order.requested_price
-        fee = order.fee or 0
 
         if not price or not qty:
             continue
@@ -104,102 +103,27 @@ async def get_strategy_performance(
         direction = getattr(order, "direction", None) or "long"
         is_short = is_futures and direction == "short"
 
-        if is_short:
-            # 숏: sell=진입, buy=청산
-            if order.side == "sell":
-                short_lots[sym].append(
-                    {
-                        "strategy": order.strategy_name,
-                        "qty": qty,
-                        "cost": price * qty + fee,
-                        "time": order.created_at,
-                    }
-                )
-                # 진입 카운트: 진입 전략 기준
-                if (
-                    order.strategy_name == name
-                    and ensure_aware(order.created_at) >= start
-                ):
-                    trade_count += 1
-            elif order.side == "buy":
-                remaining = qty
-                fee_remaining = fee
-                while remaining > 0 and short_lots[sym]:
-                    lot = short_lots[sym][0]
-                    close_qty = min(remaining, lot["qty"])
-                    avg_entry = lot["cost"] / lot["qty"]
-                    lot_fee = fee_remaining * (close_qty / qty) if qty > 0 else 0
-                    pnl = (avg_entry - price) * close_qty - lot_fee
+        # 진입/청산 판별: short(sell=진입, buy=청산), long/spot(buy=진입, sell=청산)
+        is_entry = (is_short and order.side == "sell") or (
+            not is_short and order.side == "buy"
+        )
+        is_close = (is_short and order.side == "buy") or (
+            not is_short and order.side == "sell"
+        )
 
-                    in_period = (
-                        lot["strategy"] == name and ensure_aware(lot["time"]) >= start
-                    )
-                    if in_period:
-                        total_pnl += pnl
-                        ret_pct = (
-                            pnl / (avg_entry * close_qty) * 100 if avg_entry > 0 else 0
-                        )
-                        returns.append(ret_pct)
-                        trade_count += 1
-                        if pnl > 0:
-                            winning += 1
-                        else:
-                            losing += 1
-
-                    lot["qty"] -= close_qty
-                    lot["cost"] -= avg_entry * close_qty
-                    fee_remaining -= lot_fee
-                    remaining -= close_qty
-                    if lot["qty"] <= 1e-12:
-                        short_lots[sym].pop(0)
-        else:
-            # 롱/현물: buy=진입, sell=청산
-            if order.side == "buy":
-                long_lots[sym].append(
-                    {
-                        "strategy": order.strategy_name,
-                        "qty": qty,
-                        "cost": price * qty + fee,
-                        "time": order.created_at,
-                    }
-                )
-                if (
-                    order.strategy_name == name
-                    and ensure_aware(order.created_at) >= start
-                ):
-                    trade_count += 1
-
-            elif order.side == "sell":
-                remaining = qty
-                fee_remaining = fee
-                while remaining > 0 and long_lots[sym]:
-                    lot = long_lots[sym][0]
-                    close_qty = min(remaining, lot["qty"])
-                    avg_entry = lot["cost"] / lot["qty"]
-                    lot_fee = fee_remaining * (close_qty / qty) if qty > 0 else 0
-                    pnl = (price - avg_entry) * close_qty - lot_fee
-
-                    in_period = (
-                        lot["strategy"] == name and ensure_aware(lot["time"]) >= start
-                    )
-                    if in_period:
-                        total_pnl += pnl
-                        ret_pct = (
-                            pnl / (avg_entry * close_qty) * 100 if avg_entry > 0 else 0
-                        )
-                        returns.append(ret_pct)
-                        trade_count += 1
-                        if pnl > 0:
-                            winning += 1
-                        else:
-                            losing += 1
-
-                    lot["qty"] -= close_qty
-                    lot["cost"] -= avg_entry * close_qty
-                    fee_remaining -= lot_fee
-                    remaining -= close_qty
-                    if lot["qty"] <= 1e-12:
-                        long_lots[sym].pop(0)
+        if is_entry:
+            trade_count += 1
+        elif is_close and order.realized_pnl is not None:
+            pnl = order.realized_pnl
+            total_pnl += pnl
+            pnl_pct = (
+                order.realized_pnl_pct if order.realized_pnl_pct is not None else 0.0
+            )
+            returns.append(pnl_pct)
+            if pnl > 0:
+                winning += 1
+            else:
+                losing += 1
 
     win_rate = winning / (winning + losing) * 100 if (winning + losing) > 0 else 0
     avg_return = sum(returns) / len(returns) if returns else 0
