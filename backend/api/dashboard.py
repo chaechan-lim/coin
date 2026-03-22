@@ -312,7 +312,10 @@ async def get_latest_trade_review(
     )
     log = result.scalar_one_or_none()
     if log:
-        return log.result
+        data = log.result or {}
+        if "analyzed_at" not in data and log.analyzed_at:
+            data["analyzed_at"] = log.analyzed_at.isoformat()
+        return data
     return {"message": "아직 매매 회고 데이터 없음", "insights": [], "recommendations": []}
 
 

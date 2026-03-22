@@ -16,18 +16,35 @@ interface OpenPosition {
   unrealized_pnl_pct?: number
 }
 
-/** ISO 8601 UTC 타임스탬프를 KST 로컬 표시로 변환 (MM/DD HH:mm KST) */
+/** ISO 8601 UTC 타임스탬프를 KST 로컬 표시로 변환 (MM/DD HH:mm) */
 function fmtKst(isoStr?: string): string {
   if (!isoStr) return ''
   try {
     const d = new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z')
-    return d.toLocaleString('ko-KR', {
-      timeZone: 'Asia/Seoul',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
+    const mm = String(d.toLocaleString('en-US', { timeZone: 'Asia/Seoul', month: '2-digit' }))
+    const dd = String(d.toLocaleString('en-US', { timeZone: 'Asia/Seoul', day: '2-digit' }))
+    const hh = String(d.toLocaleString('en-US', { timeZone: 'Asia/Seoul', hour: '2-digit', hour12: false })).padStart(2, '0')
+    const mi = String(d.toLocaleString('en-US', { timeZone: 'Asia/Seoul', minute: '2-digit' })).padStart(2, '0')
+    return `${mm}/${dd} ${hh}:${mi}`
+  } catch {
+    return ''
+  }
+}
+
+/** 경과 시간을 한국어로 표시 (e.g. "2시간 전", "3일 전") */
+function fmtElapsed(isoStr?: string): string {
+  if (!isoStr) return ''
+  try {
+    const d = new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z')
+    const diffMs = Date.now() - d.getTime()
+    if (diffMs < 0) return '방금'
+    const diffMin = Math.floor(diffMs / 60_000)
+    if (diffMin < 1) return '방금'
+    if (diffMin < 60) return `${diffMin}분 전`
+    const diffHour = Math.floor(diffMin / 60)
+    if (diffHour < 24) return `${diffHour}시간 전`
+    const diffDay = Math.floor(diffHour / 24)
+    return `${diffDay}일 전`
   } catch {
     return ''
   }
@@ -253,10 +270,9 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
         <div className="flex items-center gap-2 mb-3 flex-wrap">
           <div className={`w-2 h-2 rounded-full shrink-0 ${review?.total_trades > 0 ? 'bg-blue-500' : 'bg-gray-500'}`} />
           <h3 className="text-white font-semibold text-sm">매매 회고</h3>
-          <span className="text-gray-500 text-xs hidden sm:inline">24시간 분석</span>
           {review?.analyzed_at && (
-            <span className="text-gray-500 text-xs" title={review.analyzed_at}>
-              · {fmtKst(review.analyzed_at)}
+            <span className="text-gray-400 text-xs" title={review.analyzed_at}>
+              {fmtKst(review.analyzed_at)} 기준 · {review.period_hours ?? 24}시간 · {fmtElapsed(review.analyzed_at)}
             </span>
           )}
           <button
@@ -379,8 +395,8 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
           <div className="flex items-center gap-2">
             <h3 className="text-white text-sm font-semibold">성과 분석</h3>
             {perfData?.generated_at && !perfData.status && (
-              <span className="text-gray-500 text-xs" title={perfData.generated_at}>
-                · {fmtKst(perfData.generated_at)}
+              <span className="text-gray-400 text-xs" title={perfData.generated_at}>
+                {fmtKst(perfData.generated_at)} 기준 · {fmtElapsed(perfData.generated_at)}
               </span>
             )}
           </div>
@@ -468,8 +484,8 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
           <div className="flex items-center gap-2">
             <h3 className="text-white text-sm font-semibold">전략 어드바이저</h3>
             {adviceData?.generated_at && !adviceData.status && (
-              <span className="text-gray-500 text-xs" title={adviceData.generated_at}>
-                · {fmtKst(adviceData.generated_at)}
+              <span className="text-gray-400 text-xs" title={adviceData.generated_at}>
+                {fmtKst(adviceData.generated_at)} 기준 · {fmtElapsed(adviceData.generated_at)}
               </span>
             )}
           </div>
