@@ -222,7 +222,7 @@ class SurgeTradingConfig(BaseSettings):
     max_hold_minutes: int = 120
     vol_threshold: float = 4.0           # 거래량 배수 임계값 (백테스트 PF 1.42)
     price_threshold: float = 1.0         # 가격 변동 % 임계값
-    long_only: bool = True
+    long_only: bool = False
     daily_trade_limit: int = 15
     scan_symbols_count: int = 30
     cooldown_per_symbol_sec: int = 3600  # 60분 (백테스트 최적 PF 1.71)
