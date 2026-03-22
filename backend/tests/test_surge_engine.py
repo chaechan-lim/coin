@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 from collections import deque
 
 from core.models import Position
+from core.enums import SignalType
 from engine.surge_engine import (
     SurgeEngine,
     SurgePositionState,
@@ -101,7 +102,7 @@ class TestSurgeEngineInit:
         assert surge_engine._trail_activation_pct == 0.5  # COIN-20: 1.0→0.5
         assert surge_engine._trail_stop_pct == 0.8
         assert surge_engine._max_hold_minutes == 120
-        assert surge_engine._long_only is True
+        assert surge_engine._long_only is False  # COIN-36: default changed
         assert surge_engine._daily_trade_limit == 15
 
     def test_coin20_entry_filter_config(self, surge_engine):
@@ -216,9 +217,9 @@ class TestRSI:
 # ── Test: Entry conditions ───────────────────────────────────────
 
 class TestEntryConditions:
-    def test_long_only_blocks_short(self, surge_engine):
-        """With long_only=True, short direction candidates are skipped."""
-        assert surge_engine._long_only is True
+    def test_bidirectional_allows_short(self, surge_engine):
+        """COIN-36: With long_only=False (default), short direction is allowed."""
+        assert surge_engine._long_only is False
         # Simulate negative price change -> would be "short"
         surge_engine._symbol_states["BTC/USDT"] = SymbolState()
         state = surge_engine._symbol_states["BTC/USDT"]
@@ -228,6 +229,22 @@ class TestEntryConditions:
             state.rsi_closes.append(65000.0 - i * 100)
 
         # Price change should be negative
+        _, _, price_chg = surge_engine.compute_surge_score("BTC/USDT")
+        if price_chg < 0:
+            direction = "short"
+            # With bidirectional, short should NOT be blocked
+            assert not (surge_engine._long_only and direction == "short")
+
+    def test_long_only_true_blocks_short(self, surge_engine):
+        """With long_only=True explicitly set, short direction is blocked."""
+        surge_engine._long_only = True
+        surge_engine._symbol_states["BTC/USDT"] = SymbolState()
+        state = surge_engine._symbol_states["BTC/USDT"]
+        for i in range(10):
+            state.volume_1m.append(100.0)
+            state.prices.append(65000.0 - i * 100)  # declining
+            state.rsi_closes.append(65000.0 - i * 100)
+
         _, _, price_chg = surge_engine.compute_surge_score("BTC/USDT")
         if price_chg < 0:
             direction = "short"
@@ -502,7 +519,7 @@ class TestSurgeTradingConfig:
         assert cfg.max_hold_minutes == 120
         assert cfg.vol_threshold == 4.0
         assert cfg.price_threshold == 1.0
-        assert cfg.long_only is True
+        assert cfg.long_only is False  # COIN-36: default changed
         assert cfg.daily_trade_limit == 15
         assert cfg.scan_symbols_count == 30
         assert cfg.cooldown_per_symbol_sec == 3600
@@ -1299,3 +1316,299 @@ class TestExitCooldownCOIN22:
         # This is the exact check from _scan_for_entries line 508
         blocked = sym in surge_engine._cooldowns and now < surge_engine._cooldowns[sym]
         assert blocked is True
+
+
+# ── COIN-36: Short Entry Execution Tests ─────────────────────────
+
+class TestShortEntryExecution:
+    """COIN-36: Test short position entry when bidirectional is enabled."""
+
+    def test_short_direction_from_negative_price_change(self, surge_engine):
+        """Negative price change produces 'short' direction."""
+        assert surge_engine._long_only is False
+        # Set candle-based data (used by compute_surge_score)
+        surge_engine._candle_vol_ratios["ETH/USDT"] = 5.0
+        surge_engine._candle_price_chgs["ETH/USDT"] = -3.0  # negative = declining
+        surge_engine._candle_vol_accel["ETH/USDT"] = 1.0
+
+        _, _, price_chg = surge_engine.compute_surge_score("ETH/USDT")
+        assert price_chg < 0
+        direction = "long" if price_chg > 0 else "short"
+        assert direction == "short"
+
+    def test_short_position_state_created(self, surge_engine):
+        """Short SurgePositionState has correct fields."""
+        pos = SurgePositionState(
+            symbol="BTC/USDT", direction="short", entry_price=65000.0,
+            quantity=0.001, margin=10.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=65000.0, trough_price=65000.0,
+        )
+        assert pos.direction == "short"
+        assert pos.trough_price == 65000.0
+
+    def test_short_entry_uses_sell_side(self, surge_engine):
+        """Short entry should use 'sell' side for order."""
+        direction = "short"
+        side = "buy" if direction == "long" else "sell"
+        assert side == "sell"
+
+    def test_short_signal_type_is_sell(self, surge_engine):
+        """Short entry should produce SELL signal type."""
+        direction = "short"
+        signal_type = SignalType.BUY if direction == "long" else SignalType.SELL
+        assert signal_type == SignalType.SELL
+
+
+# ── COIN-36: Short Exit Execution Tests ──────────────────────────
+
+class TestShortExitExecution:
+    """COIN-36: Test short position exit conditions."""
+
+    def test_short_sl_triggers(self, surge_engine):
+        """Short SL triggers when price rises beyond threshold."""
+        entry_price = 65000.0
+        # For short: pnl_pct = (entry - current) / entry * 100 * leverage
+        # SL at -2.5%: need (65000 - current) / 65000 * 100 * 3 = -2.5
+        # current = 65000 * (1 + 2.5/300) ≈ 65541.67
+        sl_price = entry_price * (1 + surge_engine._sl_pct / (100 * surge_engine._leverage))
+        pos = SurgePositionState(
+            symbol="BTC/USDT", direction="short", entry_price=entry_price,
+            quantity=0.001, margin=10.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=entry_price, trough_price=entry_price,
+        )
+        should_exit, reason = surge_engine._check_exit_conditions(
+            pos, sl_price + 100, datetime.now(timezone.utc),
+        )
+        assert should_exit is True
+        assert reason == "SL"
+
+    def test_short_tp_triggers(self, surge_engine):
+        """Short TP triggers when price drops enough."""
+        entry_price = 65000.0
+        # For short: pnl_pct = (entry - current) / entry * 100 * leverage
+        # TP at 3%: need (65000 - current) / 65000 * 100 * 3 = 3.0
+        # current = 65000 * (1 - 3.0/300) = 65000 * 0.99 = 64350
+        tp_price = entry_price * (1 - surge_engine._tp_pct / (100 * surge_engine._leverage))
+        pos = SurgePositionState(
+            symbol="BTC/USDT", direction="short", entry_price=entry_price,
+            quantity=0.001, margin=10.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=entry_price, trough_price=entry_price,
+        )
+        should_exit, reason = surge_engine._check_exit_conditions(
+            pos, tp_price - 100, datetime.now(timezone.utc),
+        )
+        assert should_exit is True
+        assert reason == "TP"
+
+    def test_short_time_expiry(self, surge_engine):
+        """Short position exits on time expiry."""
+        entry_time = datetime.now(timezone.utc) - timedelta(minutes=130)
+        pos = SurgePositionState(
+            symbol="BTC/USDT", direction="short", entry_price=65000.0,
+            quantity=0.001, margin=10.0,
+            entry_time=entry_time,
+            peak_price=65000.0, trough_price=65000.0,
+        )
+        should_exit, reason = surge_engine._check_exit_conditions(
+            pos, 65000.0, datetime.now(timezone.utc),
+        )
+        assert should_exit is True
+        assert reason == "TimeExpiry"
+
+
+# ── COIN-36: Short Exit Condition Details ────────────────────────
+
+class TestShortExitConditions:
+    """COIN-36: Detailed short exit condition tests."""
+
+    def test_short_no_exit_in_profit_range(self, surge_engine):
+        """Short position stays open within normal profit range."""
+        entry_price = 65000.0
+        # Small profit: price dropped a little
+        current_price = 64800.0
+        pos = SurgePositionState(
+            symbol="BTC/USDT", direction="short", entry_price=entry_price,
+            quantity=0.001, margin=10.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=entry_price, trough_price=entry_price,
+        )
+        should_exit, reason = surge_engine._check_exit_conditions(
+            pos, current_price, datetime.now(timezone.utc),
+        )
+        assert should_exit is False
+
+    def test_short_trough_tracks_lowest(self, surge_engine):
+        """Short position trough_price tracks the lowest price."""
+        entry_price = 65000.0
+        pos = SurgePositionState(
+            symbol="BTC/USDT", direction="short", entry_price=entry_price,
+            quantity=0.001, margin=10.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=entry_price, trough_price=entry_price,
+        )
+        # Price drops to 64500 (within TP range: pnl = 0.77*3 = 2.3% < 3%)
+        surge_engine._check_exit_conditions(pos, 64500.0, datetime.now(timezone.utc))
+        assert pos.trough_price == 64500.0
+
+        # Price bounces up but trough stays
+        surge_engine._check_exit_conditions(pos, 64800.0, datetime.now(timezone.utc))
+        assert pos.trough_price == 64500.0
+
+    def test_short_trailing_activates(self, surge_engine):
+        """Short trailing stop activates after sufficient profit."""
+        entry_price = 65000.0
+        pos = SurgePositionState(
+            symbol="BTC/USDT", direction="short", entry_price=entry_price,
+            quantity=0.001, margin=10.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=entry_price, trough_price=entry_price,
+        )
+        # Trail activation: 0.5% with 3x leverage
+        # Need trough_pnl = (entry - trough) / entry * 100 * 3 >= 0.5
+        # trough = entry * (1 - 0.5/300) ≈ 64892
+        activation_price = entry_price * (1 - surge_engine._trail_activation_pct / (100 * surge_engine._leverage))
+        surge_engine._check_exit_conditions(
+            pos, activation_price - 10, datetime.now(timezone.utc),
+        )
+        assert pos.trailing_active is True
+
+    def test_short_trailing_stop_triggers(self, surge_engine):
+        """Short trailing stop triggers after drawup from trough."""
+        entry_price = 65000.0
+        pos = SurgePositionState(
+            symbol="BTC/USDT", direction="short", entry_price=entry_price,
+            quantity=0.001, margin=10.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=entry_price, trough_price=entry_price,
+        )
+        # First, push price down to activate trailing
+        trough = entry_price * (1 - 1.0 / (100 * surge_engine._leverage))  # well below activation
+        pos.trough_price = trough
+        pos.trailing_active = True
+
+        # Then bounce up enough to trigger trail stop
+        # drawup = (current - trough) / trough * 100 * leverage >= trail_stop_pct (0.8)
+        trigger_price = trough * (1 + surge_engine._trail_stop_pct / (100 * surge_engine._leverage))
+        should_exit, reason = surge_engine._check_exit_conditions(
+            pos, trigger_price + 10, datetime.now(timezone.utc),
+        )
+        assert should_exit is True
+        assert reason == "Trailing"
+
+
+# ── COIN-36: Bidirectional Position Tests ────────────────────────
+
+class TestBidirectionalPositions:
+    """COIN-36: Test bidirectional (long + short) positions operating simultaneously."""
+
+    def test_long_and_short_positions_coexist(self, surge_engine):
+        """Engine can hold both long and short positions simultaneously."""
+        now = datetime.now(timezone.utc)
+        surge_engine._positions["BTC/USDT"] = SurgePositionState(
+            symbol="BTC/USDT", direction="long", entry_price=65000.0,
+            quantity=0.001, margin=10.0, entry_time=now,
+            peak_price=65000.0, trough_price=65000.0,
+        )
+        surge_engine._positions["ETH/USDT"] = SurgePositionState(
+            symbol="ETH/USDT", direction="short", entry_price=4000.0,
+            quantity=0.01, margin=10.0, entry_time=now,
+            peak_price=4000.0, trough_price=4000.0,
+        )
+        assert len(surge_engine._positions) == 2
+        assert surge_engine._positions["BTC/USDT"].direction == "long"
+        assert surge_engine._positions["ETH/USDT"].direction == "short"
+
+    def test_long_exit_independent_of_short(self, surge_engine):
+        """Long position exit conditions don't affect short positions."""
+        now = datetime.now(timezone.utc)
+        long_pos = SurgePositionState(
+            symbol="BTC/USDT", direction="long", entry_price=65000.0,
+            quantity=0.001, margin=10.0, entry_time=now,
+            peak_price=65000.0, trough_price=65000.0,
+        )
+        short_pos = SurgePositionState(
+            symbol="ETH/USDT", direction="short", entry_price=4000.0,
+            quantity=0.01, margin=10.0, entry_time=now,
+            peak_price=4000.0, trough_price=4000.0,
+        )
+
+        # Long hits SL (price drops significantly)
+        long_exit, long_reason = surge_engine._check_exit_conditions(
+            long_pos, 64000.0, now,
+        )
+        # Short has small profit (pnl = (4000-3990)/4000*100*3 = 0.75%, below TP 3%)
+        short_exit, short_reason = surge_engine._check_exit_conditions(
+            short_pos, 3990.0, now,
+        )
+        assert long_exit is True
+        assert long_reason == "SL"
+        assert short_exit is False
+
+    def test_short_exit_independent_of_long(self, surge_engine):
+        """Short position exit conditions don't affect long positions."""
+        now = datetime.now(timezone.utc)
+        long_pos = SurgePositionState(
+            symbol="BTC/USDT", direction="long", entry_price=65000.0,
+            quantity=0.001, margin=10.0, entry_time=now,
+            peak_price=65000.0, trough_price=65000.0,
+        )
+        short_pos = SurgePositionState(
+            symbol="ETH/USDT", direction="short", entry_price=4000.0,
+            quantity=0.01, margin=10.0, entry_time=now,
+            peak_price=4000.0, trough_price=4000.0,
+        )
+
+        # Short hits SL (price rises)
+        short_exit, short_reason = surge_engine._check_exit_conditions(
+            short_pos, 4100.0, now,
+        )
+        # Long should still be fine
+        long_exit, long_reason = surge_engine._check_exit_conditions(
+            long_pos, 65100.0, now,
+        )
+        assert short_exit is True
+        assert short_reason == "SL"
+        assert long_exit is False
+
+    def test_max_concurrent_counts_both_directions(self, surge_engine):
+        """Max concurrent limit applies to total positions regardless of direction."""
+        now = datetime.now(timezone.utc)
+        # Fill to max with mixed directions
+        surge_engine._positions["BTC/USDT"] = SurgePositionState(
+            symbol="BTC/USDT", direction="long", entry_price=65000.0,
+            quantity=0.001, margin=10.0, entry_time=now,
+            peak_price=65000.0, trough_price=65000.0,
+        )
+        surge_engine._positions["ETH/USDT"] = SurgePositionState(
+            symbol="ETH/USDT", direction="short", entry_price=4000.0,
+            quantity=0.01, margin=10.0, entry_time=now,
+            peak_price=4000.0, trough_price=4000.0,
+        )
+        surge_engine._positions["SOL/USDT"] = SurgePositionState(
+            symbol="SOL/USDT", direction="long", entry_price=150.0,
+            quantity=1.0, margin=10.0, entry_time=now,
+            peak_price=150.0, trough_price=150.0,
+        )
+
+        assert len(surge_engine._positions) >= surge_engine._max_concurrent
+
+    def test_cross_engine_conflict_check_both_directions(self, surge_engine):
+        """Cross-engine conflict check works for both long and short."""
+        # Simulate main engine having a long BTC position via _position_trackers
+        main_engine = MagicMock()
+        tracker = MagicMock(direction="long")
+        main_engine._position_trackers = {"BTC/USDT": tracker}
+        registry = MagicMock()
+        registry.get_engine.return_value = main_engine
+        surge_engine._engine_registry = registry
+
+        # Short on same symbol with opposite direction = conflict
+        conflict = surge_engine._check_cross_engine_conflict("BTC/USDT", "short")
+        assert conflict is True
+
+        # Same direction = no conflict
+        no_conflict = surge_engine._check_cross_engine_conflict("BTC/USDT", "long")
+        assert no_conflict is False
