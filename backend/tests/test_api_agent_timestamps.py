@@ -167,6 +167,48 @@ async def test_trade_review_db_fallback_preserves_existing_analyzed_at():
 
 
 @pytest.mark.asyncio
+async def test_trade_review_db_fallback_empty_result():
+    """trade-review/latest with empty result dict still injects analyzed_at."""
+    exchange = "bithumb"
+    saved = _save_and_clear(exchange)
+    _register_no_coordinator(exchange)
+    db_engine = await _create_db()
+    try:
+        factory = async_sessionmaker(bind=db_engine, class_=AsyncSession, expire_on_commit=False)
+
+        ts = datetime(2025, 3, 22, 1, 0, 0, tzinfo=timezone.utc)
+        async with factory() as sess:
+            log = AgentAnalysisLog(
+                exchange=exchange,
+                agent_name="trade_review",
+                analysis_type="trade_review",
+                result={},
+                analyzed_at=ts,
+            )
+            sess.add(log)
+            await sess.commit()
+
+        async def _db_override():
+            async with factory() as sess:
+                yield sess
+
+        from db.session import get_db
+        app = _make_test_app()
+        app.dependency_overrides[get_db] = _db_override
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/agents/trade-review/latest", params={"exchange": exchange})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "analyzed_at" in data
+        assert data["analyzed_at"].startswith("2025-03-22T01:00:00")
+    finally:
+        _restore(exchange, saved)
+        await db_engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_trade_review_no_data_returns_fallback_message():
     """trade-review/latest with no data returns fallback message."""
     exchange = "bithumb"
@@ -200,7 +242,10 @@ async def test_trade_review_no_data_returns_fallback_message():
 
 @pytest.mark.asyncio
 async def test_performance_db_fallback_includes_generated_at():
-    """performance/latest DB fallback includes generated_at from analyzed_at."""
+    """performance/latest DB fallback includes generated_at from analyzed_at.
+
+    Regression test: this endpoint already had generated_at injection before COIN-37.
+    """
     exchange = "bithumb"
     saved = _save_and_clear(exchange)
     _register_no_coordinator(exchange)
@@ -245,7 +290,10 @@ async def test_performance_db_fallback_includes_generated_at():
 
 @pytest.mark.asyncio
 async def test_strategy_advice_db_fallback_includes_generated_at():
-    """strategy-advice/latest DB fallback includes generated_at from analyzed_at."""
+    """strategy-advice/latest DB fallback includes generated_at from analyzed_at.
+
+    Regression test: this endpoint already had generated_at injection before COIN-37.
+    """
     exchange = "bithumb"
     saved = _save_and_clear(exchange)
     _register_no_coordinator(exchange)

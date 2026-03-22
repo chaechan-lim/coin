@@ -21,11 +21,13 @@ function fmtKst(isoStr?: string): string {
   if (!isoStr) return ''
   try {
     const d = new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z')
-    const mm = String(d.toLocaleString('en-US', { timeZone: 'Asia/Seoul', month: '2-digit' }))
-    const dd = String(d.toLocaleString('en-US', { timeZone: 'Asia/Seoul', day: '2-digit' }))
-    const hh = String(d.toLocaleString('en-US', { timeZone: 'Asia/Seoul', hour: '2-digit', hour12: false })).padStart(2, '0')
-    const mi = String(d.toLocaleString('en-US', { timeZone: 'Asia/Seoul', minute: '2-digit' })).padStart(2, '0')
-    return `${mm}/${dd} ${hh}:${mi}`
+    if (Number.isNaN(d.getTime())) return ''
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Seoul', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(d)
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? ''
+    return `${get('month')}/${get('day')} ${get('hour')}:${get('minute')}`
   } catch {
     return ''
   }
@@ -36,6 +38,7 @@ function fmtElapsed(isoStr?: string): string {
   if (!isoStr) return ''
   try {
     const d = new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z')
+    if (Number.isNaN(d.getTime())) return ''
     const diffMs = Date.now() - d.getTime()
     if (diffMs < 0) return '방금'
     const diffMin = Math.floor(diffMs / 60_000)
