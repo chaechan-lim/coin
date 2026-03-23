@@ -1846,3 +1846,120 @@ class TestDifferentInstanceSARPreserved:
         assert mock_deps["long_eval"].call_count >= 1
         # SAR 실행됨
         assert stats.executed_count >= 1
+
+
+class TestCloseCallback:
+    """COIN-38: on_close_callback 파라미터 테스트."""
+
+    def test_default_callback_is_none(self, tier1):
+        """기본값은 None."""
+        assert tier1._on_close_callback is None
+
+    def test_callback_set_via_constructor(self, mock_deps):
+        """생성자에서 on_close_callback 설정."""
+        callback = AsyncMock()
+        t1 = Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=mock_deps["safe_order"],
+            position_tracker=mock_deps["tracker"],
+            regime_detector=mock_deps["regime"],
+            portfolio_manager=mock_deps["pm"],
+            market_data=mock_deps["market_data"],
+            long_evaluator=mock_deps["long_eval"],
+            short_evaluator=mock_deps["short_eval"],
+            on_close_callback=callback,
+        )
+        assert t1._on_close_callback is callback
+
+    @pytest.mark.asyncio
+    async def test_callback_invoked_on_close(self, mock_deps, session):
+        """포지션 청산 시 콜백이 호출됨."""
+        from engine.position_state_tracker import PositionState
+
+        callback = AsyncMock()
+        t1 = Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=mock_deps["safe_order"],
+            position_tracker=mock_deps["tracker"],
+            regime_detector=mock_deps["regime"],
+            portfolio_manager=mock_deps["pm"],
+            market_data=mock_deps["market_data"],
+            long_evaluator=mock_deps["long_eval"],
+            short_evaluator=mock_deps["short_eval"],
+            on_close_callback=callback,
+        )
+
+        # 포지션 설정
+        mock_deps["tracker"].open_position(PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            entry_price=80000.0,
+            quantity=0.01,
+            margin=26.67,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+            strategy_name="test",
+            confidence=0.8,
+            tier="tier1",
+        ))
+
+        # safe_order.execute_order가 success 반환하도록 설정
+        mock_deps["safe_order"].execute_order = AsyncMock(
+            return_value=OrderResponse(
+                success=True,
+                order_id=1,
+                executed_price=80000.0,
+                executed_quantity=0.01,
+                fee=0.32,
+            )
+        )
+
+        # _close_position 호출
+        result = await t1._close_position(
+            session, "BTC/USDT", Direction.LONG, "test_close"
+        )
+        assert result is True
+        callback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_callback_when_none(self, mock_deps, session):
+        """콜백 미설정 시 에러 없이 청산 진행."""
+        from engine.position_state_tracker import PositionState
+
+        t1 = Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=mock_deps["safe_order"],
+            position_tracker=mock_deps["tracker"],
+            regime_detector=mock_deps["regime"],
+            portfolio_manager=mock_deps["pm"],
+            market_data=mock_deps["market_data"],
+            long_evaluator=mock_deps["long_eval"],
+            short_evaluator=mock_deps["short_eval"],
+            on_close_callback=None,
+        )
+
+        mock_deps["tracker"].open_position(PositionState(
+            symbol="ETH/USDT",
+            direction=Direction.SHORT,
+            entry_price=3000.0,
+            quantity=0.1,
+            margin=100.0,
+            leverage=3,
+            extreme_price=3000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+            strategy_name="test",
+            confidence=0.7,
+            tier="tier1",
+        ))
+
+        result = await t1._close_position(
+            session, "ETH/USDT", Direction.SHORT, "test_close"
+        )
+        assert result is True  # no error even without callback

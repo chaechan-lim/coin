@@ -65,6 +65,7 @@ class Tier1Manager:
         long_cooldown_seconds: int | None = None,
         short_cooldown_seconds: int | None = None,
         exchange_name: str = "binance_futures",
+        on_close_callback=None,
     ):
         self._coins = coins
         self._safe_order = safe_order
@@ -89,6 +90,7 @@ class Tier1Manager:
             else cooldown_seconds
         )
         self._exchange_name = exchange_name
+        self._on_close_callback = on_close_callback
         self._last_exit_time: dict[str, float] = {}  # symbol → timestamp
         self._last_exit_direction: dict[str, Direction] = {}  # symbol → exit direction
 
@@ -615,6 +617,11 @@ class Tier1Manager:
         resp = await self._safe_order.execute_order(session, request)
         if resp.success:
             self._positions.close_position(symbol)
+            if self._on_close_callback:
+                try:
+                    await self._on_close_callback()
+                except Exception:
+                    pass
             return True
         return False
 

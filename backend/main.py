@@ -383,9 +383,16 @@ async def lifespan(app: FastAPI):
                         "binance_futures", "USDT", initial_usdt, is_futures=True,
                     )
 
+                # V2 에이전트 스택: 회고/성과분석/전략어드바이저 (COIN-38)
+                binance_combiner, binance_coordinator = _create_agent_stack(
+                    binance_market_data, config, "binance_futures", market_symbol="BTC/USDT",
+                )
+                binance_coordinator.set_engine(binance_engine)
+                binance_engine.set_agent_coordinator(binance_coordinator)
+
                 engine_registry.register(
                     "binance_futures", binance_engine, binance_portfolio_mgr,
-                    None, None,
+                    binance_combiner, binance_coordinator,
                 )
 
                 futures_health = _create_self_healing(

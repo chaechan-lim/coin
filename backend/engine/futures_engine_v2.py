@@ -127,6 +127,7 @@ class FuturesEngineV2:
             long_cooldown_seconds=int(v2_cfg.tier1_sl_long_cooldown_hours * 3600),
             short_cooldown_seconds=int(v2_cfg.tier1_sl_short_cooldown_hours * 3600),
             exchange_name=self.EXCHANGE_NAME,
+            on_close_callback=self._on_sell_completed,
         )
 
         self._tier2 = Tier2Scanner(
@@ -168,6 +169,13 @@ class FuturesEngineV2:
         self._eval_error_counts: dict[str, int] = {}
         self._position_trackers: dict = {}
 
+        # agent coordinator 호환 속성
+        self._agent_coordinator = None
+        self._paused_coins: set[str] = set()
+        self._suppressed_coins: set[str] = set()
+        self._sells_since_review: int = 0
+        self._REVIEW_TRIGGER_SELLS: int = 5
+
     # ── EngineRegistry 호환 인터페이스 ──────────
 
     @property
@@ -198,6 +206,30 @@ class FuturesEngineV2:
     def resume_buying(self, coins: list[str] | None = None) -> None:
         """health_monitor 호환: API 복구 시 매수 재개 (v2는 no-op 로그)."""
         logger.info("v2_buying_resumed", coins=coins)
+
+    def suppress_buys(self, coins: list[str]) -> None:
+        """coordinator 호환: 리스크 WARNING 시 매수 억제 (v2는 no-op 로그)."""
+        logger.info("v2_buys_suppressed", coins=coins)
+
+    def set_agent_coordinator(self, coordinator) -> None:
+        """에이전트 코디네이터 연결."""
+        self._agent_coordinator = coordinator
+
+    async def _on_sell_completed(self) -> None:
+        """매도 완료 시 카운터 증가 -> N회마다 매매 회고 트리거."""
+        self._sells_since_review += 1
+        if (self._sells_since_review >= self._REVIEW_TRIGGER_SELLS
+                and self._agent_coordinator):
+            self._sells_since_review = 0
+            try:
+                asyncio.create_task(
+                    self._agent_coordinator.run_trade_review(),
+                    name="v2_trade_review",
+                )
+                logger.info("v2_trade_review_triggered",
+                            trigger=self._REVIEW_TRIGGER_SELLS)
+            except Exception as e:
+                logger.warning("v2_trade_review_trigger_failed", error=str(e))
 
     async def _resync_cash(self, new_cash: float) -> None:
         """BalanceGuard가 호출하는 내부 장부 재동기화 콜백."""
