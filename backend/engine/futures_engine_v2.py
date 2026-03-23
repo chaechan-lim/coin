@@ -119,6 +119,7 @@ class FuturesEngineV2:
             min_confidence=v2_cfg.tier1_long_min_confidence,
             directional_weights=False,
             exchange_name=self.EXCHANGE_NAME,
+            min_sell_active_weight=v2_cfg.min_sell_active_weight,
         )
         spot_evaluator = SpotEvaluator(
             strategies=spot_strategies,
@@ -153,6 +154,10 @@ class FuturesEngineV2:
             exchange_name=self.EXCHANGE_NAME,
             on_close_callback=self._on_sell_completed,
             ml_filter=self._ml_filter,
+            # Risk management (COIN-42)
+            asymmetric_mode=v2_cfg.asymmetric_mode,
+            dynamic_sl=v2_cfg.dynamic_sl,
+            atr_leverage_scaling=v2_cfg.atr_leverage_scaling,
         )
 
         self._tier2 = Tier2Scanner(

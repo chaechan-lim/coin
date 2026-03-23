@@ -275,6 +275,12 @@ class FuturesV2Config(BaseSettings):
     tier1_sl_long_cooldown_hours: float = 12.0    # 롱 SL/TP → 롱 재진입 금지 12h
     tier1_sl_short_cooldown_hours: float = 26.0   # 숏 SL/TP → 숏 재진입 금지 26h
 
+    # Risk management — COIN-42
+    asymmetric_mode: bool = True                  # TRENDING_DOWN/VOLATILE(bearish) 시 롱 차단
+    dynamic_sl: bool = True                       # 레짐별 동적 SL 프로필
+    atr_leverage_scaling: bool = True             # ATR% 기반 레버리지 스케일링
+    min_sell_active_weight: float = 0.20          # 숏 진입 시 최소 참여 가중치 (2전략 합의)
+
     # Tier 2 (COIN-23: 필터 추가 + 파라미터 조정)
     tier2_enabled: bool = True
     tier2_max_concurrent: int = 3          # 5 → 3 (노이즈 거래 제거)
