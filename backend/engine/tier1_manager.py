@@ -1030,12 +1030,23 @@ class Tier1Manager:
                     # 강제 청산은 에러 기반이므로 쿨다운 면제
                     self._last_exit_time.pop(symbol, None)
                     self._last_exit_direction.pop(symbol, None)
+                    if self._on_close_callback:
+                        try:
+                            await self._on_close_callback()
+                        except Exception:
+                            pass
                     logger.warning(
                         "tier1_force_close_success",
                         symbol=symbol,
                         consecutive_errors=err_count,
                     )
                     return
+                # 주문 거부 (에러 아닌 실패) — 로그 후 DB 리셋 경로로 진행
+                logger.warning(
+                    "tier1_force_close_order_rejected",
+                    symbol=symbol,
+                    error=resp.error if hasattr(resp, 'error') else str(resp),
+                )
         except Exception as close_err:
             logger.warning(
                 "tier1_force_close_market_failed",
@@ -1094,7 +1105,7 @@ class Tier1Manager:
             업데이트된 포지션 수.
         """
         updated = 0
-        for symbol, exit_ts in self._last_exit_time.items():
+        for symbol, exit_ts in list(self._last_exit_time.items()):
             exit_dir = self._last_exit_direction.get(symbol)
             if exit_dir is None:
                 continue

@@ -853,7 +853,7 @@ class FuturesEngineV2:
                         if df is None or len(df) < 20:
                             continue
                         atr_col = "atr_14"
-                        if atr_col not in df.columns or len(df) == 0:
+                        if atr_col not in df.columns or df[atr_col].isna().all():
                             continue
                         atr = (
                             float(df[atr_col].iloc[-1])

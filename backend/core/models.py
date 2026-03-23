@@ -49,9 +49,7 @@ class Order(Base):
     )
 
     id = Column(Integer, primary_key=True)
-    exchange = Column(
-        String(20), nullable=False, default="bithumb", server_default="bithumb"
-    )
+    exchange = Column(String(20), nullable=False, default="bithumb", server_default="bithumb")
     exchange_order_id = Column(String(100), nullable=True)
     symbol = Column(String(20), nullable=False)
     side = Column(String(4), nullable=False)  # "buy" / "sell"
@@ -71,9 +69,9 @@ class Order(Base):
     margin_used = Column(Float, nullable=True)
 
     # PnL (sell/close orders only)
-    entry_price = Column(Float, nullable=True)  # 진입 평단가
-    realized_pnl = Column(Float, nullable=True)  # 실현 손익 (금액)
-    realized_pnl_pct = Column(Float, nullable=True)  # 실현 손익 (%)
+    entry_price = Column(Float, nullable=True)         # 진입 평단가
+    realized_pnl = Column(Float, nullable=True)        # 실현 손익 (금액)
+    realized_pnl_pct = Column(Float, nullable=True)    # 실현 손익 (%)
 
     # Strategy attribution
     strategy_name = Column(String(50), nullable=False)
@@ -97,9 +95,7 @@ class Trade(Base):
     )
 
     id = Column(Integer, primary_key=True)
-    exchange = Column(
-        String(20), nullable=False, default="bithumb", server_default="bithumb"
-    )
+    exchange = Column(String(20), nullable=False, default="bithumb", server_default="bithumb")
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
     symbol = Column(String(20), nullable=False)
     side = Column(String(4), nullable=False)
@@ -120,9 +116,7 @@ class Position(Base):
     )
 
     id = Column(Integer, primary_key=True)
-    exchange = Column(
-        String(20), nullable=False, default="bithumb", server_default="bithumb"
-    )
+    exchange = Column(String(20), nullable=False, default="bithumb", server_default="bithumb")
     symbol = Column(String(20), nullable=False)
     quantity = Column(Float, default=0.0)
     average_buy_price = Column(Float, default=0.0)
@@ -151,20 +145,18 @@ class Position(Base):
     # 매매 타이밍 추적 (재시작 시 쿨다운/washout 복원)
     last_trade_at = Column(DateTime, nullable=True)
     last_sell_at = Column(DateTime, nullable=True)
-    last_sell_direction = Column(
-        String(5), nullable=True
-    )  # "long"/"short" (COIN-41: v2 방향별 쿨다운 영속화)
+    last_sell_direction = Column(String(10), nullable=True)  # "long"/"short" (COIN-41)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class PortfolioSnapshot(Base):
     __tablename__ = "portfolio_snapshots"
-    __table_args__ = (Index("ix_portfolio_snapshots_at", "snapshot_at"),)
+    __table_args__ = (
+        Index("ix_portfolio_snapshots_at", "snapshot_at"),
+    )
 
     id = Column(Integer, primary_key=True)
-    exchange = Column(
-        String(20), nullable=False, default="bithumb", server_default="bithumb"
-    )
+    exchange = Column(String(20), nullable=False, default="bithumb", server_default="bithumb")
     total_value_krw = Column(Float, nullable=False)
     cash_balance_krw = Column(Float, nullable=False)
     invested_value_krw = Column(Float, nullable=False)
@@ -182,9 +174,7 @@ class StrategyLog(Base):
     )
 
     id = Column(Integer, primary_key=True)
-    exchange = Column(
-        String(20), nullable=False, default="bithumb", server_default="bithumb"
-    )
+    exchange = Column(String(20), nullable=False, default="bithumb", server_default="bithumb")
     strategy_name = Column(String(50), nullable=False)
     symbol = Column(String(20), nullable=False)
     signal_type = Column(String(4))  # BUY/SELL/HOLD
@@ -198,12 +188,12 @@ class StrategyLog(Base):
 
 class AgentAnalysisLog(Base):
     __tablename__ = "agent_analysis_logs"
-    __table_args__ = (Index("ix_agent_logs_name_at", "agent_name", "analyzed_at"),)
+    __table_args__ = (
+        Index("ix_agent_logs_name_at", "agent_name", "analyzed_at"),
+    )
 
     id = Column(Integer, primary_key=True)
-    exchange = Column(
-        String(20), nullable=False, default="bithumb", server_default="bithumb"
-    )
+    exchange = Column(String(20), nullable=False, default="bithumb", server_default="bithumb")
     agent_name = Column(String(50), nullable=False)
     analysis_type = Column(String(30))
     result = Column(JSON, nullable=False)
@@ -214,15 +204,17 @@ class AgentAnalysisLog(Base):
 
 class CapitalTransaction(Base):
     __tablename__ = "capital_transactions"
-    __table_args__ = (Index("ix_capital_tx_exchange_at", "exchange", "created_at"),)
+    __table_args__ = (
+        Index("ix_capital_tx_exchange_at", "exchange", "created_at"),
+    )
 
     id = Column(Integer, primary_key=True)
-    exchange = Column(String(20), nullable=False)  # "bithumb" / "binance_futures"
-    tx_type = Column(String(15), nullable=False)  # "deposit" / "withdrawal"
-    amount = Column(Float, nullable=False)  # KRW or USDT
-    currency = Column(String(10), nullable=False)  # "KRW" / "USDT"
+    exchange = Column(String(20), nullable=False)        # "bithumb" / "binance_futures"
+    tx_type = Column(String(15), nullable=False)         # "deposit" / "withdrawal"
+    amount = Column(Float, nullable=False)               # KRW or USDT
+    currency = Column(String(10), nullable=False)        # "KRW" / "USDT"
     note = Column(Text, nullable=True)
-    source = Column(String(20), default="manual")  # "manual" / "auto_detected" / "seed"
+    source = Column(String(20), default="manual")        # "manual" / "auto_detected" / "seed"
     confirmed = Column(Boolean, default=True)
     exchange_tx_id = Column(String(100), nullable=True)  # 거래소 tx ID (자동 감지 시)
     created_at = Column(DateTime, default=_utcnow)
@@ -254,9 +246,10 @@ class DailyPnL(Base):
 
 class RegimeLog(Base):
     """레짐 변경 이력 (선물 v2)."""
-
     __tablename__ = "regime_logs"
-    __table_args__ = (Index("ix_regime_logs_at", "detected_at"),)
+    __table_args__ = (
+        Index("ix_regime_logs_at", "detected_at"),
+    )
 
     id = Column(Integer, primary_key=True)
     exchange = Column(String(20), default="binance_futures")
