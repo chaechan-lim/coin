@@ -275,6 +275,11 @@ class FuturesV2Config(BaseSettings):
     tier1_sl_long_cooldown_hours: float = 12.0    # 롱 SL/TP → 롱 재진입 금지 12h
     tier1_sl_short_cooldown_hours: float = 26.0   # 숏 SL/TP → 숏 재진입 금지 26h
 
+    # Trading safeguards — 일일 한도 / 에러 강제청산 (COIN-41)
+    tier1_daily_buy_limit: int = 20    # 일일 총 매수 상한
+    tier1_max_daily_coin_buys: int = 3 # 코인당 일일 매수 상한
+    tier1_max_eval_errors: int = 3     # 연속 N회 평가 실패 → 강제 청산
+
     # Risk management — COIN-42
     asymmetric_mode: bool = True                  # TRENDING_DOWN/VOLATILE(bearish) 시 롱 차단
     dynamic_sl: bool = True                       # 레짐별 동적 SL 프로필
