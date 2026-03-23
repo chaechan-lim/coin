@@ -356,7 +356,7 @@ class TestExecuteWSClose:
     async def test_close_creates_order_and_removes_position(
         self, engine, session, session_factory
     ):
-        """WS 청산 성공 시 포지션 제거."""
+        """WS 청산 성공 시 포지션 + 미실현PnL 캐시 제거."""
         # DB 포지션 생성
         db_pos = Position(
             symbol="BTC/USDT", exchange="binance_futures",
@@ -368,6 +368,7 @@ class TestExecuteWSClose:
 
         state = _make_position_state()
         engine._positions.open_position(state)
+        engine._ws_unrealized_pnl["BTC/USDT"] = 15.0  # 미실현 PnL 캐시
 
         mock_resp = MagicMock(success=True)
         engine._safe_order.execute_order = AsyncMock(return_value=mock_resp)
@@ -381,6 +382,7 @@ class TestExecuteWSClose:
             )
 
         assert not engine._positions.has_position("BTC/USDT")
+        assert "BTC/USDT" not in engine._ws_unrealized_pnl
         engine._safe_order.execute_order.assert_called_once()
 
     @pytest.mark.asyncio
@@ -514,6 +516,8 @@ class TestWSPriceMonitorLoop:
 
         # 폴백 태스크가 생성되었는지 확인
         assert engine._fast_sl_task is not None
+        # 동적 생성된 폴백 태스크가 self._tasks에 추가됨 (stop()에서 취소 가능)
+        assert engine._fast_sl_task in engine._tasks
 
         # 정리
         if engine._fast_sl_task and not engine._fast_sl_task.done():
@@ -824,6 +828,52 @@ class TestWSPositionLoop:
         assert engine._positions.get("BTC/USDT").extreme_price == 82000.0
 
     @pytest.mark.asyncio
+    async def test_current_value_committed_when_significant(
+        self, engine, mock_exchange, session, session_factory
+    ):
+        """current_value만 변동돼도 >0.1 USDT 차이이면 커밋됨."""
+        db_pos = Position(
+            symbol="BTC/USDT",
+            exchange="binance_futures",
+            quantity=0.01,
+            average_buy_price=80000.0,
+            total_invested=100.0,
+            current_value=100.0,
+        )
+        session.add(db_pos)
+        await session.commit()
+
+        call_count = 0
+
+        async def mock_watch():
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise asyncio.CancelledError()
+            return [
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "contracts": 0.01,          # 동일 — qty 변경 없음
+                    "initialMargin": 100.0,      # 동일 — margin 변경 없음
+                    "entryPrice": 80000.0,       # 동일
+                    "markPrice": 81000.0,
+                    "unrealizedPnl": 10.0,       # current_value = 100 + 10 = 110
+                }
+            ]
+
+        mock_exchange.watch_positions = AsyncMock(side_effect=mock_watch)
+        engine._is_running = True
+
+        with patch(
+            "engine.futures_engine_v2.get_session_factory",
+            return_value=session_factory,
+        ):
+            await engine._ws_position_loop()
+
+        await session.refresh(db_pos)
+        assert abs(db_pos.current_value - 110.0) < 0.01
+
+    @pytest.mark.asyncio
     async def test_timeout_continues(self, engine, mock_exchange):
         """TimeoutError는 정상 — 계속 진행."""
         call_count = 0
@@ -853,7 +903,7 @@ class TestStartStop:
             await engine.start()
 
         assert engine._ws_monitor_task is not None
-        assert engine._ws_bp_task is not None
+        assert engine._ws_balance_task is not None
         assert engine._ws_pos_task is not None
         assert engine._fast_sl_task is None  # WS 성공이므로 폴백 없음
         assert len(engine._tasks) >= 9  # 6 기본 + 3 WS
@@ -870,7 +920,7 @@ class TestStartStop:
             await engine.start()
 
         assert engine._ws_monitor_task is None
-        assert engine._ws_bp_task is None
+        assert engine._ws_balance_task is None
         assert engine._ws_pos_task is None
         assert engine._fast_sl_task is not None
         assert len(engine._tasks) >= 7  # 6 기본 + 1 폴백
@@ -886,7 +936,7 @@ class TestStartStop:
             await engine.stop()
 
         assert engine._ws_monitor_task is None
-        assert engine._ws_bp_task is None
+        assert engine._ws_balance_task is None
         assert engine._ws_pos_task is None
         assert engine._fast_sl_task is None
         mock_exchange.close_ws.assert_called()
@@ -910,7 +960,7 @@ class TestGetStatusWS:
         """get_status에 WS 상태 필드 포함."""
         status = engine.get_status()
         assert "ws_price_monitor" in status
-        assert "ws_balance_position" in status
+        assert "ws_balance_audit" in status
         assert "ws_position_sync" in status
         assert "fast_sl_fallback" in status
 
@@ -921,7 +971,7 @@ class TestGetStatusWS:
             await engine.start()
         status = engine.get_status()
         assert status["ws_price_monitor"] is True
-        assert status["ws_balance_position"] is True
+        assert status["ws_balance_audit"] is True
         assert status["ws_position_sync"] is True
         assert status["fast_sl_fallback"] is False
         with patch("engine.futures_engine_v2.emit_event", new_callable=AsyncMock):
@@ -935,7 +985,7 @@ class TestGetStatusWS:
             await engine.start()
         status = engine.get_status()
         assert status["ws_price_monitor"] is False
-        assert status["ws_balance_position"] is False
+        assert status["ws_balance_audit"] is False
         assert status["ws_position_sync"] is False
         assert status["fast_sl_fallback"] is True
         with patch("engine.futures_engine_v2.emit_event", new_callable=AsyncMock):

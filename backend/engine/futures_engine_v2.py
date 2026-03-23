@@ -183,8 +183,8 @@ class FuturesEngineV2:
         self._ws_consecutive_successes: int = 0  # WS 연속 성공 카운터 (폴백 해제 기준)
         self._ws_unrealized_pnl: dict[str, float] = {}  # 포지션별 미실현 PnL (잔고 감사용)
         self._ws_monitor_task: asyncio.Task | None = None
-        self._ws_bp_task: asyncio.Task | None = None   # WS balance audit loop
-        self._ws_pos_task: asyncio.Task | None = None   # WS position sync loop
+        self._ws_balance_task: asyncio.Task | None = None  # _ws_balance_loop
+        self._ws_pos_task: asyncio.Task | None = None    # _ws_position_loop
         self._fast_sl_task: asyncio.Task | None = None
         self._ws_enabled = True  # WS 활성화 플래그
 
@@ -297,7 +297,7 @@ class FuturesEngineV2:
                 self._ws_monitor_task = asyncio.create_task(
                     self._ws_price_monitor_loop(), name="v2_ws_price"
                 )
-                self._ws_bp_task = asyncio.create_task(
+                self._ws_balance_task = asyncio.create_task(
                     self._ws_balance_loop(), name="v2_ws_balance"
                 )
                 self._ws_pos_task = asyncio.create_task(
@@ -324,7 +324,7 @@ class FuturesEngineV2:
             asyncio.create_task(self._persist_loop(), name="v2_persist"),
         ]
         # WS 태스크도 관리 목록에 추가
-        for t in (self._ws_monitor_task, self._ws_bp_task, self._ws_pos_task, self._fast_sl_task):
+        for t in (self._ws_monitor_task, self._ws_balance_task, self._ws_pos_task, self._fast_sl_task):
             if t is not None:
                 self._tasks.append(t)
 
@@ -339,7 +339,7 @@ class FuturesEngineV2:
                     pass
         self._tasks = []
         self._ws_monitor_task = None
-        self._ws_bp_task = None
+        self._ws_balance_task = None
         self._ws_pos_task = None
         self._fast_sl_task = None
 
@@ -442,6 +442,7 @@ class FuturesEngineV2:
                             self._fast_stop_check_loop(),
                             name="v2_fast_sl",
                         )
+                        self._tasks.append(self._fast_sl_task)
                         logger.warning("v2_ws_fallback_activated")
 
                     backoff = await self._ws_reconnect(backoff)
@@ -547,6 +548,7 @@ class FuturesEngineV2:
             resp = await self._safe_order.execute_order(session, request)
             if resp.success:
                 self._positions.close_position(symbol)
+                self._ws_unrealized_pnl.pop(symbol, None)
                 logger.warning(
                     "v2_ws_position_closed",
                     symbol=symbol,
@@ -564,11 +566,15 @@ class FuturesEngineV2:
                 if self._on_sell_completed:
                     try:
                         await self._on_sell_completed()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("v2_on_sell_callback_error", error=str(e))
 
     async def _fast_stop_check_loop(self) -> None:
-        """WS 실패 시 30초 폴링 SL/TP 폴백."""
+        """WS 실패 시 30초 폴링 SL/TP 폴백.
+
+        _realtime_stop_check는 shield로 보호하여, 폴백 태스크 취소 시
+        진행 중인 청산 주문이 중단되지 않도록 한다.
+        """
         while self._is_running:
             await asyncio.sleep(self._FAST_SL_INTERVAL)
             try:
@@ -581,9 +587,15 @@ class FuturesEngineV2:
                         ticker = await self._exchange.fetch_ticker(symbol)
                         price = ticker.last
                         if price > 0:
-                            await self._realtime_stop_check(symbol, price)
+                            await asyncio.shield(
+                                self._realtime_stop_check(symbol, price)
+                            )
+                    except asyncio.CancelledError:
+                        raise  # 태스크 취소는 전파
                     except Exception as e:
                         logger.debug("v2_fast_sl_check_error", symbol=symbol, error=str(e))
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.warning("v2_fast_sl_loop_error", error=str(e))
 
@@ -725,7 +737,10 @@ class FuturesEngineV2:
 
                         # 미실현 PnL → current_value + 잔고 감사용 캐시
                         if contracts > 0 and entry > 0:
-                            db_pos.current_value = margin + unrealized
+                            new_value = margin + unrealized
+                            if abs((db_pos.current_value or 0) - new_value) > 0.1:
+                                db_pos.current_value = new_value
+                                updated = True
                             self._ws_unrealized_pnl[sym] = unrealized
 
                         # 인메모리 extreme 업데이트
@@ -959,8 +974,8 @@ class FuturesEngineV2:
             and not self._ws_monitor_task.done()
         )
         ws_balance_ok = (
-            self._ws_bp_task is not None
-            and not self._ws_bp_task.done()
+            self._ws_balance_task is not None
+            and not self._ws_balance_task.done()
         )
         ws_position_ok = (
             self._ws_pos_task is not None
@@ -982,7 +997,7 @@ class FuturesEngineV2:
             "balance_guard": self._guard.get_status(),
             "tracked_coins": self.tracked_coins,
             "ws_price_monitor": ws_price_ok,
-            "ws_balance_position": ws_balance_ok,
+            "ws_balance_audit": ws_balance_ok,
             "ws_position_sync": ws_position_ok,
             "fast_sl_fallback": fast_sl_active,
         }
