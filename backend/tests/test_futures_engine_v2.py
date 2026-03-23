@@ -452,3 +452,89 @@ class TestSnapshotInPersistLoop:
     def test_exchange_name_passed_to_tier1(self, engine):
         """FuturesEngineV2가 Tier1Manager에 exchange_name을 전달."""
         assert engine._tier1._exchange_name == "binance_futures"
+
+
+class TestAgentCoordinatorCompat:
+    """COIN-38: V2 에이전트 코디네이터 호환성 테스트."""
+
+    def test_has_paused_coins(self, engine):
+        """_paused_coins 속성 존재 (coordinator 호환)."""
+        assert hasattr(engine, '_paused_coins')
+        assert isinstance(engine._paused_coins, set)
+
+    def test_has_suppressed_coins(self, engine):
+        """_suppressed_coins 속성 존재 (coordinator 호환)."""
+        assert hasattr(engine, '_suppressed_coins')
+        assert isinstance(engine._suppressed_coins, set)
+
+    def test_suppress_buys_no_error(self, engine):
+        """suppress_buys 메서드 호출 시 에러 없음."""
+        assert hasattr(engine, 'suppress_buys')
+        assert callable(engine.suppress_buys)
+        engine.suppress_buys(["BTC/USDT"])  # no-op, should not raise
+
+    def test_set_agent_coordinator(self, engine):
+        """에이전트 코디네이터 설정."""
+        mock_coord = MagicMock()
+        engine.set_agent_coordinator(mock_coord)
+        assert engine._agent_coordinator is mock_coord
+
+    def test_has_sells_since_review(self, engine):
+        """_sells_since_review 카운터 존재."""
+        assert hasattr(engine, '_sells_since_review')
+        assert engine._sells_since_review == 0
+
+    @pytest.mark.asyncio
+    async def test_on_sell_completed_increments_counter(self, engine):
+        """_on_sell_completed가 카운터를 증가."""
+        assert engine._sells_since_review == 0
+        await engine._on_sell_completed()
+        assert engine._sells_since_review == 1
+
+    @pytest.mark.asyncio
+    async def test_on_sell_completed_triggers_review_at_threshold(self, engine):
+        """매도 N회 도달 시 trade_review 트리거."""
+        mock_coord = MagicMock()
+        mock_coord.run_trade_review = AsyncMock()
+        engine.set_agent_coordinator(mock_coord)
+
+        # 트리거 직전까지 카운터 설정
+        engine._sells_since_review = engine._REVIEW_TRIGGER_SELLS - 1
+        await engine._on_sell_completed()
+
+        # 카운터 리셋 확인
+        assert engine._sells_since_review == 0
+
+        # run_trade_review가 실제로 호출됐는지 확인
+        # create_task로 스케줄됐으므로 이벤트 루프 한 틱 실행
+        await asyncio.sleep(0)
+        mock_coord.run_trade_review.assert_called_once()
+
+        # 태스크가 background_tasks에 등록됐다가 완료 후 제거됨
+        await asyncio.sleep(0)
+        assert len(engine._background_tasks) == 0
+
+    @pytest.mark.asyncio
+    async def test_on_sell_completed_no_trigger_without_coordinator(self, engine):
+        """코디네이터 미설정 시 에러 없이 카운터만 증가."""
+        engine._agent_coordinator = None
+        engine._sells_since_review = engine._REVIEW_TRIGGER_SELLS - 1
+        await engine._on_sell_completed()
+        # 코디네이터 없으면 트리거 안 됨, 카운터는 threshold에 도달
+        assert engine._sells_since_review == engine._REVIEW_TRIGGER_SELLS
+
+    @pytest.mark.asyncio
+    async def test_on_sell_completed_no_trigger_below_threshold(self, engine):
+        """매도 횟수 미달 시 트리거 안 됨."""
+        mock_coord = MagicMock()
+        mock_coord.run_trade_review = AsyncMock()
+        engine.set_agent_coordinator(mock_coord)
+
+        engine._sells_since_review = 0
+        await engine._on_sell_completed()
+        assert engine._sells_since_review == 1  # just incremented
+
+    def test_tier1_has_on_close_callback(self, engine):
+        """Tier1Manager에 on_close_callback이 연결됨."""
+        assert engine._tier1._on_close_callback is not None
+        assert engine._tier1._on_close_callback == engine._on_sell_completed
