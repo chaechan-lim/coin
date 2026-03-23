@@ -7,6 +7,9 @@ FuturesEngineV2 백테스터 — 레짐 적응형 선물 엔진 Walk-Forward 검
   python backtest_v2.py --days 360 --coins BTC ETH SOL
   python backtest_v2.py --days 180 --leverage 5
 
+현물 4전략 모드 (라이브 V2 구성 검증):
+  python backtest_v2.py --days 540 --spot-strategies
+
 Walk-Forward (240-day train + 60-day val + 60-day test):
   python backtest_v2.py --days 540 --walk-forward
 """
@@ -230,6 +233,226 @@ def create_v1_strategies() -> dict:
         "obv_divergence": OBVDivergenceStrategy(),
         "bb_squeeze": BBSqueezeStrategy(),
     }
+
+
+def create_spot_strategies() -> dict:
+    """현물 4전략 인스턴스 생성."""
+    from strategies.cis_momentum import CISMomentumStrategy
+    from strategies.bnf_deviation import BNFDeviationStrategy
+    from strategies.donchian_channel import DonchianChannelStrategy
+    from strategies.larry_williams import LarryWilliamsStrategy
+    return {
+        "cis_momentum": CISMomentumStrategy(),
+        "bnf_deviation": BNFDeviationStrategy(),
+        "donchian_channel": DonchianChannelStrategy(),
+        "larry_williams": LarryWilliamsStrategy(),
+    }
+
+
+# 현물 4전략 가중치 (combiner.py SPOT_WEIGHTS 복제)
+SPOT_WEIGHTS: dict[str, float] = {
+    "cis_momentum": 0.42,
+    "bnf_deviation": 0.25,
+    "donchian_channel": 0.24,
+    "larry_williams": 0.10,
+}
+
+# 현물 전략 SL/TP/트레일링 ATR 배수 (SpotEvaluator 라이브 설정 일치)
+SPOT_SL_ATR = 5.0
+SPOT_TP_ATR = 14.0
+SPOT_TRAIL_ACTIVATION_ATR = 3.0
+SPOT_TRAIL_STOP_ATR = 1.5
+SPOT_MIN_CONFIDENCE = 0.50
+
+
+class SpotStrategyAdapter(RegimeStrategy):
+    """현물 4전략 → v2 RegimeStrategy 인터페이스 어댑터.
+
+    현물 4전략(cis_momentum, bnf_deviation, donchian_channel, larry_williams)을
+    SignalCombiner(SPOT_WEIGHTS)로 가중 투표하여 선물 백테스트에 적용.
+
+    라이브 SpotEvaluator와 동일한 로직:
+    - 4h 캔들 기반 (1h 데이터에서 합성)
+    - BUY → LONG, SELL → SHORT 매핑
+    - SL 5.0 / TP 14.0 ATR 배수
+    """
+
+    def __init__(
+        self,
+        strategies: dict,
+        weights: dict[str, float],
+        min_confidence: float = SPOT_MIN_CONFIDENCE,
+    ):
+        self._strategies = strategies  # {name: BaseStrategy instance}
+        self._combiner = _create_spot_combiner(weights, min_confidence)
+        self._min_confidence = min_confidence
+
+    @property
+    def name(self) -> str:
+        return "spot_ensemble"
+
+    @property
+    def target_regimes(self) -> list[Regime]:
+        return [Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.RANGING, Regime.VOLATILE]
+
+    async def evaluate(
+        self,
+        df_5m: pd.DataFrame,
+        df_1h: pd.DataFrame,
+        regime: RegimeState,
+        current_position: Direction | None,
+    ) -> StrategyDecision:
+        """현물 4전략 가중 투표로 방향 결정.
+
+        1h 데이터를 4h로 리샘플링하여 현물 전략에 전달.
+        """
+        # 1h → 4h 리샘플링
+        df_4h = self._resample_1h_to_4h(df_1h)
+        if df_4h is None or len(df_4h) < 30:
+            return self._hold(current_position)
+
+        close = float(df_4h["close"].iloc[-1]) if "close" in df_4h.columns else 0.0
+        atr = float(df_4h["atr_14"].iloc[-1]) if "atr_14" in df_4h.columns else 0.0
+
+        # 더미 Ticker (spot 전략 analyze() 인터페이스 요구)
+        ticker = Ticker(
+            symbol="X/USDT", last=close, bid=close * 0.999, ask=close * 1.001,
+            high=close * 1.01, low=close * 0.99, volume=1000.0,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        # 4전략 시그널 수집
+        signals: list[Signal] = []
+        for strat_name, strat in self._strategies.items():
+            try:
+                signal = await strat.analyze(df_4h, ticker)
+                signals.append(signal)
+            except Exception:
+                continue
+
+        if not signals:
+            return self._hold(current_position)
+
+        # SignalCombiner 가중 투표
+        combined = self._combiner.combine(signals)
+
+        # BUY → LONG, SELL → SHORT 매핑
+        if combined.action == SignalType.BUY:
+            conf = min(1.0, combined.combined_confidence)
+            if conf < self._min_confidence:
+                return self._hold(current_position)
+            sizing = self._calc_sizing(conf, atr, close) if atr > 0 and close > 0 else 0.5
+            return StrategyDecision(
+                direction=Direction.LONG,
+                confidence=conf,
+                sizing_factor=sizing,
+                stop_loss_atr=SPOT_SL_ATR,
+                take_profit_atr=SPOT_TP_ATR,
+                reason=f"spot_buy: {combined.final_reason}",
+                strategy_name="spot_ensemble",
+                indicators={"buy_conf": conf, "active": len(signals)},
+            )
+        elif combined.action == SignalType.SELL:
+            conf = min(1.0, combined.combined_confidence)
+            if conf < self._min_confidence:
+                return self._hold(current_position)
+            sizing = self._calc_sizing(conf, atr, close) if atr > 0 and close > 0 else 0.5
+            return StrategyDecision(
+                direction=Direction.SHORT,
+                confidence=conf,
+                sizing_factor=sizing,
+                stop_loss_atr=SPOT_SL_ATR,
+                take_profit_atr=SPOT_TP_ATR,
+                reason=f"spot_sell: {combined.final_reason}",
+                strategy_name="spot_ensemble",
+                indicators={"sell_conf": conf, "active": len(signals)},
+            )
+
+        return self._hold(current_position)
+
+    def _hold(self, current_position: Direction | None) -> StrategyDecision:
+        return StrategyDecision(
+            direction=current_position or Direction.FLAT,
+            confidence=0.5,
+            sizing_factor=0.0,
+            stop_loss_atr=0,
+            take_profit_atr=0,
+            reason="spot_ensemble_hold",
+            strategy_name="spot_ensemble",
+        )
+
+    @staticmethod
+    def _resample_1h_to_4h(df_1h: pd.DataFrame) -> pd.DataFrame | None:
+        """1h 캔들을 4h로 리샘플링 + 인디케이터 재계산."""
+        if df_1h is None or len(df_1h) < 40:
+            return None
+
+        df = df_1h.copy()
+
+        # OHLCV 리샘플링
+        ohlcv = df[["open", "high", "low", "close", "volume"]].resample("4h").agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }).dropna()
+
+        if len(ohlcv) < 30:
+            return None
+
+        # 현물 전략에 필요한 인디케이터 계산 (lowercase — 백테스트 컨벤션)
+        ohlcv.ta.sma(length=5, append=True)
+        ohlcv.ta.sma(length=20, append=True)
+        ohlcv.ta.sma(length=50, append=True)
+        ohlcv.ta.sma(length=60, append=True)
+        ohlcv.ta.ema(length=9, append=True)
+        ohlcv.ta.ema(length=12, append=True)
+        ohlcv.ta.ema(length=20, append=True)
+        ohlcv.ta.ema(length=21, append=True)
+        ohlcv.ta.ema(length=26, append=True)
+        ohlcv.ta.ema(length=50, append=True)
+        ohlcv.ta.rsi(length=14, append=True)
+        ohlcv.ta.atr(length=14, append=True)
+        ohlcv.ta.adx(length=14, append=True)
+        ohlcv.ta.bbands(length=20, std=2, append=True)
+        ohlcv.ta.macd(fast=12, slow=26, signal=9, append=True)
+        ohlcv["Volume_SMA_20"] = ohlcv["volume"].rolling(window=20).mean()
+
+        # pandas_ta → lowercase 매핑
+        ohlcv.rename(columns=_RENAME_MAP, inplace=True)
+        for col in ohlcv.columns:
+            if col.startswith("BBU_20") and "bb_upper_20" not in ohlcv.columns:
+                ohlcv.rename(columns={col: "bb_upper_20"}, inplace=True)
+            elif col.startswith("BBL_20") and "bb_lower_20" not in ohlcv.columns:
+                ohlcv.rename(columns={col: "bb_lower_20"}, inplace=True)
+            elif col.startswith("BBM_20") and "bb_mid_20" not in ohlcv.columns:
+                ohlcv.rename(columns={col: "bb_mid_20"}, inplace=True)
+
+        # 추가 lowercase alias (현물 전략이 사용하는 컬럼명)
+        _spot_rename = {
+            "SMA_5": "sma_5", "SMA_20": "sma_20", "SMA_50": "sma_50", "SMA_60": "sma_60",
+            "EMA_12": "ema_12", "EMA_26": "ema_26",
+            "MACDh_12_26_9": "macd_hist",
+            "MACD_12_26_9": "macd_line",
+            "MACDs_12_26_9": "macd_signal",
+        }
+        ohlcv.rename(columns=_spot_rename, inplace=True)
+
+        ohlcv.dropna(inplace=True)
+        return ohlcv
+
+
+def _create_spot_combiner(
+    weights: dict[str, float],
+    min_confidence: float = SPOT_MIN_CONFIDENCE,
+):
+    """현물 전략용 SignalCombiner 생성."""
+    from strategies.combiner import SignalCombiner
+    return SignalCombiner(
+        strategy_weights=weights,
+        min_confidence=min_confidence,
+    )
 
 
 def _tf_hours(tf: str) -> float:
@@ -473,6 +696,8 @@ class V2Backtester:
         self._eval_interval = eval_interval
         self._use_v1 = False
         self._v1_adapter: V1StrategyAdapter | None = None
+        self._use_spot = False
+        self._spot_adapter: SpotStrategyAdapter | None = None
 
         # 레짐 감지 파라미터 저장 (_precompute_regimes에서도 사용)
         self._regime_confirm = regime_confirm
@@ -494,6 +719,12 @@ class V2Backtester:
         self._v1_adapter = V1StrategyAdapter(strategies, REGIME_STRATEGY_MAP)
         self._use_v1 = True
 
+    def enable_spot_strategies(self) -> None:
+        """현물 4전략 SignalCombiner 가중 투표 모드 활성화."""
+        strategies = create_spot_strategies()
+        self._spot_adapter = SpotStrategyAdapter(strategies, SPOT_WEIGHTS)
+        self._use_spot = True
+
     async def prefetch(self, days: int) -> dict[str, tuple[pd.DataFrame, pd.DataFrame]]:
         """모든 코인의 5m + 1h 데이터 프리페치."""
         result = {}
@@ -514,12 +745,16 @@ class V2Backtester:
 
     async def run(self, days: int) -> V2BacktestResult:
         """v2 백테스트 실행."""
+        mode = "현물 4전략" if self._use_spot else ("v1 7전략" if self._use_v1 else "v2 레짐")
         print(f"\n{'='*60}")
-        print(f"  FuturesEngine V2 백테스트 | 5m+1h | {days}일")
+        print(f"  FuturesEngine V2 백테스트 | {mode} | 5m+1h | {days}일")
         print(f"  코인: {', '.join(self._coins)}")
         print(f"  레버리지: {self._leverage}x | 수수료: {FUTURES_FEE*100:.2f}%")
         print(f"  최대 포지션: {self._max_position_pct*100:.0f}% | 리스크: {self._base_risk_pct*100:.0f}%")
         print(f"  쿨다운: {self._cooldown_candles}캔들 ({self._cooldown_candles*5}분) | 최소 신뢰도: {self._min_confidence}")
+        if self._use_spot:
+            print("  현물 전략: cis_momentum(0.42), bnf_deviation(0.25), donchian_channel(0.24), larry_williams(0.10)")
+            print(f"  SL/TP: {SPOT_SL_ATR}/{SPOT_TP_ATR} ATR | Trail: {SPOT_TRAIL_ACTIVATION_ATR}/{SPOT_TRAIL_STOP_ATR} ATR")
         print(f"{'='*60}")
 
         all_data = await self.prefetch(days)
@@ -681,7 +916,12 @@ class V2Backtester:
                         last_exit_idx[sym] = candle_idx
                     continue
 
-                strategy = self._v1_adapter if self._use_v1 else self._strategy_selector.select(coin_regime.regime)
+                if self._use_spot:
+                    strategy = self._spot_adapter
+                elif self._use_v1:
+                    strategy = self._v1_adapter
+                else:
+                    strategy = self._strategy_selector.select(coin_regime.regime)
                 current_dir = positions[sym].direction if sym in positions else None
 
                 # 5m 윈도우 슬라이스
@@ -765,8 +1005,15 @@ class V2Backtester:
                         decision.direction, price, atr,
                         decision.stop_loss_atr, decision.take_profit_atr,
                     )
-                    trail_act = price * (1 + 2.0 * atr / price) if decision.direction == Direction.LONG \
-                        else price * (1 - 2.0 * atr / price)
+                    # 현물 전략은 고유 트레일링 ATR 사용
+                    if self._use_spot:
+                        trail_act_mult = SPOT_TRAIL_ACTIVATION_ATR
+                        trail_stop_mult = SPOT_TRAIL_STOP_ATR
+                    else:
+                        trail_act_mult = 2.0
+                        trail_stop_mult = 1.0
+                    trail_act = price * (1 + trail_act_mult * atr / price) if decision.direction == Direction.LONG \
+                        else price * (1 - trail_act_mult * atr / price)
 
                     positions[sym] = V2Position(
                         symbol=sym,
@@ -778,7 +1025,7 @@ class V2Backtester:
                         sl_price=sl_price,
                         tp_price=tp_price,
                         trail_activation_price=trail_act,
-                        trail_stop_atr=1.0,
+                        trail_stop_atr=trail_stop_mult,
                         extreme_price=price,
                         atr_at_entry=atr,
                         entered_idx=candle_idx,
@@ -1310,6 +1557,8 @@ def parse_args():
     parser.add_argument("--trending-only", action="store_true", help="추세 레짐에서만 거래")
     parser.add_argument("--eval-interval", type=int, default=12, help="전략 평가 주기 (5m 캔들, 12=1h)")
     parser.add_argument("--v1-strategies", action="store_true", help="v1 7전략 레짐 미니앙상블 모드")
+    parser.add_argument("--spot-strategies", action="store_true",
+                        help="현물 4전략 SignalCombiner 가중 투표 모드 (라이브 V2 구성 검증)")
     parser.add_argument("--walk-forward", action="store_true", help="Walk-Forward 검증 모드")
     parser.add_argument("--train-days", type=int, default=240, help="WF 학습 기간")
     parser.add_argument("--val-days", type=int, default=60, help="WF 검증 기간")
@@ -1357,9 +1606,17 @@ async def main():
         regime_adx_exit=args.regime_adx_exit,
     )
 
+    if args.spot_strategies and args.v1_strategies:
+        print("오류: --spot-strategies와 --v1-strategies는 동시 사용 불가")
+        sys.exit(1)
+
     if args.v1_strategies:
         bt.enable_v1_strategies()
         print("  v1 7전략 레짐 미니앙상블 모드 활성화")
+
+    if args.spot_strategies:
+        bt.enable_spot_strategies()
+        print("  현물 4전략 SignalCombiner 가중 투표 모드 활성화")
 
     try:
         if args.walk_forward:
