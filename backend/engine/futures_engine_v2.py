@@ -233,10 +233,8 @@ class FuturesEngineV2:
     async def _on_sell_completed(self) -> None:
         """매도 완료 시 카운터 증가 -> N회마다 매매 회고 트리거."""
         self._sells_since_review += 1
-        if (
-            self._sells_since_review >= self._REVIEW_TRIGGER_SELLS
-            and self._agent_coordinator
-        ):
+        if (self._sells_since_review >= self._REVIEW_TRIGGER_SELLS
+                and self._agent_coordinator):
             self._sells_since_review = 0
             task = asyncio.create_task(
                 self._agent_coordinator.run_trade_review(),
@@ -244,7 +242,8 @@ class FuturesEngineV2:
             )
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
-            logger.info("v2_trade_review_triggered", trigger=self._REVIEW_TRIGGER_SELLS)
+            logger.info("v2_trade_review_triggered",
+                        trigger=self._REVIEW_TRIGGER_SELLS)
 
     async def _resync_cash(self, new_cash: float) -> None:
         """BalanceGuard가 호출하는 내부 장부 재동기화 콜백."""

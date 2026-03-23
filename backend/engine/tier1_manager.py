@@ -542,8 +542,6 @@ class Tier1Manager:
             return True
 
         try:
-            from strategies.ml_filter import MLSignalFilter
-
             # evaluator가 indicators에 담아준 시그널+캔들 사용
             signals = decision.indicators.get("_signals", [])
             candle_row = decision.indicators.get("_candle_row")
@@ -558,7 +556,8 @@ class Tier1Manager:
                 logger.debug("ml_filter_skip_no_candle", symbol=symbol)
                 return True
 
-            features = MLSignalFilter.extract_features(
+            # extract_features is a static method — callable on instances
+            features = self._ml_filter.extract_features(
                 signals=signals,
                 row=candle_row,
                 price=price,
@@ -925,9 +924,12 @@ class Tier1Manager:
         indicators = dict(decision.indicators) if decision.indicators else {}
         indicators["regime"] = regime.regime.value
         indicators["regime_confidence"] = round(regime.confidence, 3)
-        # numpy float → Python float 변환
+        # _-prefixed keys are internal transport fields (e.g. _signals, _candle_row)
+        # that are not JSON-serializable — strip before DB store (COIN-40)
         cleaned = {}
         for k, v in indicators.items():
+            if k.startswith("_"):
+                continue
             try:
                 cleaned[k] = float(v) if hasattr(v, "__float__") else v
             except (TypeError, ValueError):

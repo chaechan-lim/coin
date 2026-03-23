@@ -1985,6 +1985,19 @@ class MockMLFilter:
         self.predict_count = 0
         self.last_features = None
 
+    @staticmethod
+    def extract_features(signals, row, price, market_state, combined_confidence):
+        """MLSignalFilter.extract_features 위임."""
+        from strategies.ml_filter import MLSignalFilter
+
+        return MLSignalFilter.extract_features(
+            signals=signals,
+            row=row,
+            price=price,
+            market_state=market_state,
+            combined_confidence=combined_confidence,
+        )
+
     def predict(self, features):
         from strategies.ml_filter import MLPrediction
 
@@ -2282,3 +2295,191 @@ class TestCycleStatsMLFiltered:
         stats = CycleStats()
         stats.ml_filtered_count += 1
         assert stats.ml_filtered_count == 1
+
+
+class TestMLFilterSAR:
+    """SAR + ML 필터 상호작용 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_sar_blocked_by_ml_filter(self, ml_filter_deps, session):
+        """LONG 보유 → 숏 SAR 후보 → ML 필터 차단 → hold 반환."""
+        ml_filter_deps["ml_filter"]._should_trade = False
+        ml_filter_deps["ml_filter"]._win_probability = 0.30
+
+        # SAR 경로 진입을 위해 long/short evaluator가 다른 인스턴스여야 함
+        long_eval = MockLongEvaluator()
+        short_eval = MockShortEvaluator()
+
+        t1 = Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=ml_filter_deps["safe_order"],
+            position_tracker=ml_filter_deps["tracker"],
+            regime_detector=ml_filter_deps["regime"],
+            portfolio_manager=ml_filter_deps["pm"],
+            market_data=ml_filter_deps["market_data"],
+            long_evaluator=long_eval,
+            short_evaluator=short_eval,
+            leverage=3,
+            max_position_pct=0.15,
+            ml_filter=ml_filter_deps["ml_filter"],
+        )
+
+        # LONG 포지션 보유
+        ml_filter_deps["tracker"].open_position(
+            PositionState(
+                symbol="BTC/USDT",
+                direction=Direction.LONG,
+                entry_price=80000.0,
+                quantity=0.01,
+                margin=50.0,
+                leverage=3,
+                extreme_price=80000.0,
+                stop_loss_atr=1.5,
+                take_profit_atr=3.0,
+                trailing_activation_atr=2.0,
+                trailing_stop_atr=1.0,
+                strategy_name="test",
+                confidence=0.7,
+                tier="tier1",
+            )
+        )
+
+        # long_eval hold → SAR 분기 진입
+        long_eval.set_decision("BTC/USDT", _hold_decision("long_eval"))
+        # short_eval open → SAR 후보
+        short_eval.set_decision("BTC/USDT", _short_open_with_ml_indicators())
+
+        regime = _regime_state()
+        result = await t1._evaluate_coin(session, "BTC/USDT", regime)
+
+        # ML 필터가 차단 → SAR 실행 안됨 → hold
+        assert result == "hold"
+        ml_filter_deps["safe_order"].execute_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sar_allowed_by_ml_filter(self, ml_filter_deps, session):
+        """LONG 보유 → 숏 SAR 후보 → ML 필터 통과 → SAR 실행."""
+        ml_filter_deps["ml_filter"]._should_trade = True
+        ml_filter_deps["ml_filter"]._win_probability = 0.65
+
+        long_eval = MockLongEvaluator()
+        short_eval = MockShortEvaluator()
+
+        t1 = Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=ml_filter_deps["safe_order"],
+            position_tracker=ml_filter_deps["tracker"],
+            regime_detector=ml_filter_deps["regime"],
+            portfolio_manager=ml_filter_deps["pm"],
+            market_data=ml_filter_deps["market_data"],
+            long_evaluator=long_eval,
+            short_evaluator=short_eval,
+            leverage=3,
+            max_position_pct=0.15,
+            ml_filter=ml_filter_deps["ml_filter"],
+        )
+
+        ml_filter_deps["tracker"].open_position(
+            PositionState(
+                symbol="BTC/USDT",
+                direction=Direction.LONG,
+                entry_price=80000.0,
+                quantity=0.01,
+                margin=50.0,
+                leverage=3,
+                extreme_price=80000.0,
+                stop_loss_atr=1.5,
+                take_profit_atr=3.0,
+                trailing_activation_atr=2.0,
+                trailing_stop_atr=1.0,
+                strategy_name="test",
+                confidence=0.7,
+                tier="tier1",
+            )
+        )
+
+        long_eval.set_decision("BTC/USDT", _hold_decision("long_eval"))
+        short_eval.set_decision("BTC/USDT", _short_open_with_ml_indicators())
+
+        regime = _regime_state()
+        result = await t1._evaluate_coin(session, "BTC/USDT", regime)
+
+        # ML 필터 통과 → SAR 실행
+        assert result == "sar"
+
+
+class TestMLFilterSerialization:
+    """ML 필터 데이터가 포함된 indicators의 DB 직렬화 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_signal_objects_not_stored_in_strategy_log(
+        self, tier1_with_ml, ml_filter_deps, session
+    ):
+        """실제 Signal 객체가 indicators에 포함돼도 DB 직렬화 시 _-prefix 키가 제거됨."""
+        from strategies.base import Signal
+        from core.enums import SignalType
+
+        real_signals = [
+            Signal(
+                signal_type=SignalType.BUY,
+                confidence=0.75,
+                strategy_name="cis_momentum",
+                reason="test signal",
+            ),
+            Signal(
+                signal_type=SignalType.HOLD,
+                confidence=0.30,
+                strategy_name="bnf_deviation",
+                reason="no signal",
+            ),
+        ]
+
+        decision_with_signals = DirectionDecision(
+            action="open",
+            direction=Direction.LONG,
+            confidence=0.8,
+            sizing_factor=0.7,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            reason="long_signal",
+            strategy_name="cis_momentum",
+            indicators={
+                "close": 80000.0,
+                "atr": 1000.0,
+                "_signals": real_signals,
+                "_candle_row": _make_candle_row(),
+                "_combined_confidence": 0.8,
+            },
+        )
+
+        ml_filter_deps["ml_filter"]._should_trade = True
+        ml_filter_deps["long_eval"].set_decision(
+            "BTC/USDT", decision_with_signals
+        )
+
+        regime = _regime_state()
+        result = await tier1_with_ml._evaluate_coin(
+            session, "BTC/USDT", regime
+        )
+        assert result == "opened"
+
+        # flush → DB 쓰기 (JSON 직렬화 발생)
+        await session.flush()
+
+        # StrategyLog 조회하여 _-prefix 키가 제거됐는지 확인
+        from sqlalchemy import select
+        from core.models import StrategyLog
+
+        logs = (
+            await session.execute(
+                select(StrategyLog).where(StrategyLog.symbol == "BTC/USDT")
+            )
+        ).scalars().all()
+        assert len(logs) >= 1
+
+        for log in logs:
+            if log.indicators:
+                for key in log.indicators:
+                    assert not key.startswith("_"), (
+                        f"Internal key '{key}' leaked to DB"
+                    )
