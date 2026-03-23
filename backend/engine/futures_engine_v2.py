@@ -864,7 +864,7 @@ class FuturesEngineV2:
                             continue
 
                         # SL/TP/trailing 체크
-                        if await self._tier1._check_sl_tp(
+                        if await self._tier1.check_position_stop(
                             session, symbol, state, price, atr
                         ):
                             triggered += 1
@@ -875,7 +875,7 @@ class FuturesEngineV2:
                                 price=price,
                             )
                     except Exception as e:
-                        logger.debug(
+                        logger.warning(
                             "v2_downtime_stop_check_error",
                             symbol=symbol,
                             error=str(e),

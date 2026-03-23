@@ -305,6 +305,74 @@ class TestDailyBuyLimit:
         assert t1._daily_coin_buy_count["BTC/USDT"] == 3
         assert t1._daily_coin_buy_count["ETH/USDT"] == 1
 
+    @pytest.mark.asyncio
+    async def test_restore_daily_buy_count_ignores_cancelled(self, mock_deps, session):
+        """취소/실패 주문은 일일 카운터에 포함하지 않음."""
+        now = datetime.now(timezone.utc)
+
+        # 1 filled order
+        session.add(
+            Order(
+                exchange="binance_futures",
+                symbol="BTC/USDT",
+                side="buy",
+                order_type="market",
+                status="filled",
+                requested_price=80000.0,
+                executed_price=80000.0,
+                requested_quantity=0.01,
+                executed_quantity=0.01,
+                fee=0.32,
+                is_paper=False,
+                strategy_name="test",
+                created_at=now,
+            )
+        )
+        # 1 cancelled order (should be excluded)
+        session.add(
+            Order(
+                exchange="binance_futures",
+                symbol="BTC/USDT",
+                side="buy",
+                order_type="market",
+                status="cancelled",
+                requested_price=80000.0,
+                executed_price=0.0,
+                requested_quantity=0.01,
+                executed_quantity=0.0,
+                fee=0.0,
+                is_paper=False,
+                strategy_name="test",
+                created_at=now,
+            )
+        )
+        # 1 failed order (should be excluded)
+        session.add(
+            Order(
+                exchange="binance_futures",
+                symbol="BTC/USDT",
+                side="buy",
+                order_type="market",
+                status="failed",
+                requested_price=80000.0,
+                executed_price=0.0,
+                requested_quantity=0.01,
+                executed_quantity=0.0,
+                fee=0.0,
+                is_paper=False,
+                strategy_name="test",
+                created_at=now,
+            )
+        )
+        await session.commit()
+
+        t1 = _make_tier1(mock_deps)
+        await t1.restore_daily_buy_count(session)
+
+        # Only the filled order should be counted
+        assert t1._daily_buy_count == 1
+        assert t1._daily_coin_buy_count["BTC/USDT"] == 1
+
 
 # ═══════════════════════════════════════════════════
 # 2. Consecutive Error Force Close Tests
@@ -446,6 +514,87 @@ class TestConsecutiveErrorForceClose:
 
         # No force close attempted (no position)
         mock_deps["safe_order"].execute_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_force_close_failure_doesnt_crash_loop(self, mock_deps, session):
+        """_force_close_stuck_position 실패 시 평가 루프가 계속 진행."""
+        t1 = _make_tier1(mock_deps, max_eval_errors=1, coins=["BTC/USDT", "ETH/USDT"])
+
+        # BTC has position → force close will be attempted
+        pos = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+            tier="tier1",
+        )
+        mock_deps["tracker"].open_position(pos)
+
+        # Both evaluators crash
+        async def failing_eval(symbol, pos_arg, **kwargs):
+            raise RuntimeError("error")
+
+        mock_deps["long_eval"].evaluate = failing_eval
+        mock_deps["short_eval"].evaluate = failing_eval
+
+        # Make force close itself raise (price fetch + DB both fail)
+        mock_deps["market_data"].get_current_price = AsyncMock(
+            side_effect=Exception("network down")
+        )
+
+        with patch("engine.tier1_manager.emit_event", new_callable=AsyncMock):
+            # Should NOT raise — force close error is caught
+            stats = await t1.evaluation_cycle(session)
+
+        # Both coins should have been evaluated (loop wasn't interrupted)
+        assert stats.error_count == 2
+
+    @pytest.mark.asyncio
+    async def test_db_reset_failure_clears_error_counter(self, mock_deps, session):
+        """DB 리셋 실패해도 에러 카운터와 인메모리 상태는 정리됨."""
+        t1 = _make_tier1(mock_deps, max_eval_errors=1)
+        pos = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=80000.0,
+            stop_loss_atr=1.5,
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+            tier="tier1",
+        )
+        mock_deps["tracker"].open_position(pos)
+        t1._last_exit_time["BTC/USDT"] = time.time()
+        t1._last_exit_direction["BTC/USDT"] = Direction.LONG
+
+        # Price = 0 → market close skipped → DB reset path
+        mock_deps["market_data"].get_current_price = AsyncMock(return_value=0.0)
+
+        async def failing_eval(symbol, pos_arg, **kwargs):
+            raise RuntimeError("error")
+
+        mock_deps["long_eval"].evaluate = failing_eval
+        mock_deps["short_eval"].evaluate = failing_eval
+
+        with patch("engine.tier1_manager.emit_event", new_callable=AsyncMock):
+            await t1.evaluation_cycle(session)
+
+        # Even if DB has no position row (so flush is a noop),
+        # in-memory state should be cleaned via finally block
+        assert "BTC/USDT" not in t1._eval_error_counts
+        assert "BTC/USDT" not in t1._last_exit_time
+        assert "BTC/USDT" not in t1._last_exit_direction
 
     @pytest.mark.asyncio
     async def test_force_close_market_failed_db_reset(self, mock_deps, session):
@@ -658,6 +807,44 @@ class TestCooldownPersistence:
         count = await t1.restore_cooldowns(session)
         assert count == 1
         assert t1._last_exit_direction["ETH/USDT"] == Direction.SHORT
+
+    @pytest.mark.asyncio
+    async def test_restore_cooldowns_skips_unknown_direction(self, mock_deps, session):
+        """last_sell_direction과 position.direction 모두 NULL이면 쿨다운 스킵."""
+        from sqlalchemy import text
+
+        t1 = _make_tier1(
+            mock_deps,
+            long_cooldown_seconds=43200,
+            short_cooldown_seconds=93600,
+        )
+
+        sell_time = datetime.now(timezone.utc) - timedelta(hours=1)
+        # Position.direction has default="long", so use raw SQL to set NULL
+        pos = Position(
+            exchange="binance_futures",
+            symbol="BTC/USDT",
+            quantity=0.0,
+            average_buy_price=80000.0,
+            last_sell_at=sell_time,
+            last_sell_direction=None,
+        )
+        session.add(pos)
+        await session.flush()
+
+        # Force direction to NULL via raw SQL (ORM default prevents this)
+        await session.execute(
+            text("UPDATE positions SET direction = NULL WHERE symbol = 'BTC/USDT'")
+        )
+        await session.flush()
+        # Expire cached ORM state to re-read from DB
+        session.expire_all()
+
+        count = await t1.restore_cooldowns(session)
+        assert count == 0
+        # Should NOT be in cooldown (skipped, not defaulted to LONG)
+        assert "BTC/USDT" not in t1._last_exit_time
+        assert "BTC/USDT" not in t1._last_exit_direction
 
     @pytest.mark.asyncio
     async def test_restore_cooldowns_fallback_direction(self, mock_deps, session):
@@ -890,6 +1077,50 @@ class TestDowntimeStopCheck:
 
         # Position should still exist
         assert engine._positions.has_position("BTC/USDT")
+
+    @pytest.mark.asyncio
+    async def test_check_position_stop_public_api(self, engine_deps, session_factory):
+        """check_position_stop (public) 메서드가 _check_sl_tp에 위임."""
+        engine = engine_deps
+
+        pos = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            quantity=0.01,
+            entry_price=85000.0,
+            margin=100.0,
+            leverage=3,
+            extreme_price=85000.0,
+            stop_loss_atr=1.5,  # SL at 85000 - 1500 = 83500
+            take_profit_atr=3.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+            tier="tier1",
+        )
+        engine._positions.open_position(pos)
+        pos.update_extreme(85000.0)
+
+        # Mock the close
+        engine._tier1._safe_order = AsyncMock(spec=SafeOrderPipeline)
+        engine._tier1._safe_order.execute_order = AsyncMock(
+            return_value=OrderResponse(
+                success=True,
+                order_id=1,
+                executed_price=80000.0,
+                executed_quantity=0.01,
+            )
+        )
+
+        from db.session import get_session_factory
+
+        sf = session_factory
+        async with sf() as session:
+            with patch("engine.tier1_manager.emit_event", new_callable=AsyncMock):
+                # Price below SL → should trigger
+                result = await engine._tier1.check_position_stop(
+                    session, "BTC/USDT", pos, price=80000.0, atr=1000.0
+                )
+            assert result is True
 
     @pytest.mark.asyncio
     async def test_downtime_error_handling(self, engine_deps, session_factory):

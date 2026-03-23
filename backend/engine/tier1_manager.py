@@ -259,7 +259,14 @@ class Tier1Manager:
                 if err_count >= self._max_eval_errors and self._positions.has_position(
                     coin
                 ):
-                    await self._force_close_stuck_position(session, coin, str(e))
+                    try:
+                        await self._force_close_stuck_position(session, coin, str(e))
+                    except Exception as fc_err:
+                        logger.error(
+                            "tier1_force_close_failed",
+                            coin=coin,
+                            error=str(fc_err),
+                        )
 
         elapsed_ms = (time.monotonic() - start_time) * 1000
         self._cycle_count += 1
@@ -852,6 +859,17 @@ class Tier1Manager:
             return True
         return False
 
+    async def check_position_stop(
+        self,
+        session: AsyncSession,
+        symbol: str,
+        state: PositionState,
+        price: float,
+        atr: float,
+    ) -> bool:
+        """SL/TP/trailing 체크 (public). 히트 시 청산 + 쿨다운 설정. Returns True if closed."""
+        return await self._check_sl_tp(session, symbol, state, price, atr)
+
     async def _check_sl_tp(
         self,
         session: AsyncSession,
@@ -946,6 +964,7 @@ class Tier1Manager:
             .where(
                 Order.exchange == self._exchange_name,
                 Order.side == "buy",
+                Order.status == "filled",
                 Order.created_at >= today_start,
             )
             .group_by(Order.symbol)
@@ -1025,38 +1044,46 @@ class Tier1Manager:
             )
 
         # 2차: 거래소 매도 불가 → DB 포지션 강제 리셋
-        result = await session.execute(
-            select(Position).where(
-                Position.symbol == symbol,
-                Position.quantity > 0,
-                Position.exchange == self._exchange_name,
+        try:
+            result = await session.execute(
+                select(Position).where(
+                    Position.symbol == symbol,
+                    Position.quantity > 0,
+                    Position.exchange == self._exchange_name,
+                )
             )
-        )
-        position = result.scalar_one_or_none()
-        if position:
-            position.quantity = 0
-            position.current_value = 0
-            await session.flush()
+            position = result.scalar_one_or_none()
+            if position:
+                position.quantity = 0
+                position.current_value = 0
+                await session.flush()
 
-        self._positions.close_position(symbol)
-        self._eval_error_counts.pop(symbol, None)
-        # 강제 청산은 에러 기반이므로 쿨다운 면제
-        self._last_exit_time.pop(symbol, None)
-        self._last_exit_direction.pop(symbol, None)
-
-        logger.error(
-            "tier1_force_close_db_reset",
-            symbol=symbol,
-            detail="거래소 매도 실패 → DB 포지션 강제 리셋",
-        )
-        await emit_event(
-            "critical",
-            "engine",
-            f"Tier1 강제 청산 (DB 리셋): {symbol}",
-            detail=f"연속 {err_count}회 평가 실패, 거래소 매도 불가 → DB 포지션 0으로 리셋. "
-            f"수동으로 거래소에서 {symbol} 포지션을 확인하세요.",
-            metadata={"symbol": symbol, "consecutive_errors": err_count},
-        )
+            logger.error(
+                "tier1_force_close_db_reset",
+                symbol=symbol,
+                detail="거래소 매도 실패 → DB 포지션 강제 리셋",
+            )
+            await emit_event(
+                "critical",
+                "engine",
+                f"Tier1 강제 청산 (DB 리셋): {symbol}",
+                detail=f"연속 {err_count}회 평가 실패, 거래소 매도 불가 → DB 포지션 0으로 리셋. "
+                f"수동으로 거래소에서 {symbol} 포지션을 확인하세요.",
+                metadata={"symbol": symbol, "consecutive_errors": err_count},
+            )
+        except Exception as db_err:
+            logger.error(
+                "tier1_force_close_db_reset_failed",
+                symbol=symbol,
+                error=str(db_err),
+            )
+        finally:
+            # 항상 인메모리 상태 정리 — 무한 재시도 방지
+            self._positions.close_position(symbol)
+            self._eval_error_counts.pop(symbol, None)
+            # 강제 청산은 에러 기반이므로 쿨다운 면제
+            self._last_exit_time.pop(symbol, None)
+            self._last_exit_direction.pop(symbol, None)
 
     # ── COIN-41: 쿨다운 DB 영속화 ──────────────────
 
@@ -1134,7 +1161,14 @@ class Tier1Manager:
                     Direction.SHORT if pos.direction == "short" else Direction.LONG
                 )
             else:
-                self._last_exit_direction[pos.symbol] = Direction.LONG
+                # 방향 정보 없음 — 쿨다운 스킵 (잘못된 기본값보다 안전)
+                logger.warning(
+                    "tier1_cooldown_restore_skip_no_direction",
+                    symbol=pos.symbol,
+                    detail="last_sell_direction과 position.direction 모두 NULL",
+                )
+                self._last_exit_time.pop(pos.symbol, None)
+                continue
 
             restored += 1
             logger.debug(
