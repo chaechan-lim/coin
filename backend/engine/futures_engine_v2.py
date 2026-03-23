@@ -24,7 +24,7 @@ from engine.strategy_selector import StrategySelector
 from engine.spot_evaluator import SpotEvaluator
 from engine.tier1_manager import Tier1Manager
 from engine.tier2_scanner import Tier2Scanner
-from engine.safe_order_pipeline import SafeOrderPipeline
+from engine.safe_order_pipeline import SafeOrderPipeline, OrderRequest
 from engine.balance_guard import BalanceGuard
 from engine.position_state_tracker import PositionState, PositionStateTracker
 from engine.order_manager import OrderManager
@@ -177,8 +177,10 @@ class FuturesEngineV2:
 
         # WS 모니터링 상태
         self._close_lock = asyncio.Lock()  # WS/eval 동시 청산 방지
+        self._ws_reconnect_lock = asyncio.Lock()  # 재연결 동시 호출 방지
         self._ws_monitor_task: asyncio.Task | None = None
-        self._ws_balance_task: asyncio.Task | None = None
+        self._ws_bp_task: asyncio.Task | None = None   # WS balance audit loop
+        self._ws_pos_task: asyncio.Task | None = None   # WS position sync loop
         self._fast_sl_task: asyncio.Task | None = None
         self._ws_enabled = True  # WS 활성화 플래그
 
@@ -291,8 +293,11 @@ class FuturesEngineV2:
                 self._ws_monitor_task = asyncio.create_task(
                     self._ws_price_monitor_loop(), name="v2_ws_price"
                 )
-                self._ws_balance_task = asyncio.create_task(
-                    self._ws_balance_position_loop(), name="v2_ws_balance"
+                self._ws_bp_task = asyncio.create_task(
+                    self._ws_balance_loop(), name="v2_ws_balance"
+                )
+                self._ws_pos_task = asyncio.create_task(
+                    self._ws_position_loop(), name="v2_ws_position"
                 )
                 ws_started = True
                 logger.info("v2_ws_started")
@@ -315,7 +320,7 @@ class FuturesEngineV2:
             asyncio.create_task(self._persist_loop(), name="v2_persist"),
         ]
         # WS 태스크도 관리 목록에 추가
-        for t in (self._ws_monitor_task, self._ws_balance_task, self._fast_sl_task):
+        for t in (self._ws_monitor_task, self._ws_bp_task, self._ws_pos_task, self._fast_sl_task):
             if t is not None:
                 self._tasks.append(t)
 
@@ -330,7 +335,8 @@ class FuturesEngineV2:
                     pass
         self._tasks = []
         self._ws_monitor_task = None
-        self._ws_balance_task = None
+        self._ws_bp_task = None
+        self._ws_pos_task = None
         self._fast_sl_task = None
 
         # WS 연결 해제
@@ -344,23 +350,28 @@ class FuturesEngineV2:
     # ── WS 실시간 모니터링 ────────────────────────
 
     async def _ws_reconnect(self, backoff: float) -> float:
-        """WS 재연결 시도. 성공 시 backoff 리셋, 실패 시 증가된 backoff 반환."""
-        wait = min(backoff, self._WS_RECONNECT_MAX)
-        logger.info("v2_ws_reconnect_attempt", wait_sec=wait)
-        await asyncio.sleep(wait)
+        """WS 재연결 시도. 성공 시 backoff 리셋, 실패 시 증가된 backoff 반환.
 
-        try:
-            await self._exchange.close_ws()
-        except Exception:
-            pass
+        _ws_reconnect_lock으로 동시 호출을 직렬화하여 다중 루프의
+        동시 재연결 폭풍(reconnect storm)을 방지한다.
+        """
+        async with self._ws_reconnect_lock:
+            wait = min(backoff, self._WS_RECONNECT_MAX)
+            logger.info("v2_ws_reconnect_attempt", wait_sec=wait)
+            await asyncio.sleep(wait)
 
-        try:
-            await self._exchange.create_ws_exchange()
-            logger.info("v2_ws_reconnected")
-            return self._WS_RECONNECT_MIN
-        except Exception as e:
-            logger.warning("v2_ws_reconnect_failed", error=str(e))
-            return min(wait * self._WS_RECONNECT_FACTOR, self._WS_RECONNECT_MAX)
+            try:
+                await self._exchange.close_ws()
+            except Exception:
+                pass
+
+            try:
+                await self._exchange.create_ws_exchange()
+                logger.info("v2_ws_reconnected")
+                return self._WS_RECONNECT_MIN
+            except Exception as e:
+                logger.warning("v2_ws_reconnect_failed", error=str(e))
+                return min(wait * self._WS_RECONNECT_FACTOR, self._WS_RECONNECT_MAX)
 
     async def _ws_price_monitor_loop(self) -> None:
         """WS 실시간 가격 수신 → 보유 포지션 SL/TP/trailing 체크.
@@ -492,8 +503,6 @@ class FuturesEngineV2:
         self, symbol: str, state: PositionState, price: float, reason: str,
     ) -> None:
         """close_lock 하에서 DB 검증 + 청산 실행 (WS 모니터 전용)."""
-        from engine.safe_order_pipeline import OrderRequest
-
         # DB에서 포지션 재확인
         sf = get_session_factory()
         async with sf() as session:
@@ -558,20 +567,11 @@ class FuturesEngineV2:
                         ticker = await self._exchange.fetch_ticker(symbol)
                         price = ticker.last
                         if price > 0:
-                            state.update_extreme(price)
                             await self._realtime_stop_check(symbol, price)
                     except Exception as e:
                         logger.debug("v2_fast_sl_check_error", symbol=symbol, error=str(e))
             except Exception as e:
                 logger.warning("v2_fast_sl_loop_error", error=str(e))
-
-    async def _ws_balance_position_loop(self) -> None:
-        """WS 잔고 감사 + 포지션 동기화 루프 (asyncio.gather로 병렬)."""
-        await asyncio.gather(
-            self._ws_balance_loop(),
-            self._ws_position_loop(),
-            return_exceptions=True,
-        )
 
     async def _ws_balance_loop(self) -> None:
         """WS 잔고 실시간 감사 — 내부 장부 vs 거래소 잔고 차이 모니터링.
@@ -663,6 +663,19 @@ class FuturesEngineV2:
                         )
                         db_pos = result.scalar_one_or_none()
                         if not db_pos:
+                            continue
+
+                        # 외부 청산 감지 (청산/수동 종료 등)
+                        if contracts == 0 and db_pos.quantity > 0:
+                            logger.warning(
+                                "v2_external_close_detected",
+                                symbol=sym,
+                                db_quantity=db_pos.quantity,
+                            )
+                            db_pos.quantity = 0
+                            db_pos.current_value = 0
+                            self._positions.close_position(sym)
+                            changed = True
                             continue
 
                         margin = float(fp.get("initialMargin", 0) or 0)
@@ -924,8 +937,12 @@ class FuturesEngineV2:
             and not self._ws_monitor_task.done()
         )
         ws_balance_ok = (
-            self._ws_balance_task is not None
-            and not self._ws_balance_task.done()
+            self._ws_bp_task is not None
+            and not self._ws_bp_task.done()
+        )
+        ws_position_ok = (
+            self._ws_pos_task is not None
+            and not self._ws_pos_task.done()
         )
         fast_sl_active = (
             self._fast_sl_task is not None
@@ -944,5 +961,6 @@ class FuturesEngineV2:
             "tracked_coins": self.tracked_coins,
             "ws_price_monitor": ws_price_ok,
             "ws_balance_position": ws_balance_ok,
+            "ws_position_sync": ws_position_ok,
             "fast_sl_fallback": fast_sl_active,
         }
