@@ -10,7 +10,7 @@
 빗썸(현물, 비활성) + 바이낸스 현물(live) + 바이낸스 USDM 선물(live, 3x) + 서지 **쿼드 엔진** 24시간 자동 트레이딩 시스템.
 가중 투표 (HOLD=기권) + ML 시그널 필터 + 5요소 시장 감지 + 적응형 가중치, AI 에이전트 5종, Discord 봇(자연어 제어), React 대시보드(8탭).
 **현물 4전략** (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + **선물 7전략** (MA, RSI, MACD, 볼린저RSI, 스토캐스틱RSI, OBV, BB스퀴즈).
-**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **1717 유닛 테스트**.
+**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **1747 유닛 테스트**.
 
 ---
 
@@ -132,6 +132,7 @@ coin/
 | backtest_v2 현물 4전략 모드 (COIN-44) | `--spot-strategies` CLI 플래그 추가. SpotStrategyAdapter가 현물 4전략(cis_momentum, bnf_deviation, donchian_channel, larry_williams)을 RegimeStrategy 인터페이스로 래핑. SignalCombiner(SPOT_WEIGHTS) 가중 투표, 1h→4h 리샘플링, BUY→LONG/SELL→SHORT 매핑, SL 5.0/TP 14.0 ATR(SpotEvaluator 라이브 설정 일치). 라이브 V2 구성의 선물 성능 540일 검증 가능. 테스트 16개 추가(1717 total). |
 | backtest_v2 현물 1h 윈도우 확대 (COIN-45) | `LOOKBACK_WINDOW=60`으로 1h→4h 리샘플링 시 15개 4h 캔들 → `_resample_1h_to_4h()` 30개 미달 → 항상 HOLD → 0 거래 버그 수정. `SPOT_1H_LOOKBACK=400` 상수 추가 (100 4h - 59 SMA_60 = ~41개 ≥ 30). spot 모드에서 1h 윈도우 슬라이싱에 확대 적용. 테스트 5개 추가(1722 total). |
 | V2 선물 엔진 거래 안전장치 (COIN-41) | V1 TradingEngine의 4가지 안전장치를 V2 FuturesEngineV2/Tier1Manager에 포팅. (1) **일일 매수 한도**: 20건/일 전체, 3건/일/코인, UTC 자정 리셋, Order DB에서 재시작 시 복원. (2) **연속 에러 강제청산**: 3회 연속 평가 실패 → SafeOrderPipeline으로 포지션 강제 종료, 실패 시 DB 직접 리셋 폴백. 강제청산은 쿨다운 면제. (3) **쿨다운 DB 영속화**: `Position.last_sell_at` + 신규 `last_sell_direction` 컬럼으로 방향별 쿨다운 영속화, `_persist_loop`에서 5분마다 저장, `initialize()`에서 복원. (4) **다운타임 SL/TP 체크**: `start()`에서 엔진 시작 전 모든 오픈 포지션의 SL/TP 조건 즉시 점검. `FuturesV2Config`에 `tier1_daily_buy_limit`/`tier1_max_daily_coin_buys`/`tier1_max_eval_errors` 설정 추가. 테스트 46개 추가(1701 total). |
+| V2 포지션 관리 안전장치 5종 (COIN-43) | V1의 5가지 포지션 관리 기능을 V2에 포팅. (1) **Paired exit**: 듀얼 이밸류에이터 아키텍처로 방향별 평가자만 청산 가능 (LONG→long_evaluator, SHORT→short_evaluator). (2) **교차 거래소 충돌 감지**: 숏 진입 전 현물 롱 확인, conf≥0.65 → 현물 청산 후 진행, 미달 시 차단. callback 패턴으로 느슨한 결합. (3) **셧다운 포지션 경고**: stop() 시 오픈 포지션 PnL 로깅 + emit_event 알림. (4) **SL 이벤트 스팸 방지**: 심볼당 5분 쿨다운 (`_last_stop_event_time`), WS 경로도 포함, 청산 완료 시 해제. (5) **Tier1 max_hold_hours**: 설정 시간 초과 포지션 강제 청산 (기본 0=비활성). `FuturesV2Config.tier1_max_hold_hours` 추가. 테스트 30개 추가(1747 total). |
 
 ### 낮은 우선순위
 
