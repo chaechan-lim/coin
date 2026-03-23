@@ -2483,3 +2483,568 @@ class TestMLFilterSerialization:
                     assert not key.startswith("_"), (
                         f"Internal key '{key}' leaked to DB"
                     )
+
+
+# ══════════════════════════════════════════════════════════════════
+# COIN-42: 리스크 관리 테스트
+# ══════════════════════════════════════════════════════════════════
+
+
+def _regime_state_with_trend(regime=Regime.TRENDING_UP, trend_direction=1):
+    """트렌드 방향을 지정할 수 있는 RegimeState 생성."""
+    return RegimeState(
+        regime=regime,
+        confidence=0.8,
+        adx=30,
+        bb_width=3.0,
+        atr_pct=1.5,
+        volume_ratio=1.2,
+        trend_direction=trend_direction,
+        timestamp=datetime.now(timezone.utc),
+    )
+
+
+@pytest.fixture
+def risk_deps():
+    """리스크 관리 테스트용 의존성 (all risk flags enabled)."""
+    regime = RegimeDetector()
+    regime._current = _regime_state()
+
+    safe_order = AsyncMock(spec=SafeOrderPipeline)
+    safe_order.execute_order = AsyncMock(
+        return_value=OrderResponse(
+            success=True,
+            order_id=1,
+            executed_price=80000.0,
+            executed_quantity=0.01,
+            fee=0.32,
+        )
+    )
+
+    tracker = PositionStateTracker()
+
+    pm = MagicMock(spec=PortfolioManager)
+    pm.cash_balance = 10000.0  # large enough to avoid cap issues
+
+    market_data = AsyncMock()
+    market_data.get_ohlcv_df = AsyncMock(return_value=_make_df())
+    market_data.get_current_price = AsyncMock(return_value=80000.0)
+
+    long_eval = MockLongEvaluator()
+    short_eval = MockShortEvaluator()
+
+    return {
+        "regime": regime,
+        "safe_order": safe_order,
+        "tracker": tracker,
+        "pm": pm,
+        "market_data": market_data,
+        "long_eval": long_eval,
+        "short_eval": short_eval,
+    }
+
+
+@pytest.fixture
+def tier1_risk(risk_deps):
+    """Tier1Manager with all COIN-42 risk flags enabled."""
+    return Tier1Manager(
+        coins=["BTC/USDT", "ETH/USDT"],
+        safe_order=risk_deps["safe_order"],
+        position_tracker=risk_deps["tracker"],
+        regime_detector=risk_deps["regime"],
+        portfolio_manager=risk_deps["pm"],
+        market_data=risk_deps["market_data"],
+        long_evaluator=risk_deps["long_eval"],
+        short_evaluator=risk_deps["short_eval"],
+        leverage=5,
+        max_position_pct=0.15,
+        min_confidence=0.4,
+        cooldown_seconds=0,
+        asymmetric_mode=True,
+        dynamic_sl=True,
+        atr_leverage_scaling=True,
+    )
+
+
+# ── TestAsymmetricMode ──────────────────────────────────────────
+
+
+class TestAsymmetricMode:
+    """비대칭 모드: TRENDING_DOWN/VOLATILE(bearish)에서 롱 차단."""
+
+    def test_is_bearish_trending_down(self):
+        rs = _regime_state_with_trend(Regime.TRENDING_DOWN, trend_direction=-1)
+        assert Tier1Manager._is_bearish_regime(rs) is True
+
+    def test_is_bearish_trending_down_positive_trend(self):
+        """TRENDING_DOWN은 trend_direction과 무관하게 항상 bearish."""
+        rs = _regime_state_with_trend(Regime.TRENDING_DOWN, trend_direction=1)
+        assert Tier1Manager._is_bearish_regime(rs) is True
+
+    def test_is_bearish_volatile_negative_trend(self):
+        rs = _regime_state_with_trend(Regime.VOLATILE, trend_direction=-1)
+        assert Tier1Manager._is_bearish_regime(rs) is True
+
+    def test_not_bearish_volatile_positive_trend(self):
+        rs = _regime_state_with_trend(Regime.VOLATILE, trend_direction=1)
+        assert Tier1Manager._is_bearish_regime(rs) is False
+
+    def test_not_bearish_trending_up(self):
+        rs = _regime_state_with_trend(Regime.TRENDING_UP, trend_direction=1)
+        assert Tier1Manager._is_bearish_regime(rs) is False
+
+    def test_not_bearish_ranging(self):
+        rs = _regime_state_with_trend(Regime.RANGING, trend_direction=0)
+        assert Tier1Manager._is_bearish_regime(rs) is False
+
+    @pytest.mark.asyncio
+    async def test_long_blocked_in_downtrend(self, risk_deps, tier1_risk, session):
+        """TRENDING_DOWN에서 롱 진입 → hold로 차단."""
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_DOWN)
+
+        risk_deps["long_eval"].set_decision("BTC/USDT", _long_open_decision(
+            indicators={"close": 80000.0, "atr": 1000.0},
+        ))
+
+        result = await tier1_risk._evaluate_coin(
+            session, "BTC/USDT", risk_deps["regime"]._current
+        )
+        assert result == "hold"
+
+    @pytest.mark.asyncio
+    async def test_short_allowed_in_downtrend(self, risk_deps, tier1_risk, session):
+        """TRENDING_DOWN에서 숏 진입 → 허용."""
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_DOWN)
+
+        risk_deps["short_eval"].set_decision("BTC/USDT", _short_open_decision(
+            indicators={"close": 80000.0, "atr": 1000.0},
+        ))
+
+        result = await tier1_risk._evaluate_coin(
+            session, "BTC/USDT", risk_deps["regime"]._current
+        )
+        assert result == "opened"
+
+    @pytest.mark.asyncio
+    async def test_long_allowed_in_uptrend(self, risk_deps, tier1_risk, session):
+        """TRENDING_UP에서 롱 진입 → 허용."""
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_UP)
+
+        risk_deps["long_eval"].set_decision("BTC/USDT", _long_open_decision(
+            indicators={"close": 80000.0, "atr": 1000.0},
+        ))
+
+        result = await tier1_risk._evaluate_coin(
+            session, "BTC/USDT", risk_deps["regime"]._current
+        )
+        assert result == "opened"
+
+    @pytest.mark.asyncio
+    async def test_disabled_allows_long_in_downtrend(self, risk_deps, session):
+        """asymmetric_mode=False면 TRENDING_DOWN에서도 롱 허용."""
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_DOWN)
+
+        tier1_no_asym = Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=risk_deps["safe_order"],
+            position_tracker=risk_deps["tracker"],
+            regime_detector=risk_deps["regime"],
+            portfolio_manager=risk_deps["pm"],
+            market_data=risk_deps["market_data"],
+            long_evaluator=risk_deps["long_eval"],
+            short_evaluator=risk_deps["short_eval"],
+            leverage=5,
+            max_position_pct=0.15,
+            min_confidence=0.4,
+            cooldown_seconds=0,
+            asymmetric_mode=False,
+        )
+
+        risk_deps["long_eval"].set_decision("BTC/USDT", _long_open_decision(
+            indicators={"close": 80000.0, "atr": 1000.0},
+        ))
+
+        result = await tier1_no_asym._evaluate_coin(
+            session, "BTC/USDT", risk_deps["regime"]._current
+        )
+        assert result == "opened"
+
+
+# ── TestDynamicSL ───────────────────────────────────────────────
+
+
+class TestDynamicSL:
+    """동적 SL: 레짐별 ATR mult 스케일링."""
+
+    def test_trending_up_no_change(self, risk_deps, tier1_risk):
+        """TRENDING_UP: multiplier=1.0 → 그대로."""
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_UP)
+        result = tier1_risk._apply_dynamic_sl(2.0)
+        assert result == 2.0  # 2.0 * 1.0 = 2.0
+
+    def test_trending_down_tighter(self, risk_deps, tier1_risk):
+        """TRENDING_DOWN: multiplier=0.6 → 타이트."""
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_DOWN)
+        result = tier1_risk._apply_dynamic_sl(2.0)
+        assert result == 1.2  # 2.0 * 0.6 = 1.2
+
+    def test_ranging_moderate(self, risk_deps, tier1_risk):
+        """RANGING: multiplier=0.8."""
+        risk_deps["regime"]._current = _regime_state(Regime.RANGING)
+        result = tier1_risk._apply_dynamic_sl(2.0)
+        assert result == 1.6  # 2.0 * 0.8 = 1.6
+
+    def test_volatile_tighter(self, risk_deps, tier1_risk):
+        """VOLATILE: multiplier=0.7."""
+        risk_deps["regime"]._current = _regime_state(Regime.VOLATILE)
+        result = tier1_risk._apply_dynamic_sl(2.0)
+        assert result == 1.4  # 2.0 * 0.7 = 1.4
+
+    def test_floor_clamp(self, risk_deps, tier1_risk):
+        """SL이 floor 미만이면 floor로 클램프."""
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_DOWN)
+        # 0.5 * 0.6 = 0.3, but floor for TRENDING_DOWN = 0.8
+        result = tier1_risk._apply_dynamic_sl(0.5)
+        assert result == 0.8
+
+    def test_cap_clamp(self, risk_deps, tier1_risk):
+        """SL이 cap 초과이면 cap으로 클램프."""
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_DOWN)
+        # 10.0 * 0.6 = 6.0, but cap for TRENDING_DOWN = 4.0
+        result = tier1_risk._apply_dynamic_sl(10.0)
+        assert result == 4.0
+
+    def test_no_regime_returns_base(self, risk_deps, tier1_risk):
+        """레짐 없으면 base_sl_atr 그대로 반환."""
+        risk_deps["regime"]._current = None
+        result = tier1_risk._apply_dynamic_sl(2.0)
+        assert result == 2.0
+
+    @pytest.mark.asyncio
+    async def test_sl_check_uses_dynamic_and_restores(self, risk_deps, tier1_risk, session):
+        """_check_sl_tp에서 동적 SL 적용 후 원복 확인."""
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_DOWN)
+
+        state = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=5,
+            extreme_price=80000.0,
+            stop_loss_atr=2.0,
+            take_profit_atr=4.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+            tier="tier1",
+        )
+
+        original_sl = state.stop_loss_atr
+        # Price that doesn't trigger SL
+        await tier1_risk._check_sl_tp(session, "BTC/USDT", state, 79500.0, 1000.0)
+        # SL should be restored to original
+        assert state.stop_loss_atr == original_sl
+
+    @pytest.mark.asyncio
+    async def test_dynamic_sl_triggers_tighter_sl(self, risk_deps, tier1_risk, session):
+        """TRENDING_DOWN에서 동적 SL이 더 타이트하게 적용되어 SL 히트."""
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_DOWN)
+
+        # entry=80000, atr=1000
+        # Original SL: 80000 - (1000 * 2.0) = 78000
+        # Dynamic SL (TRENDING_DOWN, mult=0.6): 2.0 * 0.6 = 1.2
+        #   → SL: 80000 - (1000 * 1.2) = 78800
+        # Price 78700 < 78800 → SL hit with dynamic, but NOT without
+        state = PositionState(
+            symbol="BTC/USDT",
+            direction=Direction.LONG,
+            quantity=0.01,
+            entry_price=80000.0,
+            margin=100.0,
+            leverage=5,
+            extreme_price=80000.0,
+            stop_loss_atr=2.0,
+            take_profit_atr=4.0,
+            trailing_activation_atr=2.0,
+            trailing_stop_atr=1.0,
+            tier="tier1",
+        )
+        risk_deps["tracker"].open_position(state)
+
+        result = await tier1_risk._check_sl_tp(
+            session, "BTC/USDT", state, 78700.0, 1000.0
+        )
+        assert result is True  # dynamic SL triggered
+
+
+# ── TestATRLeverageScaling ──────────────────────────────────────
+
+
+class TestATRLeverageScaling:
+    """ATR% 기반 레버리지 스케일링."""
+
+    def test_low_atr_full_leverage(self, tier1_risk):
+        """낮은 ATR(1%) → 최대 레버리지(5x)."""
+        lev = tier1_risk._calc_atr_leverage(atr=800.0, close=80000.0)
+        # ATR% = 1% → tier (0.0, 5) → min(5, 5) = 5
+        assert lev == 5
+
+    def test_high_atr_reduced_leverage(self, tier1_risk):
+        """높은 ATR(8%) → 레버리지 3x로 축소."""
+        lev = tier1_risk._calc_atr_leverage(atr=6400.0, close=80000.0)
+        # ATR% = 8% → tier (7.0, 3) → min(5, 3) = 3
+        assert lev == 3
+
+    def test_very_high_atr_minimal_leverage(self, tier1_risk):
+        """매우 높은 ATR(25%) → 레버리지 1x."""
+        lev = tier1_risk._calc_atr_leverage(atr=20000.0, close=80000.0)
+        # ATR% = 25% → tier (20.0, 1) → min(5, 1) = 1
+        assert lev == 1
+
+    def test_medium_atr_4x(self, tier1_risk):
+        """중간 ATR(6%) → 레버리지 4x."""
+        lev = tier1_risk._calc_atr_leverage(atr=4800.0, close=80000.0)
+        # ATR% = 6% → tier (5.0, 4) → min(5, 4) = 4
+        assert lev == 4
+
+    def test_zero_close_returns_1(self, tier1_risk):
+        """close=0 → 안전하게 1x."""
+        lev = tier1_risk._calc_atr_leverage(atr=1000.0, close=0.0)
+        assert lev == 1
+
+    def test_config_leverage_cap(self, risk_deps):
+        """설정 레버리지(2x)가 ATR 레버리지(5x)보다 작으면 설정값 우선."""
+        tier1_low_lev = Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=risk_deps["safe_order"],
+            position_tracker=risk_deps["tracker"],
+            regime_detector=risk_deps["regime"],
+            portfolio_manager=risk_deps["pm"],
+            market_data=risk_deps["market_data"],
+            long_evaluator=risk_deps["long_eval"],
+            short_evaluator=risk_deps["short_eval"],
+            leverage=2,
+            atr_leverage_scaling=True,
+        )
+        # ATR% = 1% → tier allows 5, but config is 2 → min(2, 5) = 2
+        lev = tier1_low_lev._calc_atr_leverage(atr=800.0, close=80000.0)
+        assert lev == 2
+
+
+# ── TestRegimeSizing ────────────────────────────────────────────
+
+
+class TestRegimeSizing:
+    """레짐별 포지션 사이징 팩터."""
+
+    def test_trending_up_full_size(self, risk_deps, tier1_risk):
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_UP)
+        assert tier1_risk._get_regime_sizing_factor() == 1.0
+
+    def test_trending_down_half_size(self, risk_deps, tier1_risk):
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_DOWN)
+        assert tier1_risk._get_regime_sizing_factor() == 0.5
+
+    def test_ranging_80_pct(self, risk_deps, tier1_risk):
+        risk_deps["regime"]._current = _regime_state(Regime.RANGING)
+        assert tier1_risk._get_regime_sizing_factor() == 0.8
+
+    def test_volatile_60_pct(self, risk_deps, tier1_risk):
+        risk_deps["regime"]._current = _regime_state(Regime.VOLATILE)
+        assert tier1_risk._get_regime_sizing_factor() == 0.6
+
+    def test_no_regime_defaults_to_1(self, risk_deps, tier1_risk):
+        risk_deps["regime"]._current = None
+        assert tier1_risk._get_regime_sizing_factor() == 1.0
+
+    def test_margin_smaller_in_downtrend(self, risk_deps, tier1_risk):
+        """TRENDING_DOWN 마진 < TRENDING_UP 마진."""
+        decision = _long_open_decision(confidence=0.8, sizing_factor=0.7)
+
+        # Large ATR to keep raw_margin below max_position_pct cap
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_UP)
+        margin_up = tier1_risk._calc_margin(decision, close=80000.0, atr=5000.0)
+
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_DOWN)
+        margin_down = tier1_risk._calc_margin(decision, close=80000.0, atr=5000.0)
+
+        assert margin_down < margin_up
+        assert abs(margin_down / margin_up - 0.5) < 0.01  # 50% ratio
+
+
+# ── TestMinSellActiveWeight ─────────────────────────────────────
+
+
+class TestMinSellActiveWeight:
+    """MIN_SELL_ACTIVE_WEIGHT: 숏 진입 시 최소 2전략 합의 필요."""
+
+    def test_combiner_blocks_single_strategy_short(self):
+        """단일 전략 SELL → MIN_SELL_ACTIVE_WEIGHT 미충족 → HOLD."""
+        from strategies.combiner import SignalCombiner
+        from strategies.base import Signal
+        from core.enums import SignalType
+
+        # 가장 무거운 단일 전략(cis_momentum=0.42)보다 높게 설정
+        combiner = SignalCombiner(
+            strategy_weights=SignalCombiner.SPOT_WEIGHTS.copy(),
+            min_confidence=0.50,
+            min_sell_active_weight=0.45,
+        )
+
+        # 단일 전략 cis_momentum(0.42)만 SELL → 0.42 < 0.45 → 차단
+        signals = [
+            Signal(signal_type=SignalType.SELL, confidence=0.9, strategy_name="cis_momentum", reason="test"),
+            Signal(signal_type=SignalType.HOLD, confidence=0.0, strategy_name="bnf_deviation", reason="test"),
+            Signal(signal_type=SignalType.HOLD, confidence=0.0, strategy_name="donchian_channel", reason="test"),
+            Signal(signal_type=SignalType.HOLD, confidence=0.0, strategy_name="larry_williams", reason="test"),
+        ]
+        result = combiner.combine(signals)
+        assert result.action == SignalType.HOLD  # blocked by MIN_SELL_ACTIVE_WEIGHT
+
+    def test_combiner_allows_two_strategy_short(self):
+        """2전략 SELL → active_weight >= 0.45 → 통과."""
+        from strategies.combiner import SignalCombiner
+        from strategies.base import Signal
+        from core.enums import SignalType
+
+        combiner = SignalCombiner(
+            strategy_weights=SignalCombiner.SPOT_WEIGHTS.copy(),
+            min_confidence=0.50,
+            min_sell_active_weight=0.45,
+        )
+
+        # 2전략 SELL: cis_momentum(0.42) + bnf_deviation(0.25) = 0.67 >= 0.45
+        signals = [
+            Signal(signal_type=SignalType.SELL, confidence=0.8, strategy_name="cis_momentum", reason="test"),
+            Signal(signal_type=SignalType.SELL, confidence=0.7, strategy_name="bnf_deviation", reason="test"),
+            Signal(signal_type=SignalType.HOLD, confidence=0.0, strategy_name="donchian_channel", reason="test"),
+            Signal(signal_type=SignalType.HOLD, confidence=0.0, strategy_name="larry_williams", reason="test"),
+        ]
+        result = combiner.combine(signals)
+        assert result.action == SignalType.SELL
+
+    def test_combiner_default_no_min_sell_weight(self):
+        """min_sell_active_weight=0 (기본값) → 단일 전략 SELL도 허용."""
+        from strategies.combiner import SignalCombiner
+        from strategies.base import Signal
+        from core.enums import SignalType
+
+        combiner = SignalCombiner(
+            strategy_weights=SignalCombiner.SPOT_WEIGHTS.copy(),
+            min_confidence=0.50,
+            min_sell_active_weight=0.0,
+        )
+
+        signals = [
+            Signal(signal_type=SignalType.SELL, confidence=0.9, strategy_name="cis_momentum", reason="test"),
+            Signal(signal_type=SignalType.HOLD, confidence=0.0, strategy_name="bnf_deviation", reason="test"),
+            Signal(signal_type=SignalType.HOLD, confidence=0.0, strategy_name="donchian_channel", reason="test"),
+            Signal(signal_type=SignalType.HOLD, confidence=0.0, strategy_name="larry_williams", reason="test"),
+        ]
+        result = combiner.combine(signals)
+        # With default, single strategy SELL should be allowed
+        # (if it passes MIN_ACTIVE_WEIGHT=0.12, which 0.22 does)
+        assert result.action == SignalType.SELL
+
+
+# ── TestRiskFlagsInit ───────────────────────────────────────────
+
+
+class TestRiskFlagsInit:
+    """리스크 관리 플래그 초기화."""
+
+    def test_default_flags_off(self, risk_deps):
+        """기본값: 모든 리스크 플래그 비활성."""
+        tier1 = Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=risk_deps["safe_order"],
+            position_tracker=risk_deps["tracker"],
+            regime_detector=risk_deps["regime"],
+            portfolio_manager=risk_deps["pm"],
+            market_data=risk_deps["market_data"],
+            long_evaluator=risk_deps["long_eval"],
+            short_evaluator=risk_deps["short_eval"],
+        )
+        assert tier1._asymmetric_mode is False
+        assert tier1._dynamic_sl is False
+        assert tier1._atr_leverage_scaling is False
+
+    def test_explicit_flags_on(self, tier1_risk):
+        """명시적 활성화: 모든 리스크 플래그 활성."""
+        assert tier1_risk._asymmetric_mode is True
+        assert tier1_risk._dynamic_sl is True
+        assert tier1_risk._atr_leverage_scaling is True
+
+
+# ── TestRiskIntegration ─────────────────────────────────────────
+
+
+class TestRiskIntegration:
+    """리스크 관리 통합 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_downtrend_short_smaller_position(self, risk_deps, tier1_risk, session):
+        """TRENDING_DOWN에서 숏 포지션 사이징 50% 축소 확인."""
+        # TRENDING_UP에서 숏 열기
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_UP)
+        risk_deps["short_eval"].set_decision("BTC/USDT", _short_open_decision(
+            indicators={"close": 80000.0, "atr": 5000.0},
+        ))
+        await tier1_risk._evaluate_coin(
+            session, "BTC/USDT", risk_deps["regime"]._current
+        )
+        order_up = risk_deps["safe_order"].execute_order.call_args
+        margin_up = order_up[0][1].margin  # OrderRequest.margin
+
+        # 리셋
+        risk_deps["safe_order"].execute_order.reset_mock()
+        risk_deps["tracker"].close_position("BTC/USDT")
+
+        # TRENDING_DOWN에서 숏 열기
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_DOWN)
+        risk_deps["short_eval"].set_decision("BTC/USDT", _short_open_decision(
+            indicators={"close": 80000.0, "atr": 5000.0},
+        ))
+        await tier1_risk._evaluate_coin(
+            session, "BTC/USDT", risk_deps["regime"]._current
+        )
+        order_down = risk_deps["safe_order"].execute_order.call_args
+        margin_down = order_down[0][1].margin
+
+        assert margin_down < margin_up
+
+    @pytest.mark.asyncio
+    async def test_high_atr_reduces_leverage_in_order(self, risk_deps, session):
+        """높은 ATR% → OrderRequest의 leverage가 축소되는지 확인."""
+        risk_deps["regime"]._current = _regime_state(Regime.TRENDING_UP)
+
+        tier1 = Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=risk_deps["safe_order"],
+            position_tracker=risk_deps["tracker"],
+            regime_detector=risk_deps["regime"],
+            portfolio_manager=risk_deps["pm"],
+            market_data=risk_deps["market_data"],
+            long_evaluator=risk_deps["long_eval"],
+            short_evaluator=risk_deps["short_eval"],
+            leverage=5,
+            max_position_pct=0.15,
+            min_confidence=0.4,
+            cooldown_seconds=0,
+            atr_leverage_scaling=True,
+        )
+
+        # ATR% = 8000/80000 = 10% → tier (10.0, 2) triggers → but actually > 10%
+        # Let's use ATR = 8800, close = 80000 → ATR% = 11% → tier (10.0, 2) → lev=2
+        risk_deps["long_eval"].set_decision("BTC/USDT", _long_open_decision(
+            indicators={"close": 80000.0, "atr": 8800.0},
+        ))
+
+        await tier1._evaluate_coin(
+            session, "BTC/USDT", risk_deps["regime"]._current
+        )
+
+        order = risk_deps["safe_order"].execute_order.call_args
+        req = order[0][1]  # OrderRequest
+        assert req.leverage == 2  # scaled down from 5

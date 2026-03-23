@@ -5,6 +5,12 @@ Tier1Manager — Tier 1 코인 상시 포지션 관리.
 각 방향(롱/숏)의 진입/청산을 독립적인 이밸류에이터가 판단한다.
 
 ATR 기반 연속 사이징: 변동성 낮으면 크게, 높으면 작게.
+
+리스크 관리 (COIN-42):
+- 비대칭 모드: TRENDING_DOWN/VOLATILE(bearish) 시 신규 롱 차단
+- 동적 SL: 레짐별 SL ATR mult 스케일링
+- ATR 레버리지 스케일링: 고변동성에서 레버리지 자동 축소
+- 시장 상태별 포지션 사이징: 하락장→50%, 변동성→60%
 """
 
 import time
@@ -16,7 +22,7 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.constants import MIN_NOTIONAL
-from core.enums import Direction
+from core.enums import Direction, Regime
 from core.models import StrategyLog
 from engine.direction_evaluator import DirectionDecision, DirectionEvaluator
 from engine.regime_detector import RegimeDetector, RegimeState
@@ -26,6 +32,34 @@ from engine.portfolio_manager import PortfolioManager
 from services.market_data import MarketDataService
 
 logger = structlog.get_logger(__name__)
+
+# ── 동적 SL 프로필 (COIN-42) ────────────────────────────────────
+# 레짐별 SL ATR mult 스케일링: (multiplier, floor_atr_mult, cap_atr_mult)
+_DYNAMIC_SL_PROFILES: dict[Regime, tuple[float, float, float]] = {
+    Regime.TRENDING_UP: (1.0, 1.0, 8.0),  # 상승장: 기본 SL, 넓은 상한
+    Regime.TRENDING_DOWN: (0.6, 0.8, 4.0),  # 하락장: SL 타이트 (60%)
+    Regime.RANGING: (0.8, 1.0, 6.0),  # 횡보: SL 약간 타이트
+    Regime.VOLATILE: (0.7, 0.8, 5.0),  # 변동성: SL 타이트 (70%)
+}
+_DEFAULT_SL_PROFILE = (0.8, 1.0, 6.0)
+
+# ── ATR 레버리지 스케일링 (COIN-42) ──────────────────────────────
+_ATR_LEVERAGE_TIERS: list[tuple[float, int]] = [
+    (20.0, 1),  # ATR > 20% → 1x
+    (10.0, 2),  # ATR > 10% → 2x
+    (7.0, 3),  # ATR > 7%  → 3x
+    (5.0, 4),  # ATR > 5%  → 4x
+    (3.0, 5),  # ATR > 3%  → 5x
+    (0.0, 5),  # ATR <= 3% → 5x (max)
+]
+
+# ── 레짐별 포지션 사이징 팩터 (COIN-42) ──────────────────────────
+_REGIME_SIZING_FACTORS: dict[Regime, float] = {
+    Regime.TRENDING_UP: 1.0,  # 상승장: 풀 사이즈
+    Regime.TRENDING_DOWN: 0.5,  # 하락장: 50%
+    Regime.RANGING: 0.8,  # 횡보: 80%
+    Regime.VOLATILE: 0.6,  # 변동성: 60%
+}
 
 
 @dataclass
@@ -69,6 +103,10 @@ class Tier1Manager:
         exchange_name: str = "binance_futures",
         on_close_callback: Callable[[], Awaitable[None]] | None = None,
         ml_filter=None,
+        # Risk management (COIN-42)
+        asymmetric_mode: bool = False,
+        dynamic_sl: bool = False,
+        atr_leverage_scaling: bool = False,
     ):
         self._coins = coins
         self._safe_order = safe_order
@@ -82,6 +120,10 @@ class Tier1Manager:
         self._max_position_pct = max_position_pct
         self._min_confidence = min_confidence
         self._ml_filter = ml_filter
+        # Risk management flags (COIN-42)
+        self._asymmetric_mode = asymmetric_mode
+        self._dynamic_sl = dynamic_sl
+        self._atr_leverage_scaling = atr_leverage_scaling
         # Direction-specific cooldowns (COIN-27): fallback to single cooldown_seconds
         self._long_cooldown_sec = (
             long_cooldown_seconds
@@ -367,6 +409,30 @@ class Tier1Manager:
                 df_1h=df_1h,
             )
 
+        # 비대칭 모드: 하락장/변동성(bearish) 시 롱 진입 차단 (COIN-42)
+        if self._asymmetric_mode and long_decision.is_open:
+            if self._is_bearish_regime(regime):
+                logger.info(
+                    "asymmetric_long_blocked",
+                    symbol=symbol,
+                    regime=regime.regime.value,
+                    confidence=long_decision.confidence,
+                )
+                long_decision = DirectionDecision(
+                    action="hold",
+                    direction=None,
+                    confidence=0.0,
+                    sizing_factor=0.0,
+                    stop_loss_atr=0.0,
+                    take_profit_atr=0.0,
+                    reason=f"asymmetric_blocked: {regime.regime.value}",
+                    strategy_name=long_decision.strategy_name,
+                    indicators=long_decision.indicators,
+                )
+                # 같은 인스턴스면 short_decision도 업데이트
+                if self._long_evaluator is self._short_evaluator:
+                    short_decision = long_decision
+
         # 진입 시그널 선택
         decision, loser = self._resolve_entry(long_decision, short_decision)
         if decision is None:
@@ -601,6 +667,8 @@ class Tier1Manager:
         이밸류에이터가 캔들을 이미 조회했으므로, indicators에 close/atr가 있으면
         그 값을 재사용하여 불필요한 API 호출을 줄인다.
 
+        ATR 레버리지 스케일링 (COIN-42): atr_pct에 따라 레버리지를 동적으로 축소.
+
         Returns:
             True if position was successfully opened, False otherwise.
         """
@@ -614,11 +682,16 @@ class Tier1Manager:
             close = self._last_close(df_5m)
             atr = self._last_atr(df_5m)
 
+        # ATR 레버리지 스케일링 (COIN-42)
+        effective_leverage = self._leverage
+        if self._atr_leverage_scaling and close > 0:
+            effective_leverage = self._calc_atr_leverage(atr, close)
+
         margin = self._calc_margin(decision, close, atr)
         if margin <= 0:
             return False
 
-        quantity = (margin * self._leverage) / close if close > 0 else 0.0
+        quantity = (margin * effective_leverage) / close if close > 0 else 0.0
         if quantity <= 0:
             return False
 
@@ -629,7 +702,7 @@ class Tier1Manager:
             quantity=quantity,
             price=close,
             margin=margin,
-            leverage=self._leverage,
+            leverage=effective_leverage,
             strategy_name=decision.strategy_name,
             confidence=decision.confidence,
             tier="tier1",
@@ -653,7 +726,7 @@ class Tier1Manager:
                 quantity=resp.executed_quantity,
                 entry_price=resp.executed_price,
                 margin=margin,
-                leverage=self._leverage,
+                leverage=effective_leverage,
                 extreme_price=resp.executed_price,
                 stop_loss_atr=decision.stop_loss_atr,
                 take_profit_atr=decision.take_profit_atr,
@@ -719,40 +792,51 @@ class Tier1Manager:
     ) -> bool:
         """SL/TP/trailing 체크. 히트 시 청산 + 쿨다운 설정. Returns True if closed.
 
+        동적 SL 활성 시 레짐에 따라 SL ATR 배수를 조정한다 (COIN-42).
         Note: update_extreme(price)는 호출 전에 _evaluate_coin에서 이미 수행됨.
         """
         if price <= 0 or atr <= 0:
             return False
 
-        if state.check_stop_loss(price, atr):
-            await self._close_position(
-                session,
-                symbol,
-                state.direction,
-                f"SL hit: price={price:.2f}",
-            )
-            self._set_exit_cooldown(symbol, state.direction)
-            return True
+        # 동적 SL: 레짐에 따라 일시적으로 SL ATR mult를 조정 (COIN-42)
+        original_sl_atr = state.stop_loss_atr
+        if self._dynamic_sl:
+            state.stop_loss_atr = self._apply_dynamic_sl(state.stop_loss_atr)
 
-        if state.check_trailing_stop(price, atr):
-            await self._close_position(
-                session,
-                symbol,
-                state.direction,
-                f"Trailing stop hit: price={price:.2f}",
-            )
-            self._set_exit_cooldown(symbol, state.direction)
-            return True
+        try:
+            if state.check_stop_loss(price, atr):
+                await self._close_position(
+                    session,
+                    symbol,
+                    state.direction,
+                    f"SL hit: price={price:.2f}",
+                )
+                self._set_exit_cooldown(symbol, state.direction)
+                return True
 
-        if state.check_take_profit(price, atr):
-            await self._close_position(
-                session,
-                symbol,
-                state.direction,
-                f"TP hit: price={price:.2f}",
-            )
-            self._set_exit_cooldown(symbol, state.direction)
-            return True
+            if state.check_trailing_stop(price, atr):
+                await self._close_position(
+                    session,
+                    symbol,
+                    state.direction,
+                    f"Trailing stop hit: price={price:.2f}",
+                )
+                self._set_exit_cooldown(symbol, state.direction)
+                return True
+
+            if state.check_take_profit(price, atr):
+                await self._close_position(
+                    session,
+                    symbol,
+                    state.direction,
+                    f"TP hit: price={price:.2f}",
+                )
+                self._set_exit_cooldown(symbol, state.direction)
+                return True
+        finally:
+            # 원본 SL 복원 (일시적 조정이므로 영속 변경하지 않음)
+            if self._dynamic_sl:
+                state.stop_loss_atr = original_sl_atr
 
         return False
 
@@ -820,7 +904,7 @@ class Tier1Manager:
         close: float,
         atr: float,
     ) -> float:
-        """ATR 기반 마진 계산."""
+        """ATR 기반 마진 계산. 레짐별 사이징 팩터 적용 (COIN-42)."""
         cash = self._pm.cash_balance
         if cash <= 0 or close <= 0 or atr <= 0:
             return 0.0
@@ -830,6 +914,10 @@ class Tier1Manager:
 
         raw_margin = (cash * self.BASE_RISK_PCT) / risk_per_unit
         adjusted = raw_margin * decision.sizing_factor * decision.confidence
+
+        # 레짐별 포지션 사이징 팩터 (COIN-42)
+        adjusted *= self._get_regime_sizing_factor()
+
         max_margin = cash * self._max_position_pct
         final = min(adjusted, max_margin)
 
@@ -887,6 +975,66 @@ class Tier1Manager:
             return 0.0
         val = df["atr_14"].iloc[-1]
         return float(val) if pd.notna(val) else 0.0
+
+    # ── 리스크 관리 헬퍼 (COIN-42) ──────────────────────────────────
+
+    @staticmethod
+    def _is_bearish_regime(regime: RegimeState) -> bool:
+        """하락/변동성(bearish) 레짐 여부.
+
+        TRENDING_DOWN은 항상 bearish.
+        VOLATILE은 trend_direction이 하락(-1)일 때만 bearish.
+        """
+        if regime.regime == Regime.TRENDING_DOWN:
+            return True
+        if regime.regime == Regime.VOLATILE and regime.trend_direction < 0:
+            return True
+        return False
+
+    def _apply_dynamic_sl(self, base_sl_atr: float) -> float:
+        """레짐별 동적 SL ATR mult 계산."""
+        regime_state = self._regime.current
+        if regime_state is None:
+            return base_sl_atr
+
+        mult, floor, cap = _DYNAMIC_SL_PROFILES.get(
+            regime_state.regime, _DEFAULT_SL_PROFILE
+        )
+        adjusted = base_sl_atr * mult
+        return max(floor, min(adjusted, cap))
+
+    def _calc_atr_leverage(self, atr: float, close: float) -> int:
+        """ATR% 기반 최대 레버리지 계산.
+
+        고변동성(높은 ATR%)에서 레버리지를 자동 축소하여
+        과도한 리스크를 방지한다.
+        """
+        if close <= 0:
+            return 1
+        atr_pct = (atr / close) * 100
+
+        max_lev = self._leverage
+        for threshold, lev in _ATR_LEVERAGE_TIERS:
+            if atr_pct > threshold:
+                max_lev = lev
+                break
+
+        effective = min(self._leverage, max_lev)
+        if effective < self._leverage:
+            logger.info(
+                "atr_leverage_scaled",
+                atr_pct=round(atr_pct, 2),
+                base_leverage=self._leverage,
+                effective_leverage=effective,
+            )
+        return max(effective, 1)
+
+    def _get_regime_sizing_factor(self) -> float:
+        """현재 레짐에 따른 포지션 사이징 팩터 반환."""
+        regime_state = self._regime.current
+        if regime_state is None:
+            return 1.0
+        return _REGIME_SIZING_FACTORS.get(regime_state.regime, 0.8)
 
     @staticmethod
     def _direction_to_signal_type(direction: Direction | None) -> str:

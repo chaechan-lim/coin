@@ -128,6 +128,7 @@ coin/
 | 전략 성과 FIFO→realized_pnl 전환 (COIN-35) | `GET /strategies/{name}/performance` FIFO 로트 매칭을 `realized_pnl` 기반 계산으로 교체. V1→V2 전환 시 고아 로트가 FIFO 큐를 오염하여 V2 전략 승/패가 누락되던 버그 수정. 청산 주문의 `realized_pnl`을 직접 사용하여 승/패 판정 → 고아 로트 문제 근본 해결. 테스트 5개 순증(1500 total). |
 | 서지 엔진 양방향(숏) 활성화 (COIN-36) | `SurgeTradingConfig.long_only` 기본값 `True`→`False` 변경. 180일 백테스트 검증: 양방향 SL2.5% PnL +366%(롱온리 +215% 대비 +70%), MDD 1.6% 허용범위. 숏 진입/청산/트레일링 인프라 기존 완비, config 토글만 변경. 숏 진입/청산 유닛 테스트 + 양방향 동시 포지션 테스트 17개 추가(1517 total). |
 | V2 ML Signal Filter 적용 (COIN-40) | V1에서 손실 거래 40-50% 차단하던 ML 시그널 필터가 V2 Tier1Manager에 미적용되던 버그 수정. Tier1Manager에 `_check_ml_filter()` 게이트 추가 (신규 진입+SAR만 필터링, 청산은 허용). SpotEvaluator가 open 결정에 signals+candle_row 전달. FuturesEngineV2에서 signal_filter.pkl 로드(min_win_prob 0.52). CycleStats에 ml_filtered_count 추가. 테스트 16개 추가(1563 total). |
+| V2 리스크 관리 5종 포팅 (COIN-42) | V1 TradingEngine의 리스크 관리 기능 5종을 V2 Tier1Manager에 포팅. (1) 비대칭 모드: TRENDING_DOWN/VOLATILE(bearish) 시 신규 롱 차단. (2) 동적 SL: 레짐별 ATR mult 스케일링(floor/cap 포함). (3) ATR 레버리지 스케일링: 6단계 ATR%→레버리지 매핑(20%→1x~3%→5x). (4) 레짐별 포지션 사이징: TRENDING_DOWN→50%, VOLATILE→60%, RANGING→80%. (5) MIN_SELL_ACTIVE_WEIGHT: SignalCombiner에 숏 최소 참여 가중치 전달. FuturesV2Config에 4개 설정 추가. 테스트 35개 추가(1655 total). |
 
 ### 낮은 우선순위
 
