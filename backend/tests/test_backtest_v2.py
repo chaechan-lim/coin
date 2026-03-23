@@ -337,3 +337,353 @@ class TestV2BacktestResult:
         )
         assert result.total_pnl_pct == 10.0
         assert result.profit_factor == 1.8
+
+
+def _make_1h_df_varied(n=600, close=80000.0):
+    """1h 테스트 DataFrame 생성 (가격 변동 포함 — 인디케이터 계산 가능)."""
+    dates = pd.date_range(
+        end=datetime.now(timezone.utc),
+        periods=n,
+        freq="1h",
+    )
+    # 가격에 변동 추가 (RSI/ATR 등 인디케이터 계산 가능하도록)
+    closes = [close + np.sin(i * 0.05) * 500 + i * 2 for i in range(n)]
+    df = pd.DataFrame({
+        "close": closes,
+        "open": [c - 30 for c in closes],
+        "high": [c + 200 for c in closes],
+        "low": [c - 200 for c in closes],
+        "volume": [5000.0 + np.sin(i * 0.1) * 1000 for i in range(n)],
+        "ema_20": [c * (1 + 0.002 * (i - (n - 1))) for i, c in enumerate(closes)],
+        "ema_50": [c - 500 for c in closes],
+        "rsi_14": [50.0 + np.sin(i * 0.1) * 15 for i in range(n)],
+        "atr_14": [800.0] * n,
+        "adx_14": [30.0] * n,
+        "bb_upper_20": [c + 2000 for c in closes],
+        "bb_lower_20": [c - 2000 for c in closes],
+        "bb_mid_20": closes,
+    }, index=dates)
+    return df
+
+
+class TestSpotStrategyAdapter:
+    """SpotStrategyAdapter 유닛 테스트 — 현물 4전략 → RegimeStrategy 어댑터."""
+
+    @pytest.fixture
+    def mock_strategies(self):
+        """4개 현물 전략 mock."""
+        from strategies.base import Signal
+        from core.enums import SignalType
+
+        buy_signal = Signal(
+            signal_type=SignalType.BUY, confidence=0.75,
+            reason="test buy", strategy_name="cis_momentum",
+        )
+        sell_signal = Signal(
+            signal_type=SignalType.SELL, confidence=0.70,
+            reason="test sell", strategy_name="bnf_deviation",
+        )
+        hold_signal = Signal(
+            signal_type=SignalType.HOLD, confidence=0.5,
+            reason="test hold", strategy_name="donchian_channel",
+        )
+
+        strat_buy = AsyncMock()
+        strat_buy.analyze = AsyncMock(return_value=buy_signal)
+        strat_buy.name = "cis_momentum"
+
+        strat_sell = AsyncMock()
+        strat_sell.analyze = AsyncMock(return_value=sell_signal)
+        strat_sell.name = "bnf_deviation"
+
+        strat_hold = AsyncMock()
+        strat_hold.analyze = AsyncMock(return_value=hold_signal)
+        strat_hold.name = "donchian_channel"
+
+        strat_buy2 = AsyncMock()
+        strat_buy2.analyze = AsyncMock(return_value=Signal(
+            signal_type=SignalType.BUY, confidence=0.65,
+            reason="test buy 2", strategy_name="larry_williams",
+        ))
+        strat_buy2.name = "larry_williams"
+
+        return {
+            "cis_momentum": strat_buy,
+            "bnf_deviation": strat_sell,
+            "donchian_channel": strat_hold,
+            "larry_williams": strat_buy2,
+        }
+
+    @pytest.fixture
+    def adapter(self, mock_strategies):
+        from backtest_v2 import SpotStrategyAdapter, SPOT_WEIGHTS
+        return SpotStrategyAdapter(mock_strategies, SPOT_WEIGHTS)
+
+    def test_name(self, adapter):
+        assert adapter.name == "spot_ensemble"
+
+    def test_target_regimes(self, adapter):
+        regimes = adapter.target_regimes
+        assert Regime.TRENDING_UP in regimes
+        assert Regime.TRENDING_DOWN in regimes
+        assert Regime.RANGING in regimes
+        assert Regime.VOLATILE in regimes
+
+    @pytest.mark.asyncio
+    async def test_evaluate_buy_signal(self, adapter, mock_strategies):
+        """BUY 우세 → LONG 결정."""
+        from strategies.base import Signal
+        from core.enums import SignalType
+
+        # 3개 BUY, 1개 HOLD → BUY 우세
+        for name in ["cis_momentum", "bnf_deviation", "larry_williams"]:
+            mock_strategies[name].analyze = AsyncMock(return_value=Signal(
+                signal_type=SignalType.BUY, confidence=0.75,
+                reason="test buy", strategy_name=name,
+            ))
+        mock_strategies["donchian_channel"].analyze = AsyncMock(return_value=Signal(
+            signal_type=SignalType.HOLD, confidence=0.5,
+            reason="test hold", strategy_name="donchian_channel",
+        ))
+
+        df_1h = _make_1h_df_varied(n=600, close=80000.0)
+        regime = RegimeState(
+            regime=Regime.TRENDING_UP, confidence=0.8, adx=30, bb_width=3.0,
+            atr_pct=1.5, volume_ratio=1.2, trend_direction=1,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        decision = await adapter.evaluate(df_1h, df_1h, regime, None)
+        assert decision.direction == Direction.LONG
+        assert decision.confidence >= 0.5
+        assert decision.sizing_factor > 0
+        assert decision.stop_loss_atr == 5.0
+        assert decision.take_profit_atr == 14.0
+        assert decision.strategy_name == "spot_ensemble"
+
+    @pytest.mark.asyncio
+    async def test_evaluate_sell_signal(self, adapter, mock_strategies):
+        """SELL 우세 → SHORT 결정."""
+        from strategies.base import Signal
+        from core.enums import SignalType
+
+        # 3개 SELL, 1개 HOLD → SELL 우세
+        for name in ["cis_momentum", "bnf_deviation", "larry_williams"]:
+            mock_strategies[name].analyze = AsyncMock(return_value=Signal(
+                signal_type=SignalType.SELL, confidence=0.70,
+                reason="test sell", strategy_name=name,
+            ))
+        mock_strategies["donchian_channel"].analyze = AsyncMock(return_value=Signal(
+            signal_type=SignalType.HOLD, confidence=0.5,
+            reason="test hold", strategy_name="donchian_channel",
+        ))
+
+        df_1h = _make_1h_df_varied(n=600, close=80000.0)
+        regime = RegimeState(
+            regime=Regime.TRENDING_DOWN, confidence=0.8, adx=30, bb_width=3.0,
+            atr_pct=1.5, volume_ratio=1.2, trend_direction=-1,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        decision = await adapter.evaluate(df_1h, df_1h, regime, None)
+        assert decision.direction == Direction.SHORT
+        assert decision.confidence >= 0.5
+        assert decision.sizing_factor > 0
+        assert decision.stop_loss_atr == 5.0
+        assert decision.take_profit_atr == 14.0
+
+    @pytest.mark.asyncio
+    async def test_evaluate_hold_on_all_hold(self, adapter, mock_strategies):
+        """모든 전략 HOLD → HOLD 결정."""
+        from strategies.base import Signal
+        from core.enums import SignalType
+
+        for name in mock_strategies:
+            mock_strategies[name].analyze = AsyncMock(return_value=Signal(
+                signal_type=SignalType.HOLD, confidence=0.5,
+                reason="test hold", strategy_name=name,
+            ))
+
+        df_1h = _make_1h_df_varied(n=600, close=80000.0)
+        regime = RegimeState(
+            regime=Regime.RANGING, confidence=0.8, adx=15, bb_width=1.5,
+            atr_pct=1.0, volume_ratio=1.0, trend_direction=0,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        decision = await adapter.evaluate(df_1h, df_1h, regime, None)
+        assert decision.is_hold
+
+    @pytest.mark.asyncio
+    async def test_evaluate_hold_on_low_confidence(self, adapter, mock_strategies):
+        """낮은 신뢰도 → HOLD."""
+        from strategies.base import Signal
+        from core.enums import SignalType
+
+        for name in mock_strategies:
+            mock_strategies[name].analyze = AsyncMock(return_value=Signal(
+                signal_type=SignalType.BUY, confidence=0.20,
+                reason="low conf", strategy_name=name,
+            ))
+
+        df_1h = _make_1h_df_varied(n=600, close=80000.0)
+        regime = RegimeState(
+            regime=Regime.RANGING, confidence=0.8, adx=15, bb_width=1.5,
+            atr_pct=1.0, volume_ratio=1.0, trend_direction=0,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        decision = await adapter.evaluate(df_1h, df_1h, regime, None)
+        # 0.20 confidence는 combiner min_confidence(0.50) 미만 → HOLD
+        assert decision.is_hold
+
+    @pytest.mark.asyncio
+    async def test_evaluate_insufficient_data(self, adapter):
+        """데이터 부족 → HOLD."""
+        df_short = _make_1h_df(n=10, close=80000.0)  # Too short for 4h resample
+        regime = RegimeState(
+            regime=Regime.RANGING, confidence=0.8, adx=15, bb_width=1.5,
+            atr_pct=1.0, volume_ratio=1.0, trend_direction=0,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        decision = await adapter.evaluate(df_short, df_short, regime, None)
+        assert decision.is_hold
+
+    @pytest.mark.asyncio
+    async def test_evaluate_with_strategy_error(self, adapter, mock_strategies):
+        """일부 전략 에러 → 나머지 전략으로 진행."""
+        from strategies.base import Signal
+        from core.enums import SignalType
+
+        mock_strategies["cis_momentum"].analyze = AsyncMock(side_effect=Exception("test error"))
+        for name in ["bnf_deviation", "donchian_channel", "larry_williams"]:
+            mock_strategies[name].analyze = AsyncMock(return_value=Signal(
+                signal_type=SignalType.BUY, confidence=0.75,
+                reason="test buy", strategy_name=name,
+            ))
+
+        df_1h = _make_1h_df_varied(n=600, close=80000.0)
+        regime = RegimeState(
+            regime=Regime.TRENDING_UP, confidence=0.8, adx=30, bb_width=3.0,
+            atr_pct=1.5, volume_ratio=1.2, trend_direction=1,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        decision = await adapter.evaluate(df_1h, df_1h, regime, None)
+        # cis_momentum 에러, 나머지 3개 BUY → LONG
+        assert decision.direction == Direction.LONG
+
+    def test_resample_1h_to_4h(self):
+        """1h → 4h 리샘플링 + 인디케이터 계산."""
+        from backtest_v2 import SpotStrategyAdapter
+
+        df_1h = _make_1h_df_varied(n=600, close=80000.0)
+        df_4h = SpotStrategyAdapter._resample_1h_to_4h(df_1h)
+
+        assert df_4h is not None
+        assert len(df_4h) > 0
+        # 인디케이터 존재 확인
+        assert "close" in df_4h.columns
+        assert "rsi_14" in df_4h.columns
+        assert "atr_14" in df_4h.columns
+
+    def test_resample_1h_to_4h_short_data(self):
+        """데이터 부족 → None."""
+        from backtest_v2 import SpotStrategyAdapter
+
+        df_short = _make_1h_df(n=10, close=80000.0)
+        result = SpotStrategyAdapter._resample_1h_to_4h(df_short)
+        assert result is None
+
+
+class TestV2BacktesterSpotMode:
+    """V2Backtester 현물 전략 모드 통합 테스트."""
+
+    @pytest.fixture
+    def mock_exchange(self):
+        exchange = AsyncMock()
+        exchange.initialize = AsyncMock()
+        exchange.close_ws = AsyncMock()
+        return exchange
+
+    def test_enable_spot_strategies(self, mock_exchange):
+        """enable_spot_strategies()가 SpotStrategyAdapter를 생성."""
+        from backtest_v2 import V2Backtester
+        bt = V2Backtester(exchange=mock_exchange, coins=["BTC/USDT"])
+        assert bt._use_spot is False
+        assert bt._spot_adapter is None
+
+        bt.enable_spot_strategies()
+        assert bt._use_spot is True
+        assert bt._spot_adapter is not None
+        assert bt._spot_adapter.name == "spot_ensemble"
+
+    def test_spot_and_v1_exclusive(self, mock_exchange):
+        """spot과 v1 모드 독립 활성화 가능 (CLI에서 동시 사용 차단)."""
+        from backtest_v2 import V2Backtester
+        bt = V2Backtester(exchange=mock_exchange, coins=["BTC/USDT"])
+        bt.enable_spot_strategies()
+        assert bt._use_spot is True
+
+        # spot이 활성화된 상태에서 v1도 활성화 가능 (내부적으로는 두 플래그 독립)
+        # CLI에서 동시 사용은 차단하지만 API 레벨에서는 허용
+        bt.enable_v1_strategies()
+        assert bt._use_v1 is True
+
+    @pytest.mark.asyncio
+    async def test_simulate_with_spot_adapter(self, mock_exchange):
+        """현물 전략 모드로 시뮬레이션 실행."""
+        from backtest_v2 import V2Backtester
+
+        bt = V2Backtester(
+            exchange=mock_exchange,
+            coins=["BTC/USDT"],
+            leverage=3,
+            initial_balance=1000.0,
+        )
+        bt.enable_spot_strategies()
+
+        df_5m = _make_5m_df(n=500, trend="up")
+        df_1h = _make_1h_df_varied(n=600)
+
+        all_data = {"BTC/USDT": (df_5m, df_1h)}
+        result = await bt._simulate(all_data, 3)
+
+        assert result.initial_balance == 1000.0
+        assert result.total_trades >= 0
+        assert len(result.equity_curve) > 0
+
+    def test_create_spot_strategies(self):
+        """create_spot_strategies()가 4전략을 반환."""
+        from backtest_v2 import create_spot_strategies
+        strategies = create_spot_strategies()
+
+        assert len(strategies) == 4
+        assert "cis_momentum" in strategies
+        assert "bnf_deviation" in strategies
+        assert "donchian_channel" in strategies
+        assert "larry_williams" in strategies
+
+    def test_spot_weights_match_combiner(self):
+        """SPOT_WEIGHTS가 combiner.py 값과 일치."""
+        from backtest_v2 import SPOT_WEIGHTS
+        from strategies.combiner import SignalCombiner
+
+        for name, weight in SPOT_WEIGHTS.items():
+            assert name in SignalCombiner.SPOT_WEIGHTS
+            assert weight == SignalCombiner.SPOT_WEIGHTS[name], \
+                f"{name}: {weight} != {SignalCombiner.SPOT_WEIGHTS[name]}"
+
+    def test_spot_constants_match_live(self):
+        """SL/TP/Trail ATR 상수가 SpotEvaluator 라이브 설정과 일치."""
+        from backtest_v2 import (
+            SPOT_SL_ATR, SPOT_TP_ATR,
+            SPOT_TRAIL_ACTIVATION_ATR, SPOT_TRAIL_STOP_ATR,
+            SPOT_MIN_CONFIDENCE,
+        )
+        assert SPOT_SL_ATR == 5.0
+        assert SPOT_TP_ATR == 14.0
+        assert SPOT_TRAIL_ACTIVATION_ATR == 3.0
+        assert SPOT_TRAIL_STOP_ATR == 1.5
+        assert SPOT_MIN_CONFIDENCE == 0.50
