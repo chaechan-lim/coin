@@ -1,9 +1,7 @@
 """FuturesEngineV2 테스트."""
 import asyncio
 import pytest
-import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime, timezone
 
 from engine.futures_engine_v2 import FuturesEngineV2
 from config import AppConfig
@@ -112,7 +110,7 @@ class TestStartStop:
         with patch("engine.futures_engine_v2.emit_event", new_callable=AsyncMock):
             await engine.start()
         assert engine.is_running is True
-        assert len(engine._tasks) == 6  # 6 loops
+        assert len(engine._tasks) >= 6  # 6 기본 + WS 태스크 (최대 8)
 
         await engine.stop()
         assert engine.is_running is False

@@ -201,6 +201,10 @@ class Tier1Manager:
         price = self._last_close(df_5m)
         atr = self._last_atr(df_5m)
 
+        # WS 실시간 SL/TP 체크용 ATR 캐시 업데이트
+        if atr > 0:
+            self._positions.update_atr(symbol, atr)
+
         # 1. SL/TP/trailing 체크는 전략 시그널과 무관하게 항상 수행
         if pos_state:
             if price > 0:
