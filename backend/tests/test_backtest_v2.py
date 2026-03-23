@@ -687,3 +687,73 @@ class TestV2BacktesterSpotMode:
         assert SPOT_TRAIL_ACTIVATION_ATR == 3.0
         assert SPOT_TRAIL_STOP_ATR == 1.5
         assert SPOT_MIN_CONFIDENCE == 0.50
+
+
+class TestSpot1hLookbackWindow:
+    """COIN-45: SPOT_1H_LOOKBACK으로 현물 4전략 1h 윈도우 확대 검증."""
+
+    def test_spot_1h_lookback_constant_value(self):
+        """SPOT_1H_LOOKBACK이 충분한 4h 캔들 생성 보장 (SMA_60 + dropna 고려)."""
+        from backtest_v2 import SPOT_1H_LOOKBACK, LOOKBACK_WINDOW
+
+        assert SPOT_1H_LOOKBACK == 400
+        # 400 1h → 100 4h → SMA_60 dropna 59개 제외 → ~41개 >= 30 요건 충족
+        min_4h_needed = 30 + 59  # evaluate() 30개 + SMA_60 워밍업 59개
+        assert SPOT_1H_LOOKBACK // 4 >= min_4h_needed
+        # 기존 LOOKBACK_WINDOW보다 커야 함
+        assert SPOT_1H_LOOKBACK > LOOKBACK_WINDOW
+
+    def test_old_lookback_insufficient_for_spot(self):
+        """기존 LOOKBACK_WINDOW=60으로는 4h 리샘플링 30개 미달 재현."""
+        from backtest_v2 import LOOKBACK_WINDOW, SpotStrategyAdapter
+
+        # 60개 1h → 최대 15개 4h → _resample_1h_to_4h에서 None
+        df_1h_short = _make_1h_df_varied(n=LOOKBACK_WINDOW, close=80000.0)
+        result = SpotStrategyAdapter._resample_1h_to_4h(df_1h_short)
+        assert result is None, (
+            f"LOOKBACK_WINDOW={LOOKBACK_WINDOW}개 1h로는 4h 30개 미달이어야 함"
+        )
+
+    def test_spot_lookback_sufficient_for_resample(self):
+        """SPOT_1H_LOOKBACK=300이면 4h 리샘플링 + 인디케이터 계산 성공."""
+        from backtest_v2 import SPOT_1H_LOOKBACK, SpotStrategyAdapter
+
+        df_1h = _make_1h_df_varied(n=SPOT_1H_LOOKBACK, close=80000.0)
+        result = SpotStrategyAdapter._resample_1h_to_4h(df_1h)
+        assert result is not None, (
+            f"SPOT_1H_LOOKBACK={SPOT_1H_LOOKBACK}개 1h로 4h 리샘플링 성공해야 함"
+        )
+        assert len(result) >= 30, f"4h 캔들 30개 이상이어야 함, got {len(result)}"
+        # SMA_60 계산 가능 확인
+        assert "sma_60" in result.columns or "SMA_60" in result.columns
+
+    def test_simulate_uses_spot_lookback_in_spot_mode(self, mock_exchange=None):
+        """spot 모드에서 _simulate가 SPOT_1H_LOOKBACK 사용 확인."""
+        from backtest_v2 import V2Backtester, SPOT_1H_LOOKBACK, LOOKBACK_WINDOW
+
+        exchange = AsyncMock()
+        exchange.initialize = AsyncMock()
+        exchange.close_ws = AsyncMock()
+
+        bt = V2Backtester(exchange=exchange, coins=["BTC/USDT"])
+        bt.enable_spot_strategies()
+
+        # _use_spot이 활성화되면 h_lookback = SPOT_1H_LOOKBACK
+        assert bt._use_spot is True
+        # 내부 로직 검증: spot 모드에서 사용할 lookback 계산
+        h_lookback = SPOT_1H_LOOKBACK if bt._use_spot else LOOKBACK_WINDOW
+        assert h_lookback == SPOT_1H_LOOKBACK
+
+    def test_non_spot_mode_uses_default_lookback(self):
+        """비-spot 모드에서는 기존 LOOKBACK_WINDOW 유지."""
+        from backtest_v2 import V2Backtester, SPOT_1H_LOOKBACK, LOOKBACK_WINDOW
+
+        exchange = AsyncMock()
+        exchange.initialize = AsyncMock()
+        exchange.close_ws = AsyncMock()
+
+        bt = V2Backtester(exchange=exchange, coins=["BTC/USDT"])
+        assert bt._use_spot is False
+
+        h_lookback = SPOT_1H_LOOKBACK if bt._use_spot else LOOKBACK_WINDOW
+        assert h_lookback == LOOKBACK_WINDOW

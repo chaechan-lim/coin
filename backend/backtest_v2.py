@@ -46,6 +46,7 @@ SLIPPAGE = 0.0002         # 0.02% 슬리피지
 MIN_MARGIN_USDT = 5.0     # 최소 마진
 BASE_RISK_PCT = 0.02      # 기본 리스크: 자본의 2%
 LOOKBACK_WINDOW = 60      # 전략 평가용 슬라이스 크기
+SPOT_1H_LOOKBACK = 400    # 현물 4전략 모드: 1h→4h 리샘플링용 ((30+59)×4 ≈ 356, +여유)
 
 COINS_DEFAULT = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT"]
 
@@ -933,7 +934,8 @@ class V2Backtester:
 
                 # 1h 윈도우 (가장 가까운 1h 캔들까지)
                 h_idx = df1h.index.searchsorted(ts, side="right")
-                h_start = max(0, h_idx - LOOKBACK_WINDOW)
+                h_lookback = SPOT_1H_LOOKBACK if self._use_spot else LOOKBACK_WINDOW
+                h_start = max(0, h_idx - h_lookback)
                 window_1h = df1h.iloc[h_start:h_idx]
 
                 if len(window_5m) < 21 or len(window_1h) < 5:
