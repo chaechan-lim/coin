@@ -158,6 +158,9 @@ class FuturesEngineV2:
             asymmetric_mode=v2_cfg.asymmetric_mode,
             dynamic_sl=v2_cfg.dynamic_sl,
             atr_leverage_scaling=v2_cfg.atr_leverage_scaling,
+            daily_buy_limit=v2_cfg.tier1_daily_buy_limit,
+            max_daily_coin_buys=v2_cfg.tier1_max_daily_coin_buys,
+            max_eval_errors=v2_cfg.tier1_max_eval_errors,
         )
 
         self._tier2 = Tier2Scanner(
@@ -207,8 +210,7 @@ class FuturesEngineV2:
         self._fast_sl_task: asyncio.Task | None = None
         self._ws_enabled = True  # WS 활성화 플래그
 
-        # health_monitor 호환 속성
-        self._eval_error_counts: dict[str, int] = {}
+        # health_monitor 호환 속성: Tier1Manager의 실제 에러 카운터를 참조
         self._position_trackers: dict = {}
 
         # agent coordinator 호환 속성
@@ -232,6 +234,16 @@ class FuturesEngineV2:
     @property
     def exchange_name(self) -> str:
         return self.EXCHANGE_NAME
+
+    @property
+    def _eval_error_counts(self) -> dict[str, int]:
+        """health_monitor 호환: Tier1Manager의 실제 에러 카운터 참조."""
+        return self._tier1._eval_error_counts
+
+    @_eval_error_counts.setter
+    def _eval_error_counts(self, value: dict[str, int]) -> None:
+        """health_monitor 호환: 외부에서 에러 카운터 설정 허용."""
+        self._tier1._eval_error_counts = value
 
     def set_engine_registry(self, registry) -> None:
         self._engine_registry = registry
@@ -261,8 +273,10 @@ class FuturesEngineV2:
     async def _on_sell_completed(self) -> None:
         """매도 완료 시 카운터 증가 -> N회마다 매매 회고 트리거."""
         self._sells_since_review += 1
-        if (self._sells_since_review >= self._REVIEW_TRIGGER_SELLS
-                and self._agent_coordinator):
+        if (
+            self._sells_since_review >= self._REVIEW_TRIGGER_SELLS
+            and self._agent_coordinator
+        ):
             self._sells_since_review = 0
             task = asyncio.create_task(
                 self._agent_coordinator.run_trade_review(),
@@ -270,8 +284,7 @@ class FuturesEngineV2:
             )
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
-            logger.info("v2_trade_review_triggered",
-                        trigger=self._REVIEW_TRIGGER_SELLS)
+            logger.info("v2_trade_review_triggered", trigger=self._REVIEW_TRIGGER_SELLS)
 
     async def _resync_cash(self, new_cash: float) -> None:
         """BalanceGuard가 호출하는 내부 장부 재동기화 콜백."""
@@ -287,11 +300,19 @@ class FuturesEngineV2:
     # ── 시작/중지 ──────────────────────────────
 
     async def initialize(self) -> None:
-        """초기화: 포지션 복원 + 레버리지 설정."""
+        """초기화: 포지션 복원 + 쿨다운 복원 + 일일 매수 복원 + 레버리지 설정."""
         sf = get_session_factory()
         async with sf() as session:
             count = await self._positions.restore_from_db(session, self.EXCHANGE_NAME)
             logger.info("v2_positions_restored", count=count)
+
+            # COIN-41: 쿨다운 DB 복원 (재시작 시 쿨다운 소실 방지)
+            cooldown_count = await self._tier1.restore_cooldowns(session)
+            if cooldown_count:
+                logger.info("v2_cooldowns_restored", count=cooldown_count)
+
+            # COIN-41: 일일 매수 카운터 복원
+            await self._tier1.restore_daily_buy_count(session)
 
         for symbol in self.tracked_coins:
             try:
@@ -307,6 +328,9 @@ class FuturesEngineV2:
             return
         self._is_running = True
         await emit_event("info", "engine", "선물 엔진 v2 시작")
+
+        # COIN-41: 다운타임 중 SL/TP 초과 포지션 즉시 체크
+        await self._check_downtime_stops()
 
         # WS 초기화
         ws_started = False
@@ -802,6 +826,84 @@ class FuturesEngineV2:
                 else:
                     await asyncio.sleep(5)
 
+    # ── COIN-41: 다운타임 SL/TP 체크 ──────────────
+
+    async def _check_downtime_stops(self) -> None:
+        """서버 시작 직후 다운타임 중 SL/TP 초과 포지션 즉시 체크 및 처리."""
+        try:
+            positions = self._positions.positions
+            if not positions:
+                logger.info("v2_downtime_stops_no_positions")
+                return
+
+            triggered = 0
+            sf = get_session_factory()
+            async with sf() as session:
+                for symbol, state in list(positions.items()):
+                    try:
+                        price = await self._market_data.get_current_price(symbol)
+                        if price <= 0:
+                            continue
+
+                        # extreme price 업데이트
+                        state.update_extreme(price)
+
+                        # ATR 필요 — 5m 캔들에서 조회
+                        df = await self._market_data.get_ohlcv_df(symbol, "5m", 200)
+                        if df is None or len(df) < 20:
+                            continue
+                        atr_col = "atr_14"
+                        if atr_col not in df.columns or len(df) == 0:
+                            continue
+                        atr = (
+                            float(df[atr_col].iloc[-1])
+                            if not df[atr_col].isna().iloc[-1]
+                            else 0.0
+                        )
+                        if atr <= 0:
+                            continue
+
+                        # SL/TP/trailing 체크
+                        if await self._tier1._check_sl_tp(
+                            session, symbol, state, price, atr
+                        ):
+                            triggered += 1
+                            logger.warning(
+                                "v2_downtime_stop_triggered",
+                                symbol=symbol,
+                                direction=state.direction.value,
+                                price=price,
+                            )
+                    except Exception as e:
+                        logger.debug(
+                            "v2_downtime_stop_check_error",
+                            symbol=symbol,
+                            error=str(e),
+                        )
+
+                if triggered:
+                    await session.commit()
+                    logger.warning(
+                        "v2_downtime_stops_executed",
+                        count=triggered,
+                    )
+                    await emit_event(
+                        "warning",
+                        "engine",
+                        f"V2 다운타임 SL/TP 도달 포지션 {triggered}건 처리",
+                        metadata={
+                            "exchange": self.EXCHANGE_NAME,
+                            "count": triggered,
+                        },
+                    )
+                else:
+                    logger.info(
+                        "v2_downtime_stops_all_clear",
+                        positions=len(positions),
+                    )
+        except Exception as e:
+            logger.warning("v2_downtime_stop_check_failed", error=str(e))
+
     # ── 루프들 ──────────────────────────────────
 
     async def _regime_loop(self) -> None:
@@ -893,6 +995,8 @@ class FuturesEngineV2:
                 sf = get_session_factory()
                 async with sf() as session:
                     await self._positions.persist_to_db(session, self.EXCHANGE_NAME)
+                    # COIN-41: 쿨다운 DB 영속화
+                    await self._tier1.persist_cooldowns(session)
                     await session.commit()
 
                     # 포트폴리오 스냅샷 저장 (daily_pnl 계산용)
@@ -1019,4 +1123,6 @@ class FuturesEngineV2:
             "ws_balance_audit": ws_balance_ok,
             "ws_position_sync": ws_position_ok,
             "fast_sl_fallback": fast_sl_active,
+            "daily_buy_count": self._tier1._daily_buy_count,
+            "eval_error_counts": dict(self._tier1._eval_error_counts),
         }

@@ -19,11 +19,13 @@ import pandas as pd
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.constants import MIN_NOTIONAL
 from core.enums import Direction, Regime
-from core.models import StrategyLog
+from core.event_bus import emit_event
+from core.models import Order, Position, StrategyLog
 from engine.direction_evaluator import DirectionDecision, DirectionEvaluator
 from engine.regime_detector import RegimeDetector, RegimeState
 from engine.safe_order_pipeline import SafeOrderPipeline, OrderRequest
@@ -107,6 +109,9 @@ class Tier1Manager:
         asymmetric_mode: bool = False,
         dynamic_sl: bool = False,
         atr_leverage_scaling: bool = False,
+        daily_buy_limit: int = 20,
+        max_daily_coin_buys: int = 3,
+        max_eval_errors: int = 3,
     ):
         self._coins = coins
         self._safe_order = safe_order
@@ -140,6 +145,17 @@ class Tier1Manager:
         self._last_exit_time: dict[str, float] = {}  # symbol → timestamp
         self._last_exit_direction: dict[str, Direction] = {}  # symbol → exit direction
 
+        # COIN-41: 일일 매수 한도
+        self._daily_buy_limit = daily_buy_limit
+        self._max_daily_coin_buys = max_daily_coin_buys
+        self._daily_buy_count: int = 0
+        self._daily_coin_buy_count: dict[str, int] = {}
+        self._daily_reset_date: datetime | None = None
+
+        # COIN-41: 연속 에러 강제 청산
+        self._max_eval_errors = max_eval_errors
+        self._eval_error_counts: dict[str, int] = {}
+
         # 관측용 상태 (COIN-17)
         self._cycle_count: int = 0
         self._last_cycle_at: datetime | None = None
@@ -167,6 +183,9 @@ class Tier1Manager:
             if self._regime.current
             else None,
             "ml_filter_active": self._ml_filter is not None,
+            "daily_buy_count": self._daily_buy_count,
+            "daily_buy_limit": self._daily_buy_limit,
+            "eval_error_counts": dict(self._eval_error_counts),
         }
 
     async def evaluation_cycle(self, session: AsyncSession) -> CycleStats:
@@ -179,9 +198,13 @@ class Tier1Manager:
             logger.debug("tier1_skip_no_regime")
             return stats
 
+        # COIN-41: 일일 카운터 리셋 (UTC 자정)
+        self._reset_daily_counter()
+
         for coin in self._coins:
             try:
                 outcome = await self._evaluate_coin(session, coin, regime_state)
+                self._eval_error_counts.pop(coin, None)  # 성공 시 에러 카운터 리셋
                 stats.coins_evaluated += 1
                 stats.decisions[coin] = outcome
                 self._last_decisions[coin] = outcome
@@ -198,16 +221,45 @@ class Tier1Manager:
                     stats.candle_error_count += 1
                 elif outcome == "ml_filtered":
                     stats.ml_filtered_count += 1
+                elif outcome == "daily_limit":
+                    stats.cooldown_count += 1  # 일일 한도도 쿨다운 카운트
                 elif outcome == "margin_insufficient":
                     stats.low_confidence_count += 1  # 마진 부족도 미실행 카운트
                 elif outcome in ("opened", "closed", "sar", "flat_close"):
                     stats.executed_count += 1
                     self._last_action_at = datetime.now(timezone.utc)
             except Exception as e:
+                # COIN-41: 연속 에러 카운터 + 강제 청산
+                err_count = self._eval_error_counts.get(coin, 0) + 1
+                self._eval_error_counts[coin] = err_count
                 stats.error_count += 1
                 stats.decisions[coin] = "error"
                 self._last_decisions[coin] = "error"
-                logger.error("tier1_eval_error", coin=coin, error=str(e))
+                logger.error(
+                    "tier1_eval_error",
+                    coin=coin,
+                    error=str(e),
+                    consecutive_errors=err_count,
+                )
+
+                level = "critical" if err_count >= self._max_eval_errors else "warning"
+                await emit_event(
+                    level,
+                    "engine",
+                    f"Tier1 평가 실패: {coin} ({err_count}회 연속)",
+                    detail=str(e),
+                    metadata={
+                        "symbol": coin,
+                        "consecutive_errors": err_count,
+                        "exchange": self._exchange_name,
+                    },
+                )
+
+                # 연속 N회 실패 + 보유 포지션 → 강제 청산
+                if err_count >= self._max_eval_errors and self._positions.has_position(
+                    coin
+                ):
+                    await self._force_close_stuck_position(session, coin, str(e))
 
         elapsed_ms = (time.monotonic() - start_time) * 1000
         self._cycle_count += 1
@@ -515,6 +567,19 @@ class Tier1Manager:
             )
             return "ml_filtered"
 
+        # COIN-41: 일일 매수 한도 체크
+        can_trade, reason = self._can_trade(symbol)
+        if not can_trade:
+            self._log_direction_decision(
+                session,
+                symbol,
+                decision,
+                regime=regime,
+                was_executed=False,
+            )
+            logger.debug("tier1_daily_limit", symbol=symbol, reason=reason)
+            return "daily_limit"
+
         # 진입 실행
         opened = await self._open_position_from_decision(session, symbol, decision)
         self._log_direction_decision(
@@ -524,6 +589,11 @@ class Tier1Manager:
             regime=regime,
             was_executed=opened,
         )
+        if opened:
+            self._daily_buy_count += 1
+            self._daily_coin_buy_count[symbol] = (
+                self._daily_coin_buy_count.get(symbol, 0) + 1
+            )
         return "opened" if opened else "margin_insufficient"
 
     def _resolve_entry(
@@ -844,6 +914,239 @@ class Tier1Manager:
         """SL/TP/trailing 후 방향별 쿨다운 설정 (COIN-27)."""
         self._last_exit_time[symbol] = time.time()
         self._last_exit_direction[symbol] = direction
+
+    # ── COIN-41: 일일 매수 한도 ──────────────────────
+
+    def _reset_daily_counter(self) -> None:
+        """UTC 자정에 일일 카운터 리셋."""
+        today = datetime.now(timezone.utc).date()
+        if self._daily_reset_date != today:
+            self._daily_buy_count = 0
+            self._daily_coin_buy_count.clear()
+            self._daily_reset_date = today
+
+    def _can_trade(self, symbol: str) -> tuple[bool, str]:
+        """일일 매수 한도 체크. Returns (allowed, reason)."""
+        if self._daily_buy_count >= self._daily_buy_limit:
+            return False, f"Daily buy limit reached ({self._daily_buy_limit})"
+        coin_buys = self._daily_coin_buy_count.get(symbol, 0)
+        if coin_buys >= self._max_daily_coin_buys:
+            return (
+                False,
+                f"Coin daily limit reached ({symbol}: {coin_buys}/{self._max_daily_coin_buys})",
+            )
+        return True, "OK"
+
+    async def restore_daily_buy_count(self, session: AsyncSession) -> None:
+        """DB에서 오늘 매수 카운터 복원 (재시작 시)."""
+        today = datetime.now(timezone.utc).date()
+        today_start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+        result = await session.execute(
+            select(Order.symbol, func.count())
+            .where(
+                Order.exchange == self._exchange_name,
+                Order.side == "buy",
+                Order.created_at >= today_start,
+            )
+            .group_by(Order.symbol)
+        )
+        total_buys = 0
+        for symbol, count in result.all():
+            self._daily_coin_buy_count[symbol] = count
+            total_buys += count
+        self._daily_buy_count = total_buys
+        self._daily_reset_date = today
+        if total_buys:
+            logger.info(
+                "tier1_daily_buy_count_restored",
+                total=total_buys,
+                coins=dict(self._daily_coin_buy_count),
+            )
+
+    # ── COIN-41: 연속 에러 강제 청산 ──────────────────
+
+    async def _force_close_stuck_position(
+        self,
+        session: AsyncSession,
+        symbol: str,
+        last_error: str,
+    ) -> None:
+        """연속 평가 실패 포지션 강제 청산. 가격 조회 불가 시 DB에서 직접 제거."""
+        pos_state = self._positions.get(symbol)
+        if not pos_state:
+            self._eval_error_counts.pop(symbol, None)
+            return
+
+        err_count = self._eval_error_counts.get(symbol, 0)
+        logger.warning(
+            "tier1_force_close",
+            symbol=symbol,
+            direction=pos_state.direction.value,
+            quantity=pos_state.quantity,
+            consecutive_errors=err_count,
+            last_error=last_error,
+        )
+
+        # SafeOrderPipeline으로 청산 시도
+        try:
+            price = await self._get_price(symbol)
+            if price > 0:
+                request = OrderRequest(
+                    symbol=symbol,
+                    direction=pos_state.direction,
+                    action="close",
+                    quantity=pos_state.quantity,
+                    price=price,
+                    margin=pos_state.margin,
+                    leverage=self._leverage,
+                    strategy_name="force_close",
+                    confidence=0.0,
+                    tier="tier1",
+                    entry_price=pos_state.entry_price,
+                )
+                resp = await self._safe_order.execute_order(session, request)
+                if resp.success:
+                    self._positions.close_position(symbol)
+                    self._eval_error_counts.pop(symbol, None)
+                    # 강제 청산은 에러 기반이므로 쿨다운 면제
+                    self._last_exit_time.pop(symbol, None)
+                    self._last_exit_direction.pop(symbol, None)
+                    logger.warning(
+                        "tier1_force_close_success",
+                        symbol=symbol,
+                        consecutive_errors=err_count,
+                    )
+                    return
+        except Exception as close_err:
+            logger.warning(
+                "tier1_force_close_market_failed",
+                symbol=symbol,
+                error=str(close_err),
+            )
+
+        # 2차: 거래소 매도 불가 → DB 포지션 강제 리셋
+        result = await session.execute(
+            select(Position).where(
+                Position.symbol == symbol,
+                Position.quantity > 0,
+                Position.exchange == self._exchange_name,
+            )
+        )
+        position = result.scalar_one_or_none()
+        if position:
+            position.quantity = 0
+            position.current_value = 0
+            await session.flush()
+
+        self._positions.close_position(symbol)
+        self._eval_error_counts.pop(symbol, None)
+        # 강제 청산은 에러 기반이므로 쿨다운 면제
+        self._last_exit_time.pop(symbol, None)
+        self._last_exit_direction.pop(symbol, None)
+
+        logger.error(
+            "tier1_force_close_db_reset",
+            symbol=symbol,
+            detail="거래소 매도 실패 → DB 포지션 강제 리셋",
+        )
+        await emit_event(
+            "critical",
+            "engine",
+            f"Tier1 강제 청산 (DB 리셋): {symbol}",
+            detail=f"연속 {err_count}회 평가 실패, 거래소 매도 불가 → DB 포지션 0으로 리셋. "
+            f"수동으로 거래소에서 {symbol} 포지션을 확인하세요.",
+            metadata={"symbol": symbol, "consecutive_errors": err_count},
+        )
+
+    # ── COIN-41: 쿨다운 DB 영속화 ──────────────────
+
+    async def persist_cooldowns(self, session: AsyncSession) -> int:
+        """인메모리 쿨다운을 DB Position.last_sell_at/last_sell_direction에 영속화.
+
+        Returns:
+            업데이트된 포지션 수.
+        """
+        updated = 0
+        for symbol, exit_ts in self._last_exit_time.items():
+            exit_dir = self._last_exit_direction.get(symbol)
+            if exit_dir is None:
+                continue
+
+            # 해당 심볼 포지션 조회 (활성/비활성 모두)
+            result = await session.execute(
+                select(Position).where(
+                    Position.symbol == symbol,
+                    Position.exchange == self._exchange_name,
+                )
+            )
+            pos = result.scalar_one_or_none()
+            if pos:
+                pos.last_sell_at = datetime.fromtimestamp(exit_ts, tz=timezone.utc)
+                pos.last_sell_direction = exit_dir.value
+                updated += 1
+
+        if updated > 0:
+            await session.flush()
+            logger.debug("tier1_cooldowns_persisted", count=updated)
+        return updated
+
+    async def restore_cooldowns(self, session: AsyncSession) -> int:
+        """DB에서 쿨다운 복원 (재시작 시).
+
+        Position.last_sell_at + last_sell_direction이 쿨다운 범위 내이면
+        인메모리 _last_exit_time / _last_exit_direction에 복원.
+
+        Returns:
+            복원된 쿨다운 수.
+        """
+        result = await session.execute(
+            select(Position).where(
+                Position.exchange == self._exchange_name,
+                Position.last_sell_at.isnot(None),
+            )
+        )
+        restored = 0
+        max_cooldown = max(self._long_cooldown_sec, self._short_cooldown_sec)
+
+        for pos in result.scalars().all():
+            if pos.last_sell_at is None:
+                continue
+
+            sell_at = pos.last_sell_at
+            # timezone-aware 변환 (DB에서 naive일 수 있음)
+            if sell_at.tzinfo is None:
+                sell_at = sell_at.replace(tzinfo=timezone.utc)
+
+            elapsed = (datetime.now(timezone.utc) - sell_at).total_seconds()
+            if elapsed >= max_cooldown:
+                continue  # 쿨다운 만료
+
+            self._last_exit_time[pos.symbol] = sell_at.timestamp()
+
+            # direction 복원: last_sell_direction 우선, 없으면 현재 position direction 사용
+            if pos.last_sell_direction:
+                dir_str = pos.last_sell_direction
+                self._last_exit_direction[pos.symbol] = (
+                    Direction.SHORT if dir_str == "short" else Direction.LONG
+                )
+            elif pos.direction:
+                self._last_exit_direction[pos.symbol] = (
+                    Direction.SHORT if pos.direction == "short" else Direction.LONG
+                )
+            else:
+                self._last_exit_direction[pos.symbol] = Direction.LONG
+
+            restored += 1
+            logger.debug(
+                "tier1_cooldown_restored",
+                symbol=pos.symbol,
+                direction=self._last_exit_direction[pos.symbol].value,
+                remaining_h=round((max_cooldown - elapsed) / 3600, 1),
+            )
+
+        if restored:
+            logger.info("tier1_cooldowns_restored", count=restored)
+        return restored
 
     async def _execute_sar(
         self,
