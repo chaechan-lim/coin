@@ -40,6 +40,7 @@ class CycleStats:
     executed_count: int = 0
     error_count: int = 0
     candle_error_count: int = 0
+    ml_filtered_count: int = 0
     decisions: dict = field(default_factory=dict)  # symbol → outcome string
 
 
@@ -67,6 +68,7 @@ class Tier1Manager:
         short_cooldown_seconds: int | None = None,
         exchange_name: str = "binance_futures",
         on_close_callback: Callable[[], Awaitable[None]] | None = None,
+        ml_filter=None,
     ):
         self._coins = coins
         self._safe_order = safe_order
@@ -79,6 +81,7 @@ class Tier1Manager:
         self._leverage = leverage
         self._max_position_pct = max_position_pct
         self._min_confidence = min_confidence
+        self._ml_filter = ml_filter
         # Direction-specific cooldowns (COIN-27): fallback to single cooldown_seconds
         self._long_cooldown_sec = (
             long_cooldown_seconds
@@ -121,6 +124,7 @@ class Tier1Manager:
             "regime": self._regime.current.regime.value
             if self._regime.current
             else None,
+            "ml_filter_active": self._ml_filter is not None,
         }
 
     async def evaluation_cycle(self, session: AsyncSession) -> CycleStats:
@@ -150,6 +154,8 @@ class Tier1Manager:
                     stats.sl_tp_count += 1
                 elif outcome == "candle_error":
                     stats.candle_error_count += 1
+                elif outcome == "ml_filtered":
+                    stats.ml_filtered_count += 1
                 elif outcome == "margin_insufficient":
                     stats.low_confidence_count += 1  # 마진 부족도 미실행 카운트
                 elif outcome in ("opened", "closed", "sar", "flat_close"):
@@ -172,6 +178,7 @@ class Tier1Manager:
             hold=stats.hold_count,
             low_conf=stats.low_confidence_count,
             cooldown=stats.cooldown_count,
+            ml_filtered=stats.ml_filtered_count,
             sl_tp=stats.sl_tp_count,
             executed=stats.executed_count,
             errors=stats.error_count,
@@ -247,6 +254,7 @@ class Tier1Manager:
                 if (
                     short_decision.is_open
                     and short_decision.confidence >= self._min_confidence
+                    and self._check_ml_filter(symbol, short_decision, regime)
                 ):
                     sar_outcome = await self._execute_sar(
                         session, symbol, pos_state.direction, short_decision
@@ -310,6 +318,7 @@ class Tier1Manager:
                 if (
                     long_decision.is_open
                     and long_decision.confidence >= self._min_confidence
+                    and self._check_ml_filter(symbol, long_decision, regime)
                 ):
                     sar_outcome = await self._execute_sar(
                         session, symbol, pos_state.direction, long_decision
@@ -425,6 +434,17 @@ class Tier1Manager:
             )
             return "cooldown"
 
+        # ML 시그널 필터: 신규 진입만 필터링 (COIN-40)
+        if not self._check_ml_filter(symbol, decision, regime):
+            self._log_direction_decision(
+                session,
+                symbol,
+                decision,
+                regime=regime,
+                was_executed=False,
+            )
+            return "ml_filtered"
+
         # 진입 실행
         opened = await self._open_position_from_decision(session, symbol, decision)
         self._log_direction_decision(
@@ -506,6 +526,66 @@ class Tier1Manager:
             )
             return True
         return False
+
+    def _check_ml_filter(
+        self,
+        symbol: str,
+        decision: DirectionDecision,
+        regime: RegimeState,
+    ) -> bool:
+        """ML 시그널 필터: 신규 진입만 필터링 (청산은 허용).
+
+        Returns:
+            True if trade should proceed, False if blocked by ML filter.
+        """
+        if self._ml_filter is None:
+            return True
+
+        try:
+            from strategies.ml_filter import MLSignalFilter
+
+            # evaluator가 indicators에 담아준 시그널+캔들 사용
+            signals = decision.indicators.get("_signals", [])
+            candle_row = decision.indicators.get("_candle_row")
+            combined_confidence = decision.indicators.get(
+                "_combined_confidence", decision.confidence
+            )
+            price = decision.indicators.get("close", 0.0)
+            market_state = regime.regime.value
+
+            if candle_row is None:
+                # 캔들 데이터 없으면 필터 통과 (graceful degradation)
+                logger.debug("ml_filter_skip_no_candle", symbol=symbol)
+                return True
+
+            features = MLSignalFilter.extract_features(
+                signals=signals,
+                row=candle_row,
+                price=price,
+                market_state=market_state,
+                combined_confidence=combined_confidence,
+            )
+            pred = self._ml_filter.predict(features)
+
+            if not pred.should_trade:
+                logger.info(
+                    "ml_filter_blocked",
+                    symbol=symbol,
+                    win_prob=round(pred.win_probability, 3),
+                    direction=decision.direction.value if decision.direction else None,
+                )
+                return False
+
+            logger.debug(
+                "ml_filter_passed",
+                symbol=symbol,
+                win_prob=round(pred.win_probability, 3),
+            )
+            return True
+
+        except Exception as e:
+            logger.warning("ml_filter_error", symbol=symbol, error=str(e))
+            return True  # 에러 시 필터 통과 (graceful degradation)
 
     async def _open_position_from_decision(
         self,

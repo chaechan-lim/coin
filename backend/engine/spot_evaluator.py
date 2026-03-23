@@ -198,6 +198,11 @@ class SpotEvaluator:
                         "atr": last_atr,
                         "trailing_activation_atr": self._trail_activation_atr_mult,
                         "trailing_stop_atr": self._trail_stop_atr_mult,
+                        "_signals": signals,
+                        "_candle_row": df_4h.iloc[-1]
+                        if df_4h is not None and len(df_4h) > 0
+                        else None,
+                        "_combined_confidence": confidence,
                     },
                 )
 
@@ -231,6 +236,11 @@ class SpotEvaluator:
                         "atr": last_atr,
                         "trailing_activation_atr": self._trail_activation_atr_mult,
                         "trailing_stop_atr": self._trail_stop_atr_mult,
+                        "_signals": signals,
+                        "_candle_row": df_4h.iloc[-1]
+                        if df_4h is not None and len(df_4h) > 0
+                        else None,
+                        "_combined_confidence": confidence,
                     },
                 )
 

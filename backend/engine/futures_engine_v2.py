@@ -81,6 +81,19 @@ class FuturesEngineV2:
             leverage=v2_cfg.leverage,
         )
 
+        # ML Signal Filter (선택적 — 모델 파일 존재 시 활성) (COIN-40)
+        self._ml_filter = None
+        try:
+            from strategies.ml_filter import MLSignalFilter, MODEL_DIR
+
+            model_path = MODEL_DIR / "signal_filter.pkl"
+            if model_path.exists():
+                self._ml_filter = MLSignalFilter(min_win_prob=0.52)
+                self._ml_filter.load(str(model_path))
+                logger.info("v2_ml_filter_loaded", model_path=str(model_path))
+        except Exception as e:
+            logger.warning("v2_ml_filter_load_failed", error=str(e))
+
         # 양방향 SpotEvaluator: 현물 4전략 기반 롱+숏 (COIN-28)
         # 하나의 SpotEvaluator 인스턴스가 long_evaluator + short_evaluator 모두 담당.
         # BUY → 롱 진입 / 숏 청산, SELL → 숏 진입 / 롱 청산.
@@ -128,6 +141,7 @@ class FuturesEngineV2:
             short_cooldown_seconds=int(v2_cfg.tier1_sl_short_cooldown_hours * 3600),
             exchange_name=self.EXCHANGE_NAME,
             on_close_callback=self._on_sell_completed,
+            ml_filter=self._ml_filter,
         )
 
         self._tier2 = Tier2Scanner(
@@ -219,8 +233,10 @@ class FuturesEngineV2:
     async def _on_sell_completed(self) -> None:
         """매도 완료 시 카운터 증가 -> N회마다 매매 회고 트리거."""
         self._sells_since_review += 1
-        if (self._sells_since_review >= self._REVIEW_TRIGGER_SELLS
-                and self._agent_coordinator):
+        if (
+            self._sells_since_review >= self._REVIEW_TRIGGER_SELLS
+            and self._agent_coordinator
+        ):
             self._sells_since_review = 0
             task = asyncio.create_task(
                 self._agent_coordinator.run_trade_review(),
@@ -228,8 +244,7 @@ class FuturesEngineV2:
             )
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
-            logger.info("v2_trade_review_triggered",
-                        trigger=self._REVIEW_TRIGGER_SELLS)
+            logger.info("v2_trade_review_triggered", trigger=self._REVIEW_TRIGGER_SELLS)
 
     async def _resync_cash(self, new_cash: float) -> None:
         """BalanceGuard가 호출하는 내부 장부 재동기화 콜백."""
