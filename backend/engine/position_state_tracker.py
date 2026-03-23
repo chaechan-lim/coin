@@ -150,8 +150,9 @@ class PositionStateTracker:
         )
 
     def close_position(self, symbol: str) -> PositionState | None:
-        """포지션 제거. 반환: 제거된 상태 or None."""
+        """포지션 제거 + ATR 캐시 정리. 반환: 제거된 상태 or None."""
         state = self._positions.pop(symbol, None)
+        self._last_atr.pop(symbol, None)
         if state:
             logger.info(
                 "position_closed",

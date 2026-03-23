@@ -11,6 +11,7 @@ SurgeEngine을 대체 (Tier 2로 통합).
 """
 
 import asyncio
+import time
 import structlog
 
 from sqlalchemy import select
@@ -178,6 +179,9 @@ class FuturesEngineV2:
         # WS 모니터링 상태
         self._close_lock = asyncio.Lock()  # WS/eval 동시 청산 방지
         self._ws_reconnect_lock = asyncio.Lock()  # 재연결 동시 호출 방지
+        self._last_reconnect_at: float = 0.0  # 마지막 재연결 시각 (monotonic)
+        self._ws_consecutive_successes: int = 0  # WS 연속 성공 카운터 (폴백 해제 기준)
+        self._ws_unrealized_pnl: dict[str, float] = {}  # 포지션별 미실현 PnL (잔고 감사용)
         self._ws_monitor_task: asyncio.Task | None = None
         self._ws_bp_task: asyncio.Task | None = None   # WS balance audit loop
         self._ws_pos_task: asyncio.Task | None = None   # WS position sync loop
@@ -352,10 +356,15 @@ class FuturesEngineV2:
     async def _ws_reconnect(self, backoff: float) -> float:
         """WS 재연결 시도. 성공 시 backoff 리셋, 실패 시 증가된 backoff 반환.
 
-        _ws_reconnect_lock으로 동시 호출을 직렬화하여 다중 루프의
-        동시 재연결 폭풍(reconnect storm)을 방지한다.
+        _ws_reconnect_lock으로 동시 호출을 직렬화하고, freshness check로
+        최근 재연결된 경우 중복 재연결을 스킵하여 reconnect storm을 방지한다.
         """
         async with self._ws_reconnect_lock:
+            # 최근 재연결됐으면 스킵 (다른 루프가 이미 재연결함)
+            if (time.monotonic() - self._last_reconnect_at) < self._WS_RECONNECT_MIN:
+                logger.debug("v2_ws_reconnect_skipped_fresh")
+                return self._WS_RECONNECT_MIN
+
             wait = min(backoff, self._WS_RECONNECT_MAX)
             logger.info("v2_ws_reconnect_attempt", wait_sec=wait)
             await asyncio.sleep(wait)
@@ -367,6 +376,7 @@ class FuturesEngineV2:
 
             try:
                 await self._exchange.create_ws_exchange()
+                self._last_reconnect_at = time.monotonic()
                 logger.info("v2_ws_reconnected")
                 return self._WS_RECONNECT_MIN
             except Exception as e:
@@ -393,15 +403,18 @@ class FuturesEngineV2:
                 consecutive_errors = 0
                 backoff = self._WS_RECONNECT_MIN
 
-                # 폴백이 실행 중이었다면 해제
-                if self._fast_sl_task and not self._fast_sl_task.done():
+                # 폴백 해제: 3회 연속 성공 후 (대칭 히스테리시스)
+                self._ws_consecutive_successes += 1
+                if (self._fast_sl_task and not self._fast_sl_task.done()
+                        and self._ws_consecutive_successes >= self._WS_MAX_ERRORS):
                     self._fast_sl_task.cancel()
                     try:
                         await self._fast_sl_task
                     except asyncio.CancelledError:
                         pass
                     self._fast_sl_task = None
-                    logger.info("v2_fast_sl_fallback_cancelled")
+                    logger.info("v2_fast_sl_fallback_cancelled",
+                                after_successes=self._ws_consecutive_successes)
 
                 for symbol in symbols:
                     if symbol in tickers:
@@ -415,6 +428,7 @@ class FuturesEngineV2:
                 break
             except Exception as e:
                 consecutive_errors += 1
+                self._ws_consecutive_successes = 0
                 logger.warning(
                     "v2_ws_price_error",
                     error=str(e),
@@ -595,7 +609,9 @@ class FuturesEngineV2:
                     wallet_total = float(getattr(usdt, "total", 0) or 0)
                     margin_used = float(getattr(usdt, "used", 0) or 0)
 
-                exchange_cash = wallet_total - margin_used
+                # CLAUDE.md 규약: walletBalance에서 unrealizedPnl + totalMargin 차감
+                total_unrealized = sum(self._ws_unrealized_pnl.values())
+                exchange_cash = wallet_total - total_unrealized - margin_used
                 internal_cash = self._pm.cash_balance
 
                 if exchange_cash > 0:
@@ -646,6 +662,7 @@ class FuturesEngineV2:
                 sf = get_session_factory()
                 async with sf() as session:
                     changed = False
+                    post_commit_closes: list[str] = []
 
                     for fp in positions:
                         contracts = float(fp.get("contracts", 0) or 0)
@@ -674,8 +691,8 @@ class FuturesEngineV2:
                             )
                             db_pos.quantity = 0
                             db_pos.current_value = 0
-                            self._positions.close_position(sym)
                             changed = True
+                            post_commit_closes.append(sym)
                             continue
 
                         margin = float(fp.get("initialMargin", 0) or 0)
@@ -706,10 +723,10 @@ class FuturesEngineV2:
                             db_pos.liquidation_price = liq
                             updated = True
 
-                        # 현재가 + 미실현 PnL
+                        # 미실현 PnL → current_value + 잔고 감사용 캐시
                         if contracts > 0 and entry > 0:
-                            db_pos.current_price = mark or entry
                             db_pos.current_value = margin + unrealized
+                            self._ws_unrealized_pnl[sym] = unrealized
 
                         # 인메모리 extreme 업데이트
                         state = self._positions.get(sym)
@@ -727,6 +744,11 @@ class FuturesEngineV2:
 
                     if changed:
                         await session.commit()
+
+                    # commit 성공 후 인메모리 포지션 제거
+                    for sym_close in post_commit_closes:
+                        self._positions.close_position(sym_close)
+                        self._ws_unrealized_pnl.pop(sym_close, None)
 
             except asyncio.TimeoutError:
                 continue

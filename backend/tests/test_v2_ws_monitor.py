@@ -144,6 +144,17 @@ class TestATRCaching:
         tracker.update_atr("BTC/USDT", -10.0)
         assert tracker.get_atr("BTC/USDT") == 500.0
 
+    def test_close_position_cleans_atr_cache(self):
+        """포지션 종료 시 ATR 캐시도 제거."""
+        tracker = PositionStateTracker()
+        state = _make_position_state()
+        tracker.open_position(state)
+        tracker.update_atr("BTC/USDT", 500.0)
+        assert tracker.get_atr("BTC/USDT") == 500.0
+
+        tracker.close_position("BTC/USDT")
+        assert tracker.get_atr("BTC/USDT") == 0.0
+
 
 # ── WS Reconnect 테스트 ──────────────────────────
 
@@ -152,6 +163,7 @@ class TestWSReconnect:
     @pytest.mark.asyncio
     async def test_reconnect_success_returns_min(self, engine, mock_exchange):
         """재연결 성공 시 최소 backoff 반환."""
+        engine._last_reconnect_at = 0.0  # 오래 전 재연결 (freshness 통과)
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await engine._ws_reconnect(10.0)
         assert result == engine._WS_RECONNECT_MIN
@@ -161,6 +173,7 @@ class TestWSReconnect:
     @pytest.mark.asyncio
     async def test_reconnect_failure_doubles_backoff(self, engine, mock_exchange):
         """재연결 실패 시 backoff 2배."""
+        engine._last_reconnect_at = 0.0
         mock_exchange.create_ws_exchange.side_effect = Exception("connection failed")
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await engine._ws_reconnect(10.0)
@@ -169,10 +182,23 @@ class TestWSReconnect:
     @pytest.mark.asyncio
     async def test_reconnect_caps_at_max(self, engine, mock_exchange):
         """backoff 최대값 초과 방지."""
+        engine._last_reconnect_at = 0.0
         mock_exchange.create_ws_exchange.side_effect = Exception("fail")
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await engine._ws_reconnect(200.0)
         assert result == engine._WS_RECONNECT_MAX
+
+    @pytest.mark.asyncio
+    async def test_reconnect_skips_when_fresh(self, engine, mock_exchange):
+        """최근 재연결된 경우 중복 재연결 스킵."""
+        import time
+        engine._last_reconnect_at = time.monotonic()  # 방금 재연결
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await engine._ws_reconnect(10.0)
+        assert result == engine._WS_RECONNECT_MIN
+        # close_ws/create_ws_exchange 호출 없어야 함
+        mock_exchange.close_ws.assert_not_called()
+        mock_exchange.create_ws_exchange.assert_not_called()
 
 
 # ── Realtime Stop Check 테스트 ────────────────────
@@ -498,9 +524,39 @@ class TestWSPriceMonitorLoop:
                 pass
 
     @pytest.mark.asyncio
-    async def test_fallback_cancelled_on_reconnect(self, engine, mock_exchange):
-        """WS 재연결 성공 시 폴백 태스크 취소."""
+    async def test_fallback_cancelled_after_consecutive_successes(self, engine, mock_exchange):
+        """WS 3회 연속 성공 후 폴백 태스크 취소 (대칭 히스테리시스)."""
         # 미리 폴백 태스크 생성
+        async def dummy():
+            await asyncio.sleep(3600)
+
+        engine._fast_sl_task = asyncio.create_task(dummy())
+
+        state = _make_position_state()
+        engine._positions.open_position(state)
+
+        tick_count = 0
+
+        async def mock_watch(symbols):
+            nonlocal tick_count
+            tick_count += 1
+            if tick_count > 3:
+                raise asyncio.CancelledError()
+            return {"BTC/USDT": {"last": 80000.0}}
+
+        mock_exchange.watch_tickers = AsyncMock(side_effect=mock_watch)
+        engine._is_running = True
+        engine._realtime_stop_check = AsyncMock()
+        engine._ws_consecutive_successes = 0
+
+        await engine._ws_price_monitor_loop()
+
+        # 3회 연속 성공 후 폴백 취소 확인
+        assert engine._fast_sl_task is None
+
+    @pytest.mark.asyncio
+    async def test_fallback_not_cancelled_on_single_success(self, engine, mock_exchange):
+        """WS 1회 성공으로는 폴백 취소 안 함."""
         async def dummy():
             await asyncio.sleep(3600)
 
@@ -521,11 +577,19 @@ class TestWSPriceMonitorLoop:
         mock_exchange.watch_tickers = AsyncMock(side_effect=mock_watch)
         engine._is_running = True
         engine._realtime_stop_check = AsyncMock()
+        engine._ws_consecutive_successes = 0
 
         await engine._ws_price_monitor_loop()
 
-        # 폴백 취소 확인
-        assert engine._fast_sl_task is None
+        # 1회 성공으로는 폴백 유지
+        assert engine._fast_sl_task is not None
+
+        # cleanup
+        engine._fast_sl_task.cancel()
+        try:
+            await engine._fast_sl_task
+        except asyncio.CancelledError:
+            pass
 
 
 # ── Fast SL Fallback Loop 테스트 ──────────────────
@@ -574,6 +638,8 @@ class TestWSBalanceLoop:
             return {"USDT": {"total": 600.0, "used": 50.0}}
 
         mock_exchange.watch_balance = AsyncMock(side_effect=mock_watch)
+        # unrealized PnL이 있는 상황: exchange_cash = 600 - 0(unrealized) - 50 = 550
+        engine._ws_unrealized_pnl = {}
         mock_pm.cash_balance = 100.0  # 내부 장부 = 100, 거래소 = 550 → 큰 괴리
         engine._is_running = True
 
@@ -599,12 +665,36 @@ class TestWSBalanceLoop:
             return {"USDT": {"total": 500.0, "used": 0.0}}
 
         mock_exchange.watch_balance = AsyncMock(side_effect=mock_watch)
+        engine._ws_unrealized_pnl = {}
         mock_pm.cash_balance = 500.0
         engine._is_running = True
 
         with patch("engine.futures_engine_v2.logger") as mock_logger:
             await engine._ws_balance_loop()
             # warning은 호출되지 않아야 함 (reconnect/error 경고 제외)
+            for call in mock_logger.warning.call_args_list:
+                assert call.args[0] != "v2_ws_balance_discrepancy"
+
+    @pytest.mark.asyncio
+    async def test_subtracts_unrealized_pnl(self, engine, mock_exchange, mock_pm):
+        """미실현 PnL 차감하여 정확한 잔고 비교."""
+        call_count = 0
+
+        async def mock_watch():
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise asyncio.CancelledError()
+            return {"USDT": {"total": 600.0, "used": 50.0}}
+
+        mock_exchange.watch_balance = AsyncMock(side_effect=mock_watch)
+        # unrealized PnL = 50 → exchange_cash = 600 - 50 - 50 = 500
+        engine._ws_unrealized_pnl = {"BTC/USDT": 50.0}
+        mock_pm.cash_balance = 500.0  # 일치 → 경고 없음
+        engine._is_running = True
+
+        with patch("engine.futures_engine_v2.logger") as mock_logger:
+            await engine._ws_balance_loop()
             for call in mock_logger.warning.call_args_list:
                 assert call.args[0] != "v2_ws_balance_discrepancy"
 
@@ -858,16 +948,20 @@ class TestGetStatusWS:
 class TestCloseLock:
     @pytest.mark.asyncio
     async def test_close_lock_serializes_concurrent_closes(self, engine):
-        """close_lock이 동시 청산을 직렬화."""
+        """close_lock이 동시 청산을 직렬화 — 비중첩 실행 확인."""
+        import time
+
         state = _make_position_state()
         engine._positions.open_position(state)
         engine._positions.update_atr("BTC/USDT", 1000.0)
 
-        call_order = []
+        timestamps = []  # (start, end) pairs
 
         async def mock_close(symbol, state, price, reason):
-            call_order.append(price)
+            start = time.monotonic()
             await asyncio.sleep(0.05)
+            end = time.monotonic()
+            timestamps.append((start, end))
 
         engine._execute_ws_close = AsyncMock(side_effect=mock_close)
 
@@ -877,8 +971,10 @@ class TestCloseLock:
             engine._realtime_stop_check("BTC/USDT", 76000.0),  # SL hit
         )
 
-        # close_lock에 의해 직렬화 → 두 호출 모두 실행됨 (mock은 실제 청산 안 함)
-        assert len(call_order) == 2
+        assert len(timestamps) == 2
+        # 두 번째 호출이 첫 번째 완료 후에 시작됨 (직렬화 확인)
+        timestamps.sort(key=lambda t: t[0])
+        assert timestamps[1][0] >= timestamps[0][1]
 
     @pytest.mark.asyncio
     async def test_close_lock_exists(self, engine):
@@ -891,12 +987,31 @@ class TestCloseLock:
         assert isinstance(engine._ws_reconnect_lock, asyncio.Lock)
 
 
+class TestReconnectStorm:
+    @pytest.mark.asyncio
+    async def test_concurrent_reconnects_only_execute_once(self, engine, mock_exchange):
+        """3개 루프가 동시에 _ws_reconnect 호출 → freshness로 1회만 실제 재연결."""
+        engine._last_reconnect_at = 0.0  # 오래 전
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            results = await asyncio.gather(
+                engine._ws_reconnect(5.0),
+                engine._ws_reconnect(5.0),
+                engine._ws_reconnect(5.0),
+            )
+
+        # 첫 번째만 실제 재연결, 나머지는 freshness로 스킵
+        assert all(r == engine._WS_RECONNECT_MIN for r in results)
+        # create_ws_exchange는 1회만 호출 (첫 번째가 재연결, 나머지 스킵)
+        assert mock_exchange.create_ws_exchange.call_count == 1
+
+
 class TestWSPositionLoopExternalClose:
     @pytest.mark.asyncio
     async def test_contracts_zero_detects_external_close(
         self, engine, mock_exchange, session, session_factory
     ):
-        """contracts=0 수신 시 외부 청산 감지 → DB 수량 0 + 인메모리 제거."""
+        """contracts=0 수신 시 외부 청산 감지 → DB 커밋 후 인메모리 제거."""
         db_pos = Position(
             symbol="BTC/USDT",
             exchange="binance_futures",
@@ -908,9 +1023,10 @@ class TestWSPositionLoopExternalClose:
         session.add(db_pos)
         await session.commit()
 
-        # 인메모리 포지션 등록
+        # 인메모리 포지션 + ATR 캐시 등록
         state = _make_position_state()
         engine._positions.open_position(state)
+        engine._positions.update_atr("BTC/USDT", 500.0)
 
         call_count = 0
 
@@ -944,5 +1060,7 @@ class TestWSPositionLoopExternalClose:
         assert db_pos.quantity == 0
         assert db_pos.current_value == 0
 
-        # 인메모리 포지션 제거 확인
+        # 인메모리 포지션 제거 확인 (commit 후)
         assert not engine._positions.has_position("BTC/USDT")
+        # ATR 캐시도 제거됨
+        assert engine._positions.get_atr("BTC/USDT") == 0.0
