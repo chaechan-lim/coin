@@ -11,19 +11,23 @@ SurgeEngine을 대체 (Tier 2로 통합).
 """
 
 import asyncio
+import time
 import structlog
+
+from sqlalchemy import select
 
 from config import AppConfig
 from core.event_bus import emit_event
+from core.models import Position
 from db.session import get_session_factory
 from engine.regime_detector import RegimeDetector
 from engine.strategy_selector import StrategySelector
 from engine.spot_evaluator import SpotEvaluator
 from engine.tier1_manager import Tier1Manager
 from engine.tier2_scanner import Tier2Scanner
-from engine.safe_order_pipeline import SafeOrderPipeline
+from engine.safe_order_pipeline import SafeOrderPipeline, OrderRequest
 from engine.balance_guard import BalanceGuard
-from engine.position_state_tracker import PositionStateTracker
+from engine.position_state_tracker import PositionState, PositionStateTracker
 from engine.order_manager import OrderManager
 from engine.portfolio_manager import PortfolioManager
 from exchange.base import ExchangeAdapter
@@ -41,6 +45,13 @@ class FuturesEngineV2:
     """선물 엔진 v2 — 레짐 적응형, 상시 포지션."""
 
     EXCHANGE_NAME = "binance_futures"
+
+    # WS 재연결 상수
+    _WS_RECONNECT_MIN = 5       # 최소 재연결 대기 (초)
+    _WS_RECONNECT_MAX = 300     # 최대 재연결 대기 (초)
+    _WS_RECONNECT_FACTOR = 2    # 지수 백오프 배율
+    _WS_MAX_ERRORS = 3          # WS 폴백 전환 기준 연속 에러
+    _FAST_SL_INTERVAL = 30      # 폴백 폴링 주기 (초)
 
     def __init__(
         self,
@@ -165,6 +176,18 @@ class FuturesEngineV2:
         self._recovery_manager = None
         self._broadcast_callback = None
 
+        # WS 모니터링 상태
+        self._close_lock = asyncio.Lock()  # WS/eval 동시 청산 방지
+        self._ws_reconnect_lock = asyncio.Lock()  # 재연결 동시 호출 방지
+        self._last_reconnect_at: float = 0.0  # 마지막 재연결 시각 (monotonic)
+        self._ws_consecutive_successes: int = 0  # WS 연속 성공 카운터 (폴백 해제 기준)
+        self._ws_unrealized_pnl: dict[str, float] = {}  # 포지션별 미실현 PnL (잔고 감사용)
+        self._ws_monitor_task: asyncio.Task | None = None
+        self._ws_balance_task: asyncio.Task | None = None  # _ws_balance_loop
+        self._ws_pos_task: asyncio.Task | None = None    # _ws_position_loop
+        self._fast_sl_task: asyncio.Task | None = None
+        self._ws_enabled = True  # WS 활성화 플래그
+
         # health_monitor 호환 속성
         self._eval_error_counts: dict[str, int] = {}
         self._position_trackers: dict = {}
@@ -266,6 +289,32 @@ class FuturesEngineV2:
         self._is_running = True
         await emit_event("info", "engine", "선물 엔진 v2 시작")
 
+        # WS 초기화
+        ws_started = False
+        if self._ws_enabled:
+            try:
+                await self._exchange.create_ws_exchange()
+                self._ws_monitor_task = asyncio.create_task(
+                    self._ws_price_monitor_loop(), name="v2_ws_price"
+                )
+                self._ws_balance_task = asyncio.create_task(
+                    self._ws_balance_loop(), name="v2_ws_balance"
+                )
+                self._ws_pos_task = asyncio.create_task(
+                    self._ws_position_loop(), name="v2_ws_position"
+                )
+                ws_started = True
+                logger.info("v2_ws_started")
+            except Exception as e:
+                logger.warning("v2_ws_init_failed", error=str(e))
+
+        # WS 실패 시 폴백 시작
+        if not ws_started:
+            self._fast_sl_task = asyncio.create_task(
+                self._fast_stop_check_loop(), name="v2_fast_sl"
+            )
+            logger.info("v2_fast_sl_fallback_started")
+
         self._tasks = [
             asyncio.create_task(self._regime_loop(), name="v2_regime"),
             asyncio.create_task(self._tier1_loop(), name="v2_tier1"),
@@ -274,6 +323,10 @@ class FuturesEngineV2:
             asyncio.create_task(self._income_loop(), name="v2_income"),
             asyncio.create_task(self._persist_loop(), name="v2_persist"),
         ]
+        # WS 태스크도 관리 목록에 추가
+        for t in (self._ws_monitor_task, self._ws_balance_task, self._ws_pos_task, self._fast_sl_task):
+            if t is not None:
+                self._tasks.append(t)
 
     async def stop(self) -> None:
         self._is_running = False
@@ -285,7 +338,450 @@ class FuturesEngineV2:
                 except asyncio.CancelledError:
                     pass
         self._tasks = []
+        self._ws_monitor_task = None
+        self._ws_balance_task = None
+        self._ws_pos_task = None
+        self._fast_sl_task = None
+
+        # WS 연결 해제
+        try:
+            await self._exchange.close_ws()
+        except Exception:
+            pass
+
         await emit_event("info", "engine", "선물 엔진 v2 중지")
+
+    # ── WS 실시간 모니터링 ────────────────────────
+
+    async def _ws_reconnect(self, backoff: float) -> float:
+        """WS 재연결 시도. 성공 시 backoff 리셋, 실패 시 증가된 backoff 반환.
+
+        _ws_reconnect_lock으로 동시 호출을 직렬화하고, freshness check로
+        최근 재연결된 경우 중복 재연결을 스킵하여 reconnect storm을 방지한다.
+        """
+        async with self._ws_reconnect_lock:
+            # 최근 재연결됐으면 스킵 (다른 루프가 이미 재연결함)
+            if (time.monotonic() - self._last_reconnect_at) < self._WS_RECONNECT_MIN:
+                logger.debug("v2_ws_reconnect_skipped_fresh")
+                return self._WS_RECONNECT_MIN
+
+            wait = min(backoff, self._WS_RECONNECT_MAX)
+            logger.info("v2_ws_reconnect_attempt", wait_sec=wait)
+            await asyncio.sleep(wait)
+
+            try:
+                await self._exchange.close_ws()
+            except Exception:
+                pass
+
+            try:
+                await self._exchange.create_ws_exchange()
+                self._last_reconnect_at = time.monotonic()
+                logger.info("v2_ws_reconnected")
+                return self._WS_RECONNECT_MIN
+            except Exception as e:
+                logger.warning("v2_ws_reconnect_failed", error=str(e))
+                return min(wait * self._WS_RECONNECT_FACTOR, self._WS_RECONNECT_MAX)
+
+    async def _ws_price_monitor_loop(self) -> None:
+        """WS 실시간 가격 수신 → 보유 포지션 SL/TP/trailing 체크.
+
+        3회 연속 에러 시 _fast_stop_check_loop 폴백 자동 시작.
+        재연결 성공 시 폴백 해제.
+        """
+        backoff = self._WS_RECONNECT_MIN
+        consecutive_errors = 0
+
+        while self._is_running:
+            try:
+                symbols = self._positions.all_symbols()
+                if not symbols:
+                    await asyncio.sleep(5)
+                    continue
+
+                tickers = await self._exchange.watch_tickers(symbols)
+                consecutive_errors = 0
+                backoff = self._WS_RECONNECT_MIN
+
+                # 폴백 해제: 3회 연속 성공 후 (대칭 히스테리시스)
+                self._ws_consecutive_successes += 1
+                if (self._fast_sl_task and not self._fast_sl_task.done()
+                        and self._ws_consecutive_successes >= self._WS_MAX_ERRORS):
+                    self._fast_sl_task.cancel()
+                    try:
+                        await self._fast_sl_task
+                    except asyncio.CancelledError:
+                        pass
+                    self._fast_sl_task = None
+                    logger.info("v2_fast_sl_fallback_cancelled",
+                                after_successes=self._ws_consecutive_successes)
+
+                for symbol in symbols:
+                    if symbol in tickers:
+                        price = float(tickers[symbol].get("last", 0))
+                        if price > 0:
+                            await self._realtime_stop_check(symbol, price)
+
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                consecutive_errors += 1
+                self._ws_consecutive_successes = 0
+                logger.warning(
+                    "v2_ws_price_error",
+                    error=str(e),
+                    consecutive=consecutive_errors,
+                )
+
+                if consecutive_errors >= self._WS_MAX_ERRORS:
+                    # 폴백 시작
+                    if not self._fast_sl_task or self._fast_sl_task.done():
+                        self._fast_sl_task = asyncio.create_task(
+                            self._fast_stop_check_loop(),
+                            name="v2_fast_sl",
+                        )
+                        self._tasks.append(self._fast_sl_task)
+                        logger.warning("v2_ws_fallback_activated")
+
+                    backoff = await self._ws_reconnect(backoff)
+                    if backoff == self._WS_RECONNECT_MIN:
+                        consecutive_errors = 0
+                else:
+                    await asyncio.sleep(5)
+
+    async def _realtime_stop_check(self, symbol: str, price: float) -> None:
+        """WS 가격으로 SL/TP/trailing 즉시 체크 — 경량 2단계 필터링.
+
+        Phase 1: 인메모리 PositionState로 빠른 필터 (DB 미접근).
+        Phase 2: 히트 시 close_lock 획득 → DB 포지션 조회 → 청산 실행.
+        """
+        state = self._positions.get(symbol)
+        if not state:
+            return
+
+        # extreme 가격 업데이트 (트레일링용)
+        state.update_extreme(price)
+
+        # --- Phase 1: 빠른 필터 (99%는 여기서 리턴) ---
+        entry = state.entry_price
+        if entry <= 0:
+            return
+
+        # Tier1: ATR 기반 SL/TP
+        if state.tier == "tier1":
+            atr = self._positions.get_atr(symbol)
+            if atr <= 0:
+                return  # ATR 미캐시 시 SL/TP 체크 스킵
+
+            sl_hit = state.check_stop_loss(price, atr)
+            tp_hit = state.check_take_profit(price, atr)
+            trail_hit = state.check_trailing_stop(price, atr)
+
+            if not (sl_hit or tp_hit or trail_hit):
+                return
+
+            # --- Phase 2: close_lock 하에 DB 검증 + 청산 ---
+            if sl_hit:
+                reason = f"[WS] SL hit: price={price:.2f}"
+            elif trail_hit:
+                reason = f"[WS] Trailing stop: price={price:.2f}"
+            else:
+                reason = f"[WS] TP hit: price={price:.2f}"
+
+            async with self._close_lock:
+                await self._execute_ws_close(symbol, state, price, reason)
+
+        # Tier2: 퍼센트 기반 SL/TP
+        elif state.tier == "tier2":
+            leverage = self._config.futures_v2.leverage
+            if state.is_long:
+                pnl_pct = (price - entry) / entry * 100 * leverage
+            else:
+                pnl_pct = (entry - price) / entry * 100 * leverage
+
+            sl_pct = self._config.futures_v2.tier2_sl_pct
+            tp_pct = self._config.futures_v2.tier2_tp_pct
+
+            if pnl_pct <= -sl_pct:
+                reason = f"[WS] Tier2 SL: {pnl_pct:.1f}%"
+            elif pnl_pct >= tp_pct:
+                reason = f"[WS] Tier2 TP: +{pnl_pct:.1f}%"
+            else:
+                return
+
+            async with self._close_lock:
+                await self._execute_ws_close(symbol, state, price, reason)
+
+    async def _execute_ws_close(
+        self, symbol: str, state: PositionState, price: float, reason: str,
+    ) -> None:
+        """close_lock 하에서 DB 검증 + 청산 실행 (WS 모니터 전용)."""
+        # DB에서 포지션 재확인
+        sf = get_session_factory()
+        async with sf() as session:
+            result = await session.execute(
+                select(Position).where(
+                    Position.symbol == symbol,
+                    Position.quantity > 0,
+                    Position.exchange == self.EXCHANGE_NAME,
+                )
+            )
+            db_pos = result.scalar_one_or_none()
+            if not db_pos:
+                return  # 이미 청산됨
+
+            request = OrderRequest(
+                symbol=symbol,
+                direction=state.direction,
+                action="close",
+                quantity=state.quantity,
+                price=price,
+                margin=state.margin,
+                leverage=self._config.futures_v2.leverage,
+                strategy_name=state.strategy_name or "ws_stop",
+                confidence=0.0,
+                tier=state.tier,
+                entry_price=state.entry_price,
+            )
+            resp = await self._safe_order.execute_order(session, request)
+            if resp.success:
+                self._positions.close_position(symbol)
+                self._ws_unrealized_pnl.pop(symbol, None)
+                logger.warning(
+                    "v2_ws_position_closed",
+                    symbol=symbol,
+                    reason=reason,
+                    price=price,
+                    direction=state.direction.value,
+                )
+                await session.commit()
+
+                # Tier1: 방향별 쿨다운 설정
+                if state.tier == "tier1":
+                    self._tier1._set_exit_cooldown(symbol, state.direction)
+
+                # 매도 콜백 (매매 회고 트리거)
+                if self._on_sell_completed:
+                    try:
+                        await self._on_sell_completed()
+                    except Exception as e:
+                        logger.debug("v2_on_sell_callback_error", error=str(e))
+
+    async def _fast_stop_check_loop(self) -> None:
+        """WS 실패 시 30초 폴링 SL/TP 폴백.
+
+        _realtime_stop_check는 shield로 보호하여, 폴백 태스크 취소 시
+        진행 중인 청산 주문이 중단되지 않도록 한다.
+        """
+        while self._is_running:
+            await asyncio.sleep(self._FAST_SL_INTERVAL)
+            try:
+                positions = dict(self._positions.positions)
+                if not positions:
+                    continue
+
+                for symbol, state in positions.items():
+                    try:
+                        ticker = await self._exchange.fetch_ticker(symbol)
+                        price = ticker.last
+                        if price > 0:
+                            await asyncio.shield(
+                                self._realtime_stop_check(symbol, price)
+                            )
+                    except asyncio.CancelledError:
+                        raise  # 태스크 취소는 전파
+                    except Exception as e:
+                        logger.debug("v2_fast_sl_check_error", symbol=symbol, error=str(e))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("v2_fast_sl_loop_error", error=str(e))
+
+    async def _ws_balance_loop(self) -> None:
+        """WS 잔고 실시간 감사 — 내부 장부 vs 거래소 잔고 차이 모니터링.
+
+        cash 갱신 안 함 (감사만). >2% 괴리 시 경고.
+        """
+        backoff = self._WS_RECONNECT_MIN
+        consecutive_errors = 0
+
+        while self._is_running:
+            try:
+                balance = await self._exchange.watch_balance()
+                consecutive_errors = 0
+                backoff = self._WS_RECONNECT_MIN
+
+                usdt = balance.get("USDT", {})
+                if isinstance(usdt, dict):
+                    wallet_total = float(usdt.get("total", 0) or 0)
+                    margin_used = float(usdt.get("used", 0) or 0)
+                else:
+                    wallet_total = float(getattr(usdt, "total", 0) or 0)
+                    margin_used = float(getattr(usdt, "used", 0) or 0)
+
+                # CLAUDE.md 규약: walletBalance에서 unrealizedPnl + totalMargin 차감
+                total_unrealized = sum(self._ws_unrealized_pnl.values())
+                exchange_cash = wallet_total - total_unrealized - margin_used
+                internal_cash = self._pm.cash_balance
+
+                if exchange_cash > 0:
+                    diff = abs(exchange_cash - internal_cash)
+                    if diff > 5.0 or (internal_cash > 0 and diff / internal_cash > 0.02):
+                        logger.warning(
+                            "v2_ws_balance_discrepancy",
+                            internal=round(internal_cash, 2),
+                            exchange=round(exchange_cash, 2),
+                            diff=round(diff, 2),
+                        )
+
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                consecutive_errors += 1
+                logger.warning(
+                    "v2_ws_balance_error",
+                    error=str(e),
+                    consecutive=consecutive_errors,
+                )
+                if consecutive_errors >= self._WS_MAX_ERRORS:
+                    backoff = await self._ws_reconnect(backoff)
+                    if backoff == self._WS_RECONNECT_MIN:
+                        consecutive_errors = 0
+                else:
+                    await asyncio.sleep(5)
+
+    async def _ws_position_loop(self) -> None:
+        """WS 포지션 실시간 수신 → DB 포지션 즉시 갱신 (margin, unrealizedPnl, 수량).
+
+        인메모리 PositionState.extreme_price도 함께 업데이트.
+        """
+        backoff = self._WS_RECONNECT_MIN
+        consecutive_errors = 0
+
+        while self._is_running:
+            try:
+                positions = await self._exchange.watch_positions()
+                if not positions:
+                    continue
+
+                consecutive_errors = 0
+                backoff = self._WS_RECONNECT_MIN
+
+                sf = get_session_factory()
+                async with sf() as session:
+                    changed = False
+                    post_commit_closes: list[str] = []
+
+                    for fp in positions:
+                        contracts = float(fp.get("contracts", 0) or 0)
+                        sym_raw = fp.get("symbol", "")
+                        # "BTC/USDT:USDT" → "BTC/USDT"
+                        sym = sym_raw.replace(":USDT", "") if sym_raw else ""
+                        if not sym:
+                            continue
+
+                        result = await session.execute(
+                            select(Position).where(
+                                Position.symbol == sym,
+                                Position.exchange == self.EXCHANGE_NAME,
+                            )
+                        )
+                        db_pos = result.scalar_one_or_none()
+                        if not db_pos:
+                            continue
+
+                        # 외부 청산 감지 (청산/수동 종료 등)
+                        if contracts == 0 and db_pos.quantity > 0:
+                            logger.warning(
+                                "v2_external_close_detected",
+                                symbol=sym,
+                                db_quantity=db_pos.quantity,
+                            )
+                            db_pos.quantity = 0
+                            db_pos.current_value = 0
+                            changed = True
+                            post_commit_closes.append(sym)
+                            continue
+
+                        margin = float(fp.get("initialMargin", 0) or 0)
+                        entry = float(fp.get("entryPrice", 0) or 0)
+                        liq = float(fp.get("liquidationPrice", 0) or 0) or None
+                        unrealized = float(fp.get("unrealizedPnl", 0) or 0)
+                        mark = float(fp.get("markPrice", 0) or 0)
+                        updated = False
+
+                        # 수량 변동 (1% 기준)
+                        if (contracts > 0 and db_pos.quantity > 0
+                                and abs(db_pos.quantity - contracts) / max(db_pos.quantity, 0.0001) > 0.01):
+                            db_pos.quantity = contracts
+                            updated = True
+
+                        # 마진 변동 (>0.1 USDT)
+                        if margin > 0 and abs((db_pos.margin_used or 0) - margin) > 0.1:
+                            db_pos.margin_used = margin
+                            updated = True
+
+                        # 진입가 변동
+                        if entry > 0 and abs(db_pos.average_buy_price - entry) > 0.0001:
+                            db_pos.average_buy_price = entry
+                            updated = True
+
+                        # 청산가
+                        if liq and db_pos.liquidation_price != liq:
+                            db_pos.liquidation_price = liq
+                            updated = True
+
+                        # 미실현 PnL → current_value + 잔고 감사용 캐시
+                        if contracts > 0 and entry > 0:
+                            new_value = margin + unrealized
+                            if abs((db_pos.current_value or 0) - new_value) > 0.1:
+                                db_pos.current_value = new_value
+                                updated = True
+                            self._ws_unrealized_pnl[sym] = unrealized
+
+                        # 인메모리 extreme 업데이트
+                        state = self._positions.get(sym)
+                        if state and mark > 0:
+                            state.update_extreme(mark)
+
+                        if updated:
+                            changed = True
+                            logger.debug(
+                                "v2_ws_position_updated",
+                                symbol=sym,
+                                margin=round(margin, 2),
+                                contracts=contracts,
+                            )
+
+                    if changed:
+                        await session.commit()
+
+                    # commit 성공 후 인메모리 포지션 제거
+                    for sym_close in post_commit_closes:
+                        self._positions.close_position(sym_close)
+                        self._ws_unrealized_pnl.pop(sym_close, None)
+
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                consecutive_errors += 1
+                logger.warning(
+                    "v2_ws_position_error",
+                    error=str(e),
+                    consecutive=consecutive_errors,
+                )
+                if consecutive_errors >= self._WS_MAX_ERRORS:
+                    backoff = await self._ws_reconnect(backoff)
+                    if backoff == self._WS_RECONNECT_MIN:
+                        consecutive_errors = 0
+                else:
+                    await asyncio.sleep(5)
 
     # ── 루프들 ──────────────────────────────────
 
@@ -473,6 +969,22 @@ class FuturesEngineV2:
     def get_status(self) -> dict:
         """엔진 상태 정보 반환 (API용)."""
         regime = self._regime.current
+        ws_price_ok = (
+            self._ws_monitor_task is not None
+            and not self._ws_monitor_task.done()
+        )
+        ws_balance_ok = (
+            self._ws_balance_task is not None
+            and not self._ws_balance_task.done()
+        )
+        ws_position_ok = (
+            self._ws_pos_task is not None
+            and not self._ws_pos_task.done()
+        )
+        fast_sl_active = (
+            self._fast_sl_task is not None
+            and not self._fast_sl_task.done()
+        )
         return {
             "engine": "futures_v2",
             "is_running": self._is_running,
@@ -484,4 +996,8 @@ class FuturesEngineV2:
             "balance_guard_paused": self._guard.is_paused,
             "balance_guard": self._guard.get_status(),
             "tracked_coins": self.tracked_coins,
+            "ws_price_monitor": ws_price_ok,
+            "ws_balance_audit": ws_balance_ok,
+            "ws_position_sync": ws_position_ok,
+            "fast_sl_fallback": fast_sl_active,
         }

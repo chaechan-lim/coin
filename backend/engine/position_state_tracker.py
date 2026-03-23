@@ -125,6 +125,7 @@ class PositionStateTracker:
 
     def __init__(self) -> None:
         self._positions: dict[str, PositionState] = {}
+        self._last_atr: dict[str, float] = {}  # WS SL/TP 체크용 ATR 캐시
 
     @property
     def positions(self) -> dict[str, PositionState]:
@@ -149,8 +150,9 @@ class PositionStateTracker:
         )
 
     def close_position(self, symbol: str) -> PositionState | None:
-        """포지션 제거. 반환: 제거된 상태 or None."""
+        """포지션 제거 + ATR 캐시 정리. 반환: 제거된 상태 or None."""
         state = self._positions.pop(symbol, None)
+        self._last_atr.pop(symbol, None)
         if state:
             logger.info(
                 "position_closed",
@@ -176,6 +178,15 @@ class PositionStateTracker:
 
     def all_symbols(self) -> list[str]:
         return list(self._positions.keys())
+
+    def update_atr(self, symbol: str, atr: float) -> None:
+        """WS SL/TP 체크용 ATR 캐시 업데이트."""
+        if atr > 0:
+            self._last_atr[symbol] = atr
+
+    def get_atr(self, symbol: str) -> float:
+        """캐시된 ATR 반환 (없으면 0.0)."""
+        return self._last_atr.get(symbol, 0.0)
 
     async def restore_from_db(self, session: AsyncSession, exchange_name: str) -> int:
         """DB에서 기존 포지션을 복원한다.
