@@ -175,6 +175,7 @@ class FuturesEngineV2:
         self._suppressed_coins: set[str] = set()
         self._sells_since_review: int = 0
         self._REVIEW_TRIGGER_SELLS: int = 5
+        self._background_tasks: set[asyncio.Task] = set()
 
     # ── EngineRegistry 호환 인터페이스 ──────────
 
@@ -221,15 +222,14 @@ class FuturesEngineV2:
         if (self._sells_since_review >= self._REVIEW_TRIGGER_SELLS
                 and self._agent_coordinator):
             self._sells_since_review = 0
-            try:
-                asyncio.create_task(
-                    self._agent_coordinator.run_trade_review(),
-                    name="v2_trade_review",
-                )
-                logger.info("v2_trade_review_triggered",
-                            trigger=self._REVIEW_TRIGGER_SELLS)
-            except Exception as e:
-                logger.warning("v2_trade_review_trigger_failed", error=str(e))
+            task = asyncio.create_task(
+                self._agent_coordinator.run_trade_review(),
+                name="v2_trade_review",
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            logger.info("v2_trade_review_triggered",
+                        trigger=self._REVIEW_TRIGGER_SELLS)
 
     async def _resync_cash(self, new_cash: float) -> None:
         """BalanceGuard가 호출하는 내부 장부 재동기화 콜백."""

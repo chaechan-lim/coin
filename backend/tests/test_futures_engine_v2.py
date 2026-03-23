@@ -505,6 +505,15 @@ class TestAgentCoordinatorCompat:
         # 카운터 리셋 확인
         assert engine._sells_since_review == 0
 
+        # run_trade_review가 실제로 호출됐는지 확인
+        # create_task로 스케줄됐으므로 이벤트 루프 한 틱 실행
+        await asyncio.sleep(0)
+        mock_coord.run_trade_review.assert_called_once()
+
+        # 태스크가 background_tasks에 등록됐다가 완료 후 제거됨
+        await asyncio.sleep(0)
+        assert len(engine._background_tasks) == 0
+
     @pytest.mark.asyncio
     async def test_on_sell_completed_no_trigger_without_coordinator(self, engine):
         """코디네이터 미설정 시 에러 없이 카운터만 증가."""

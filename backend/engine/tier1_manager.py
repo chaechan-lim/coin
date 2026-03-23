@@ -10,6 +10,7 @@ ATR 기반 연속 사이징: 변동성 낮으면 크게, 높으면 작게.
 import time
 import structlog
 import pandas as pd
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -65,7 +66,7 @@ class Tier1Manager:
         long_cooldown_seconds: int | None = None,
         short_cooldown_seconds: int | None = None,
         exchange_name: str = "binance_futures",
-        on_close_callback=None,
+        on_close_callback: Callable[[], Awaitable[None]] | None = None,
     ):
         self._coins = coins
         self._safe_order = safe_order
@@ -620,8 +621,8 @@ class Tier1Manager:
             if self._on_close_callback:
                 try:
                     await self._on_close_callback()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("on_close_callback_failed", error=str(exc))
             return True
         return False
 
