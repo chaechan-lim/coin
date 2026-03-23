@@ -77,6 +77,7 @@ class CycleStats:
     error_count: int = 0
     candle_error_count: int = 0
     ml_filtered_count: int = 0
+    daily_limit_count: int = 0
     decisions: dict = field(default_factory=dict)  # symbol → outcome string
 
 
@@ -222,7 +223,7 @@ class Tier1Manager:
                 elif outcome == "ml_filtered":
                     stats.ml_filtered_count += 1
                 elif outcome == "daily_limit":
-                    stats.cooldown_count += 1  # 일일 한도도 쿨다운 카운트
+                    stats.daily_limit_count += 1
                 elif outcome == "margin_insufficient":
                     stats.low_confidence_count += 1  # 마진 부족도 미실행 카운트
                 elif outcome in ("opened", "closed", "sar", "flat_close"):
@@ -279,6 +280,7 @@ class Tier1Manager:
             hold=stats.hold_count,
             low_conf=stats.low_confidence_count,
             cooldown=stats.cooldown_count,
+            daily_limit=stats.daily_limit_count,
             ml_filtered=stats.ml_filtered_count,
             sl_tp=stats.sl_tp_count,
             executed=stats.executed_count,
@@ -963,7 +965,7 @@ class Tier1Manager:
             select(Order.symbol, func.count())
             .where(
                 Order.exchange == self._exchange_name,
-                Order.side == "buy",
+                Order.margin_used.isnot(None),  # open orders only (long buy + short sell)
                 Order.status == "filled",
                 Order.created_at >= today_start,
             )
@@ -1067,21 +1069,29 @@ class Tier1Manager:
             if position:
                 position.quantity = 0
                 position.current_value = 0
+                position.margin_used = 0
+                position.total_invested = 0
                 await session.flush()
 
-            logger.error(
-                "tier1_force_close_db_reset",
-                symbol=symbol,
-                detail="거래소 매도 실패 → DB 포지션 강제 리셋",
-            )
-            await emit_event(
-                "critical",
-                "engine",
-                f"Tier1 강제 청산 (DB 리셋): {symbol}",
-                detail=f"연속 {err_count}회 평가 실패, 거래소 매도 불가 → DB 포지션 0으로 리셋. "
-                f"수동으로 거래소에서 {symbol} 포지션을 확인하세요.",
-                metadata={"symbol": symbol, "consecutive_errors": err_count},
-            )
+                logger.error(
+                    "tier1_force_close_db_reset",
+                    symbol=symbol,
+                    detail="거래소 매도 실패 → DB 포지션 강제 리셋",
+                )
+                await emit_event(
+                    "critical",
+                    "engine",
+                    f"Tier1 강제 청산 (DB 리셋): {symbol}",
+                    detail=f"연속 {err_count}회 평가 실패, 거래소 매도 불가 → DB 포지션 0으로 리셋. "
+                    f"수동으로 거래소에서 {symbol} 포지션을 확인하세요.",
+                    metadata={"symbol": symbol, "consecutive_errors": err_count},
+                )
+            else:
+                logger.info(
+                    "tier1_force_close_no_db_position",
+                    symbol=symbol,
+                    detail="DB에 활성 포지션 없음 — 이미 청산됨",
+                )
         except Exception as db_err:
             logger.error(
                 "tier1_force_close_db_reset_failed",
@@ -1229,6 +1239,11 @@ class Tier1Manager:
         # 2. 반대 방향 즉시 오픈
         opened = await self._open_position_from_decision(session, symbol, new_decision)
         if opened:
+            # COIN-41: SAR도 일일 매수 카운터에 반영 (진단/관측용)
+            self._daily_buy_count += 1
+            self._daily_coin_buy_count[symbol] = (
+                self._daily_coin_buy_count.get(symbol, 0) + 1
+            )
             logger.info(
                 "tier1_sar_executed",
                 symbol=symbol,

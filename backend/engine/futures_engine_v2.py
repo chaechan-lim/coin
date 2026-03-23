@@ -854,6 +854,7 @@ class FuturesEngineV2:
                             continue
                         atr_col = "atr_14"
                         if atr_col not in df.columns or df[atr_col].isna().all():
+                            logger.debug("v2_downtime_stop_no_atr", symbol=symbol)
                             continue
                         atr = (
                             float(df[atr_col].iloc[-1])

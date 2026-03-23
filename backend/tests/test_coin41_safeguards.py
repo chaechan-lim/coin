@@ -257,9 +257,9 @@ class TestDailyBuyLimit:
 
     @pytest.mark.asyncio
     async def test_restore_daily_buy_count(self, mock_deps, session):
-        """DB에서 오늘 매수 카운터 복원."""
-        # Insert today's buy orders
+        """DB에서 오늘 매수 카운터 복원 — margin_used 기반으로 open 주문만 집계."""
         now = datetime.now(timezone.utc)
+        # 3 long-open orders (side="buy", margin_used set)
         for i in range(3):
             order = Order(
                 exchange="binance_futures",
@@ -274,11 +274,12 @@ class TestDailyBuyLimit:
                 fee=0.32,
                 is_paper=False,
                 strategy_name="test",
+                margin_used=266.67,
                 created_at=now - timedelta(minutes=i),
             )
             session.add(order)
 
-        # Add ETH order
+        # 1 ETH long-open order
         session.add(
             Order(
                 exchange="binance_futures",
@@ -293,6 +294,68 @@ class TestDailyBuyLimit:
                 fee=0.12,
                 is_paper=False,
                 strategy_name="test",
+                margin_used=100.0,
+                created_at=now,
+            )
+        )
+
+        # 1 short-open order (side="sell", margin_used set) — SHOULD be counted
+        session.add(
+            Order(
+                exchange="binance_futures",
+                symbol="SOL/USDT",
+                side="sell",
+                order_type="market",
+                status="filled",
+                requested_price=150.0,
+                executed_price=150.0,
+                requested_quantity=1.0,
+                executed_quantity=1.0,
+                fee=0.06,
+                is_paper=False,
+                strategy_name="test",
+                margin_used=50.0,
+                direction="short",
+                created_at=now,
+            )
+        )
+
+        # 1 close-long order (side="sell", no margin_used) — should NOT be counted
+        session.add(
+            Order(
+                exchange="binance_futures",
+                symbol="BTC/USDT",
+                side="sell",
+                order_type="market",
+                status="filled",
+                requested_price=82000.0,
+                executed_price=82000.0,
+                requested_quantity=0.01,
+                executed_quantity=0.01,
+                fee=0.33,
+                is_paper=False,
+                strategy_name="test",
+                margin_used=None,
+                created_at=now,
+            )
+        )
+
+        # 1 close-short order (side="buy", no margin_used) — should NOT be counted
+        session.add(
+            Order(
+                exchange="binance_futures",
+                symbol="SOL/USDT",
+                side="buy",
+                order_type="market",
+                status="filled",
+                requested_price=148.0,
+                executed_price=148.0,
+                requested_quantity=1.0,
+                executed_quantity=1.0,
+                fee=0.06,
+                is_paper=False,
+                strategy_name="test",
+                margin_used=None,
                 created_at=now,
             )
         )
@@ -301,16 +364,18 @@ class TestDailyBuyLimit:
         t1 = _make_tier1(mock_deps)
         await t1.restore_daily_buy_count(session)
 
-        assert t1._daily_buy_count == 4
+        # 3 BTC long + 1 ETH long + 1 SOL short = 5 opens total
+        assert t1._daily_buy_count == 5
         assert t1._daily_coin_buy_count["BTC/USDT"] == 3
         assert t1._daily_coin_buy_count["ETH/USDT"] == 1
+        assert t1._daily_coin_buy_count["SOL/USDT"] == 1
 
     @pytest.mark.asyncio
     async def test_restore_daily_buy_count_ignores_cancelled(self, mock_deps, session):
         """취소/실패 주문은 일일 카운터에 포함하지 않음."""
         now = datetime.now(timezone.utc)
 
-        # 1 filled order
+        # 1 filled open order (margin_used set)
         session.add(
             Order(
                 exchange="binance_futures",
@@ -325,10 +390,11 @@ class TestDailyBuyLimit:
                 fee=0.32,
                 is_paper=False,
                 strategy_name="test",
+                margin_used=266.67,
                 created_at=now,
             )
         )
-        # 1 cancelled order (should be excluded)
+        # 1 cancelled order (should be excluded — not filled)
         session.add(
             Order(
                 exchange="binance_futures",
@@ -343,10 +409,11 @@ class TestDailyBuyLimit:
                 fee=0.0,
                 is_paper=False,
                 strategy_name="test",
+                margin_used=266.67,
                 created_at=now,
             )
         )
-        # 1 failed order (should be excluded)
+        # 1 failed order (should be excluded — not filled)
         session.add(
             Order(
                 exchange="binance_futures",
@@ -361,6 +428,7 @@ class TestDailyBuyLimit:
                 fee=0.0,
                 is_paper=False,
                 strategy_name="test",
+                margin_used=266.67,
                 created_at=now,
             )
         )
@@ -623,6 +691,7 @@ class TestConsecutiveErrorForceClose:
             quantity=0.01,
             average_buy_price=80000.0,
             total_invested=100.0,
+            margin_used=33.33,
         )
         session.add(db_pos)
         await session.flush()
@@ -646,6 +715,8 @@ class TestConsecutiveErrorForceClose:
         updated_pos = result.scalar_one_or_none()
         assert updated_pos is not None
         assert updated_pos.quantity == 0
+        assert updated_pos.margin_used == 0
+        assert updated_pos.total_invested == 0
 
 
 # ═══════════════════════════════════════════════════
