@@ -1,6 +1,6 @@
 # 코인 자동 매매 시스템 — 운영 참조
 
-> 최종 업데이트: 2026-03-19
+> 최종 업데이트: 2026-03-23
 > 완료된 Phase 1-5 상세 및 버전 이력은 `CHANGELOG.md` 참고.
 
 ---
@@ -10,7 +10,7 @@
 빗썸(현물, 비활성) + 바이낸스 현물(live) + 바이낸스 USDM 선물(live, 3x) + 서지 **쿼드 엔진** 24시간 자동 트레이딩 시스템.
 가중 투표 (HOLD=기권) + ML 시그널 필터 + 5요소 시장 감지 + 적응형 가중치, AI 에이전트 5종, Discord 봇(자연어 제어), React 대시보드(8탭).
 **현물 4전략** (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + **선물 7전략** (MA, RSI, MACD, 볼린저RSI, 스토캐스틱RSI, OBV, BB스퀴즈).
-**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **1671 유닛 테스트**.
+**자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단), **1717 유닛 테스트**.
 
 ---
 
@@ -46,7 +46,7 @@ coin/
 │   ├── agents/        (market_analysis, risk_management, trade_review, performance_analytics, strategy_advisor, diagnostic_agent, coordinator)
 │   ├── engine/        (trading_engine, futures_engine, surge_engine, order_manager, portfolio_manager, recovery, health_monitor, capital_sync, scheduler)
 │   ├── api/           (router, dependencies, dashboard, portfolio, trades, strategies, events, capital, websocket)
-│   └── tests/         (1366 tests)
+│   └── tests/         (1588 tests)
 └── frontend/
     └── src/           (Dashboard, 8탭 컴포넌트, hooks, types)
 ```
@@ -129,7 +129,8 @@ coin/
 | 서지 엔진 양방향(숏) 활성화 (COIN-36) | `SurgeTradingConfig.long_only` 기본값 `True`→`False` 변경. 180일 백테스트 검증: 양방향 SL2.5% PnL +366%(롱온리 +215% 대비 +70%), MDD 1.6% 허용범위. 숏 진입/청산/트레일링 인프라 기존 완비, config 토글만 변경. 숏 진입/청산 유닛 테스트 + 양방향 동시 포지션 테스트 17개 추가(1517 total). |
 | V2 ML Signal Filter 적용 (COIN-40) | V1에서 손실 거래 40-50% 차단하던 ML 시그널 필터가 V2 Tier1Manager에 미적용되던 버그 수정. Tier1Manager에 `_check_ml_filter()` 게이트 추가 (신규 진입+SAR만 필터링, 청산은 허용). SpotEvaluator가 open 결정에 signals+candle_row 전달. FuturesEngineV2에서 signal_filter.pkl 로드(min_win_prob 0.52). CycleStats에 ml_filtered_count 추가. 테스트 16개 추가(1563 total). |
 | V2 리스크 관리 5종 포팅 (COIN-42) | V1 TradingEngine의 리스크 관리 기능 5종을 V2 Tier1Manager에 포팅. (1) 비대칭 모드: TRENDING_DOWN/VOLATILE(bearish) 시 신규 롱 차단. (2) 동적 SL: 레짐별 ATR mult 스케일링(floor/cap 포함). (3) ATR 레버리지 스케일링: 6단계 ATR%→레버리지 매핑(20%→1x~3%→5x). (4) 레짐별 포지션 사이징: TRENDING_DOWN→50%, VOLATILE→60%, RANGING→80%. (5) MIN_SELL_ACTIVE_WEIGHT: SignalCombiner에 숏 최소 참여 가중치 전달. FuturesV2Config에 4개 설정 추가. 테스트 35개 추가(1655 total). |
-| backtest_v2 현물 4전략 모드 (COIN-44) | `--spot-strategies` CLI 플래그 추가. SpotStrategyAdapter가 현물 4전략(cis_momentum, bnf_deviation, donchian_channel, larry_williams)을 RegimeStrategy 인터페이스로 래핑. SignalCombiner(SPOT_WEIGHTS) 가중 투표, 1h→4h 리샘플링, BUY→LONG/SELL→SHORT 매핑, SL 5.0/TP 14.0 ATR(SpotEvaluator 라이브 설정 일치). 라이브 V2 구성의 선물 성능 540일 검증 가능. 테스트 16개 추가(1671 total). |
+| backtest_v2 현물 4전략 모드 (COIN-44) | `--spot-strategies` CLI 플래그 추가. SpotStrategyAdapter가 현물 4전략(cis_momentum, bnf_deviation, donchian_channel, larry_williams)을 RegimeStrategy 인터페이스로 래핑. SignalCombiner(SPOT_WEIGHTS) 가중 투표, 1h→4h 리샘플링, BUY→LONG/SELL→SHORT 매핑, SL 5.0/TP 14.0 ATR(SpotEvaluator 라이브 설정 일치). 라이브 V2 구성의 선물 성능 540일 검증 가능. 테스트 16개 추가(1717 total). |
+| V2 선물 엔진 거래 안전장치 (COIN-41) | V1 TradingEngine의 4가지 안전장치를 V2 FuturesEngineV2/Tier1Manager에 포팅. (1) **일일 매수 한도**: 20건/일 전체, 3건/일/코인, UTC 자정 리셋, Order DB에서 재시작 시 복원. (2) **연속 에러 강제청산**: 3회 연속 평가 실패 → SafeOrderPipeline으로 포지션 강제 종료, 실패 시 DB 직접 리셋 폴백. 강제청산은 쿨다운 면제. (3) **쿨다운 DB 영속화**: `Position.last_sell_at` + 신규 `last_sell_direction` 컬럼으로 방향별 쿨다운 영속화, `_persist_loop`에서 5분마다 저장, `initialize()`에서 복원. (4) **다운타임 SL/TP 체크**: `start()`에서 엔진 시작 전 모든 오픈 포지션의 SL/TP 조건 즉시 점검. `FuturesV2Config`에 `tier1_daily_buy_limit`/`tier1_max_daily_coin_buys`/`tier1_max_eval_errors` 설정 추가. 테스트 46개 추가(1701 total). |
 
 ### 낮은 우선순위
 

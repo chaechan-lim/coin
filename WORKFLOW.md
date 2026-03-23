@@ -18,6 +18,16 @@ tracker:
 agent:
   type: claude
   model: opus
+  model_tiers:
+    plan: opus
+    review: opus
+    high: opus
+    medium: sonnet
+    low: haiku
+  model_labels:
+    model:opus: opus
+    model:sonnet: sonnet
+    model:haiku: haiku
   permission_mode: dangerously-skip
   max_turns: 200
   max_budget_usd: 20.00

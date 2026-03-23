@@ -8,6 +8,7 @@ unique 제약을 (symbol, exchange) 복합 키로 변경.
     cd /home/chans/coin/backend
     .venv/bin/python db/migrate.py
 """
+
 import sqlite3
 import sys
 import os
@@ -34,6 +35,7 @@ POSITION_FUTURES_COLUMNS = {
     "leverage": "INTEGER NOT NULL DEFAULT 1",
     "liquidation_price": "REAL",
     "margin_used": "REAL NOT NULL DEFAULT 0.0",
+    "last_sell_direction": "TEXT",  # COIN-41: v2 방향별 쿨다운 영속화
 }
 
 
@@ -45,7 +47,9 @@ def has_column(cursor, table: str, column: str) -> bool:
 
 def migrate(db_path: str) -> None:
     if not os.path.exists(db_path):
-        print(f"DB not found at {db_path} — skipping migration (will be created on first run)")
+        print(
+            f"DB not found at {db_path} — skipping migration (will be created on first run)"
+        )
         return
 
     conn = sqlite3.connect(db_path)
@@ -73,13 +77,17 @@ def migrate(db_path: str) -> None:
 
     # 3. Recreate positions table to change unique constraint
     #    SQLite doesn't support DROP CONSTRAINT, so we use batch mode (rename+recreate+copy)
-    cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='positions'")
+    cursor.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='positions'"
+    )
     row = cursor.fetchone()
     if row:
         create_sql = row[0]
         # Check if the old unique constraint on symbol alone exists
         if "uq_position_symbol_exchange" not in create_sql and "UNIQUE" in create_sql:
-            print("  Rebuilding positions table for composite unique (symbol, exchange)...")
+            print(
+                "  Rebuilding positions table for composite unique (symbol, exchange)..."
+            )
             cursor.execute("ALTER TABLE positions RENAME TO _positions_old")
             cursor.execute("""
                 CREATE TABLE positions (

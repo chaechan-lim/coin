@@ -145,6 +145,7 @@ class Position(Base):
     # 매매 타이밍 추적 (재시작 시 쿨다운/washout 복원)
     last_trade_at = Column(DateTime, nullable=True)
     last_sell_at = Column(DateTime, nullable=True)
+    last_sell_direction = Column(String(10), nullable=True)  # "long"/"short" (COIN-41)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
