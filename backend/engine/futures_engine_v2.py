@@ -501,18 +501,21 @@ class FuturesEngineV2:
                     direction = pos.direction or "long"
                     try:
                         price = await self._market_data.get_current_price(pos.symbol)
-                        if direction == "long":
-                            pnl_pct = (
-                                (price - pos.average_buy_price)
-                                / pos.average_buy_price
-                                * 100
-                            )
+                        if pos.average_buy_price and pos.average_buy_price > 0:
+                            if direction == "long":
+                                pnl_pct = (
+                                    (price - pos.average_buy_price)
+                                    / pos.average_buy_price
+                                    * 100
+                                )
+                            else:
+                                pnl_pct = (
+                                    (pos.average_buy_price - price)
+                                    / pos.average_buy_price
+                                    * 100
+                                )
                         else:
-                            pnl_pct = (
-                                (pos.average_buy_price - price)
-                                / pos.average_buy_price
-                                * 100
-                            )
+                            pnl_pct = 0.0
                     except Exception:
                         price = 0
                         pnl_pct = 0

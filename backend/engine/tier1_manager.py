@@ -13,6 +13,7 @@ ATR 기반 연속 사이징: 변동성 낮으면 크게, 높으면 작게.
 - 시장 상태별 포지션 사이징: 하락장→50%, 변동성→60%
 """
 
+import asyncio
 import time
 import structlog
 import pandas as pd
@@ -1025,8 +1026,6 @@ class Tier1Manager:
             else:
                 pnl_pct = (state.entry_price - price) / state.entry_price * 100
         leveraged_pnl = pnl_pct * state.leverage
-
-        import asyncio
 
         try:
             loop = asyncio.get_running_loop()
