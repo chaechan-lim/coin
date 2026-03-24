@@ -13,12 +13,13 @@ SurgeEngine을 대체 (Tier 2로 통합).
 import asyncio
 import time
 import structlog
+from datetime import datetime, timezone
 
 from sqlalchemy import or_, select
 
 from config import AppConfig
 from core.event_bus import emit_event
-from core.models import Position
+from core.models import Order, Position
 from db.session import get_session_factory
 from engine.regime_detector import RegimeDetector
 from engine.regime_evaluators import RegimeLongEvaluator, RegimeShortEvaluator
@@ -161,6 +162,9 @@ class FuturesEngineV2:
             self._short_evaluator = spot_evaluator
             logger.info("v2_strategy_mode_spot")
 
+        # COIN-48: WS/eval 동시 청산 방지 뮤텍스 (Tier1Manager와 공유)
+        self._close_lock = asyncio.Lock()
+
         self._tier1 = Tier1Manager(
             coins=list(v2_cfg.tier1_coins),
             safe_order=self._safe_order,
@@ -189,6 +193,8 @@ class FuturesEngineV2:
             # COIN-43: 최대 보유 시간 + 교차 거래소 체크
             max_hold_hours=v2_cfg.tier1_max_hold_hours,
             cross_exchange_checker=self._check_cross_exchange_position,
+            # COIN-48: WS/eval 동시 청산 방지 뮤텍스 공유
+            close_lock=self._close_lock,
         )
 
         self._tier2 = Tier2Scanner(
@@ -226,8 +232,7 @@ class FuturesEngineV2:
         self._recovery_manager = None
         self._broadcast_callback = None
 
-        # WS 모니터링 상태
-        self._close_lock = asyncio.Lock()  # WS/eval 동시 청산 방지
+        # WS 모니터링 상태 (_close_lock은 위에서 생성, Tier1Manager와 공유)
         self._ws_reconnect_lock = asyncio.Lock()  # 재연결 동시 호출 방지
         self._last_reconnect_at: float = 0.0  # 마지막 재연결 시각 (monotonic)
         self._ws_consecutive_successes: int = 0  # WS 연속 성공 카운터 (폴백 해제 기준)
@@ -807,6 +812,107 @@ class FuturesEngineV2:
                     except Exception as e:
                         logger.debug("v2_on_sell_callback_error", error=str(e))
 
+    async def _handle_external_close(
+        self,
+        session,
+        symbol: str,
+        db_pos: Position,
+    ) -> bool:
+        """WS 포지션 루프에서 외부 청산 감지 시 처리 (COIN-48).
+
+        close_lock으로 eval/WS 동시 청산 방지.
+        마진+PnL을 내부 cash에 반환하고 거래 기록을 생성한다.
+
+        Returns True if position was closed (cash returned).
+        """
+        async with self._close_lock:
+            # 락 획득 후 재확인 — eval 루프가 먼저 청산했을 수 있음
+            pos_state = self._positions.get(symbol)
+            if not pos_state and db_pos.quantity <= 0:
+                return False
+
+            invested = db_pos.total_invested or db_pos.margin_used or 0
+            entry = db_pos.average_buy_price or 0
+            direction = getattr(db_pos, "direction", "long")
+            leverage = getattr(db_pos, "leverage", 1) or 1
+            old_qty = db_pos.quantity
+
+            # 현재가 추정 (PnL 계산용)
+            try:
+                current_price = await self._market_data.get_current_price(symbol)
+            except Exception:
+                current_price = entry  # 가격 조회 실패 시 entry로 추정
+
+            # PnL 계산
+            if entry > 0 and current_price > 0:
+                if direction == "short":
+                    pnl_pct = (entry - current_price) / entry * leverage * 100
+                else:
+                    pnl_pct = (current_price - entry) / entry * leverage * 100
+            else:
+                pnl_pct = 0.0
+            pnl_amount = invested * pnl_pct / 100 if invested else 0.0
+
+            # DB 포지션 업데이트
+            db_pos.quantity = 0
+            db_pos.current_value = 0
+            db_pos.last_sell_at = datetime.now(timezone.utc)
+
+            # 거래 기록 생성
+            close_side = "sell" if direction != "short" else "buy"
+            order = Order(
+                exchange=self.EXCHANGE_NAME,
+                symbol=symbol,
+                side=close_side,
+                order_type="market",
+                status="filled",
+                requested_price=current_price,
+                executed_price=current_price,
+                requested_quantity=old_qty,
+                executed_quantity=old_qty,
+                fee=0.0,
+                fee_currency="USDT",
+                is_paper=False,
+                direction=direction,
+                leverage=leverage,
+                margin_used=invested,
+                entry_price=entry,
+                realized_pnl=round(pnl_amount, 4),
+                realized_pnl_pct=round(pnl_pct, 2),
+                strategy_name="external_close",
+                signal_confidence=0.0,
+                signal_reason="WS 외부 청산 감지 (거래소 SL/TP/수동 등)",
+                filled_at=datetime.now(timezone.utc),
+            )
+            session.add(order)
+
+            # 내부 cash에 마진+PnL 반환
+            if invested > 0:
+                cash_returned = max(invested + pnl_amount, 0.0)
+                self._pm._cash_balance += cash_returned
+                self._pm._realized_pnl += pnl_amount
+                logger.info(
+                    "v2_external_close_cash_returned",
+                    symbol=symbol,
+                    invested=round(invested, 2),
+                    pnl_amount=round(pnl_amount, 2),
+                    cash_returned=round(cash_returned, 2),
+                    cash_balance=round(self._pm._cash_balance, 2),
+                )
+
+            logger.warning(
+                "v2_external_close_detected",
+                symbol=symbol,
+                db_quantity=old_qty,
+                entry=round(entry, 4),
+                current_price=round(current_price, 4),
+                pnl_pct=round(pnl_pct, 2),
+                cash_returned=round(max(invested + pnl_amount, 0.0), 2)
+                if invested > 0
+                else 0,
+            )
+            return True
+
     async def _fast_stop_check_loop(self) -> None:
         """WS 실패 시 30초 폴링 SL/TP 폴백.
 
@@ -936,17 +1042,16 @@ class FuturesEngineV2:
                         if not db_pos:
                             continue
 
-                        # 외부 청산 감지 (청산/수동 종료 등)
+                        # 외부 청산 감지 (청산/수동 종료 등) — COIN-48: lock + cash 반환
                         if contracts == 0 and db_pos.quantity > 0:
-                            logger.warning(
-                                "v2_external_close_detected",
-                                symbol=sym,
-                                db_quantity=db_pos.quantity,
+                            closed = await self._handle_external_close(
+                                session,
+                                sym,
+                                db_pos,
                             )
-                            db_pos.quantity = 0
-                            db_pos.current_value = 0
-                            changed = True
-                            post_commit_closes.append(sym)
+                            if closed:
+                                changed = True
+                                post_commit_closes.append(sym)
                             continue
 
                         margin = float(fp.get("initialMargin", 0) or 0)

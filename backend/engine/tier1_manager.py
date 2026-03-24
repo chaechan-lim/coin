@@ -122,6 +122,8 @@ class Tier1Manager:
         cross_exchange_checker: (
             Callable[[str, float], Awaitable[bool | None]] | None
         ) = None,
+        # COIN-48: WS/eval 동시 청산 방지 (FuturesEngineV2와 공유)
+        close_lock: asyncio.Lock | None = None,
     ):
         self._coins = coins
         self._safe_order = safe_order
@@ -135,6 +137,8 @@ class Tier1Manager:
         self._max_position_pct = max_position_pct
         self._min_confidence = min_confidence
         self._ml_filter = ml_filter
+        # COIN-48: WS/eval 동시 청산 방지 뮤텍스
+        self._close_lock = close_lock or asyncio.Lock()
         # Risk management flags (COIN-42)
         self._asymmetric_mode = asymmetric_mode
         self._dynamic_sl = dynamic_sl
@@ -877,39 +881,44 @@ class Tier1Manager:
         direction: Direction,
         reason: str,
     ) -> bool:
-        """포지션 청산. Returns True if successfully closed."""
-        pos_state = self._positions.get(symbol)
-        if not pos_state:
+        """포지션 청산. close_lock으로 WS/sync 동시 청산 방지 (COIN-48).
+
+        Returns True if successfully closed.
+        """
+        async with self._close_lock:
+            # 락 획득 후 재확인 — WS 모니터가 먼저 청산했을 수 있음
+            pos_state = self._positions.get(symbol)
+            if not pos_state:
+                return False
+
+            price = await self._get_price(symbol)
+            if price <= 0:
+                return False
+
+            request = OrderRequest(
+                symbol=symbol,
+                direction=direction,
+                action="close",
+                quantity=pos_state.quantity,
+                price=price,
+                margin=pos_state.margin,
+                leverage=self._leverage,
+                strategy_name=pos_state.strategy_name,
+                confidence=pos_state.confidence,
+                tier="tier1",
+                entry_price=pos_state.entry_price,
+            )
+
+            resp = await self._safe_order.execute_order(session, request)
+            if resp.success:
+                self._positions.close_position(symbol)
+                if self._on_close_callback:
+                    try:
+                        await self._on_close_callback()
+                    except Exception as exc:
+                        logger.warning("on_close_callback_failed", error=str(exc))
+                return True
             return False
-
-        price = await self._get_price(symbol)
-        if price <= 0:
-            return False
-
-        request = OrderRequest(
-            symbol=symbol,
-            direction=direction,
-            action="close",
-            quantity=pos_state.quantity,
-            price=price,
-            margin=pos_state.margin,
-            leverage=self._leverage,
-            strategy_name=pos_state.strategy_name,
-            confidence=pos_state.confidence,
-            tier="tier1",
-            entry_price=pos_state.entry_price,
-        )
-
-        resp = await self._safe_order.execute_order(session, request)
-        if resp.success:
-            self._positions.close_position(symbol)
-            if self._on_close_callback:
-                try:
-                    await self._on_close_callback()
-                except Exception as exc:
-                    logger.warning("on_close_callback_failed", error=str(exc))
-            return True
-        return False
 
     async def check_position_stop(
         self,
@@ -1155,119 +1164,123 @@ class Tier1Manager:
         symbol: str,
         last_error: str,
     ) -> None:
-        """연속 평가 실패 포지션 강제 청산. 가격 조회 불가 시 DB에서 직접 제거."""
-        pos_state = self._positions.get(symbol)
-        if not pos_state:
-            self._eval_error_counts.pop(symbol, None)
-            return
+        """연속 평가 실패 포지션 강제 청산. 가격 조회 불가 시 DB에서 직접 제거.
 
-        err_count = self._eval_error_counts.get(symbol, 0)
-        logger.warning(
-            "tier1_force_close",
-            symbol=symbol,
-            direction=pos_state.direction.value,
-            quantity=pos_state.quantity,
-            consecutive_errors=err_count,
-            last_error=last_error,
-        )
+        COIN-48: close_lock으로 WS/eval 동시 청산 방지.
+        """
+        async with self._close_lock:
+            pos_state = self._positions.get(symbol)
+            if not pos_state:
+                self._eval_error_counts.pop(symbol, None)
+                return
 
-        # SafeOrderPipeline으로 청산 시도
-        try:
-            price = await self._get_price(symbol)
-            if price > 0:
-                request = OrderRequest(
-                    symbol=symbol,
-                    direction=pos_state.direction,
-                    action="close",
-                    quantity=pos_state.quantity,
-                    price=price,
-                    margin=pos_state.margin,
-                    leverage=self._leverage,
-                    strategy_name="force_close",
-                    confidence=0.0,
-                    tier="tier1",
-                    entry_price=pos_state.entry_price,
-                )
-                resp = await self._safe_order.execute_order(session, request)
-                if resp.success:
-                    self._positions.close_position(symbol)
-                    self._eval_error_counts.pop(symbol, None)
-                    # 강제 청산은 에러 기반이므로 쿨다운 면제
-                    self._last_exit_time.pop(symbol, None)
-                    self._last_exit_direction.pop(symbol, None)
-                    if self._on_close_callback:
-                        try:
-                            await self._on_close_callback()
-                        except Exception:
-                            pass
-                    logger.warning(
-                        "tier1_force_close_success",
-                        symbol=symbol,
-                        consecutive_errors=err_count,
-                    )
-                    return
-                # 주문 거부 (에러 아닌 실패) — 로그 후 DB 리셋 경로로 진행
-                logger.warning(
-                    "tier1_force_close_order_rejected",
-                    symbol=symbol,
-                    error=resp.error if hasattr(resp, "error") else str(resp),
-                )
-        except Exception as close_err:
+            err_count = self._eval_error_counts.get(symbol, 0)
             logger.warning(
-                "tier1_force_close_market_failed",
+                "tier1_force_close",
                 symbol=symbol,
-                error=str(close_err),
+                direction=pos_state.direction.value,
+                quantity=pos_state.quantity,
+                consecutive_errors=err_count,
+                last_error=last_error,
             )
 
-        # 2차: 거래소 매도 불가 → DB 포지션 강제 리셋
-        try:
-            result = await session.execute(
-                select(Position).where(
-                    Position.symbol == symbol,
-                    Position.quantity > 0,
-                    Position.exchange == self._exchange_name,
+            # SafeOrderPipeline으로 청산 시도
+            try:
+                price = await self._get_price(symbol)
+                if price > 0:
+                    request = OrderRequest(
+                        symbol=symbol,
+                        direction=pos_state.direction,
+                        action="close",
+                        quantity=pos_state.quantity,
+                        price=price,
+                        margin=pos_state.margin,
+                        leverage=self._leverage,
+                        strategy_name="force_close",
+                        confidence=0.0,
+                        tier="tier1",
+                        entry_price=pos_state.entry_price,
+                    )
+                    resp = await self._safe_order.execute_order(session, request)
+                    if resp.success:
+                        self._positions.close_position(symbol)
+                        self._eval_error_counts.pop(symbol, None)
+                        # 강제 청산은 에러 기반이므로 쿨다운 면제
+                        self._last_exit_time.pop(symbol, None)
+                        self._last_exit_direction.pop(symbol, None)
+                        if self._on_close_callback:
+                            try:
+                                await self._on_close_callback()
+                            except Exception:
+                                pass
+                        logger.warning(
+                            "tier1_force_close_success",
+                            symbol=symbol,
+                            consecutive_errors=err_count,
+                        )
+                        return
+                    # 주문 거부 (에러 아닌 실패) — 로그 후 DB 리셋 경로로 진행
+                    logger.warning(
+                        "tier1_force_close_order_rejected",
+                        symbol=symbol,
+                        error=resp.error if hasattr(resp, "error") else str(resp),
+                    )
+            except Exception as close_err:
+                logger.warning(
+                    "tier1_force_close_market_failed",
+                    symbol=symbol,
+                    error=str(close_err),
                 )
-            )
-            position = result.scalar_one_or_none()
-            if position:
-                position.quantity = 0
-                position.current_value = 0
-                position.margin_used = 0
-                position.total_invested = 0
-                await session.flush()
 
+            # 2차: 거래소 매도 불가 → DB 포지션 강제 리셋
+            try:
+                result = await session.execute(
+                    select(Position).where(
+                        Position.symbol == symbol,
+                        Position.quantity > 0,
+                        Position.exchange == self._exchange_name,
+                    )
+                )
+                position = result.scalar_one_or_none()
+                if position:
+                    position.quantity = 0
+                    position.current_value = 0
+                    position.margin_used = 0
+                    position.total_invested = 0
+                    await session.flush()
+
+                    logger.error(
+                        "tier1_force_close_db_reset",
+                        symbol=symbol,
+                        detail="거래소 매도 실패 → DB 포지션 강제 리셋",
+                    )
+                    await emit_event(
+                        "critical",
+                        "engine",
+                        f"Tier1 강제 청산 (DB 리셋): {symbol}",
+                        detail=f"연속 {err_count}회 평가 실패, 거래소 매도 불가 → DB 포지션 0으로 리셋. "
+                        f"수동으로 거래소에서 {symbol} 포지션을 확인하세요.",
+                        metadata={"symbol": symbol, "consecutive_errors": err_count},
+                    )
+                else:
+                    logger.info(
+                        "tier1_force_close_no_db_position",
+                        symbol=symbol,
+                        detail="DB에 활성 포지션 없음 — 이미 청산됨",
+                    )
+            except Exception as db_err:
                 logger.error(
-                    "tier1_force_close_db_reset",
+                    "tier1_force_close_db_reset_failed",
                     symbol=symbol,
-                    detail="거래소 매도 실패 → DB 포지션 강제 리셋",
+                    error=str(db_err),
                 )
-                await emit_event(
-                    "critical",
-                    "engine",
-                    f"Tier1 강제 청산 (DB 리셋): {symbol}",
-                    detail=f"연속 {err_count}회 평가 실패, 거래소 매도 불가 → DB 포지션 0으로 리셋. "
-                    f"수동으로 거래소에서 {symbol} 포지션을 확인하세요.",
-                    metadata={"symbol": symbol, "consecutive_errors": err_count},
-                )
-            else:
-                logger.info(
-                    "tier1_force_close_no_db_position",
-                    symbol=symbol,
-                    detail="DB에 활성 포지션 없음 — 이미 청산됨",
-                )
-        except Exception as db_err:
-            logger.error(
-                "tier1_force_close_db_reset_failed",
-                symbol=symbol,
-                error=str(db_err),
-            )
-        finally:
-            # 항상 인메모리 상태 정리 — 무한 재시도 방지
-            self._positions.close_position(symbol)
-            self._eval_error_counts.pop(symbol, None)
-            # 강제 청산은 에러 기반이므로 쿨다운 면제
-            self._last_exit_time.pop(symbol, None)
-            self._last_exit_direction.pop(symbol, None)
+            finally:
+                # 항상 인메모리 상태 정리 — 무한 재시도 방지
+                self._positions.close_position(symbol)
+                self._eval_error_counts.pop(symbol, None)
+                # 강제 청산은 에러 기반이므로 쿨다운 면제
+                self._last_exit_time.pop(symbol, None)
+                self._last_exit_direction.pop(symbol, None)
 
     # ── COIN-41: 쿨다운 DB 영속화 ──────────────────
 

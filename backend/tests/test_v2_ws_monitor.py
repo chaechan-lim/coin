@@ -40,9 +40,7 @@ def mock_exchange():
     exchange.watch_tickers = AsyncMock(return_value={})
     exchange.watch_balance = AsyncMock(return_value={})
     exchange.watch_positions = AsyncMock(return_value=[])
-    exchange.fetch_ticker = AsyncMock(
-        return_value=MagicMock(last=80000.0)
-    )
+    exchange.fetch_ticker = AsyncMock(return_value=MagicMock(last=80000.0))
     return exchange
 
 
@@ -192,6 +190,7 @@ class TestWSReconnect:
     async def test_reconnect_skips_when_fresh(self, engine, mock_exchange):
         """최근 재연결된 경우 중복 재연결 스킵."""
         import time
+
         engine._last_reconnect_at = time.monotonic()  # 방금 재연결
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await engine._ws_reconnect(10.0)
@@ -241,12 +240,16 @@ class TestRealtimeStopCheck:
     async def test_tier1_trailing_stop_hit(self, engine):
         """Tier1 트레일링 스탑 활성화 후 히트."""
         state = _make_position_state(
-            entry_price=80000.0, trail_act_atr=2.0, trail_stop_atr=1.0,
+            entry_price=80000.0,
+            trail_act_atr=2.0,
+            trail_stop_atr=1.0,
             trailing_active=True,
         )
         state.extreme_price = 85000.0
         engine._positions.open_position(state)
-        engine._positions.update_atr("BTC/USDT", 1000.0)  # trail = extreme - 1000 = 84000
+        engine._positions.update_atr(
+            "BTC/USDT", 1000.0
+        )  # trail = extreme - 1000 = 84000
         engine._execute_ws_close = AsyncMock()
 
         await engine._realtime_stop_check("BTC/USDT", 83500.0)
@@ -279,7 +282,9 @@ class TestRealtimeStopCheck:
     async def test_tier1_short_sl_hit(self, engine):
         """Tier1 SHORT SL 히트."""
         state = _make_position_state(
-            direction=Direction.SHORT, entry_price=80000.0, sl_atr=1.5,
+            direction=Direction.SHORT,
+            entry_price=80000.0,
+            sl_atr=1.5,
         )
         engine._positions.open_position(state)
         engine._positions.update_atr("BTC/USDT", 1000.0)  # SL = 80000 + 1500 = 81500
@@ -359,9 +364,12 @@ class TestExecuteWSClose:
         """WS 청산 성공 시 포지션 + 미실현PnL 캐시 제거."""
         # DB 포지션 생성
         db_pos = Position(
-            symbol="BTC/USDT", exchange="binance_futures",
-            quantity=0.01, average_buy_price=80000.0,
-            total_invested=100.0, current_value=100.0,
+            symbol="BTC/USDT",
+            exchange="binance_futures",
+            quantity=0.01,
+            average_buy_price=80000.0,
+            total_invested=100.0,
+            current_value=100.0,
         )
         session.add(db_pos)
         await session.commit()
@@ -377,23 +385,22 @@ class TestExecuteWSClose:
             "engine.futures_engine_v2.get_session_factory",
             return_value=session_factory,
         ):
-            await engine._execute_ws_close(
-                "BTC/USDT", state, 78000.0, "[WS] SL hit"
-            )
+            await engine._execute_ws_close("BTC/USDT", state, 78000.0, "[WS] SL hit")
 
         assert not engine._positions.has_position("BTC/USDT")
         assert "BTC/USDT" not in engine._ws_unrealized_pnl
         engine._safe_order.execute_order.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_close_failure_keeps_position(
-        self, engine, session, session_factory
-    ):
+    async def test_close_failure_keeps_position(self, engine, session, session_factory):
         """주문 실패 시 포지션 유지."""
         db_pos = Position(
-            symbol="BTC/USDT", exchange="binance_futures",
-            quantity=0.01, average_buy_price=80000.0,
-            total_invested=100.0, current_value=100.0,
+            symbol="BTC/USDT",
+            exchange="binance_futures",
+            quantity=0.01,
+            average_buy_price=80000.0,
+            total_invested=100.0,
+            current_value=100.0,
         )
         session.add(db_pos)
         await session.commit()
@@ -408,9 +415,7 @@ class TestExecuteWSClose:
             "engine.futures_engine_v2.get_session_factory",
             return_value=session_factory,
         ):
-            await engine._execute_ws_close(
-                "BTC/USDT", state, 78000.0, "[WS] SL hit"
-            )
+            await engine._execute_ws_close("BTC/USDT", state, 78000.0, "[WS] SL hit")
 
         assert engine._positions.has_position("BTC/USDT")
 
@@ -425,9 +430,7 @@ class TestExecuteWSClose:
             "engine.futures_engine_v2.get_session_factory",
             return_value=session_factory,
         ):
-            await engine._execute_ws_close(
-                "BTC/USDT", state, 78000.0, "[WS] SL hit"
-            )
+            await engine._execute_ws_close("BTC/USDT", state, 78000.0, "[WS] SL hit")
 
         engine._safe_order.execute_order.assert_not_called()
         # 인메모리 포지션은 유지 (DB에서 이미 청산된 것으로 판단)
@@ -528,8 +531,11 @@ class TestWSPriceMonitorLoop:
                 pass
 
     @pytest.mark.asyncio
-    async def test_fallback_cancelled_after_consecutive_successes(self, engine, mock_exchange):
+    async def test_fallback_cancelled_after_consecutive_successes(
+        self, engine, mock_exchange
+    ):
         """WS 3회 연속 성공 후 폴백 태스크 취소 (대칭 히스테리시스)."""
+
         # 미리 폴백 태스크 생성
         async def dummy():
             await asyncio.sleep(3600)
@@ -559,8 +565,11 @@ class TestWSPriceMonitorLoop:
         assert engine._fast_sl_task is None
 
     @pytest.mark.asyncio
-    async def test_fallback_not_cancelled_on_single_success(self, engine, mock_exchange):
+    async def test_fallback_not_cancelled_on_single_success(
+        self, engine, mock_exchange
+    ):
         """WS 1회 성공으로는 폴백 취소 안 함."""
+
         async def dummy():
             await asyncio.sleep(3600)
 
@@ -853,11 +862,11 @@ class TestWSPositionLoop:
             return [
                 {
                     "symbol": "BTC/USDT:USDT",
-                    "contracts": 0.01,          # 동일 — qty 변경 없음
-                    "initialMargin": 100.0,      # 동일 — margin 변경 없음
-                    "entryPrice": 80000.0,       # 동일
+                    "contracts": 0.01,  # 동일 — qty 변경 없음
+                    "initialMargin": 100.0,  # 동일 — margin 변경 없음
+                    "entryPrice": 80000.0,  # 동일
                     "markPrice": 81000.0,
-                    "unrealizedPnl": 10.0,       # current_value = 100 + 10 = 110
+                    "unrealizedPnl": 10.0,  # current_value = 100 + 10 = 110
                 }
             ]
 
@@ -1059,7 +1068,7 @@ class TestReconnectStorm:
 class TestWSPositionLoopExternalClose:
     @pytest.mark.asyncio
     async def test_contracts_zero_detects_external_close(
-        self, engine, mock_exchange, session, session_factory
+        self, engine, mock_exchange, mock_market_data, mock_pm, session, session_factory
     ):
         """contracts=0 수신 시 외부 청산 감지 → DB 커밋 후 인메모리 제거."""
         db_pos = Position(
@@ -1099,6 +1108,11 @@ class TestWSPositionLoopExternalClose:
         mock_exchange.watch_positions = AsyncMock(side_effect=mock_watch)
         engine._is_running = True
 
+        # COIN-48: mock_pm needs _cash_balance and _realized_pnl attributes
+        mock_pm._cash_balance = 400.0
+        mock_pm._realized_pnl = 0.0
+        mock_market_data.get_current_price = AsyncMock(return_value=80000.0)
+
         with patch(
             "engine.futures_engine_v2.get_session_factory",
             return_value=session_factory,
@@ -1114,3 +1128,413 @@ class TestWSPositionLoopExternalClose:
         assert not engine._positions.has_position("BTC/USDT")
         # ATR 캐시도 제거됨
         assert engine._positions.get_atr("BTC/USDT") == 0.0
+
+
+# ── COIN-48: 이중 청산 방지 + cash 반환 테스트 ──────────
+
+
+class TestCOIN48ExternalCloseCashReturn:
+    """COIN-48: WS 외부 청산 감지 시 cash 반환 + 거래 기록 생성."""
+
+    @pytest.mark.asyncio
+    async def test_external_close_returns_cash(
+        self, engine, mock_exchange, mock_market_data, mock_pm, session, session_factory
+    ):
+        """외부 청산 시 invested + pnl이 cash에 반환된다."""
+        db_pos = Position(
+            symbol="BTC/USDT",
+            exchange="binance_futures",
+            quantity=0.01,
+            average_buy_price=80000.0,
+            total_invested=100.0,
+            current_value=110.0,
+            direction="long",
+            leverage=3,
+        )
+        session.add(db_pos)
+        await session.commit()
+
+        state = _make_position_state()
+        engine._positions.open_position(state)
+
+        # 현재가 81000 → 롱: PnL = 100 * (81000-80000)/80000 * 3 * 100 / 100 = +3.75
+        mock_market_data.get_current_price = AsyncMock(return_value=81000.0)
+        mock_pm._cash_balance = 400.0
+        mock_pm._realized_pnl = 0.0
+
+        call_count = 0
+
+        async def mock_watch():
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise asyncio.CancelledError()
+            return [
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "contracts": 0,
+                    "initialMargin": 0,
+                    "entryPrice": 80000.0,
+                    "markPrice": 81000.0,
+                    "unrealizedPnl": 0,
+                }
+            ]
+
+        mock_exchange.watch_positions = AsyncMock(side_effect=mock_watch)
+        engine._is_running = True
+
+        with patch(
+            "engine.futures_engine_v2.get_session_factory",
+            return_value=session_factory,
+        ):
+            await engine._ws_position_loop()
+
+        # cash = 400 + (100 + 3.75) = 503.75
+        expected_pnl = 100.0 * (81000.0 - 80000.0) / 80000.0 * 3 * 100 / 100
+        expected_cash = 400.0 + 100.0 + expected_pnl
+        assert mock_pm._cash_balance == pytest.approx(expected_cash, abs=0.1)
+        assert mock_pm._realized_pnl == pytest.approx(expected_pnl, abs=0.1)
+
+    @pytest.mark.asyncio
+    async def test_external_close_creates_order_record(
+        self, engine, mock_exchange, mock_market_data, mock_pm, session, session_factory
+    ):
+        """외부 청산 시 Order 레코드가 생성된다."""
+        from core.models import Order
+
+        db_pos = Position(
+            symbol="ETH/USDT",
+            exchange="binance_futures",
+            quantity=0.051,
+            average_buy_price=3000.0,
+            total_invested=50.0,
+            current_value=52.0,
+            direction="long",
+            leverage=3,
+        )
+        session.add(db_pos)
+        await session.commit()
+
+        state = _make_position_state(
+            symbol="ETH/USDT", entry_price=3000.0, quantity=0.051
+        )
+        engine._positions.open_position(state)
+
+        mock_market_data.get_current_price = AsyncMock(return_value=3050.0)
+        mock_pm._cash_balance = 200.0
+        mock_pm._realized_pnl = 0.0
+
+        call_count = 0
+
+        async def mock_watch():
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise asyncio.CancelledError()
+            return [
+                {
+                    "symbol": "ETH/USDT:USDT",
+                    "contracts": 0,
+                    "initialMargin": 0,
+                    "entryPrice": 3000.0,
+                    "markPrice": 3050.0,
+                    "unrealizedPnl": 0,
+                }
+            ]
+
+        mock_exchange.watch_positions = AsyncMock(side_effect=mock_watch)
+        engine._is_running = True
+
+        with patch(
+            "engine.futures_engine_v2.get_session_factory",
+            return_value=session_factory,
+        ):
+            await engine._ws_position_loop()
+
+        # Order 레코드 확인
+        from sqlalchemy import select
+
+        result = await session.execute(
+            select(Order).where(
+                Order.symbol == "ETH/USDT",
+                Order.strategy_name == "external_close",
+            )
+        )
+        order = result.scalar_one_or_none()
+        assert order is not None
+        assert order.executed_quantity == 0.051
+        assert order.strategy_name == "external_close"
+        assert order.side == "sell"  # long position → sell to close
+
+    @pytest.mark.asyncio
+    async def test_external_close_already_closed_skips(
+        self, engine, mock_exchange, mock_market_data, mock_pm, session, session_factory
+    ):
+        """eval 루프가 먼저 청산한 경우 (DB qty=0) 외부 청산 감지가 트리거되지 않는다."""
+        # eval 루프가 이미 청산한 상태: DB qty=0
+        db_pos = Position(
+            symbol="BTC/USDT",
+            exchange="binance_futures",
+            quantity=0,  # 이미 eval에 의해 청산됨
+            average_buy_price=80000.0,
+            total_invested=100.0,
+            current_value=0,
+        )
+        session.add(db_pos)
+        await session.commit()
+
+        # 인메모리 포지션도 없음 (eval이 제거)
+        mock_pm._cash_balance = 400.0
+        mock_pm._realized_pnl = 0.0
+
+        call_count = 0
+
+        async def mock_watch():
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise asyncio.CancelledError()
+            return [
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "contracts": 0,
+                    "initialMargin": 0,
+                    "entryPrice": 80000.0,
+                    "markPrice": 80000.0,
+                    "unrealizedPnl": 0,
+                }
+            ]
+
+        mock_exchange.watch_positions = AsyncMock(side_effect=mock_watch)
+        engine._is_running = True
+
+        with patch(
+            "engine.futures_engine_v2.get_session_factory",
+            return_value=session_factory,
+        ):
+            await engine._ws_position_loop()
+
+        # DB qty=0이므로 `contracts==0 and db_pos.quantity>0` 조건 미충족
+        # → _handle_external_close 미호출, cash 변경 없음
+        assert mock_pm._cash_balance == 400.0
+
+    @pytest.mark.asyncio
+    async def test_external_close_uses_close_lock(
+        self, engine, mock_exchange, mock_market_data, mock_pm, session, session_factory
+    ):
+        """외부 청산 처리가 _close_lock을 사용한다."""
+        db_pos = Position(
+            symbol="BTC/USDT",
+            exchange="binance_futures",
+            quantity=0.01,
+            average_buy_price=80000.0,
+            total_invested=100.0,
+            current_value=100.0,
+        )
+        session.add(db_pos)
+        await session.commit()
+
+        state = _make_position_state()
+        engine._positions.open_position(state)
+
+        mock_market_data.get_current_price = AsyncMock(return_value=80000.0)
+        mock_pm._cash_balance = 400.0
+        mock_pm._realized_pnl = 0.0
+
+        lock_acquired = False
+        original_lock = engine._close_lock
+
+        class TrackingLock:
+            """Lock wrapper that records acquisition."""
+
+            async def __aenter__(self):
+                nonlocal lock_acquired
+                lock_acquired = True
+                await original_lock.__aenter__()
+                return self
+
+            async def __aexit__(self, *args):
+                await original_lock.__aexit__(*args)
+
+        engine._close_lock = TrackingLock()
+
+        call_count = 0
+
+        async def mock_watch():
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise asyncio.CancelledError()
+            return [
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "contracts": 0,
+                    "initialMargin": 0,
+                    "entryPrice": 80000.0,
+                    "markPrice": 80000.0,
+                    "unrealizedPnl": 0,
+                }
+            ]
+
+        mock_exchange.watch_positions = AsyncMock(side_effect=mock_watch)
+        engine._is_running = True
+
+        with patch(
+            "engine.futures_engine_v2.get_session_factory",
+            return_value=session_factory,
+        ):
+            await engine._ws_position_loop()
+
+        assert lock_acquired, "close_lock should be acquired during external close"
+
+    @pytest.mark.asyncio
+    async def test_short_external_close_cash_return(
+        self, engine, mock_exchange, mock_market_data, mock_pm, session, session_factory
+    ):
+        """숏 포지션 외부 청산 시 PnL이 정확히 계산된다."""
+        db_pos = Position(
+            symbol="BTC/USDT",
+            exchange="binance_futures",
+            quantity=0.01,
+            average_buy_price=80000.0,
+            total_invested=100.0,
+            current_value=110.0,
+            direction="short",
+            leverage=3,
+        )
+        session.add(db_pos)
+        await session.commit()
+
+        state = _make_position_state(direction=Direction.SHORT)
+        engine._positions.open_position(state)
+
+        # 숏: entry 80000, current 79000 → PnL = 100 * (80000-79000)/80000 * 3 * 100 / 100 = +3.75
+        mock_market_data.get_current_price = AsyncMock(return_value=79000.0)
+        mock_pm._cash_balance = 400.0
+        mock_pm._realized_pnl = 0.0
+
+        call_count = 0
+
+        async def mock_watch():
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise asyncio.CancelledError()
+            return [
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "contracts": 0,
+                    "initialMargin": 0,
+                    "entryPrice": 80000.0,
+                    "markPrice": 79000.0,
+                    "unrealizedPnl": 0,
+                }
+            ]
+
+        mock_exchange.watch_positions = AsyncMock(side_effect=mock_watch)
+        engine._is_running = True
+
+        with patch(
+            "engine.futures_engine_v2.get_session_factory",
+            return_value=session_factory,
+        ):
+            await engine._ws_position_loop()
+
+        expected_pnl = 100.0 * (80000.0 - 79000.0) / 80000.0 * 3 * 100 / 100
+        expected_cash = 400.0 + 100.0 + expected_pnl
+        assert mock_pm._cash_balance == pytest.approx(expected_cash, abs=0.1)
+
+
+class TestCOIN48CloseLockShared:
+    """COIN-48: Tier1Manager와 FuturesEngineV2가 같은 close_lock을 공유."""
+
+    @pytest.mark.asyncio
+    async def test_tier1_shares_close_lock_with_engine(self, engine):
+        """Tier1Manager와 FuturesEngineV2가 동일한 _close_lock 인스턴스를 사용."""
+        assert engine._close_lock is engine._tier1._close_lock
+
+    @pytest.mark.asyncio
+    async def test_tier1_close_acquires_lock(self, engine):
+        """Tier1Manager._close_position이 close_lock을 획득한다."""
+        state = _make_position_state()
+        engine._positions.open_position(state)
+        engine._positions.update_atr("BTC/USDT", 1000.0)
+
+        lock_acquired = False
+        original_lock = engine._close_lock
+
+        class TrackingLock:
+            async def __aenter__(self):
+                nonlocal lock_acquired
+                lock_acquired = True
+                await original_lock.__aenter__()
+                return self
+
+            async def __aexit__(self, *args):
+                await original_lock.__aexit__(*args)
+
+        engine._tier1._close_lock = TrackingLock()
+
+        mock_resp = MagicMock(success=True)
+        engine._safe_order.execute_order = AsyncMock(return_value=mock_resp)
+
+        from unittest.mock import AsyncMock as AM
+
+        engine._tier1._get_price = AM(return_value=80000.0)
+
+        mock_session = AsyncMock()
+        result = await engine._tier1._close_position(
+            mock_session, "BTC/USDT", Direction.LONG, "test close"
+        )
+
+        assert lock_acquired, "close_lock should be acquired during tier1 close"
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_concurrent_ws_and_eval_close_only_one_succeeds(self, engine):
+        """WS 모니터와 eval 루프가 동시에 청산 시도 → 하나만 성공."""
+        state = _make_position_state()
+        engine._positions.open_position(state)
+        engine._positions.update_atr("BTC/USDT", 1000.0)
+
+        close_count = 0
+
+        async def mock_close_position(session, symbol, direction, reason):
+            nonlocal close_count
+            # close_lock 내부에서 pos_state를 재확인하므로,
+            # 첫 번째 호출 성공 후 두 번째는 pos_state=None → False
+            pos_state = engine._positions.get(symbol)
+            if not pos_state:
+                return False
+            close_count += 1
+            engine._positions.close_position(symbol)
+            return True
+
+        async def mock_ws_close(symbol, state, price, reason):
+            # WS close도 동일한 패턴 — position 확인 후 close
+            pos_state = engine._positions.get(symbol)
+            if not pos_state:
+                return
+            engine._positions.close_position(symbol)
+
+        # Tier1 close는 lock을 직접 사용하므로 원본 메서드 사용
+        engine._tier1._get_price = AsyncMock(return_value=80000.0)
+
+        mock_resp = MagicMock(success=True)
+        engine._safe_order.execute_order = AsyncMock(return_value=mock_resp)
+
+        mock_session = AsyncMock()
+
+        # 동시에 두 close 시도 (같은 lock 공유)
+        results = await asyncio.gather(
+            engine._tier1._close_position(
+                mock_session, "BTC/USDT", Direction.LONG, "eval close"
+            ),
+            engine._tier1._close_position(
+                mock_session, "BTC/USDT", Direction.LONG, "ws close"
+            ),
+        )
+
+        # 하나만 True, 하나는 False (lock + pos_state 재확인)
+        assert sum(results) == 1, f"Exactly one close should succeed: {results}"
+        assert not engine._positions.has_position("BTC/USDT")
