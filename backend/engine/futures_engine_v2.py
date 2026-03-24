@@ -21,6 +21,7 @@ from core.event_bus import emit_event
 from core.models import Position
 from db.session import get_session_factory
 from engine.regime_detector import RegimeDetector
+from engine.regime_evaluators import RegimeLongEvaluator, RegimeShortEvaluator
 from engine.strategy_selector import StrategySelector
 from engine.spot_evaluator import SpotEvaluator
 from engine.tier1_manager import Tier1Manager
@@ -105,36 +106,60 @@ class FuturesEngineV2:
         except Exception as e:
             logger.warning("v2_ml_filter_load_failed", error=str(e))
 
-        # 양방향 SpotEvaluator: 현물 4전략 기반 롱+숏 (COIN-28)
-        # 하나의 SpotEvaluator 인스턴스가 long_evaluator + short_evaluator 모두 담당.
-        # BUY → 롱 진입 / 숏 청산, SELL → 숏 진입 / 롱 청산.
-        spot_strategies = [
-            CISMomentumStrategy(),
-            BNFDeviationStrategy(),
-            DonchianChannelStrategy(),
-            LarryWilliamsStrategy(),
-        ]
-        spot_combiner = SignalCombiner(
-            strategy_weights=SignalCombiner.SPOT_WEIGHTS.copy(),
-            min_confidence=v2_cfg.tier1_long_min_confidence,
-            directional_weights=False,
-            exchange_name=self.EXCHANGE_NAME,
-            min_sell_active_weight=v2_cfg.min_sell_active_weight,
-        )
-        spot_evaluator = SpotEvaluator(
-            strategies=spot_strategies,
-            combiner=spot_combiner,
-            market_data=market_data,
-            eval_interval=v2_cfg.tier1_long_eval_interval_sec,
-            min_confidence=v2_cfg.tier1_long_min_confidence,
-            cooldown_hours=v2_cfg.tier1_long_cooldown_hours,
-            sl_atr_mult=v2_cfg.tier1_long_sl_atr_mult,
-            tp_atr_mult=v2_cfg.tier1_long_tp_atr_mult,
-            trail_activation_atr_mult=v2_cfg.tier1_long_trail_activation_atr_mult,
-            trail_stop_atr_mult=v2_cfg.tier1_long_trail_stop_atr_mult,
-        )
-        self._long_evaluator = spot_evaluator
-        self._short_evaluator = spot_evaluator
+        # ── Evaluator 생성: strategy_mode에 따라 분기 (COIN-46) ──
+        self._strategy_mode = v2_cfg.strategy_mode
+        if v2_cfg.strategy_mode == "regime":
+            # 레짐 3전략: RegimeLongEvaluator + RegimeShortEvaluator
+            # 백테스트 PF 2.17, MDD 5.42%, Sharpe 1.61 (ALL PASS)
+            regime_eval_interval = v2_cfg.tier1_regime_eval_interval_sec
+            self._long_evaluator = RegimeLongEvaluator(
+                strategy_selector=self._strategies,
+                regime_detector=self._regime,
+                market_data=market_data,
+                eval_interval=regime_eval_interval,
+            )
+            self._short_evaluator = RegimeShortEvaluator(
+                strategy_selector=self._strategies,
+                regime_detector=self._regime,
+                market_data=market_data,
+                eval_interval=regime_eval_interval,
+            )
+            logger.info(
+                "v2_strategy_mode_regime",
+                eval_interval=regime_eval_interval,
+                cooldown_hours=v2_cfg.tier1_regime_cooldown_hours,
+                min_confidence=v2_cfg.tier1_min_confidence,
+            )
+        else:
+            # 현물 4전략 폴백 (strategy_mode=spot)
+            spot_strategies = [
+                CISMomentumStrategy(),
+                BNFDeviationStrategy(),
+                DonchianChannelStrategy(),
+                LarryWilliamsStrategy(),
+            ]
+            spot_combiner = SignalCombiner(
+                strategy_weights=SignalCombiner.SPOT_WEIGHTS.copy(),
+                min_confidence=v2_cfg.tier1_long_min_confidence,
+                directional_weights=False,
+                exchange_name=self.EXCHANGE_NAME,
+                min_sell_active_weight=v2_cfg.min_sell_active_weight,
+            )
+            spot_evaluator = SpotEvaluator(
+                strategies=spot_strategies,
+                combiner=spot_combiner,
+                market_data=market_data,
+                eval_interval=v2_cfg.tier1_long_eval_interval_sec,
+                min_confidence=v2_cfg.tier1_long_min_confidence,
+                cooldown_hours=v2_cfg.tier1_long_cooldown_hours,
+                sl_atr_mult=v2_cfg.tier1_long_sl_atr_mult,
+                tp_atr_mult=v2_cfg.tier1_long_tp_atr_mult,
+                trail_activation_atr_mult=v2_cfg.tier1_long_trail_activation_atr_mult,
+                trail_stop_atr_mult=v2_cfg.tier1_long_trail_stop_atr_mult,
+            )
+            self._long_evaluator = spot_evaluator
+            self._short_evaluator = spot_evaluator
+            logger.info("v2_strategy_mode_spot")
 
         self._tier1 = Tier1Manager(
             coins=list(v2_cfg.tier1_coins),
@@ -1214,19 +1239,25 @@ class FuturesEngineV2:
     def strategies(self) -> dict:
         """v2 활성 전략 이름 → 전략 객체 매핑 (전략 성과/비교 탭용).
 
-        SpotEvaluator의 현물 4전략만 반환 — 실제 주문 생성에 사용되는 전략.
-        주문의 strategy_name이 이 전략 이름으로 기록되므로 /strategies/comparison이
-        올바른 성과 데이터를 조회할 수 있다.
-        V1 7전략(bollinger_rsi 등)과 V2 레짐 전략(trend_follower 등)은 비활성이므로 제외.
+        strategy_mode에 따라 반환하는 전략이 다름:
+        - regime: 레짐 3전략 (trend_follower, mean_reversion, vol_breakout)
+        - spot: 현물 4전략 (cis_momentum, bnf_deviation, donchian_channel, larry_williams)
         """
         seen: dict[str, object] = {}
-        # SpotEvaluator의 현물 전략들 (실제 주문에 사용되는 전략명)
-        evaluator = self._long_evaluator
-        if hasattr(evaluator, "_strategies"):
-            for strategy in evaluator._strategies:
+        if self._strategy_mode == "regime":
+            # 레짐 전략: StrategySelector에서 모든 전략 객체를 가져옴 (중복 제거)
+            for strategy in self._strategies.all_strategies.values():
                 name = getattr(strategy, "name", None)
                 if name and name not in seen:
                     seen[name] = strategy
+        else:
+            # SpotEvaluator의 현물 전략들 (실제 주문에 사용되는 전략명)
+            evaluator = self._long_evaluator
+            if hasattr(evaluator, "_strategies"):
+                for strategy in evaluator._strategies:
+                    name = getattr(strategy, "name", None)
+                    if name and name not in seen:
+                        seen[name] = strategy
         return seen
 
     @property
@@ -1285,6 +1316,7 @@ class FuturesEngineV2:
         return {
             "engine": "futures_v2",
             "is_running": self._is_running,
+            "strategy_mode": self._strategy_mode,
             "regime": regime.regime.value if regime else "unknown",
             "regime_confidence": regime.confidence if regime else 0.0,
             "tier1_positions": self._positions.active_count("tier1"),

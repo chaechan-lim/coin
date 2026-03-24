@@ -194,11 +194,10 @@ async def _db_with_many_cycles():
 class TestFuturesEngineV2StrategiesProperty:
     """Verify that FuturesEngineV2.strategies excludes regime strategies."""
 
-    def test_strategies_returns_only_spot_evaluator_strategies(self):
-        """strategies property should only contain SpotEvaluator's 4 strategies."""
+    def test_strategies_spot_mode_returns_only_spot_strategies(self):
+        """COIN-46: strategy_mode=spot → SpotEvaluator의 현물 4전략만 반환."""
         from engine.futures_engine_v2 import FuturesEngineV2
 
-        # Build a mock that mimics the real engine's structure
         mock_strategy_1 = MagicMock()
         mock_strategy_1.name = "cis_momentum"
         mock_strategy_2 = MagicMock()
@@ -208,16 +207,8 @@ class TestFuturesEngineV2StrategiesProperty:
         mock_strategy_4 = MagicMock()
         mock_strategy_4.name = "larry_williams"
 
-        # Regime strategies that should NOT appear
-        regime_strat_1 = MagicMock()
-        regime_strat_1.name = "trend_follower"
-        regime_strat_2 = MagicMock()
-        regime_strat_2.name = "mean_reversion"
-        regime_strat_3 = MagicMock()
-        regime_strat_3.name = "vol_breakout"
-
-        # Create a minimal FuturesEngineV2-like object
         engine = MagicMock(spec=FuturesEngineV2)
+        engine._strategy_mode = "spot"
         engine._long_evaluator = MagicMock()
         engine._long_evaluator._strategies = [
             mock_strategy_1,
@@ -225,14 +216,7 @@ class TestFuturesEngineV2StrategiesProperty:
             mock_strategy_3,
             mock_strategy_4,
         ]
-        engine._strategies = MagicMock()
-        engine._strategies._strategies = {
-            "trend_follower": regime_strat_1,
-            "mean_reversion": regime_strat_2,
-            "vol_breakout": regime_strat_3,
-        }
 
-        # Call the actual property implementation
         result = FuturesEngineV2.strategies.fget(engine)
 
         assert set(result.keys()) == {
@@ -241,23 +225,49 @@ class TestFuturesEngineV2StrategiesProperty:
             "donchian_channel",
             "larry_williams",
         }
-        # Regime strategies must NOT be included
-        assert "trend_follower" not in result
-        assert "mean_reversion" not in result
-        assert "vol_breakout" not in result
+
+    def test_strategies_regime_mode_returns_regime_strategies(self):
+        """COIN-46: strategy_mode=regime → 레짐 3전략 반환."""
+        from engine.futures_engine_v2 import FuturesEngineV2
+
+        regime_strat_1 = MagicMock()
+        regime_strat_1.name = "trend_follower"
+        regime_strat_2 = MagicMock()
+        regime_strat_2.name = "mean_reversion"
+        regime_strat_3 = MagicMock()
+        regime_strat_3.name = "vol_breakout"
+
+        engine = MagicMock(spec=FuturesEngineV2)
+        engine._strategy_mode = "regime"
+        engine._strategies = MagicMock()
+        engine._strategies.all_strategies = {
+            "TRENDING_UP": regime_strat_1,
+            "TRENDING_DOWN": regime_strat_1,  # same instance
+            "RANGING": regime_strat_2,
+            "VOLATILE": regime_strat_3,
+        }
+
+        result = FuturesEngineV2.strategies.fget(engine)
+
+        assert set(result.keys()) == {
+            "trend_follower",
+            "mean_reversion",
+            "vol_breakout",
+        }
 
     def test_strategies_no_evaluator_returns_empty(self):
-        """If evaluator has no _strategies, return empty dict."""
+        """If evaluator has no _strategies, return empty dict (spot mode)."""
         from engine.futures_engine_v2 import FuturesEngineV2
 
         engine = MagicMock(spec=FuturesEngineV2)
+        engine._strategy_mode = "spot"
         engine._long_evaluator = MagicMock(spec=[])  # no _strategies attr
 
         result = FuturesEngineV2.strategies.fget(engine)
         assert result == {}
 
-    def test_strategies_count_is_four(self):
-        """Exactly 4 active strategies should be returned."""
+    def test_strategies_count_is_four_spot_mode(self):
+        """COIN-46: strategy_mode=spot → 4 active strategies."""
         from engine.futures_engine_v2 import FuturesEngineV2
 
         strats = []
@@ -272,6 +282,7 @@ class TestFuturesEngineV2StrategiesProperty:
             strats.append(s)
 
         engine = MagicMock(spec=FuturesEngineV2)
+        engine._strategy_mode = "spot"
         engine._long_evaluator = MagicMock()
         engine._long_evaluator._strategies = strats
 

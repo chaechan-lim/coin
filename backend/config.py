@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field, field_validator
-from typing import Optional
+from typing import Literal
 
 
 class ExchangeConfig(BaseSettings):
@@ -252,6 +252,9 @@ class FuturesV2Config(BaseSettings):
     leverage: int = 3
     max_leverage: int = 5
 
+    # Strategy mode: "regime" (레짐 3전략) or "spot" (현물 4전략) (COIN-46)
+    strategy_mode: Literal["regime", "spot"] = "regime"
+
     # Tier 1
     tier1_coins: list[str] = [
         "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT",
@@ -262,7 +265,11 @@ class FuturesV2Config(BaseSettings):
     tier1_min_confidence: float = 0.4
     tier1_cooldown_seconds: int = 93600  # 26h (백테스트 최적)
 
-    # Long evaluator — 현물 4전략 기반 (COIN-26)
+    # Regime evaluator 파라미터 — backtest_v2 최적 (COIN-46)
+    tier1_regime_eval_interval_sec: int = 14400   # 48 × 5min = 4h
+    tier1_regime_cooldown_hours: float = 26.0     # 312 × 5min = 26h
+
+    # Long evaluator — 현물 4전략 기반 (COIN-26), strategy_mode=spot에서 사용
     tier1_long_eval_interval_sec: int = 300       # 5분 (현물과 동일)
     tier1_long_min_confidence: float = 0.50       # 현물 라이브 동일
     tier1_long_cooldown_hours: float = 60.0       # 현물 Optuna 최적 (cd15)
