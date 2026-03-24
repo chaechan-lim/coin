@@ -61,7 +61,6 @@ notify:
 project:
   knowledge:
     - CLAUDE.md
-    - PROGRESS.md
   scope:
     include:
       - "backend/"
