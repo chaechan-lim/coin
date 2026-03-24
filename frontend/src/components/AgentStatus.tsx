@@ -20,7 +20,8 @@ interface OpenPosition {
 function fmtKst(isoStr?: string): string {
   if (!isoStr) return ''
   try {
-    const d = new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z')
+    const hasOffset = /[+-]\d{2}:\d{2}$/.test(isoStr)
+    const d = new Date(hasOffset || isoStr.endsWith('Z') ? isoStr : isoStr + 'Z')
     if (Number.isNaN(d.getTime())) return ''
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone: 'Asia/Seoul', month: '2-digit', day: '2-digit',
@@ -37,7 +38,8 @@ function fmtKst(isoStr?: string): string {
 function fmtElapsed(isoStr?: string): string {
   if (!isoStr) return ''
   try {
-    const d = new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z')
+    const hasOffset = /[+-]\d{2}:\d{2}$/.test(isoStr)
+    const d = new Date(hasOffset || isoStr.endsWith('Z') ? isoStr : isoStr + 'Z')
     if (Number.isNaN(d.getTime())) return ''
     const diffMs = Date.now() - d.getTime()
     if (diffMs < 0) return '방금'
