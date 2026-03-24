@@ -13,6 +13,7 @@ ATR 기반 연속 사이징: 변동성 낮으면 크게, 높으면 작게.
 - 시장 상태별 포지션 사이징: 하락장→50%, 변동성→60%
 """
 
+import asyncio
 import time
 import structlog
 import pandas as pd
@@ -85,6 +86,8 @@ class Tier1Manager:
     """Tier 1 코인의 상시 포지션 관리 — 듀얼 이밸류에이터."""
 
     BASE_RISK_PCT = 0.02  # 1회 리스크: 계좌의 2%
+    CROSS_FLIP_MIN_CONFIDENCE = 0.65  # 교차 거래소 포지션 전환 최소 신뢰도
+    _STOP_EVENT_COOLDOWN_SEC = 300  # SL/TP/trailing 이벤트 스팸 방지 5분 쿨다운
 
     def __init__(
         self,
@@ -113,6 +116,12 @@ class Tier1Manager:
         daily_buy_limit: int = 20,
         max_daily_coin_buys: int = 3,
         max_eval_errors: int = 3,
+        # COIN-43: 최대 보유 시간 (0=무제한)
+        max_hold_hours: float = 0,
+        # COIN-43: 교차 거래소 포지션 충돌 체크 콜백
+        cross_exchange_checker: (
+            Callable[[str, float], Awaitable[bool | None]] | None
+        ) = None,
     ):
         self._coins = coins
         self._safe_order = safe_order
@@ -156,6 +165,15 @@ class Tier1Manager:
         # COIN-41: 연속 에러 강제 청산
         self._max_eval_errors = max_eval_errors
         self._eval_error_counts: dict[str, int] = {}
+
+        # COIN-43: SL/TP/trailing 이벤트 스팸 방지
+        self._last_stop_event_time: dict[str, datetime] = {}
+
+        # COIN-43: 최대 보유 시간 (0=무제한)
+        self._max_hold_hours = max_hold_hours
+
+        # COIN-43: 교차 거래소 포지션 충돌 체크 콜백
+        self._cross_exchange_checker = cross_exchange_checker
 
         # 관측용 상태 (COIN-17)
         self._cycle_count: int = 0
@@ -226,6 +244,8 @@ class Tier1Manager:
                     stats.daily_limit_count += 1
                 elif outcome == "margin_insufficient":
                     stats.low_confidence_count += 1  # 마진 부족도 미실행 카운트
+                elif outcome == "cross_exchange_blocked":
+                    stats.hold_count += 1  # 교차 거래소 충돌도 미실행
                 elif outcome in ("opened", "closed", "sar", "flat_close"):
                     stats.executed_count += 1
                     self._last_action_at = datetime.now(timezone.utc)
@@ -323,6 +343,7 @@ class Tier1Manager:
                 return "sl_tp"
 
         # 2. 포지션 방향에 따라 해당 이밸류에이터의 청산 시그널 체크
+        #    (COIN-43 paired exit: 진입 방향 evaluator만 청산 평가)
         if current_dir == Direction.LONG:
             long_decision = await self._long_evaluator.evaluate(
                 symbol,
@@ -331,6 +352,14 @@ class Tier1Manager:
                 df_1h=df_1h,
             )
             if long_decision.is_close:
+                logger.info(
+                    "paired_exit_close",
+                    symbol=symbol,
+                    direction="long",
+                    entry_strategy=pos_state.strategy_name,
+                    close_strategy=long_decision.strategy_name,
+                    confidence=long_decision.confidence,
+                )
                 await self._close_position(
                     session, symbol, pos_state.direction, long_decision.reason
                 )
@@ -395,6 +424,14 @@ class Tier1Manager:
                 df_1h=df_1h,
             )
             if short_decision.is_close:
+                logger.info(
+                    "paired_exit_close",
+                    symbol=symbol,
+                    direction="short",
+                    entry_strategy=pos_state.strategy_name,
+                    close_strategy=short_decision.strategy_name,
+                    confidence=short_decision.confidence,
+                )
                 await self._close_position(
                     session, symbol, pos_state.direction, short_decision.reason
                 )
@@ -588,6 +625,19 @@ class Tier1Manager:
             )
             logger.debug("tier1_daily_limit", symbol=symbol, reason=reason)
             return "daily_limit"
+
+        # COIN-43: 교차 거래소 포지션 충돌 감지 (선물 숏 vs 현물 롱)
+        if decision.direction == Direction.SHORT and self._cross_exchange_checker:
+            cross_result = await self._check_cross_exchange(symbol, decision.confidence)
+            if cross_result == "blocked":
+                self._log_direction_decision(
+                    session,
+                    symbol,
+                    decision,
+                    regime=regime,
+                    was_executed=False,
+                )
+                return "cross_exchange_blocked"
 
         # 진입 실행
         opened = await self._open_position_from_decision(session, symbol, decision)
@@ -880,13 +930,16 @@ class Tier1Manager:
         price: float,
         atr: float,
     ) -> bool:
-        """SL/TP/trailing 체크. 히트 시 청산 + 쿨다운 설정. Returns True if closed.
+        """SL/TP/trailing/max_hold 체크. 히트 시 청산 + 쿨다운 설정. Returns True if closed.
 
         동적 SL 활성 시 레짐에 따라 SL ATR 배수를 조정한다 (COIN-42).
+        이벤트 스팸 방지: 5분 쿨다운 (COIN-43).
         Note: update_extreme(price)는 호출 전에 _evaluate_coin에서 이미 수행됨.
         """
         if price <= 0 or atr <= 0:
             return False
+
+        sell_reason: str | None = None
 
         # 동적 SL: 레짐에 따라 일시적으로 SL ATR mult를 조정 (COIN-42)
         original_sl_atr = state.stop_loss_atr
@@ -895,40 +948,109 @@ class Tier1Manager:
 
         try:
             if state.check_stop_loss(price, atr):
-                await self._close_position(
-                    session,
-                    symbol,
-                    state.direction,
-                    f"SL hit: price={price:.2f}",
-                )
-                self._set_exit_cooldown(symbol, state.direction)
-                return True
+                sell_reason = f"SL hit: price={price:.2f}"
 
-            if state.check_trailing_stop(price, atr):
-                await self._close_position(
-                    session,
-                    symbol,
-                    state.direction,
-                    f"Trailing stop hit: price={price:.2f}",
-                )
-                self._set_exit_cooldown(symbol, state.direction)
-                return True
+            elif state.check_trailing_stop(price, atr):
+                sell_reason = f"Trailing stop hit: price={price:.2f}"
 
-            if state.check_take_profit(price, atr):
-                await self._close_position(
-                    session,
-                    symbol,
-                    state.direction,
-                    f"TP hit: price={price:.2f}",
-                )
-                self._set_exit_cooldown(symbol, state.direction)
-                return True
+            elif state.check_take_profit(price, atr):
+                sell_reason = f"TP hit: price={price:.2f}"
         finally:
             # 원본 SL 복원 (일시적 조정이므로 영속 변경하지 않음)
             if self._dynamic_sl:
                 state.stop_loss_atr = original_sl_atr
 
-        return False
+        # COIN-43: 최대 보유 시간 체크
+        if not sell_reason and self._max_hold_hours > 0:
+            held_hours = (
+                datetime.now(timezone.utc) - state.entered_at
+            ).total_seconds() / 3600
+            if held_hours >= self._max_hold_hours:
+                if state.entry_price > 0:
+                    if state.is_long:
+                        pnl_pct = (price - state.entry_price) / state.entry_price * 100
+                    else:
+                        pnl_pct = (state.entry_price - price) / state.entry_price * 100
+                else:
+                    pnl_pct = 0.0
+                sell_reason = (
+                    f"보유 시간 초과: {held_hours:.1f}h "
+                    f"(한도 {self._max_hold_hours:.0f}h, 수익 {pnl_pct:+.1f}%)"
+                )
+
+        if not sell_reason:
+            return False
+
+        # COIN-43: 스탑 경고 이벤트 — 5분 쿨다운으로 스팸 방지
+        self._emit_stop_event_throttled(symbol, state, price, sell_reason)
+
+        closed = await self._close_position(
+            session,
+            symbol,
+            state.direction,
+            sell_reason,
+        )
+        if closed:
+            self._set_exit_cooldown(symbol, state.direction)
+            # 청산 완료 시 알림 쿨다운 해제
+            self._last_stop_event_time.pop(symbol, None)
+        return closed
+
+    def _emit_stop_event_throttled(
+        self,
+        symbol: str,
+        state: PositionState,
+        price: float,
+        reason: str,
+    ) -> None:
+        """SL/TP/trailing 이벤트 발화 — 심볼당 5분 쿨다운 (COIN-43).
+
+        동기 함수로 fire-and-forget asyncio.create_task 패턴 사용.
+        """
+        now = datetime.now(timezone.utc)
+        last_event = self._last_stop_event_time.get(symbol)
+        if (
+            last_event
+            and (now - last_event).total_seconds() < self._STOP_EVENT_COOLDOWN_SEC
+        ):
+            return  # 쿨다운 중
+
+        self._last_stop_event_time[symbol] = now
+
+        pnl_pct = 0.0
+        if state.entry_price > 0:
+            if state.is_long:
+                pnl_pct = (price - state.entry_price) / state.entry_price * 100
+            else:
+                pnl_pct = (state.entry_price - price) / state.entry_price * 100
+        leveraged_pnl = pnl_pct * state.leverage
+
+        async def _safe_emit() -> None:
+            try:
+                await emit_event(
+                    "warning",
+                    "futures_trade",
+                    f"선물 {state.direction.value} 스탑: {symbol}",
+                    detail=reason,
+                    metadata={
+                        "symbol": symbol,
+                        "price": price,
+                        "entry_price": state.entry_price,
+                        "pnl_pct": round(pnl_pct, 2),
+                        "leveraged_pnl_pct": round(leveraged_pnl, 2),
+                        "reason": reason,
+                        "direction": state.direction.value,
+                        "leverage": state.leverage,
+                    },
+                )
+            except Exception as e:
+                logger.debug("stop_event_emit_failed", symbol=symbol, error=str(e))
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_safe_emit(), name=f"stop_event_{symbol}")
+        except RuntimeError:
+            pass  # no running loop (test 환경)
 
     def _set_exit_cooldown(self, symbol: str, direction: Direction) -> None:
         """SL/TP/trailing 후 방향별 쿨다운 설정 (COIN-27)."""
@@ -957,6 +1079,45 @@ class Tier1Manager:
             )
         return True, "OK"
 
+    # ── COIN-43: 교차 거래소 포지션 충돌 감지 ──────────────
+
+    async def _check_cross_exchange(
+        self,
+        symbol: str,
+        confidence: float,
+    ) -> str:
+        """선물 숏 진입 전 현물 롱 확인 (COIN-43).
+
+        교차 거래소에 같은 기초 자산의 롱 포지션이 있으면:
+        - confidence >= 0.65: 현물 롱 청산 후 숏 진행 ("flipped")
+        - confidence < 0.65: 숏 차단 ("blocked")
+        - 현물 포지션 없음: "clear"
+
+        cross_exchange_checker 콜백은 (symbol, confidence) → bool|None:
+        - True: 교차 포지션 성공적으로 청산됨
+        - False: 교차 포지션 있지만 청산 실패/차단
+        - None: 교차 포지션 없음
+        """
+        if not self._cross_exchange_checker:
+            return "clear"
+
+        try:
+            result = await self._cross_exchange_checker(symbol, confidence)
+            if result is None:
+                return "clear"  # 교차 포지션 없음
+            if result is True:
+                return "flipped"  # 현물 청산 후 숏 진행
+            # False: 교차 포지션 있지만 청산 안 됨 (낮은 신뢰도 또는 실패)
+            logger.warning(
+                "cross_exchange_conflict_blocked",
+                symbol=symbol,
+                confidence=confidence,
+            )
+            return "blocked"
+        except Exception as e:
+            logger.warning("cross_exchange_check_failed", symbol=symbol, error=str(e))
+            return "clear"  # 에러 시 통과 (graceful degradation)
+
     async def restore_daily_buy_count(self, session: AsyncSession) -> None:
         """DB에서 오늘 매수 카운터 복원 (재시작 시)."""
         today = datetime.now(timezone.utc).date()
@@ -965,7 +1126,9 @@ class Tier1Manager:
             select(Order.symbol, func.count())
             .where(
                 Order.exchange == self._exchange_name,
-                Order.margin_used.isnot(None),  # open orders only (long buy + short sell)
+                Order.margin_used.isnot(
+                    None
+                ),  # open orders only (long buy + short sell)
                 Order.status == "filled",
                 Order.created_at >= today_start,
             )
@@ -1047,7 +1210,7 @@ class Tier1Manager:
                 logger.warning(
                     "tier1_force_close_order_rejected",
                     symbol=symbol,
-                    error=resp.error if hasattr(resp, 'error') else str(resp),
+                    error=resp.error if hasattr(resp, "error") else str(resp),
                 )
         except Exception as close_err:
             logger.warning(

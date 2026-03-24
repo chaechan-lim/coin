@@ -14,7 +14,7 @@ import asyncio
 import time
 import structlog
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from config import AppConfig
 from core.event_bus import emit_event
@@ -47,11 +47,11 @@ class FuturesEngineV2:
     EXCHANGE_NAME = "binance_futures"
 
     # WS 재연결 상수
-    _WS_RECONNECT_MIN = 5       # 최소 재연결 대기 (초)
-    _WS_RECONNECT_MAX = 300     # 최대 재연결 대기 (초)
-    _WS_RECONNECT_FACTOR = 2    # 지수 백오프 배율
-    _WS_MAX_ERRORS = 3          # WS 폴백 전환 기준 연속 에러
-    _FAST_SL_INTERVAL = 30      # 폴백 폴링 주기 (초)
+    _WS_RECONNECT_MIN = 5  # 최소 재연결 대기 (초)
+    _WS_RECONNECT_MAX = 300  # 최대 재연결 대기 (초)
+    _WS_RECONNECT_FACTOR = 2  # 지수 백오프 배율
+    _WS_MAX_ERRORS = 3  # WS 폴백 전환 기준 연속 에러
+    _FAST_SL_INTERVAL = 30  # 폴백 폴링 주기 (초)
 
     def __init__(
         self,
@@ -161,6 +161,9 @@ class FuturesEngineV2:
             daily_buy_limit=v2_cfg.tier1_daily_buy_limit,
             max_daily_coin_buys=v2_cfg.tier1_max_daily_coin_buys,
             max_eval_errors=v2_cfg.tier1_max_eval_errors,
+            # COIN-43: 최대 보유 시간 + 교차 거래소 체크
+            max_hold_hours=v2_cfg.tier1_max_hold_hours,
+            cross_exchange_checker=self._check_cross_exchange_position,
         )
 
         self._tier2 = Tier2Scanner(
@@ -203,10 +206,12 @@ class FuturesEngineV2:
         self._ws_reconnect_lock = asyncio.Lock()  # 재연결 동시 호출 방지
         self._last_reconnect_at: float = 0.0  # 마지막 재연결 시각 (monotonic)
         self._ws_consecutive_successes: int = 0  # WS 연속 성공 카운터 (폴백 해제 기준)
-        self._ws_unrealized_pnl: dict[str, float] = {}  # 포지션별 미실현 PnL (잔고 감사용)
+        self._ws_unrealized_pnl: dict[
+            str, float
+        ] = {}  # 포지션별 미실현 PnL (잔고 감사용)
         self._ws_monitor_task: asyncio.Task | None = None
         self._ws_balance_task: asyncio.Task | None = None  # _ws_balance_loop
-        self._ws_pos_task: asyncio.Task | None = None    # _ws_position_loop
+        self._ws_pos_task: asyncio.Task | None = None  # _ws_position_loop
         self._fast_sl_task: asyncio.Task | None = None
         self._ws_enabled = True  # WS 활성화 플래그
 
@@ -297,6 +302,79 @@ class FuturesEngineV2:
             diff=round(new_cash - old_cash, 4),
         )
 
+    # ── COIN-43: 교차 거래소 포지션 충돌 감지 ──────────────
+
+    async def _check_cross_exchange_position(
+        self,
+        symbol: str,
+        confidence: float,
+    ) -> bool | None:
+        """선물 숏 진입 전 현물 롱 확인 (COIN-43).
+
+        Returns:
+            None  = 교차 포지션 없음 (숏 진행)
+            True  = 교차 포지션 청산 성공 (숏 진행)
+            False = 교차 포지션 있으나 청산 불가/차단 (숏 차단)
+        """
+        if not self._engine_registry:
+            return None
+
+        # 기초 자산 추출 (e.g., "BTC/USDT" → "BTC")
+        base = symbol.split("/")[0]
+
+        # 모든 다른 거래소에서 같은 기초 자산 롱 포지션 검색
+        sf = get_session_factory()
+        async with sf() as session:
+            result = await session.execute(
+                select(Position).where(
+                    Position.symbol.like(f"{base}/%"),
+                    Position.quantity > 0,
+                    Position.exchange != self.EXCHANGE_NAME,
+                    or_(Position.direction != "short", Position.direction.is_(None)),
+                )
+            )
+            cross_pos = result.scalars().first()
+
+        if not cross_pos:
+            return None  # 교차 포지션 없음
+
+        # 높은 신뢰도면 현물 롱 청산 후 숏 진행
+        if confidence >= Tier1Manager.CROSS_FLIP_MIN_CONFIDENCE:
+            cross_engine = self._engine_registry.get_engine(cross_pos.exchange)
+            if cross_engine and hasattr(
+                cross_engine, "close_position_for_cross_exchange"
+            ):
+                cross_symbol = f"{base}/USDT"
+                # 교차 엔진의 quote currency에 맞게 심볼 구성
+                if hasattr(cross_engine, "_ec"):
+                    cross_symbol = f"{base}/{cross_engine._ec.quote_currency}"
+                flipped = await cross_engine.close_position_for_cross_exchange(
+                    cross_symbol,
+                    f"교차 전환: {self.EXCHANGE_NAME} SHORT(conf={confidence:.2f}) → 롱 청산",
+                )
+                if flipped:
+                    await emit_event(
+                        "info",
+                        "risk",
+                        f"교차 포지션 전환: {cross_pos.exchange} {base} 롱 청산 → {self.EXCHANGE_NAME} 숏 진행",
+                        metadata={"symbol": symbol, "confidence": round(confidence, 2)},
+                    )
+                    return True
+
+        # 청산 실패 또는 낮은 신뢰도 → 숏 차단
+        await emit_event(
+            "warning",
+            "risk",
+            f"교차 거래소 충돌: {symbol} 숏 차단 (현물 롱 보유 중)",
+            metadata={
+                "symbol": symbol,
+                "cross_exchange": cross_pos.exchange,
+                "cross_qty": cross_pos.quantity,
+                "confidence": round(confidence, 2),
+            },
+        )
+        return False
+
     # ── 시작/중지 ──────────────────────────────
 
     async def initialize(self) -> None:
@@ -367,12 +445,21 @@ class FuturesEngineV2:
             asyncio.create_task(self._persist_loop(), name="v2_persist"),
         ]
         # WS 태스크도 관리 목록에 추가
-        for t in (self._ws_monitor_task, self._ws_balance_task, self._ws_pos_task, self._fast_sl_task):
+        for t in (
+            self._ws_monitor_task,
+            self._ws_balance_task,
+            self._ws_pos_task,
+            self._fast_sl_task,
+        ):
             if t is not None:
                 self._tasks.append(t)
 
     async def stop(self) -> None:
         self._is_running = False
+
+        # 셧다운 포지션 경고: 보유 중인 포지션 PnL 로깅 + 이벤트 (COIN-43)
+        await self._log_shutdown_positions()
+
         for task in self._tasks:
             if not task.done():
                 task.cancel()
@@ -393,6 +480,76 @@ class FuturesEngineV2:
             pass
 
         await emit_event("info", "engine", "선물 엔진 v2 중지")
+
+    async def _log_shutdown_positions(self) -> None:
+        """셧다운 시 보유 포지션 PnL 로깅 + 이벤트 발생 (COIN-43)."""
+        try:
+            sf = get_session_factory()
+            async with sf() as session:
+                result = await session.execute(
+                    select(Position).where(
+                        Position.quantity > 0,
+                        Position.exchange == self.EXCHANGE_NAME,
+                    )
+                )
+                positions = result.scalars().all()
+
+                if not positions:
+                    return
+
+                for pos in positions:
+                    direction = pos.direction or "long"
+                    try:
+                        price = await self._market_data.get_current_price(pos.symbol)
+                        if pos.average_buy_price and pos.average_buy_price > 0:
+                            if direction == "long":
+                                pnl_pct = (
+                                    (price - pos.average_buy_price)
+                                    / pos.average_buy_price
+                                    * 100
+                                )
+                            else:
+                                pnl_pct = (
+                                    (pos.average_buy_price - price)
+                                    / pos.average_buy_price
+                                    * 100
+                                )
+                        else:
+                            pnl_pct = 0.0
+                    except Exception:
+                        price = 0
+                        pnl_pct = 0
+
+                    lev = pos.leverage or self._config.futures_v2.leverage
+                    logger.warning(
+                        "v2_stop_open_position",
+                        symbol=pos.symbol,
+                        direction=direction,
+                        leverage=lev,
+                        quantity=pos.quantity,
+                        entry=pos.average_buy_price,
+                        current_price=price,
+                        pnl_pct=round(pnl_pct, 2),
+                    )
+
+                await emit_event(
+                    "warning",
+                    "engine",
+                    f"선물 엔진 v2 중지: {len(positions)}개 포지션 보유 중 (레버리지 포지션 주의)",
+                    metadata={
+                        "positions": [
+                            {
+                                "symbol": p.symbol,
+                                "direction": p.direction or "long",
+                                "leverage": p.leverage
+                                or self._config.futures_v2.leverage,
+                            }
+                            for p in positions
+                        ]
+                    },
+                )
+        except Exception as e:
+            logger.warning("v2_shutdown_position_log_failed", error=str(e))
 
     # ── WS 실시간 모니터링 ────────────────────────
 
@@ -448,16 +605,21 @@ class FuturesEngineV2:
 
                 # 폴백 해제: 3회 연속 성공 후 (대칭 히스테리시스)
                 self._ws_consecutive_successes += 1
-                if (self._fast_sl_task and not self._fast_sl_task.done()
-                        and self._ws_consecutive_successes >= self._WS_MAX_ERRORS):
+                if (
+                    self._fast_sl_task
+                    and not self._fast_sl_task.done()
+                    and self._ws_consecutive_successes >= self._WS_MAX_ERRORS
+                ):
                     self._fast_sl_task.cancel()
                     try:
                         await self._fast_sl_task
                     except asyncio.CancelledError:
                         pass
                     self._fast_sl_task = None
-                    logger.info("v2_fast_sl_fallback_cancelled",
-                                after_successes=self._ws_consecutive_successes)
+                    logger.info(
+                        "v2_fast_sl_fallback_cancelled",
+                        after_successes=self._ws_consecutive_successes,
+                    )
 
                 for symbol in symbols:
                     if symbol in tickers:
@@ -533,6 +695,9 @@ class FuturesEngineV2:
             else:
                 reason = f"[WS] TP hit: price={price:.2f}"
 
+            # COIN-43: Tier1 WS SL/TP 이벤트도 Tier1Manager 쿨다운 사용
+            self._tier1._emit_stop_event_throttled(symbol, state, price, reason)
+
             async with self._close_lock:
                 await self._execute_ws_close(symbol, state, price, reason)
 
@@ -558,7 +723,11 @@ class FuturesEngineV2:
                 await self._execute_ws_close(symbol, state, price, reason)
 
     async def _execute_ws_close(
-        self, symbol: str, state: PositionState, price: float, reason: str,
+        self,
+        symbol: str,
+        state: PositionState,
+        price: float,
+        reason: str,
     ) -> None:
         """close_lock 하에서 DB 검증 + 청산 실행 (WS 모니터 전용)."""
         # DB에서 포지션 재확인
@@ -601,9 +770,10 @@ class FuturesEngineV2:
                 )
                 await session.commit()
 
-                # Tier1: 방향별 쿨다운 설정
+                # Tier1: 방향별 쿨다운 설정 + 알림 쿨다운 해제 (COIN-43)
                 if state.tier == "tier1":
                     self._tier1._set_exit_cooldown(symbol, state.direction)
+                    self._tier1._last_stop_event_time.pop(symbol, None)
 
                 # 매도 콜백 (매매 회고 트리거)
                 if self._on_sell_completed:
@@ -636,7 +806,9 @@ class FuturesEngineV2:
                     except asyncio.CancelledError:
                         raise  # 태스크 취소는 전파
                     except Exception as e:
-                        logger.debug("v2_fast_sl_check_error", symbol=symbol, error=str(e))
+                        logger.debug(
+                            "v2_fast_sl_check_error", symbol=symbol, error=str(e)
+                        )
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -671,7 +843,9 @@ class FuturesEngineV2:
 
                 if exchange_cash > 0:
                     diff = abs(exchange_cash - internal_cash)
-                    if diff > 5.0 or (internal_cash > 0 and diff / internal_cash > 0.02):
+                    if diff > 5.0 or (
+                        internal_cash > 0 and diff / internal_cash > 0.02
+                    ):
                         logger.warning(
                             "v2_ws_balance_discrepancy",
                             internal=round(internal_cash, 2),
@@ -758,8 +932,13 @@ class FuturesEngineV2:
                         updated = False
 
                         # 수량 변동 (1% 기준)
-                        if (contracts > 0 and db_pos.quantity > 0
-                                and abs(db_pos.quantity - contracts) / max(db_pos.quantity, 0.0001) > 0.01):
+                        if (
+                            contracts > 0
+                            and db_pos.quantity > 0
+                            and abs(db_pos.quantity - contracts)
+                            / max(db_pos.quantity, 0.0001)
+                            > 0.01
+                        ):
                             db_pos.quantity = contracts
                             updated = True
 
@@ -1094,20 +1273,14 @@ class FuturesEngineV2:
         """엔진 상태 정보 반환 (API용)."""
         regime = self._regime.current
         ws_price_ok = (
-            self._ws_monitor_task is not None
-            and not self._ws_monitor_task.done()
+            self._ws_monitor_task is not None and not self._ws_monitor_task.done()
         )
         ws_balance_ok = (
-            self._ws_balance_task is not None
-            and not self._ws_balance_task.done()
+            self._ws_balance_task is not None and not self._ws_balance_task.done()
         )
-        ws_position_ok = (
-            self._ws_pos_task is not None
-            and not self._ws_pos_task.done()
-        )
+        ws_position_ok = self._ws_pos_task is not None and not self._ws_pos_task.done()
         fast_sl_active = (
-            self._fast_sl_task is not None
-            and not self._fast_sl_task.done()
+            self._fast_sl_task is not None and not self._fast_sl_task.done()
         )
         return {
             "engine": "futures_v2",

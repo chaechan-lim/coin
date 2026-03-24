@@ -280,6 +280,9 @@ class FuturesV2Config(BaseSettings):
     tier1_max_daily_coin_buys: int = 3 # 코인당 일일 매수 상한
     tier1_max_eval_errors: int = 3     # 연속 N회 평가 실패 → 강제 청산
 
+    # COIN-43: Tier1 최대 보유 시간 (0=무제한)
+    tier1_max_hold_hours: float = 0    # 기본 0=무제한 (서지처럼 시간 기반 청산)
+
     # Risk management — COIN-42
     asymmetric_mode: bool = True                  # TRENDING_DOWN/VOLATILE(bearish) 시 롱 차단
     dynamic_sl: bool = True                       # 레짐별 동적 SL 프로필
