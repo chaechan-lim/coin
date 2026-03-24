@@ -14,7 +14,7 @@ import asyncio
 import time
 import structlog
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from config import AppConfig
 from core.event_bus import emit_event
@@ -330,7 +330,7 @@ class FuturesEngineV2:
                     Position.symbol.like(f"{base}/%"),
                     Position.quantity > 0,
                     Position.exchange != self.EXCHANGE_NAME,
-                    Position.direction != "short",
+                    or_(Position.direction != "short", Position.direction.is_(None)),
                 )
             )
             cross_pos = result.scalars().first()

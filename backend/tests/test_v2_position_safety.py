@@ -9,9 +9,12 @@
 """
 
 import pytest
+import pytest_asyncio
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from engine.tier1_manager import Tier1Manager
 from engine.direction_evaluator import DirectionDecision
@@ -955,3 +958,194 @@ class TestCrossExchangeCallback:
             )
 
         assert result is False
+
+
+# ════════════════════════════════════════════════════════════════
+# SL/TP Close Failure Path (self-review fix #2)
+# ════════════════════════════════════════════════════════════════
+
+
+class TestSlTpCloseFailure:
+    """_check_sl_tp returns False when _close_position fails."""
+
+    @pytest.mark.asyncio
+    async def test_sl_hit_close_fails_returns_false(self, mock_deps):
+        """SL 히트 but close 실패 → False 반환 (쿨다운 미설정)."""
+        tier1 = _make_tier1(mock_deps)
+        session = AsyncMock()
+
+        state = _make_position_state(
+            entry_price=80000.0,
+            stop_loss_atr=1.0,
+        )
+        tier1._positions.open_position(state)
+
+        # close 실패: execute_order returns success=False
+        mock_deps["safe_order"].execute_order = AsyncMock(
+            return_value=OrderResponse(
+                success=False,
+                order_id=None,
+                executed_price=0,
+                executed_quantity=0,
+                fee=0,
+            )
+        )
+
+        sl_price = 78500.0  # SL 히트
+        with patch("engine.tier1_manager.emit_event", new_callable=AsyncMock):
+            result = await tier1._check_sl_tp(
+                session, "BTC/USDT", state, sl_price, 1000.0
+            )
+
+        # close 실패 시 False 반환
+        assert result is False
+        # 포지션 아직 열려 있음
+        assert tier1._positions.has_position("BTC/USDT")
+        # 쿨다운 미설정
+        assert "BTC/USDT" not in tier1._last_exit_time
+
+    @pytest.mark.asyncio
+    async def test_sl_hit_close_succeeds_returns_true(self, mock_deps):
+        """SL 히트 + close 성공 → True 반환 + 쿨다운 설정."""
+        tier1 = _make_tier1(mock_deps)
+        session = AsyncMock()
+
+        state = _make_position_state(
+            entry_price=80000.0,
+            stop_loss_atr=1.0,
+        )
+        tier1._positions.open_position(state)
+
+        sl_price = 78500.0
+        with patch("engine.tier1_manager.emit_event", new_callable=AsyncMock):
+            result = await tier1._check_sl_tp(
+                session, "BTC/USDT", state, sl_price, 1000.0
+            )
+
+        assert result is True
+        assert not tier1._positions.has_position("BTC/USDT")
+        assert "BTC/USDT" in tier1._last_exit_time
+
+
+# ════════════════════════════════════════════════════════════════
+# Cross-Exchange NULL Direction Integration (self-review fix #5)
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest_asyncio.fixture
+async def cross_exchange_db():
+    """In-memory SQLite fixture for cross-exchange SQL query tests."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with engine.begin() as conn:
+        from core.models import Base
+
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(
+        bind=engine, class_=AsyncSession, expire_on_commit=False
+    )
+    yield factory
+    await engine.dispose()
+
+
+class TestCrossExchangeNullDirection:
+    """교차 거래소 SQL 쿼리가 direction=NULL인 포지션을 감지하는지 검증."""
+
+    @pytest.mark.asyncio
+    async def test_null_direction_detected_as_long(self, cross_exchange_db):
+        """direction=NULL인 현물 포지션도 교차 충돌로 감지됨."""
+        from engine.futures_engine_v2 import FuturesEngineV2
+
+        async with cross_exchange_db() as session:
+            # direction=None인 현물 포지션 생성 (레거시 행)
+            pos = Position(
+                exchange="binance_spot",
+                symbol="BTC/USDT",
+                quantity=0.01,
+                average_buy_price=80000.0,
+                total_invested=800.0,
+                direction=None,  # NULL — 레거시 행
+            )
+            session.add(pos)
+            await session.commit()
+
+        engine = MagicMock(spec=FuturesEngineV2)
+        engine.EXCHANGE_NAME = "binance_futures"
+        engine._engine_registry = MagicMock()
+        engine._engine_registry.get_engine = MagicMock(return_value=None)
+
+        # 실제 DB 세션 사용하여 SQL 쿼리 검증
+        with patch(
+            "engine.futures_engine_v2.get_session_factory",
+            return_value=cross_exchange_db,
+        ):
+            with patch("engine.futures_engine_v2.emit_event", new_callable=AsyncMock):
+                result = await FuturesEngineV2._check_cross_exchange_position(
+                    engine, "BTC/USDT", 0.50
+                )
+
+        # NULL direction은 non-short이므로 충돌로 감지되어야 함
+        assert result is False  # blocked (low confidence)
+
+    @pytest.mark.asyncio
+    async def test_short_direction_not_detected(self, cross_exchange_db):
+        """direction='short'인 포지션은 교차 충돌로 감지 안 됨."""
+        from engine.futures_engine_v2 import FuturesEngineV2
+
+        async with cross_exchange_db() as session:
+            pos = Position(
+                exchange="binance_spot",
+                symbol="BTC/USDT",
+                quantity=0.01,
+                average_buy_price=80000.0,
+                total_invested=800.0,
+                direction="short",
+            )
+            session.add(pos)
+            await session.commit()
+
+        engine = MagicMock(spec=FuturesEngineV2)
+        engine.EXCHANGE_NAME = "binance_futures"
+        engine._engine_registry = MagicMock()
+
+        with patch(
+            "engine.futures_engine_v2.get_session_factory",
+            return_value=cross_exchange_db,
+        ):
+            result = await FuturesEngineV2._check_cross_exchange_position(
+                engine, "BTC/USDT", 0.50
+            )
+
+        assert result is None  # 교차 포지션 없음 (short은 충돌 아님)
+
+    @pytest.mark.asyncio
+    async def test_explicit_long_direction_detected(self, cross_exchange_db):
+        """direction='long'인 현물 포지션도 정상 감지됨."""
+        from engine.futures_engine_v2 import FuturesEngineV2
+
+        async with cross_exchange_db() as session:
+            pos = Position(
+                exchange="binance_spot",
+                symbol="BTC/USDT",
+                quantity=0.01,
+                average_buy_price=80000.0,
+                total_invested=800.0,
+                direction="long",
+            )
+            session.add(pos)
+            await session.commit()
+
+        engine = MagicMock(spec=FuturesEngineV2)
+        engine.EXCHANGE_NAME = "binance_futures"
+        engine._engine_registry = MagicMock()
+        engine._engine_registry.get_engine = MagicMock(return_value=None)
+
+        with patch(
+            "engine.futures_engine_v2.get_session_factory",
+            return_value=cross_exchange_db,
+        ):
+            with patch("engine.futures_engine_v2.emit_event", new_callable=AsyncMock):
+                result = await FuturesEngineV2._check_cross_exchange_position(
+                    engine, "BTC/USDT", 0.50
+                )
+
+        assert result is False  # blocked

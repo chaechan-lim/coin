@@ -628,9 +628,7 @@ class Tier1Manager:
 
         # COIN-43: 교차 거래소 포지션 충돌 감지 (선물 숏 vs 현물 롱)
         if decision.direction == Direction.SHORT and self._cross_exchange_checker:
-            cross_result = await self._check_cross_exchange(
-                session, symbol, decision.confidence
-            )
+            cross_result = await self._check_cross_exchange(symbol, decision.confidence)
             if cross_result == "blocked":
                 self._log_direction_decision(
                     session,
@@ -1027,10 +1025,9 @@ class Tier1Manager:
                 pnl_pct = (state.entry_price - price) / state.entry_price * 100
         leveraged_pnl = pnl_pct * state.leverage
 
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(
-                emit_event(
+        async def _safe_emit() -> None:
+            try:
+                await emit_event(
                     "warning",
                     "futures_trade",
                     f"선물 {state.direction.value} 스탑: {symbol}",
@@ -1046,7 +1043,12 @@ class Tier1Manager:
                         "leverage": state.leverage,
                     },
                 )
-            )
+            except Exception as e:
+                logger.debug("stop_event_emit_failed", symbol=symbol, error=str(e))
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_safe_emit(), name=f"stop_event_{symbol}")
         except RuntimeError:
             pass  # no running loop (test 환경)
 
@@ -1081,7 +1083,6 @@ class Tier1Manager:
 
     async def _check_cross_exchange(
         self,
-        session: AsyncSession,
         symbol: str,
         confidence: float,
     ) -> str:
