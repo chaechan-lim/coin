@@ -137,6 +137,12 @@ class TestStatus:
         assert "tier2_positions" in status
         assert "balance_guard_paused" in status
 
+    def test_get_status_includes_strategy_mode(self, engine):
+        """COIN-46: get_status()에 strategy_mode 포함."""
+        status = engine.get_status()
+        assert "strategy_mode" in status
+        assert status["strategy_mode"] == "regime"
+
     def test_get_status_includes_balance_guard_detail(self, engine):
         """COIN-15: get_status()에 balance_guard 상세 정보 포함."""
         status = engine.get_status()
@@ -183,27 +189,27 @@ class TestAPICompatibility:
         strats = engine.strategies
         assert isinstance(strats, dict)
 
-    def test_strategies_contains_spot_strategy_names(self, engine):
-        """SpotEvaluator의 현물 4전략 이름이 포함되어야 함 (주문에 사용되는 전략명)."""
+    def test_strategies_regime_mode_contains_regime_names(self, engine):
+        """COIN-46: 기본(regime) 모드에서 레짐 3전략이 반환되어야 함."""
         strats = engine.strategies
         strategy_names = set(strats.keys())
-        assert "cis_momentum" in strategy_names
-        assert "bnf_deviation" in strategy_names
-        assert "donchian_channel" in strategy_names
-        assert "larry_williams" in strategy_names
+        assert "trend_follower" in strategy_names
+        assert "mean_reversion" in strategy_names
+        assert "vol_breakout" in strategy_names
 
-    def test_strategies_excludes_v2_regime_names(self, engine):
-        """COIN-34: v2 레짐 전략 3종은 비활성이므로 제외되어야 함."""
+    def test_strategies_regime_mode_excludes_spot_names(self, engine):
+        """COIN-46: regime 모드에서 현물 4전략은 제외."""
         strats = engine.strategies
         strategy_names = set(strats.keys())
-        assert "trend_follower" not in strategy_names
-        assert "mean_reversion" not in strategy_names
-        assert "vol_breakout" not in strategy_names
+        assert "cis_momentum" not in strategy_names
+        assert "bnf_deviation" not in strategy_names
+        assert "donchian_channel" not in strategy_names
+        assert "larry_williams" not in strategy_names
 
-    def test_strategies_total_count(self, engine):
-        """COIN-34: 현물 4전략만 반환 (레짐 전략 제외)."""
+    def test_strategies_regime_mode_total_count(self, engine):
+        """COIN-46: regime 모드 → 3전략 (trend_follower 중복 제거)."""
         strats = engine.strategies
-        assert len(strats) == 4
+        assert len(strats) == 3
 
     def test_strategies_values_have_name_attr(self, engine):
         """각 전략 객체에는 name 속성이 있어야 함."""
@@ -536,3 +542,160 @@ class TestAgentCoordinatorCompat:
         """Tier1Manager에 on_close_callback이 연결됨."""
         assert engine._tier1._on_close_callback is not None
         assert engine._tier1._on_close_callback == engine._on_sell_completed
+
+
+class TestStrategyMode:
+    """COIN-46: strategy_mode 전환 테스트."""
+
+    @pytest.fixture
+    def spot_config(self):
+        """strategy_mode=spot 설정."""
+        config = AppConfig()
+        config.futures_v2.strategy_mode = "spot"
+        return config
+
+    @pytest.fixture
+    def regime_config(self):
+        """strategy_mode=regime 설정 (기본값)."""
+        config = AppConfig()
+        config.futures_v2.strategy_mode = "regime"
+        return config
+
+    @pytest.fixture
+    def spot_engine(self, spot_config, mock_exchange, mock_market_data, mock_om, mock_pm):
+        return FuturesEngineV2(
+            config=spot_config,
+            exchange=mock_exchange,
+            market_data=mock_market_data,
+            order_manager=mock_om,
+            portfolio_manager=mock_pm,
+        )
+
+    @pytest.fixture
+    def regime_engine(self, regime_config, mock_exchange, mock_market_data, mock_om, mock_pm):
+        return FuturesEngineV2(
+            config=regime_config,
+            exchange=mock_exchange,
+            market_data=mock_market_data,
+            order_manager=mock_om,
+            portfolio_manager=mock_pm,
+        )
+
+    # ── Default mode ──
+
+    def test_default_strategy_mode_is_regime(self):
+        """기본 strategy_mode는 regime."""
+        from config import FuturesV2Config
+        cfg = FuturesV2Config()
+        assert cfg.strategy_mode == "regime"
+
+    # ── Regime mode ──
+
+    def test_regime_mode_uses_regime_evaluators(self, regime_engine):
+        """regime 모드에서 RegimeLongEvaluator/RegimeShortEvaluator 사용."""
+        from engine.regime_evaluators import RegimeLongEvaluator, RegimeShortEvaluator
+        assert isinstance(regime_engine._long_evaluator, RegimeLongEvaluator)
+        assert isinstance(regime_engine._short_evaluator, RegimeShortEvaluator)
+
+    def test_regime_mode_evaluators_are_different_instances(self, regime_engine):
+        """regime 모드에서 long/short evaluator는 별도 인스턴스 (SAR 작동)."""
+        assert regime_engine._long_evaluator is not regime_engine._short_evaluator
+
+    def test_regime_mode_strategies_returns_regime_strategies(self, regime_engine):
+        """regime 모드 strategies 프로퍼티: 3전략 반환."""
+        strats = regime_engine.strategies
+        assert len(strats) == 3
+        assert "trend_follower" in strats
+        assert "mean_reversion" in strats
+        assert "vol_breakout" in strats
+
+    def test_regime_mode_eval_interval(self, regime_engine):
+        """regime 모드 eval_interval이 설정대로 적용."""
+        assert regime_engine._long_evaluator.eval_interval_sec == 14400
+        assert regime_engine._short_evaluator.eval_interval_sec == 14400
+
+    def test_regime_mode_status(self, regime_engine):
+        """regime 모드 get_status()에 strategy_mode 포함."""
+        status = regime_engine.get_status()
+        assert status["strategy_mode"] == "regime"
+
+    # ── Spot mode (폴백) ──
+
+    def test_spot_mode_uses_spot_evaluator(self, spot_engine):
+        """spot 모드에서 SpotEvaluator 사용."""
+        from engine.spot_evaluator import SpotEvaluator
+        assert isinstance(spot_engine._long_evaluator, SpotEvaluator)
+        assert isinstance(spot_engine._short_evaluator, SpotEvaluator)
+
+    def test_spot_mode_evaluators_are_same_instance(self, spot_engine):
+        """spot 모드에서 long/short evaluator는 동일 인스턴스."""
+        assert spot_engine._long_evaluator is spot_engine._short_evaluator
+
+    def test_spot_mode_strategies_returns_spot_strategies(self, spot_engine):
+        """spot 모드 strategies 프로퍼티: 현물 4전략 반환."""
+        strats = spot_engine.strategies
+        assert len(strats) == 4
+        assert "cis_momentum" in strats
+        assert "bnf_deviation" in strats
+        assert "donchian_channel" in strats
+        assert "larry_williams" in strats
+
+    def test_spot_mode_strategies_excludes_regime(self, spot_engine):
+        """spot 모드에서 레짐 전략은 제외."""
+        strats = spot_engine.strategies
+        assert "trend_follower" not in strats
+        assert "mean_reversion" not in strats
+        assert "vol_breakout" not in strats
+
+    def test_spot_mode_status(self, spot_engine):
+        """spot 모드 get_status()."""
+        status = spot_engine.get_status()
+        assert status["strategy_mode"] == "spot"
+
+    # ── Config validation ──
+
+    def test_strategy_mode_config_regime(self):
+        """strategy_mode=regime config 유효."""
+        from config import FuturesV2Config
+        cfg = FuturesV2Config(strategy_mode="regime")
+        assert cfg.strategy_mode == "regime"
+
+    def test_strategy_mode_config_spot(self):
+        """strategy_mode=spot config 유효."""
+        from config import FuturesV2Config
+        cfg = FuturesV2Config(strategy_mode="spot")
+        assert cfg.strategy_mode == "spot"
+
+    def test_strategy_mode_config_invalid_rejected(self):
+        """잘못된 strategy_mode는 거부."""
+        from config import FuturesV2Config
+        with pytest.raises(Exception):
+            FuturesV2Config(strategy_mode="invalid")
+
+    # ── Regime config params ──
+
+    def test_regime_eval_interval_default(self):
+        """기본 regime eval_interval은 14400초 (4h)."""
+        from config import FuturesV2Config
+        cfg = FuturesV2Config()
+        assert cfg.tier1_regime_eval_interval_sec == 14400
+
+    def test_regime_cooldown_default(self):
+        """기본 regime cooldown은 26h."""
+        from config import FuturesV2Config
+        cfg = FuturesV2Config()
+        assert cfg.tier1_regime_cooldown_hours == 26.0
+
+    # ── Tier1Manager integration ──
+
+    def test_regime_mode_tier1_has_evaluators(self, regime_engine):
+        """regime 모드에서 Tier1Manager에 올바른 evaluator 주입."""
+        from engine.regime_evaluators import RegimeLongEvaluator, RegimeShortEvaluator
+        assert isinstance(regime_engine._tier1._long_evaluator, RegimeLongEvaluator)
+        assert isinstance(regime_engine._tier1._short_evaluator, RegimeShortEvaluator)
+
+    def test_spot_mode_tier1_has_spot_evaluator(self, spot_engine):
+        """spot 모드에서 Tier1Manager에 SpotEvaluator 주입."""
+        from engine.spot_evaluator import SpotEvaluator
+        assert isinstance(spot_engine._tier1._long_evaluator, SpotEvaluator)
+        assert isinstance(spot_engine._tier1._short_evaluator, SpotEvaluator)
