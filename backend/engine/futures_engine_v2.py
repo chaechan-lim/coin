@@ -826,9 +826,10 @@ class FuturesEngineV2:
         Returns True if position was closed (cash returned).
         """
         async with self._close_lock:
-            # 락 획득 후 재확인 — eval 루프가 먼저 청산했을 수 있음
-            pos_state = self._positions.get(symbol)
-            if not pos_state and db_pos.quantity <= 0:
+            # 락 획득 후 인메모리 상태 재확인 — eval 루프가 먼저 청산했을 수 있음.
+            # _positions는 락 보유 중 유일한 신뢰 소스: eval이 닫으면 즉시 제거됨.
+            # db_pos는 별도 세션에서 읽었으므로 오래된(stale) 데이터일 수 있음.
+            if not self._positions.get(symbol):
                 return False
 
             invested = db_pos.total_invested or db_pos.margin_used or 0
@@ -842,6 +843,12 @@ class FuturesEngineV2:
                 current_price = await self._market_data.get_current_price(symbol)
             except Exception:
                 current_price = entry  # 가격 조회 실패 시 entry로 추정
+                logger.warning(
+                    "v2_external_close_price_fallback",
+                    symbol=symbol,
+                    fallback_price=round(entry, 4),
+                    reason="get_current_price failed; PnL will be estimated as 0",
+                )
 
             # PnL 계산
             if entry > 0 and current_price > 0:
@@ -853,10 +860,19 @@ class FuturesEngineV2:
                 pnl_pct = 0.0
             pnl_amount = invested * pnl_pct / 100 if invested else 0.0
 
+            # 수수료 추정 (거래소 SL/TP도 수수료 발생, CLAUDE.md: 0.04%)
+            fee = (
+                round(current_price * old_qty * 0.0004, 4) if current_price > 0 else 0.0
+            )
+
             # DB 포지션 업데이트
             db_pos.quantity = 0
             db_pos.current_value = 0
             db_pos.last_sell_at = datetime.now(timezone.utc)
+
+            # 인메모리 포지션 제거 — 락 범위 내에서 즉시 수행, eval 루프 재시도 방지
+            self._positions.close_position(symbol)
+            self._ws_unrealized_pnl.pop(symbol, None)
 
             # 거래 기록 생성
             close_side = "sell" if direction != "short" else "buy"
@@ -870,7 +886,7 @@ class FuturesEngineV2:
                 executed_price=current_price,
                 requested_quantity=old_qty,
                 executed_quantity=old_qty,
-                fee=0.0,
+                fee=fee,
                 fee_currency="USDT",
                 is_paper=False,
                 direction=direction,
@@ -886,10 +902,10 @@ class FuturesEngineV2:
             )
             session.add(order)
 
-            # 내부 cash에 마진+PnL 반환
+            # 내부 cash에 마진+PnL 반환 — PM setter 사용 (private 직접 접근 대신)
             if invested > 0:
                 cash_returned = max(invested + pnl_amount, 0.0)
-                self._pm._cash_balance += cash_returned
+                self._pm.cash_balance = self._pm.cash_balance + cash_returned
                 self._pm._realized_pnl += pnl_amount
                 logger.info(
                     "v2_external_close_cash_returned",
@@ -897,7 +913,7 @@ class FuturesEngineV2:
                     invested=round(invested, 2),
                     pnl_amount=round(pnl_amount, 2),
                     cash_returned=round(cash_returned, 2),
-                    cash_balance=round(self._pm._cash_balance, 2),
+                    cash_balance=round(self._pm.cash_balance, 2),
                 )
 
             logger.warning(

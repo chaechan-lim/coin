@@ -1108,8 +1108,8 @@ class TestWSPositionLoopExternalClose:
         mock_exchange.watch_positions = AsyncMock(side_effect=mock_watch)
         engine._is_running = True
 
-        # COIN-48: mock_pm needs _cash_balance and _realized_pnl attributes
-        mock_pm._cash_balance = 400.0
+        # COIN-48: mock_pm cash_balance (PM setter) + _realized_pnl
+        mock_pm.cash_balance = 400.0
         mock_pm._realized_pnl = 0.0
         mock_market_data.get_current_price = AsyncMock(return_value=80000.0)
 
@@ -1159,7 +1159,7 @@ class TestCOIN48ExternalCloseCashReturn:
 
         # 현재가 81000 → 롱: PnL = 100 * (81000-80000)/80000 * 3 * 100 / 100 = +3.75
         mock_market_data.get_current_price = AsyncMock(return_value=81000.0)
-        mock_pm._cash_balance = 400.0
+        mock_pm.cash_balance = 400.0  # PM setter 사용
         mock_pm._realized_pnl = 0.0
 
         call_count = 0
@@ -1192,7 +1192,7 @@ class TestCOIN48ExternalCloseCashReturn:
         # cash = 400 + (100 + 3.75) = 503.75
         expected_pnl = 100.0 * (81000.0 - 80000.0) / 80000.0 * 3 * 100 / 100
         expected_cash = 400.0 + 100.0 + expected_pnl
-        assert mock_pm._cash_balance == pytest.approx(expected_cash, abs=0.1)
+        assert mock_pm.cash_balance == pytest.approx(expected_cash, abs=0.1)
         assert mock_pm._realized_pnl == pytest.approx(expected_pnl, abs=0.1)
 
     @pytest.mark.asyncio
@@ -1221,7 +1221,7 @@ class TestCOIN48ExternalCloseCashReturn:
         engine._positions.open_position(state)
 
         mock_market_data.get_current_price = AsyncMock(return_value=3050.0)
-        mock_pm._cash_balance = 200.0
+        mock_pm.cash_balance = 200.0
         mock_pm._realized_pnl = 0.0
 
         call_count = 0
@@ -1284,7 +1284,7 @@ class TestCOIN48ExternalCloseCashReturn:
         await session.commit()
 
         # 인메모리 포지션도 없음 (eval이 제거)
-        mock_pm._cash_balance = 400.0
+        mock_pm.cash_balance = 400.0
         mock_pm._realized_pnl = 0.0
 
         call_count = 0
@@ -1316,7 +1316,45 @@ class TestCOIN48ExternalCloseCashReturn:
 
         # DB qty=0이므로 `contracts==0 and db_pos.quantity>0` 조건 미충족
         # → _handle_external_close 미호출, cash 변경 없음
-        assert mock_pm._cash_balance == 400.0
+        assert mock_pm.cash_balance == 400.0
+
+    @pytest.mark.asyncio
+    async def test_handle_external_close_skips_when_in_memory_already_removed(
+        self, engine, mock_market_data, mock_pm, session
+    ):
+        """핵심 레이스: eval 루프가 먼저 청산(in-memory 제거) 후 WS 루프가 같은
+        포지션을 stale DB 데이터(qty>0)로 _handle_external_close 호출 → 스킵.
+
+        이것이 이중 cash 반환이 발생하던 시나리오. _positions에 없으면
+        db_pos.quantity가 여전히 > 0이더라도 cash를 반환하지 않아야 한다.
+        """
+        # DB 포지션은 qty > 0 (stale — eval이 커밋하기 전에 WS가 읽은 상태)
+        db_pos = Position(
+            symbol="BTC/USDT",
+            exchange="binance_futures",
+            quantity=0.01,
+            average_buy_price=80000.0,
+            total_invested=100.0,
+            current_value=100.0,
+            direction="long",
+            leverage=3,
+        )
+        session.add(db_pos)
+        await session.commit()
+
+        # _positions에는 없음 — eval 루프가 이미 청산하여 제거
+        assert not engine._positions.has_position("BTC/USDT")
+
+        mock_pm.cash_balance = 400.0
+        mock_pm._realized_pnl = 0.0
+        mock_market_data.get_current_price = AsyncMock(return_value=81000.0)
+
+        result = await engine._handle_external_close(session, "BTC/USDT", db_pos)
+
+        # 인메모리 포지션 없음 → 락 내부에서 즉시 리턴 False
+        assert result is False
+        # cash 변경 없음 — 이중 반환 방지
+        assert mock_pm.cash_balance == 400.0
 
     @pytest.mark.asyncio
     async def test_external_close_uses_close_lock(
@@ -1338,7 +1376,7 @@ class TestCOIN48ExternalCloseCashReturn:
         engine._positions.open_position(state)
 
         mock_market_data.get_current_price = AsyncMock(return_value=80000.0)
-        mock_pm._cash_balance = 400.0
+        mock_pm.cash_balance = 400.0
         mock_pm._realized_pnl = 0.0
 
         lock_acquired = False
@@ -1410,7 +1448,7 @@ class TestCOIN48ExternalCloseCashReturn:
 
         # 숏: entry 80000, current 79000 → PnL = 100 * (80000-79000)/80000 * 3 * 100 / 100 = +3.75
         mock_market_data.get_current_price = AsyncMock(return_value=79000.0)
-        mock_pm._cash_balance = 400.0
+        mock_pm.cash_balance = 400.0
         mock_pm._realized_pnl = 0.0
 
         call_count = 0
@@ -1442,7 +1480,7 @@ class TestCOIN48ExternalCloseCashReturn:
 
         expected_pnl = 100.0 * (80000.0 - 79000.0) / 80000.0 * 3 * 100 / 100
         expected_cash = 400.0 + 100.0 + expected_pnl
-        assert mock_pm._cash_balance == pytest.approx(expected_cash, abs=0.1)
+        assert mock_pm.cash_balance == pytest.approx(expected_cash, abs=0.1)
 
 
 class TestCOIN48CloseLockShared:
