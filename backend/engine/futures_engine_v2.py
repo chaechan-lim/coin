@@ -69,12 +69,16 @@ class FuturesEngineV2:
 
         v2_cfg = config.futures_v2
 
+        # 레짐 변경 시 Tier1 즉시 재평가 트리거 이벤트 (COIN-50)
+        self._regime_changed_event: asyncio.Event = asyncio.Event()
+
         # 핵심 컴포넌트
         self._regime = RegimeDetector(
             adx_enter=v2_cfg.regime_adx_enter,
             adx_exit=v2_cfg.regime_adx_exit,
             confirm_count=v2_cfg.regime_confirm_count,
             min_duration_h=v2_cfg.regime_min_duration_h,
+            on_regime_change=self._on_regime_change,
         )
         self._strategies = StrategySelector()
         self._positions = PositionStateTracker()
@@ -1230,6 +1234,13 @@ class FuturesEngineV2:
         except Exception as e:
             logger.warning("v2_downtime_stop_check_failed", error=str(e))
 
+    # ── 콜백들 ──────────────────────────────────
+
+    def _on_regime_change(self, prev: object, new: object) -> None:
+        """RegimeDetector 레짐 전환 확정 시 Tier1 즉시 재평가 트리거 (COIN-50)."""
+        logger.info("v2_regime_change_trigger_eval", prev=str(prev), new=str(new))
+        self._regime_changed_event.set()
+
     # ── 루프들 ──────────────────────────────────
 
     async def _regime_loop(self) -> None:
@@ -1260,7 +1271,11 @@ class FuturesEngineV2:
             await asyncio.sleep(3600)
 
     async def _tier1_loop(self) -> None:
-        """60초마다 Tier 1 코인 평가."""
+        """Tier 1 코인 평가 루프.
+
+        tier1_eval_interval_sec(60s) 주기로 평가하되,
+        레짐 변경 감지 시 즉시 재평가 (COIN-50).
+        """
         # 첫 실행 전 레짐 초기화 대기
         await asyncio.sleep(5)
         while self._is_running:
@@ -1271,7 +1286,18 @@ class FuturesEngineV2:
                     await session.commit()
             except Exception as e:
                 logger.error("v2_tier1_error", error=str(e))
-            await asyncio.sleep(self._config.futures_v2.tier1_eval_interval_sec)
+
+            # 레짐 변경 또는 일반 인터벌 — 먼저 도달한 쪽에서 깨어남
+            interval = self._config.futures_v2.tier1_eval_interval_sec
+            self._regime_changed_event.clear()
+            try:
+                await asyncio.wait_for(
+                    self._regime_changed_event.wait(),
+                    timeout=float(interval),
+                )
+                logger.info("v2_tier1_regime_triggered")
+            except asyncio.TimeoutError:
+                pass  # 정상 인터벌 만료
 
     async def _tier2_loop(self) -> None:
         """60초마다 Tier 2 스캔."""

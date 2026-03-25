@@ -266,7 +266,7 @@ class FuturesV2Config(BaseSettings):
     tier1_cooldown_seconds: int = 93600  # 26h (백테스트 최적)
 
     # Regime evaluator 파라미터 — backtest_v2 최적 (COIN-46)
-    tier1_regime_eval_interval_sec: int = 14400   # 48 × 5min = 4h
+    tier1_regime_eval_interval_sec: int = 900     # 15분 라이브 평가 주기 (COIN-50: 4h→15min)
     tier1_regime_cooldown_hours: float = 26.0     # 312 × 5min = 26h
 
     # Long evaluator — 현물 4전략 기반 (COIN-26), strategy_mode=spot에서 사용

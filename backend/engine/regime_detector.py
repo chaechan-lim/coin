@@ -6,8 +6,10 @@ ADX + BB Width + ATR% + Volume Ratio + EMA slope로 레짐을 분류한다.
 """
 import structlog
 import pandas as pd
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Optional
 
 from core.enums import Regime
 from core.event_bus import emit_event
@@ -46,6 +48,7 @@ class RegimeDetector:
         atr_pct_volatile: float = 4.0,
         confirm_count: int = 2,
         min_duration_h: int = 3,
+        on_regime_change: Optional[Callable[["Regime", "Regime"], None]] = None,
     ):
         self._adx_enter = adx_enter
         self._adx_exit = adx_exit
@@ -53,6 +56,7 @@ class RegimeDetector:
         self._atr_pct_volatile = atr_pct_volatile
         self._confirm_count = confirm_count
         self._min_duration_h = min_duration_h
+        self._on_regime_change = on_regime_change
 
         self._current: RegimeState | None = None
         self._pending_regime: Regime | None = None
@@ -228,6 +232,11 @@ class RegimeDetector:
                 confidence=raw.confidence,
                 adx=round(raw.adx, 1),
             )
+            if self._on_regime_change is not None:
+                try:
+                    self._on_regime_change(prev, raw.regime)
+                except Exception as cb_err:
+                    logger.warning("regime_change_callback_error", error=str(cb_err))
             return self._current
 
         # 아직 확인 중 — 기존 레짐 유지

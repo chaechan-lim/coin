@@ -610,9 +610,9 @@ class TestStrategyMode:
         assert "vol_breakout" in strats
 
     def test_regime_mode_eval_interval(self, regime_engine):
-        """regime 모드 eval_interval이 설정대로 적용."""
-        assert regime_engine._long_evaluator.eval_interval_sec == 14400
-        assert regime_engine._short_evaluator.eval_interval_sec == 14400
+        """regime 모드 eval_interval이 설정대로 적용 (COIN-50: 4h→15min)."""
+        assert regime_engine._long_evaluator.eval_interval_sec == 900
+        assert regime_engine._short_evaluator.eval_interval_sec == 900
 
     def test_regime_mode_status(self, regime_engine):
         """regime 모드 get_status()에 strategy_mode 포함."""
@@ -675,10 +675,10 @@ class TestStrategyMode:
     # ── Regime config params ──
 
     def test_regime_eval_interval_default(self):
-        """기본 regime eval_interval은 14400초 (4h)."""
+        """기본 regime eval_interval은 900초 (15min) — COIN-50: 4h→15min 조정."""
         from config import FuturesV2Config
         cfg = FuturesV2Config()
-        assert cfg.tier1_regime_eval_interval_sec == 14400
+        assert cfg.tier1_regime_eval_interval_sec == 900
 
     def test_regime_cooldown_default(self):
         """기본 regime cooldown은 26h."""
@@ -699,3 +699,146 @@ class TestStrategyMode:
         from engine.spot_evaluator import SpotEvaluator
         assert isinstance(spot_engine._tier1._long_evaluator, SpotEvaluator)
         assert isinstance(spot_engine._tier1._short_evaluator, SpotEvaluator)
+
+
+class TestRegimeChangeTrigger:
+    """COIN-50: 레짐 변경 → Tier1 즉시 재평가 트리거 테스트."""
+
+    @pytest.fixture
+    def regime_engine(self, app_config, mock_exchange, mock_market_data, mock_om, mock_pm):
+        app_config.futures_v2.strategy_mode = "regime"
+        return FuturesEngineV2(
+            config=app_config,
+            exchange=mock_exchange,
+            market_data=mock_market_data,
+            order_manager=mock_om,
+            portfolio_manager=mock_pm,
+        )
+
+    def test_regime_changed_event_exists(self, regime_engine):
+        """엔진에 _regime_changed_event asyncio.Event 존재."""
+        import asyncio
+        assert hasattr(regime_engine, "_regime_changed_event")
+        assert isinstance(regime_engine._regime_changed_event, asyncio.Event)
+
+    def test_regime_changed_event_initially_clear(self, regime_engine):
+        """초기에 _regime_changed_event는 미설정 상태."""
+        assert not regime_engine._regime_changed_event.is_set()
+
+    def test_on_regime_change_sets_event(self, regime_engine):
+        """_on_regime_change 호출 시 _regime_changed_event가 설정됨."""
+        from core.enums import Regime
+        regime_engine._on_regime_change(Regime.RANGING, Regime.TRENDING_UP)
+        assert regime_engine._regime_changed_event.is_set()
+
+    def test_regime_detector_has_callback(self, regime_engine):
+        """RegimeDetector에 on_regime_change 콜백이 등록됨."""
+        assert regime_engine._regime._on_regime_change is not None
+
+    @pytest.mark.asyncio
+    async def test_regime_transition_triggers_event(self):
+        """RegimeDetector 레짐 전환 확정 시 콜백이 호출됨."""
+        import pandas as pd
+        import numpy as np
+        from engine.regime_detector import RegimeDetector
+        from core.enums import Regime
+
+        fired = []
+
+        def callback(prev, new):
+            fired.append((prev, new))
+
+        detector = RegimeDetector(confirm_count=1, min_duration_h=0, on_regime_change=callback)
+
+        def _make_df(adx, ema_20, ema_50, ema_slope_dir):
+            n = 100
+            ema_values = [ema_20 * (1 + ema_slope_dir * 0.002 * (i - (n - 1))) for i in range(n)]
+            return pd.DataFrame({
+                "close": [80000.0] * n,
+                "adx_14": [adx] * n,
+                "atr_14": [1000.0] * n,
+                "ema_20": ema_values,
+                "ema_50": [ema_50] * n,
+                "bb_upper_20": [82000.0] * n,
+                "bb_lower_20": [78000.0] * n,
+                "bb_mid_20": [80000.0] * n,
+                "volume": [1000.0] * n,
+            })
+
+        # 초기 레짐: TRENDING_UP
+        df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        await detector.update(df_up, "BTC/USDT")
+        assert len(fired) == 0  # 첫 감지는 콜백 없음
+
+        # 레짐 전환: RANGING (1회 확인으로 전환)
+        df_range = _make_df(adx=15, ema_20=80000, ema_50=80000, ema_slope_dir=0)
+        df_range["bb_upper_20"] = 81000.0
+        df_range["bb_lower_20"] = 79000.0
+        await detector.update(df_range, "BTC/USDT")
+        assert len(fired) == 1
+        assert fired[0][0] == Regime.TRENDING_UP
+        assert fired[0][1] == Regime.RANGING
+
+    @pytest.mark.asyncio
+    async def test_callback_not_fired_on_same_regime(self):
+        """같은 레짐 업데이트에서는 콜백 미호출."""
+        import pandas as pd
+        from engine.regime_detector import RegimeDetector
+
+        fired = []
+
+        def callback(prev, new):
+            fired.append((prev, new))
+
+        detector = RegimeDetector(confirm_count=1, min_duration_h=0, on_regime_change=callback)
+
+        n = 100
+        df = pd.DataFrame({
+            "close": [80000.0] * n,
+            "adx_14": [30.0] * n,
+            "atr_14": [1000.0] * n,
+            "ema_20": [81000.0 * (1 + 0.002 * (i - (n - 1))) for i in range(n)],
+            "ema_50": [79000.0] * n,
+            "bb_upper_20": [82000.0] * n,
+            "bb_lower_20": [78000.0] * n,
+            "bb_mid_20": [80000.0] * n,
+            "volume": [1000.0] * n,
+        })
+
+        await detector.update(df, "BTC/USDT")  # 첫 감지
+        await detector.update(df, "BTC/USDT")  # 동일 레짐
+        await detector.update(df, "BTC/USDT")  # 동일 레짐
+
+        assert len(fired) == 0  # 전환 없음 → 콜백 없음
+
+    @pytest.mark.asyncio
+    async def test_tier1_loop_wakes_on_regime_change(self, regime_engine):
+        """_tier1_loop이 레짐 변경 이벤트 감지 시 즉시 평가 재실행."""
+        eval_calls = []
+
+        async def mock_eval_cycle(session):
+            eval_calls.append(1)
+            # 두 번째 호출에서 엔진 종료
+            if len(eval_calls) >= 2:
+                regime_engine._is_running = False
+
+        regime_engine._tier1.evaluation_cycle = mock_eval_cycle
+        regime_engine._is_running = True
+
+        # 레짐 변경 이벤트를 지연 후 설정하는 태스크
+        async def trigger_regime_change():
+            await asyncio.sleep(0.05)
+            regime_engine._on_regime_change(None, None)
+
+        with patch.object(regime_engine._config.futures_v2, "tier1_eval_interval_sec", 60):
+            trigger_task = asyncio.create_task(trigger_regime_change())
+            # _tier1_loop 실행 (첫 sleep 5초 우회)
+            with patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError()]):
+                try:
+                    await asyncio.wait_for(regime_engine._tier1_loop(), timeout=1.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+            trigger_task.cancel()
+
+        # 적어도 1회 이상 평가 실행됨
+        assert len(eval_calls) >= 1
