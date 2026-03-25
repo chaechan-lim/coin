@@ -21,6 +21,7 @@ from config import AppConfig
 from core.event_bus import emit_event
 from core.models import Order, Position
 from db.session import get_session_factory
+from core.enums import Regime
 from engine.regime_detector import RegimeDetector
 from engine.regime_evaluators import RegimeLongEvaluator, RegimeShortEvaluator
 from engine.strategy_selector import StrategySelector
@@ -1236,7 +1237,7 @@ class FuturesEngineV2:
 
     # ── 콜백들 ──────────────────────────────────
 
-    def _on_regime_change(self, prev: object, new: object) -> None:
+    def _on_regime_change(self, prev: Regime | None, new: Regime) -> None:
         """RegimeDetector 레짐 전환 확정 시 Tier1 즉시 재평가 트리거 (COIN-50)."""
         logger.info("v2_regime_change_trigger_eval", prev=str(prev), new=str(new))
         self._regime_changed_event.set()
@@ -1279,6 +1280,9 @@ class FuturesEngineV2:
         # 첫 실행 전 레짐 초기화 대기
         await asyncio.sleep(5)
         while self._is_running:
+            # 평가 시작 전에 클리어 — 평가 중 레짐 변경이 오면 이벤트가 set된 채로 남아
+            # 다음 wait_for가 즉시 반환됨 (COIN-50 race condition fix)
+            self._regime_changed_event.clear()
             try:
                 sf = get_session_factory()
                 async with sf() as session:
@@ -1289,7 +1293,6 @@ class FuturesEngineV2:
 
             # 레짐 변경 또는 일반 인터벌 — 먼저 도달한 쪽에서 깨어남
             interval = self._config.futures_v2.tier1_eval_interval_sec
-            self._regime_changed_event.clear()
             try:
                 await asyncio.wait_for(
                     self._regime_changed_event.wait(),

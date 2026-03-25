@@ -9,7 +9,6 @@ import pandas as pd
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
 
 from core.enums import Regime
 from core.event_bus import emit_event
@@ -48,7 +47,7 @@ class RegimeDetector:
         atr_pct_volatile: float = 4.0,
         confirm_count: int = 2,
         min_duration_h: int = 3,
-        on_regime_change: Optional[Callable[["Regime", "Regime"], None]] = None,
+        on_regime_change: Callable[["Regime", "Regime"], None] | None = None,
     ):
         self._adx_enter = adx_enter
         self._adx_exit = adx_exit

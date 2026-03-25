@@ -813,32 +813,77 @@ class TestRegimeChangeTrigger:
 
     @pytest.mark.asyncio
     async def test_tier1_loop_wakes_on_regime_change(self, regime_engine):
-        """_tier1_loop이 레짐 변경 이벤트 감지 시 즉시 평가 재실행."""
+        """_tier1_loop이 레짐 변경 이벤트 감지 시 즉시 평가 재실행.
+
+        interval=60s, 레짐 변경은 50ms 후 — 두 번째 eval이 ~50ms 만에
+        실행되면 60s 대기 없이 즉시 깨어난 것임을 증명한다.
+        """
         eval_calls = []
 
         async def mock_eval_cycle(session):
             eval_calls.append(1)
-            # 두 번째 호출에서 엔진 종료
+            # 두 번째 호출 이후 엔진 종료
             if len(eval_calls) >= 2:
                 regime_engine._is_running = False
 
         regime_engine._tier1.evaluation_cycle = mock_eval_cycle
         regime_engine._is_running = True
 
-        # 레짐 변경 이벤트를 지연 후 설정하는 태스크
+        # 레짐 변경 이벤트를 50ms 후 설정하는 태스크
         async def trigger_regime_change():
             await asyncio.sleep(0.05)
             regime_engine._on_regime_change(None, None)
 
+        # interval=60s이지만 outer timeout=1s 이내에 2회 eval이 완료되어야 함
+        # (regime change wakeup 없으면 60s 후에야 2번째 eval → timeout 발생)
         with patch.object(regime_engine._config.futures_v2, "tier1_eval_interval_sec", 60):
             trigger_task = asyncio.create_task(trigger_regime_change())
-            # _tier1_loop 실행 (첫 sleep 5초 우회)
-            with patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError()]):
+            # _tier1_loop의 초기 sleep(5)만 우회
+            with patch("engine.futures_engine_v2.asyncio.sleep", return_value=None):
                 try:
                     await asyncio.wait_for(regime_engine._tier1_loop(), timeout=1.0)
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
             trigger_task.cancel()
 
-        # 적어도 1회 이상 평가 실행됨
-        assert len(eval_calls) >= 1
+        # 레짐 변경 이벤트로 즉시 2회 평가가 트리거되어야 함
+        assert len(eval_calls) >= 2, (
+            f"regime change did not trigger immediate re-eval: only {len(eval_calls)} eval(s)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tier1_loop_no_race_condition_on_regime_change_during_eval(self, regime_engine):
+        """평가 중 레짐 변경이 발생해도 이벤트가 소실되지 않음.
+
+        clear()를 eval 전에 호출하므로, eval 도중 set()된 이벤트는
+        다음 wait_for에서 즉시 반환된다 (소실 없음).
+        """
+        eval_calls = []
+        regime_change_fired_during_eval = False
+
+        async def mock_eval_cycle_fires_regime_change(session):
+            nonlocal regime_change_fired_during_eval
+            eval_calls.append(len(eval_calls) + 1)
+            if len(eval_calls) == 1:
+                # 첫 번째 eval 도중 제어권 양보 후 레짐 변경 발생
+                await asyncio.sleep(0)
+                regime_engine._on_regime_change(None, None)
+                regime_change_fired_during_eval = True
+            elif len(eval_calls) >= 2:
+                regime_engine._is_running = False
+
+        regime_engine._tier1.evaluation_cycle = mock_eval_cycle_fires_regime_change
+        regime_engine._is_running = True
+
+        with patch.object(regime_engine._config.futures_v2, "tier1_eval_interval_sec", 60):
+            with patch("engine.futures_engine_v2.asyncio.sleep", return_value=None):
+                try:
+                    await asyncio.wait_for(regime_engine._tier1_loop(), timeout=1.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+
+        assert regime_change_fired_during_eval, "test setup: regime change never fired during eval"
+        # eval 도중 set된 이벤트가 소실되지 않아 즉시 2회 eval이 실행되어야 함
+        assert len(eval_calls) >= 2, (
+            f"regime change during eval was lost (race condition): only {len(eval_calls)} eval(s)"
+        )
