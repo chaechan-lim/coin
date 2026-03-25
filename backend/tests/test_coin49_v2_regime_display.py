@@ -28,7 +28,7 @@ def _make_test_app() -> FastAPI:
     return app
 
 
-def _save_and_clear(exchange: str):
+def _save_registry_state(exchange: str):
     saved = {
         "engine": engine_registry._engines.get(exchange),
         "pm": engine_registry._portfolio_managers.get(exchange),
@@ -139,7 +139,7 @@ class TestV2RegimeInMarketAnalysis:
     async def test_includes_v2_regime_when_v2_engine_active(self):
         """V2 엔진 활성화 시 v2_regime 필드가 응답에 포함된다."""
         exchange = "binance_futures"
-        saved = _save_and_clear(exchange)
+        saved = _save_registry_state(exchange)
         regime = _make_regime_state(
             Regime.TRENDING_UP,
             confidence=0.85,
@@ -182,7 +182,7 @@ class TestV2RegimeInMarketAnalysis:
     async def test_no_v2_regime_when_v1_engine(self):
         """V1 엔진(RegimeDetector 없음) 시 v2_regime 필드가 없다."""
         exchange = "bithumb"
-        saved = _save_and_clear(exchange)
+        saved = _save_registry_state(exchange)
         eng = _mock_engine_no_regime()
         coord = _mock_coordinator_with_analysis(MarketState.SIDEWAYS)
         _register(exchange, eng, coordinator=coord)
@@ -208,7 +208,7 @@ class TestV2RegimeInMarketAnalysis:
     async def test_v2_regime_none_when_no_regime_detected_yet(self):
         """V2 엔진이 있지만 아직 레짐 감지 전(current=None)이면 v2_regime 없음."""
         exchange = "binance_futures"
-        saved = _save_and_clear(exchange)
+        saved = _save_registry_state(exchange)
         eng = _mock_v2_engine_with_regime(None)  # No regime yet
         coord = _mock_coordinator_with_analysis(MarketState.SIDEWAYS)
         _register(exchange, eng, coordinator=coord)
@@ -234,7 +234,7 @@ class TestV2RegimeInMarketAnalysis:
     async def test_v2_regime_all_states(self):
         """모든 V2 레짐 상태가 올바르게 직렬화된다."""
         exchange = "binance_futures"
-        saved = _save_and_clear(exchange)
+        saved = _save_registry_state(exchange)
         from db.session import get_db
 
         for regime_enum, expected_str in [
@@ -263,13 +263,13 @@ class TestV2RegimeInMarketAnalysis:
                 _restore(exchange, saved)
 
     @pytest.mark.asyncio
-    async def test_v2_regime_with_db_fallback(self):
-        """코디네이터에 분석 없을 때 DB 폴백 + v2_regime 포함."""
+    async def test_v2_regime_in_unknown_fallback(self):
+        """코디네이터 분석 없고 DB도 비었을 때 "unknown" 응답에도 v2_regime 포함."""
         exchange = "binance_futures"
-        saved = _save_and_clear(exchange)
+        saved = _save_registry_state(exchange)
         regime = _make_regime_state(Regime.VOLATILE, confidence=0.65)
         eng = _mock_v2_engine_with_regime(regime)
-        # Coordinator with no analysis
+        # Coordinator with no analysis and empty DB → hits final "unknown" fallback
         coord = MagicMock()
         coord.last_market_analysis = None
         _register(exchange, eng, coordinator=coord)
@@ -286,9 +286,10 @@ class TestV2RegimeInMarketAnalysis:
                 )
             assert resp.status_code == 200
             data = resp.json()
-            # Falls back to "unknown" state (empty DB)
             assert data["state"] == "unknown"
-            # But no v2_regime in fallback to "unknown" (no log.result to attach to)
+            # V2 regime still attached even in the "unknown" fallback path
+            assert "v2_regime" in data
+            assert data["v2_regime"]["regime"] == "volatile"
         finally:
             _restore(exchange, saved)
 
@@ -301,7 +302,7 @@ class TestGetV2RegimeHelper:
         from api.dashboard import _get_v2_regime
 
         exchange = "nonexistent"
-        saved = _save_and_clear(exchange)
+        saved = _save_registry_state(exchange)
         engine_registry._engines.pop(exchange, None)
         try:
             result = _get_v2_regime(exchange)
@@ -314,7 +315,7 @@ class TestGetV2RegimeHelper:
         from api.dashboard import _get_v2_regime
 
         exchange = "bithumb"
-        saved = _save_and_clear(exchange)
+        saved = _save_registry_state(exchange)
         eng = _mock_engine_no_regime()
         _register(exchange, eng)
         try:
@@ -328,7 +329,7 @@ class TestGetV2RegimeHelper:
         from api.dashboard import _get_v2_regime
 
         exchange = "binance_futures"
-        saved = _save_and_clear(exchange)
+        saved = _save_registry_state(exchange)
         eng = _mock_v2_engine_with_regime(None)
         _register(exchange, eng)
         try:
@@ -342,7 +343,7 @@ class TestGetV2RegimeHelper:
         from api.dashboard import _get_v2_regime
 
         exchange = "binance_futures"
-        saved = _save_and_clear(exchange)
+        saved = _save_registry_state(exchange)
         regime = _make_regime_state(
             Regime.TRENDING_DOWN,
             confidence=0.9,
@@ -369,7 +370,7 @@ class TestGetV2RegimeHelper:
         from api.dashboard import _get_v2_regime
 
         exchange = "binance_futures"
-        saved = _save_and_clear(exchange)
+        saved = _save_registry_state(exchange)
         regime = _make_regime_state(Regime.RANGING, confidence=0.666666)
         eng = _mock_v2_engine_with_regime(regime)
         _register(exchange, eng)

@@ -196,7 +196,7 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
         <div className="bg-gray-800 rounded-xl p-4">
           <div className="flex items-center gap-2 mb-3">
             <div className={`w-2 h-2 rounded-full ${dotColor}`} />
-            <h3 className="text-white font-semibold text-sm">시장 분석</h3>
+            <h3 className="text-white font-semibold text-sm">시장 분석 에이전트</h3>
           </div>
 
           {analysis && analysis.confidence != null ? (
