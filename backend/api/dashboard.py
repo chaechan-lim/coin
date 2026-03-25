@@ -222,22 +222,48 @@ async def get_surge_scan_status():
     return scan
 
 
+def _get_v2_regime(exchange: str) -> dict | None:
+    """V2 엔진의 RegimeDetector 상태를 가져온다 (없으면 None)."""
+    eng = engine_registry.get_engine(exchange)
+    if eng is None:
+        return None
+    regime_detector = getattr(eng, "_regime", None)
+    if regime_detector is None:
+        return None
+    regime_state = regime_detector.current
+    if regime_state is None:
+        return None
+    return {
+        "regime": regime_state.regime.value,
+        "confidence": round(regime_state.confidence, 3),
+        "adx": round(regime_state.adx, 1),
+        "atr_pct": round(regime_state.atr_pct, 2),
+        "trend_direction": regime_state.trend_direction,
+        "timestamp": regime_state.timestamp.isoformat(),
+    }
+
+
 # -- Agent endpoints --
 @router.get("/agents/market-analysis/latest")
 async def get_latest_market_analysis(
     exchange: str = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
+    v2_regime = _get_v2_regime(exchange)
+
     coord = _get_coordinator(exchange)
     if coord and coord.last_market_analysis:
         analysis = coord.last_market_analysis
-        return {
+        resp = {
             "state": analysis.state.value,
             "confidence": analysis.confidence,
             "volatility_level": analysis.volatility_level,
             "recommended_weights": analysis.recommended_weights,
             "reasoning": analysis.reasoning,
         }
+        if v2_regime:
+            resp["v2_regime"] = v2_regime
+        return resp
 
     # Fallback to DB
     result = await session.execute(
@@ -248,7 +274,10 @@ async def get_latest_market_analysis(
     )
     log = result.scalar_one_or_none()
     if log:
-        return log.result
+        resp = dict(log.result) if log.result else {}
+        if v2_regime:
+            resp["v2_regime"] = v2_regime
+        return resp
     return {"state": "unknown", "message": "No analysis available yet"}
 
 
