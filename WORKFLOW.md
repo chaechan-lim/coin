@@ -27,7 +27,7 @@ agent:
   model_labels:
     complexity:high: opus
     complexity:medium: sonnet
-    complexity:low: haiku
+    complexity:low: sonnet
   permission_mode: dangerously-skip
   max_turns: 200
   max_budget_usd: 20.00
