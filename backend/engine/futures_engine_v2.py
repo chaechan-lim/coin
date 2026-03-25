@@ -1400,7 +1400,7 @@ class FuturesEngineV2:
         }
 
     @property
-    def regime_detector(self) -> "RegimeDetector":
+    def regime_detector(self) -> "RegimeDetector | None":
         """Public access to RegimeDetector (API/모니터링용)."""
         return self._regime
 

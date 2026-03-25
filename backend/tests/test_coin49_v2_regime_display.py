@@ -58,17 +58,23 @@ def _restore(name: str, saved: dict) -> None:
             store[name] = saved[key]
 
 
+# Module-level engine: tables are created once; no test writes to the DB so
+# sharing the engine across tests is safe and avoids repeated engine creation.
+_test_engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+_test_session_factory: async_sessionmaker | None = None
+
+
 async def _db_override():
     """Provide an in-memory SQLite session for the endpoint."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(
-        bind=engine, class_=AsyncSession, expire_on_commit=False
-    )
-    async with factory() as sess:
+    global _test_session_factory
+    if _test_session_factory is None:
+        async with _test_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        _test_session_factory = async_sessionmaker(
+            bind=_test_engine, class_=AsyncSession, expire_on_commit=False
+        )
+    async with _test_session_factory() as sess:
         yield sess
-    await engine.dispose()
 
 
 def _make_regime_state(

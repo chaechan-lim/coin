@@ -90,6 +90,13 @@ const REGIME_COLORS: Record<string, string> = {
   volatile: 'bg-orange-500',
 }
 
+const REGIME_TEXT_COLORS: Record<string, string> = {
+  trending_up: 'text-green-500',
+  trending_down: 'text-red-500',
+  ranging: 'text-yellow-400',
+  volatile: 'text-orange-500',
+}
+
 const REGIME_KR: Record<string, string> = {
   trending_up: '상승 추세',
   trending_down: '하락 추세',
@@ -207,7 +214,7 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
                 <>
                   <div className="flex items-center justify-between">
                     <span className="text-gray-400 text-sm">V2 레짐</span>
-                    <span className={`font-bold text-sm ${v2BgColor!.replace('bg-', 'text-')}`}>
+                    <span className={`font-bold text-sm ${REGIME_TEXT_COLORS[v2.regime] ?? 'text-gray-400'}`}>
                       {REGIME_KR[v2.regime] ?? v2.regime}
                     </span>
                   </div>

@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+import structlog
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
@@ -18,6 +19,7 @@ from core.schemas import (
 from api.dependencies import engine_registry, validate_exchange
 
 router = APIRouter(tags=["dashboard"])
+logger = structlog.get_logger(__name__)
 
 
 def _get_engine(exchange: str):
@@ -246,7 +248,8 @@ def _get_v2_regime(exchange: str) -> dict | None:
             "trend_direction": regime_state.trend_direction,
             "timestamp": regime_state.timestamp.isoformat(),
         }
-    except Exception:
+    except Exception as exc:
+        logger.warning("v2_regime_serialization_error", exchange=exchange, exc=str(exc))
         return None
 
 

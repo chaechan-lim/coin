@@ -67,7 +67,6 @@ export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeN
   // V2 레짐(Regime enum)과 에이전트 상태(MarketState enum)는 값이 겹치지 않으므로
   // V2가 있으면 에이전트 상태를 항상 보조로 표시 (두 시스템이 별도의 기준으로 동작)
   const agentState = analysis?.state
-  const showAgentSecondary = !!(v2 && agentState)
 
   const stripQuote = (sym: string) => sym.replace('/KRW', '').replace('/USDT', '')
 
@@ -81,7 +80,7 @@ export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeN
       <div className={`grid grid-cols-2 ${isFutures ? 'md:grid-cols-3' : 'md:grid-cols-4'} gap-3`}>
         <Card label={v2 ? 'V2 레짐' : '시장 상태'}>
           <span className={`text-lg font-bold ${marketInfo.color}`}>{marketInfo.label}</span>
-          {showAgentSecondary && (
+          {v2 && agentState && (
             <div className="text-[10px] text-gray-500 mt-0.5">
               에이전트: {MARKET_STATE_LABELS[agentState]?.label ?? agentState}
             </div>
