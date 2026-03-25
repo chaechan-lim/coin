@@ -92,12 +92,12 @@ def _make_regime_state(
 
 
 def _mock_v2_engine_with_regime(regime_state: RegimeState | None = None):
-    """V2 engine mock with _regime (RegimeDetector)."""
+    """V2 engine mock with regime_detector property (FuturesEngineV2 public API)."""
     eng = MagicMock()
     eng.is_running = True
     detector = MagicMock()
     detector.current = regime_state
-    eng._regime = detector
+    eng.regime_detector = detector
     return eng
 
 
@@ -118,7 +118,7 @@ def _mock_coordinator_with_analysis(state: MarketState = MarketState.UPTREND):
 
 
 def _mock_engine_no_regime():
-    """V1 engine without _regime attribute."""
+    """V1 engine without regime_detector property."""
     eng = MagicMock(spec=[])
     eng.is_running = True
     eng.strategies = {}
@@ -377,5 +377,27 @@ class TestGetV2RegimeHelper:
         try:
             result = _get_v2_regime(exchange)
             assert result["confidence"] == 0.667
+        finally:
+            _restore(exchange, saved)
+
+    def test_returns_none_on_serialization_error(self):
+        """RegimeState 직렬화 중 예외 발생 시 None 반환 — API 500 방지."""
+        from api.dashboard import _get_v2_regime
+
+        exchange = "binance_futures"
+        saved = _save_registry_state(exchange)
+        # timestamp.isoformat() 에서 AttributeError 발생하도록 설정
+        broken_regime_state = MagicMock()
+        broken_regime_state.regime.value = "trending_up"
+        broken_regime_state.confidence = 0.8
+        broken_regime_state.adx = 25.0
+        broken_regime_state.atr_pct = 2.0
+        broken_regime_state.trend_direction = 1
+        broken_regime_state.timestamp.isoformat.side_effect = AttributeError("no timestamp")
+        eng = _mock_v2_engine_with_regime(broken_regime_state)
+        _register(exchange, eng)
+        try:
+            result = _get_v2_regime(exchange)
+            assert result is None
         finally:
             _restore(exchange, saved)

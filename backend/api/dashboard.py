@@ -223,24 +223,31 @@ async def get_surge_scan_status():
 
 
 def _get_v2_regime(exchange: str) -> dict | None:
-    """V2 엔진의 RegimeDetector 상태를 가져온다 (없으면 None)."""
+    """V2 엔진의 RegimeDetector 상태를 가져온다 (없으면 None).
+
+    직렬화 실패 시 None 반환 — API 500 방지.
+    """
     eng = engine_registry.get_engine(exchange)
     if eng is None:
         return None
-    regime_detector = getattr(eng, "_regime", None)
+    # V2 FuturesEngineV2는 regime_detector 프로퍼티 노출; V1 엔진에는 없으므로 None
+    regime_detector = getattr(eng, "regime_detector", None)
     if regime_detector is None:
         return None
     regime_state = regime_detector.current
     if regime_state is None:
         return None
-    return {
-        "regime": regime_state.regime.value,
-        "confidence": round(regime_state.confidence, 3),
-        "adx": round(regime_state.adx, 1),
-        "atr_pct": round(regime_state.atr_pct, 2),
-        "trend_direction": regime_state.trend_direction,
-        "timestamp": regime_state.timestamp.isoformat(),
-    }
+    try:
+        return {
+            "regime": regime_state.regime.value,
+            "confidence": round(regime_state.confidence, 3),
+            "adx": round(regime_state.adx, 1),
+            "atr_pct": round(regime_state.atr_pct, 2),
+            "trend_direction": regime_state.trend_direction,
+            "timestamp": regime_state.timestamp.isoformat(),
+        }
+    except Exception:
+        return None
 
 
 # -- Agent endpoints --

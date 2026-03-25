@@ -182,9 +182,10 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
 
   const v2 = analysis?.v2_regime
   const hasV2 = !!v2
-  // V2 regime present → use regime color for dot; otherwise agent state color
-  const dotColor = hasV2
-    ? REGIME_COLORS[v2.regime] ?? 'bg-gray-500'
+  // Extract once so both dotColor and the regime label text stay in sync
+  const v2BgColor = v2 ? (REGIME_COLORS[v2.regime] ?? 'bg-gray-500') : null
+  const dotColor = v2BgColor
+    ? v2BgColor
     : analysis ? STATE_COLORS[analysis.state] ?? 'bg-gray-500' : 'bg-gray-600'
   const criticalAlerts = (alerts ?? []).filter((a) => a.level === 'critical')
   const warningAlerts = (alerts ?? []).filter((a) => a.level === 'warning')
@@ -206,7 +207,7 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
                 <>
                   <div className="flex items-center justify-between">
                     <span className="text-gray-400 text-sm">V2 레짐</span>
-                    <span className={`font-bold text-sm ${(REGIME_COLORS[v2.regime] ?? 'bg-gray-500').replace('bg-', 'text-')}`}>
+                    <span className={`font-bold text-sm ${v2BgColor!.replace('bg-', 'text-')}`}>
                       {REGIME_KR[v2.regime] ?? v2.regime}
                     </span>
                   </div>
@@ -238,6 +239,7 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
                   {STATE_KR[analysis.state] ?? analysis.state}
                 </span>
               </div>
+              {/* V2 존재 시 에이전트 신뢰도 숨김 — 위 레짐 신뢰도 바로 대체 표시 */}
               {!hasV2 && (
                 <div className="flex items-center justify-between">
                   <span className="text-gray-400 text-sm">신뢰도</span>

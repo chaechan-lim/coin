@@ -1399,6 +1399,11 @@ class FuturesEngineV2:
             "all_surge_scores": {},
         }
 
+    @property
+    def regime_detector(self) -> "RegimeDetector":
+        """Public access to RegimeDetector (API/모니터링용)."""
+        return self._regime
+
     def get_tier1_status(self) -> dict:
         """Tier1 운영 상태 반환 (관측용 API)."""
         return self._tier1.get_status()
