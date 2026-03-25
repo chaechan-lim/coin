@@ -146,12 +146,22 @@ export interface StrategyLog {
 }
 
 // ── Agents ───────────────────────────────────────────────────
+export interface V2Regime {
+  regime: string
+  confidence: number
+  adx: number
+  atr_pct: number
+  trend_direction: number
+  timestamp: string
+}
+
 export interface MarketAnalysis {
   state: string
   confidence: number
   volatility_level: string
   recommended_weights: Record<string, number>
   reasoning: string
+  v2_regime?: V2Regime
 }
 
 export interface RiskAlert {
