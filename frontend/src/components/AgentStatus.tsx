@@ -83,6 +83,20 @@ const STATE_KR: Record<string, string> = {
   crash: '폭락',
 }
 
+const REGIME_COLORS: Record<string, string> = {
+  trending_up: 'bg-green-500',
+  trending_down: 'bg-red-500',
+  ranging: 'bg-yellow-400',
+  volatile: 'bg-orange-500',
+}
+
+const REGIME_KR: Record<string, string> = {
+  trending_up: '상승 추세',
+  trending_down: '하락 추세',
+  ranging: '횡보 구간',
+  volatile: '고변동성',
+}
+
 const VOLATILITY_KR: Record<string, string> = {
   low: '낮음',
   medium: '보통',
@@ -166,7 +180,12 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
     onSuccess: () => qc.invalidateQueries({ queryKey: ['agents', 'strategy-advice'] }),
   })
 
-  const dotColor = analysis ? STATE_COLORS[analysis.state] ?? 'bg-gray-500' : 'bg-gray-600'
+  const v2 = analysis?.v2_regime
+  const hasV2 = !!v2
+  // V2 regime present → use regime color for dot; otherwise agent state color
+  const dotColor = hasV2
+    ? REGIME_COLORS[v2.regime] ?? 'bg-gray-500'
+    : analysis ? STATE_COLORS[analysis.state] ?? 'bg-gray-500' : 'bg-gray-600'
   const criticalAlerts = (alerts ?? []).filter((a) => a.level === 'critical')
   const warningAlerts = (alerts ?? []).filter((a) => a.level === 'warning')
 
@@ -177,29 +196,62 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
         <div className="bg-gray-800 rounded-xl p-4">
           <div className="flex items-center gap-2 mb-3">
             <div className={`w-2 h-2 rounded-full ${dotColor}`} />
-            <h3 className="text-white font-semibold text-sm">시장 분석 에이전트</h3>
+            <h3 className="text-white font-semibold text-sm">시장 분석</h3>
           </div>
 
           {analysis && analysis.confidence != null ? (
             <div className="space-y-3">
+              {/* V2 Regime — primary when available */}
+              {hasV2 && (
+                <>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-400 text-sm">V2 레짐</span>
+                    <span className={`font-bold text-sm ${(REGIME_COLORS[v2.regime] ?? 'bg-gray-500').replace('bg-', 'text-')}`}>
+                      {REGIME_KR[v2.regime] ?? v2.regime}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-400 text-sm">레짐 신뢰도</span>
+                    <div className="flex items-center gap-2">
+                      <div className="w-24 bg-gray-700 rounded-full h-1.5">
+                        <div
+                          className="bg-cyan-500 h-1.5 rounded-full"
+                          style={{ width: `${(v2.confidence ?? 0) * 100}%` }}
+                        />
+                      </div>
+                      <span className="text-white text-xs">{((v2.confidence ?? 0) * 100).toFixed(0)}%</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-gray-500">
+                    <span>ADX {v2.adx.toFixed(1)}</span>
+                    <span>ATR {v2.atr_pct.toFixed(2)}%</span>
+                    <span>방향 {v2.trend_direction > 0 ? '↑' : v2.trend_direction < 0 ? '↓' : '→'}</span>
+                  </div>
+                  <div className="border-t border-gray-700 my-1" />
+                </>
+              )}
+
+              {/* Agent market state — secondary when V2 present */}
               <div className="flex items-center justify-between">
-                <span className="text-gray-400 text-sm">시장 상태</span>
-                <span className={`font-bold text-sm ${dotColor.replace('bg-', 'text-')}`}>
+                <span className="text-gray-400 text-sm">{hasV2 ? '에이전트 분석' : '시장 상태'}</span>
+                <span className={`font-bold text-sm ${(STATE_COLORS[analysis.state] ?? 'bg-gray-500').replace('bg-', 'text-')}`}>
                   {STATE_KR[analysis.state] ?? analysis.state}
                 </span>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-gray-400 text-sm">신뢰도</span>
-                <div className="flex items-center gap-2">
-                  <div className="w-24 bg-gray-700 rounded-full h-1.5">
-                    <div
-                      className="bg-blue-500 h-1.5 rounded-full"
-                      style={{ width: `${(analysis.confidence ?? 0) * 100}%` }}
-                    />
+              {!hasV2 && (
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-400 text-sm">신뢰도</span>
+                  <div className="flex items-center gap-2">
+                    <div className="w-24 bg-gray-700 rounded-full h-1.5">
+                      <div
+                        className="bg-blue-500 h-1.5 rounded-full"
+                        style={{ width: `${(analysis.confidence ?? 0) * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-white text-xs">{((analysis.confidence ?? 0) * 100).toFixed(0)}%</span>
                   </div>
-                  <span className="text-white text-xs">{((analysis.confidence ?? 0) * 100).toFixed(0)}%</span>
                 </div>
-              </div>
+              )}
               {analysis.volatility_level && (
                 <div className="flex items-center justify-between">
                   <span className="text-gray-400 text-sm">변동성</span>
