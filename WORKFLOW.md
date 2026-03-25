@@ -25,9 +25,9 @@ agent:
     medium: sonnet
     low: haiku
   model_labels:
-    model:opus: opus
-    model:sonnet: sonnet
-    model:haiku: haiku
+    complexity:high: opus
+    complexity:medium: sonnet
+    complexity:low: haiku
   permission_mode: dangerously-skip
   max_turns: 200
   max_budget_usd: 20.00
