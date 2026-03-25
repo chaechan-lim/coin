@@ -64,9 +64,10 @@ export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeN
     label: marketState,
     color: 'text-gray-400',
   }
-  // 에이전트 분석과 V2 레짐이 다른 경우 보조 표시
+  // V2 레짐(Regime enum)과 에이전트 상태(MarketState enum)는 값이 겹치지 않으므로
+  // V2가 있으면 에이전트 상태를 항상 보조로 표시 (두 시스템이 별도의 기준으로 동작)
   const agentState = analysis?.state
-  const showAgentSecondary = v2 && agentState && agentState !== marketState
+  const showAgentSecondary = !!(v2 && agentState)
 
   const stripQuote = (sym: string) => sym.replace('/KRW', '').replace('/USDT', '')
 

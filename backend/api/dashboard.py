@@ -278,7 +278,10 @@ async def get_latest_market_analysis(
         if v2_regime:
             resp["v2_regime"] = v2_regime
         return resp
-    return {"state": "unknown", "message": "No analysis available yet"}
+    resp = {"state": "unknown", "message": "No analysis available yet"}
+    if v2_regime:
+        resp["v2_regime"] = v2_regime
+    return resp
 
 
 @router.get("/agents/market-analysis/history", response_model=list[AgentLogResponse])
