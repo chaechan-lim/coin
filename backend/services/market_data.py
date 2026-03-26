@@ -200,17 +200,22 @@ class MarketDataService:
         df.rename(columns=self._INDICATOR_RENAME, inplace=True)
 
         # BB 컬럼명은 pandas_ta 버전에 따라 suffix가 다를 수 있음 (BBU_20_2.0 vs BBU_20_2.0_2.0)
-        for col in list(df.columns):
-            if col.startswith("BBU_20") and "bb_upper_20" not in df.columns:
-                df.rename(columns={col: "bb_upper_20"}, inplace=True)
-            elif col.startswith("BBL_20") and "bb_lower_20" not in df.columns:
-                df.rename(columns={col: "bb_lower_20"}, inplace=True)
-            elif col.startswith("BBM_20") and "bb_mid_20" not in df.columns:
-                df.rename(columns={col: "bb_mid_20"}, inplace=True)
-            elif col.startswith("BBB_20") and "bb_bandwidth_20" not in df.columns:
-                df.rename(columns={col: "bb_bandwidth_20"}, inplace=True)
-            elif col.startswith("BBP_20") and "bb_percent_20" not in df.columns:
-                df.rename(columns={col: "bb_percent_20"}, inplace=True)
+        # 한 번에 dict를 빌드한 뒤 단일 rename 호출
+        _bb_prefix_map = {
+            "BBU_20": "bb_upper_20",
+            "BBL_20": "bb_lower_20",
+            "BBM_20": "bb_mid_20",
+            "BBB_20": "bb_bandwidth_20",
+            "BBP_20": "bb_percent_20",
+        }
+        bb_rename: dict[str, str] = {}
+        for col in df.columns:
+            for prefix, target in _bb_prefix_map.items():
+                if col.startswith(prefix) and target not in df.columns:
+                    bb_rename[col] = target
+                    break
+        if bb_rename:
+            df.rename(columns=bb_rename, inplace=True)
 
         return df
 

@@ -3,6 +3,8 @@
 COIN-51: 라이브 RegimeDetector + 레짐 전략이 필요한 컬럼이
 _compute_indicators()에서 올바른 이름으로 생성되는지 검증.
 """
+from unittest.mock import MagicMock
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -32,8 +34,8 @@ class TestComputeIndicators:
 
     @pytest.fixture
     def svc(self):
-        """MarketDataService 인스턴스 (exchange=None, 캐시만 사용)."""
-        return MarketDataService(exchange=None)  # type: ignore[arg-type]
+        """MarketDataService 인스턴스 (MagicMock exchange — 네트워크 호출 없음)."""
+        return MarketDataService(exchange=MagicMock())
 
     @pytest.fixture
     def df_with_indicators(self, svc):
@@ -54,16 +56,25 @@ class TestComputeIndicators:
         assert "adx_14" in df_with_indicators.columns
         assert "ADX_14" not in df_with_indicators.columns, "ADX_14 should be renamed to adx_14"
 
+    def test_adx_di_lowercase(self, df_with_indicators):
+        """DMP_14 → dmp_14, DMN_14 → dmn_14 리네임 검증 (+DI/-DI)."""
+        assert "dmp_14" in df_with_indicators.columns
+        assert "dmn_14" in df_with_indicators.columns
+        assert "DMP_14" not in df_with_indicators.columns
+        assert "DMN_14" not in df_with_indicators.columns
+
     def test_bb_columns_lowercase(self, df_with_indicators):
-        """BBU/BBL/BBM → bb_upper_20/bb_lower_20/bb_mid_20 리네임 검증."""
+        """BBU/BBL/BBM/BBB/BBP → lowercase 리네임 검증."""
         assert "bb_upper_20" in df_with_indicators.columns
         assert "bb_lower_20" in df_with_indicators.columns
         assert "bb_mid_20" in df_with_indicators.columns
-        # 원본 대문자 컬럼이 남아있지 않은지 확인
+        # 원본 대문자 컬럼이 남아있지 않은지 확인 (BBB_20, BBP_20 포함)
         for col in df_with_indicators.columns:
             assert not col.startswith("BBU_20"), f"Unrenamed BB column: {col}"
             assert not col.startswith("BBL_20"), f"Unrenamed BB column: {col}"
             assert not col.startswith("BBM_20"), f"Unrenamed BB column: {col}"
+            assert not col.startswith("BBB_20"), f"Unrenamed BB column: {col}"
+            assert not col.startswith("BBP_20"), f"Unrenamed BB column: {col}"
 
     def test_macd_columns_renamed(self, df_with_indicators):
         """MACD_12_26_9 → macd_line 등 리네임 검증."""
@@ -128,14 +139,18 @@ class TestComputeIndicators:
             )
 
     def test_short_dataframe_no_error(self, svc):
-        """데이터가 부족해도 에러 없이 반환."""
+        """데이터 1행이어도 에러 없이 원본 반환 (len < 2 조기 반환)."""
         df = _make_ohlcv(1)
         result = svc._compute_indicators(df)
         assert len(result) == 1
 
 
 class TestBacktestColumnParity:
-    """backtest_v2._RENAME_MAP과 라이브 _INDICATOR_RENAME이 일치하는지 검증."""
+    """backtest_v2._RENAME_MAP과 라이브 _INDICATOR_RENAME 사이의 일관성 검증.
+
+    두 맵의 교집합 키에 대해 동일한 target 컬럼명을 가져야 함.
+    한쪽 맵이 변경되면 다른 쪽도 같이 업데이트해야 함을 보장.
+    """
 
     def test_rename_map_covers_adx(self):
         rename = MarketDataService._INDICATOR_RENAME
@@ -146,3 +161,19 @@ class TestBacktestColumnParity:
         assert rename.get("MACD_12_26_9") == "macd_line"
         assert rename.get("MACDs_12_26_9") == "macd_signal"
         assert rename.get("MACDh_12_26_9") == "macd_hist"
+
+    def test_shared_keys_produce_same_targets(self):
+        """backtest_v2._RENAME_MAP과 공유하는 키는 동일한 target을 가져야 함.
+
+        예: 둘 다 'ADX_14'를 가지면 둘 다 'adx_14'로 매핑해야 함.
+        한 맵에서 target을 바꾸면 라이브/백테스트 컬럼 불일치가 재발.
+        """
+        from backtest_v2 import _RENAME_MAP as backtest_rename
+
+        live_rename = MarketDataService._INDICATOR_RENAME
+        shared_keys = set(backtest_rename) & set(live_rename)
+        for key in shared_keys:
+            assert live_rename[key] == backtest_rename[key], (
+                f"Column rename conflict for '{key}': "
+                f"live={live_rename[key]!r}, backtest={backtest_rename[key]!r}"
+            )
