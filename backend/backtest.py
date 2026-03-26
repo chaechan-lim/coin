@@ -49,7 +49,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
-import pandas_ta as ta
 
 # structlog 로그 레벨을 WARNING으로 올려서 백테스트 중 불필요한 출력 제거
 logging.basicConfig(level=logging.WARNING)
@@ -79,6 +78,7 @@ from strategies.base import Signal
 from core.enums import SignalType
 from exchange.bithumb_adapter import BithumbAdapter
 from exchange.data_models import Candle, Ticker
+from services.indicators import compute_indicators
 
 
 # ── 설정 ──────────────────────────────────────────────────────
@@ -554,22 +554,12 @@ async def fetch_history(
     # ── 캐시 저장 ────────────────────────────────────────────
     df.to_csv(cache_path)
 
-    # ── 기술적 지표 계산 (pandas_ta) ─────────────────────────
-    df.ta.sma(length=5,  append=True)
-    df.ta.sma(length=20, append=True)
-    df.ta.sma(length=50, append=True)
-    df.ta.sma(length=60, append=True)
-    df.ta.ema(length=12, append=True)
-    df.ta.ema(length=26, append=True)
-    df.ta.rsi(length=14, append=True)
-    df.ta.macd(fast=12, slow=26, signal=9, append=True)
-    df.ta.bbands(length=20, std=2, append=True)
-    df.ta.atr(length=14,  append=True)
-    df.ta.adx(length=14,  append=True)
+    # ── 기술적 지표 계산 (COIN-52: 통합 파이프라인) ──────────
+    df = compute_indicators(df)
 
-    df["Volume_SMA_20"] = df["volume"].rolling(window=20).mean()
-
-    df.dropna(inplace=True)
+    # sma_200 등 장기 지표는 데이터 부족 시 NaN — 핵심 지표만 기준으로 dropna
+    _core_cols = [c for c in ["ema_20", "rsi_14", "atr_14", "sma_20"] if c in df.columns]
+    df.dropna(subset=_core_cols, inplace=True)
 
     # 날짜 필터: 최근 N일
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
@@ -1225,8 +1215,8 @@ def _detect_market_state_v2(row, df: pd.DataFrame, i: int) -> tuple[str, float]:
                 else:
                     scores[MarketState.SIDEWAYS] += 2
 
-    # 5. 거래량 / Volume_SMA_20 (캔들 방향 반영)
-    vol_sma = row.get("Volume_SMA_20")
+    # 5. 거래량 / volume_sma_20 (캔들 방향 반영)
+    vol_sma = row.get("volume_sma_20", row.get("Volume_SMA_20"))
     cur_vol = row.get("volume")
     if (vol_sma is not None and cur_vol is not None
             and not (isinstance(vol_sma, float) and pd.isna(vol_sma))
