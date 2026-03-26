@@ -130,10 +130,16 @@ class TestV2CoordinatorRunMethods:
 
         V2 엔진은 _market_state 속성이 없지만 coordinator가 hasattr 체크를 하므로
         에러 없이 동작해야 함.
+
+        COIN-53: MARKET_ANALYSIS_ENABLED=True로 패치해야 에이전트 코드가 실행됨.
         """
+        import agents.coordinator as coord_module
+
         # market analysis agent needs OHLCV data
         mock_market_data.get_ohlcv_df = AsyncMock(return_value=None)
-        with patch("agents.coordinator.get_session_factory") as mock_sf:
+        # COIN-53: 비활성화 플래그를 True로 패치해서 분석 로직이 실행되게 함
+        with patch.object(coord_module, "MARKET_ANALYSIS_ENABLED", True), \
+             patch("agents.coordinator.get_session_factory") as mock_sf:
             mock_session = AsyncMock()
             mock_sf.return_value = MagicMock(
                 __aenter__=AsyncMock(return_value=mock_session),
@@ -145,7 +151,8 @@ class TestV2CoordinatorRunMethods:
             with patch.object(
                 wired_coordinator._market_agent, "analyze",
                 new_callable=AsyncMock,
-            ) as mock_analyze:
+            ) as mock_analyze, \
+                 patch("agents.coordinator.emit_event", new_callable=AsyncMock):
                 from agents.market_analysis import MarketAnalysis
                 from core.enums import MarketState
                 mock_analyze.return_value = MarketAnalysis(

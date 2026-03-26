@@ -15,6 +15,11 @@ from db.session import get_session_factory
 
 logger = structlog.get_logger(__name__)
 
+# COIN-53: MarketAnalysisAgent 비활성화.
+# 에이전트 판정이 실제 매매에 미사용 (현물=엔진 자체, 선물=RegimeDetector).
+# False로 설정하면 스케줄 실행 중단, 코드는 보존됨.
+MARKET_ANALYSIS_ENABLED = False
+
 
 class AgentCoordinator:
     """
@@ -52,8 +57,16 @@ class AgentCoordinator:
         """Set reference to trading engine for control operations."""
         self._engine = engine
 
-    async def run_market_analysis(self) -> MarketAnalysis:
-        """Run market analysis (정보 제공용 — 가중치는 엔진 _maybe_update_market_state()가 관리)."""
+    async def run_market_analysis(self) -> MarketAnalysis | None:
+        """Run market analysis (정보 제공용 — 가중치는 엔진 _maybe_update_market_state()가 관리).
+
+        COIN-53: MARKET_ANALYSIS_ENABLED=False일 때 즉시 반환 (LLM/API 비용 절감).
+        캐시된 _last_market_analysis는 보존 — API는 마지막 캐시 또는 DB 폴백 반환.
+        """
+        if not MARKET_ANALYSIS_ENABLED:
+            logger.debug("market_analysis_disabled", exchange=self._exchange_name)
+            return self._last_market_analysis
+
         analysis = await self._market_agent.analyze()
 
         # 엔진의 공식 시장 상태로 동기화 (엔진 = 4h 기준, 에이전트 = 1h 기준 → 불일치 방지)

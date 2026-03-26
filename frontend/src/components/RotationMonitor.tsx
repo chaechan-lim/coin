@@ -57,16 +57,18 @@ export function RotationMonitor({ exchange = 'bithumb' }: { exchange?: ExchangeN
     )
   }
 
-  // V2 레짐이 있으면 우선 표시, 없으면 에이전트 분석 → 엔진 상태 폴백
+  // V2 레짐이 있으면 우선 표시, 없으면 에이전트 분석(비활성 시 제외) → 엔진 상태 폴백
   const v2 = analysis?.v2_regime
-  const marketState = v2?.regime ?? analysis?.state ?? data.market_state
-  const marketInfo = MARKET_STATE_LABELS[marketState] ?? {
-    label: marketState,
+  const agentDisabled = analysis?.disabled === true
+  // COIN-53: 에이전트 비활성화 시 agent state를 폴백으로 사용하지 않음
+  const marketState = v2?.regime ?? (agentDisabled ? undefined : analysis?.state) ?? data.market_state
+  const marketInfo = MARKET_STATE_LABELS[marketState ?? ''] ?? {
+    label: marketState ?? data.market_state,
     color: 'text-gray-400',
   }
   // V2 레짐(Regime enum)과 에이전트 상태(MarketState enum)는 값이 겹치지 않으므로
-  // V2가 있으면 에이전트 상태를 항상 보조로 표시 (두 시스템이 별도의 기준으로 동작)
-  const agentState = analysis?.state
+  // V2가 있고 에이전트가 활성화된 경우에만 에이전트 상태를 보조로 표시
+  const agentState = agentDisabled ? undefined : analysis?.state
   const showAgentSecondary = !!(v2 && agentState)
 
   const stripQuote = (sym: string) => sym.replace('/KRW', '').replace('/USDT', '')

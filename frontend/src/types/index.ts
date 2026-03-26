@@ -162,6 +162,9 @@ export interface MarketAnalysis {
   recommended_weights: Record<string, number>
   reasoning: string
   v2_regime?: V2Regime
+  // COIN-53: 에이전트 비활성화 상태 표시
+  disabled?: boolean
+  disabled_reason?: string
 }
 
 export interface RiskAlert {
