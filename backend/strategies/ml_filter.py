@@ -128,7 +128,7 @@ class MLSignalFilter:
         sma20 = row.get("SMA_20", row.get("sma_20", price))
         sma50 = row.get("SMA_50", row.get("sma_50", price))
         vol = row.get("volume", 0)
-        vol_sma = row.get("Volume_SMA_20", vol if vol > 0 else 1)
+        vol_sma = row.get("volume_sma_20", row.get("Volume_SMA_20", vol if vol > 0 else 1))
 
         # BBands
         bb_upper = None
