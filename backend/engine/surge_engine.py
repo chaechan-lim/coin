@@ -714,6 +714,14 @@ class SurgeEngine:
                 "info", "surge_trade",
                 f"[Surge] {direction.upper()} {symbol} @ {exec_price:.2f}",
                 detail=f"Score={score:.2f} | Size={actual_margin:.1f} USDT ({self._leverage}x)",
+                metadata={
+                    "symbol": symbol,
+                    "direction": direction,
+                    "price": exec_price,
+                    "score": score,
+                    "size_usdt": actual_margin,
+                    "leverage": self._leverage,
+                },
             )
 
         except Exception as e:
@@ -914,6 +922,14 @@ class SurgeEngine:
                 "info", "surge_trade",
                 f"[Surge] CLOSED {symbol} | {net_pnl_pct:+.1f}% | {reason}",
                 detail=f"PnL={pnl_usdt:+.2f} USDT | Hold={hold_min:.0f}min",
+                metadata={
+                    "symbol": symbol,
+                    "direction": pos.direction,
+                    "pnl_pct": net_pnl_pct,
+                    "pnl_usdt": pnl_usdt,
+                    "reason": reason,
+                    "hold_min": hold_min,
+                },
             )
 
         except Exception as e:

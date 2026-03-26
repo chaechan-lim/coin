@@ -326,6 +326,10 @@ class TradingBot:
         ("error", "engine"),
         ("warning", "risk"),
         ("info", "recovery"),
+        ("info", "strategy"),          # AI 에이전트: 시장 분석, 매매 회고, 성과 분석, 레짐 변경
+        ("critical", "balance_guard"), # 잔고 괴리 → 엔진 일시 정지
+        ("warning", "balance_guard"),  # 잔고 재동기화
+        ("critical", "safe_order"),    # 거래소 실행 후 DB 기록 실패
     }
 
     async def send_alert(self, level: str, category: str, title: str,

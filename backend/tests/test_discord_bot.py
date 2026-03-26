@@ -557,3 +557,70 @@ async def test_send_alert_no_channel(bot):
     """채널 미설정 시 무시."""
     bot._alert_channel_id = 0
     await bot.send_alert("warning", "health", "테스트")  # 에러 없이 종료
+
+
+# ── COIN-54: _ALERT_EVENTS 확장 테스트 ─────────────────────────────
+
+def test_alert_events_contains_strategy(bot):
+    """_ALERT_EVENTS에 ('info', 'strategy') 포함."""
+    from services.discord_bot.bot import TradingBot
+    assert ("info", "strategy") in TradingBot._ALERT_EVENTS
+
+
+def test_alert_events_contains_balance_guard_critical(bot):
+    """_ALERT_EVENTS에 ('critical', 'balance_guard') 포함."""
+    from services.discord_bot.bot import TradingBot
+    assert ("critical", "balance_guard") in TradingBot._ALERT_EVENTS
+
+
+def test_alert_events_contains_balance_guard_warning(bot):
+    """_ALERT_EVENTS에 ('warning', 'balance_guard') 포함."""
+    from services.discord_bot.bot import TradingBot
+    assert ("warning", "balance_guard") in TradingBot._ALERT_EVENTS
+
+
+def test_alert_events_contains_safe_order_critical(bot):
+    """_ALERT_EVENTS에 ('critical', 'safe_order') 포함."""
+    from services.discord_bot.bot import TradingBot
+    assert ("critical", "safe_order") in TradingBot._ALERT_EVENTS
+
+
+@pytest.mark.asyncio
+async def test_send_alert_strategy_event(bot):
+    """strategy info 이벤트 → 채널 전송."""
+    channel = AsyncMock()
+    bot._alert_channel_id = 99999
+    bot._client.get_channel = MagicMock(return_value=channel)
+    bot._client.is_closed = MagicMock(return_value=False)
+    bot._client.is_ready = MagicMock(return_value=True)
+
+    await bot.send_alert("info", "strategy", "레짐 변경: ranging → trending_up")
+    channel.send.assert_called_once()
+    msg = channel.send.call_args[0][0]
+    assert "strategy" in msg.lower() or "STRATEGY" in msg
+
+
+@pytest.mark.asyncio
+async def test_send_alert_balance_guard_critical(bot):
+    """balance_guard critical → 채널 전송."""
+    channel = AsyncMock()
+    bot._alert_channel_id = 99999
+    bot._client.get_channel = MagicMock(return_value=channel)
+    bot._client.is_closed = MagicMock(return_value=False)
+    bot._client.is_ready = MagicMock(return_value=True)
+
+    await bot.send_alert("critical", "balance_guard", "잔고 괴리 7.2% — 엔진 일시 정지")
+    channel.send.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_send_alert_safe_order_critical(bot):
+    """safe_order critical → 채널 전송."""
+    channel = AsyncMock()
+    bot._alert_channel_id = 99999
+    bot._client.get_channel = MagicMock(return_value=channel)
+    bot._client.is_closed = MagicMock(return_value=False)
+    bot._client.is_ready = MagicMock(return_value=True)
+
+    await bot.send_alert("critical", "safe_order", "DB 기록 실패 — 거래소 주문은 실행됨: BTC/USDT buy")
+    channel.send.assert_called_once()

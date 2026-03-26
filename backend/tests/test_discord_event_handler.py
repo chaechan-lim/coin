@@ -411,3 +411,312 @@ async def test_close():
     h._client.aclose = AsyncMock()
     await h.close()
     h._client.aclose.assert_called_once()
+
+
+# ── COIN-54: 새 포맷터 테스트 ──────────────────────────────────
+
+# ── strategy ────────────────────────────────────────────────────
+
+def test_strategy_market_analysis_embed():
+    """시장 분석 이벤트 → 보라색 embed."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "strategy",
+        "시장 분석: trending_up (신뢰도 72%)", None,
+        {"state": "trending_up", "confidence": 0.72, "exchange": "binance_futures"},
+    )
+    assert embed is not None
+    assert "🧠" in embed["title"]
+    assert embed["color"] == 0x9B59B6  # purple
+    fields_by_name = {f["name"]: f["value"] for f in embed["fields"]}
+    assert fields_by_name["시장 상태"] == "trending_up"
+    assert "72%" in fields_by_name["신뢰도"]
+    assert fields_by_name["거래소"] == "binance_futures"
+
+
+def test_strategy_trade_review_embed():
+    """매매 회고 이벤트 → 승률/손익 필드 포함."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "strategy",
+        "매매 회고: 8건, 승률 75%, PnL +120", None,
+        {"total_trades": 8, "win_rate": 0.75, "pnl": 120.0, "exchange": "binance_futures"},
+    )
+    assert embed is not None
+    assert embed["color"] == 0x9B59B6
+    fields_by_name = {f["name"]: f["value"] for f in embed["fields"]}
+    assert fields_by_name["거래 수"] == "8"
+    assert "75%" in fields_by_name["승률"]
+    assert "+120" in fields_by_name["실현 손익"]
+
+
+def test_strategy_regime_change_embed():
+    """레짐 변경 이벤트 → 이전/새 레짐 + ADX 필드 포함."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "strategy",
+        "레짐 변경: ranging → trending_up", "신뢰도=80%, ADX=28.5",
+        {
+            "prev_regime": "ranging",
+            "new_regime": "trending_up",
+            "confidence": 0.80,
+            "adx": 28.5,
+            "symbol": "BTC/USDT",
+        },
+    )
+    assert embed is not None
+    assert "🧠" in embed["title"]
+    fields_by_name = {f["name"]: f["value"] for f in embed["fields"]}
+    assert fields_by_name["이전 레짐"] == "ranging"
+    assert fields_by_name["새 레짐"] == "trending_up"
+    assert "28.5" in fields_by_name["ADX"]
+
+
+def test_strategy_performance_embed():
+    """성과 분석 이벤트 → 기본 embed 생성."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "strategy",
+        "성과 분석 완료, 30일 PF 1.85", None,
+        {"exchange": "binance_futures"},
+    )
+    assert embed is not None
+    assert embed["color"] == 0x9B59B6
+    fields_by_name = {f["name"]: f["value"] for f in embed["fields"]}
+    assert fields_by_name["거래소"] == "binance_futures"
+
+
+def test_strategy_ignored_for_non_info_level():
+    """strategy 이벤트는 info 레벨만 처리."""
+    h = _make_handler()
+    embed = h._format_event("warning", "strategy", "전략 경고", None, {})
+    assert embed is None
+
+
+# ── balance_guard ────────────────────────────────────────────────
+
+def test_balance_guard_critical_embed():
+    """잔고 괴리 critical → 빨간 embed."""
+    h = _make_handler()
+    embed = h._format_event(
+        "critical", "balance_guard",
+        "잔고 괴리 7.2% — 엔진 일시 정지",
+        "거래소: 450.0000, 내부: 482.4000",
+        {"divergence_pct": 7.2},
+    )
+    assert embed is not None
+    assert "🚨" in embed["title"]
+    assert embed["color"] == 0xE74C3C  # red
+    fields_by_name = {f["name"]: f["value"] for f in embed["fields"]}
+    assert "7.20%" in fields_by_name["괴리율"]
+
+
+def test_balance_guard_warning_embed():
+    """잔고 재동기화 warning → 주황 embed."""
+    h = _make_handler()
+    embed = h._format_event(
+        "warning", "balance_guard",
+        "내부 장부 재동기화 #2 — 자동 재개",
+        "새 잔고: 450.0000 USDT",
+        {"exchange_balance": 450.0, "resync_count": 2},
+    )
+    assert embed is not None
+    assert "⚠️" in embed["title"]
+    assert embed["color"] == 0xF39C12  # orange
+    fields_by_name = {f["name"]: f["value"] for f in embed["fields"]}
+    assert "450.0000" in fields_by_name["거래소 잔고"]
+    assert fields_by_name["재동기화 횟수"] == "2"
+
+
+def test_balance_guard_info_embed():
+    """잔고 안정 자동 재개 info → 녹색 embed."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "balance_guard",
+        "잔고 안정 3회 연속 — 자동 재개",
+        "괴리율: 0.5%",
+        {"divergence_pct": 0.5},
+    )
+    assert embed is not None
+    assert "✅" in embed["title"]
+    assert embed["color"] == 0x2ECC71  # green
+    fields_by_name = {f["name"]: f["value"] for f in embed["fields"]}
+    assert "0.50%" in fields_by_name["괴리율"]
+
+
+def test_balance_guard_critical_consecutive_no_meta():
+    """3회 연속 경고 critical — metadata 없어도 embed 생성."""
+    h = _make_handler()
+    embed = h._format_event(
+        "critical", "balance_guard",
+        "잔고 괴리 3회 연속 — 엔진 일시 정지",
+        "괴리율: 4.1%",
+        None,  # metadata 없음
+    )
+    assert embed is not None
+    assert embed["color"] == 0xE74C3C
+
+
+# ── surge_trade ──────────────────────────────────────────────────
+
+def test_surge_trade_long_entry_embed():
+    """서지 롱 진입 → 녹색 embed."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "surge_trade",
+        "[Surge] LONG BTC/USDT @ 65432.10",
+        "Score=0.72 | Size=50.0 USDT (3x)",
+        {
+            "symbol": "BTC/USDT",
+            "direction": "long",
+            "price": 65432.10,
+            "score": 0.72,
+            "size_usdt": 50.0,
+            "leverage": 3,
+        },
+    )
+    assert embed is not None
+    assert "⚡" in embed["title"]
+    assert embed["color"] == 0x2ECC71  # green (LONG)
+    fields_by_name = {f["name"]: f["value"] for f in embed["fields"]}
+    assert fields_by_name["심볼"] == "BTC/USDT"
+    assert fields_by_name["방향"] == "LONG"
+    assert "65,432.10" in fields_by_name["가격"]
+    assert fields_by_name["서지 점수"] == "0.720"
+    assert fields_by_name["레버리지"] == "3x"
+
+
+def test_surge_trade_short_entry_embed():
+    """서지 숏 진입 → 빨간 embed."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "surge_trade",
+        "[Surge] SHORT ETH/USDT @ 3200.00",
+        "Score=0.65 | Size=30.0 USDT (3x)",
+        {
+            "symbol": "ETH/USDT",
+            "direction": "short",
+            "price": 3200.0,
+            "score": 0.65,
+            "size_usdt": 30.0,
+            "leverage": 3,
+        },
+    )
+    assert embed is not None
+    assert embed["color"] == 0xE74C3C  # red (SHORT)
+
+
+def test_surge_trade_exit_profit_embed():
+    """서지 청산 수익 → 녹색 embed."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "surge_trade",
+        "[Surge] CLOSED BTC/USDT | +4.2% | TP",
+        "PnL=+2.10 USDT | Hold=15min",
+        {
+            "symbol": "BTC/USDT",
+            "direction": "long",
+            "pnl_pct": 4.2,
+            "pnl_usdt": 2.10,
+            "reason": "TP",
+            "hold_min": 15.0,
+        },
+    )
+    assert embed is not None
+    assert embed["color"] == 0x2ECC71  # green (profit)
+    fields_by_name = {f["name"]: f["value"] for f in embed["fields"]}
+    assert "+4.2%" in fields_by_name["PnL"]
+    assert "+2.10" in fields_by_name["손익"]
+    assert fields_by_name["사유"] == "TP"
+    assert "15분" in fields_by_name["보유 시간"]
+
+
+def test_surge_trade_exit_loss_embed():
+    """서지 청산 손실 → 빨간 embed."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "surge_trade",
+        "[Surge] CLOSED ETH/USDT | -3.1% | SL",
+        "PnL=-0.93 USDT | Hold=8min",
+        {
+            "symbol": "ETH/USDT",
+            "direction": "long",
+            "pnl_pct": -3.1,
+            "pnl_usdt": -0.93,
+            "reason": "SL",
+            "hold_min": 8.0,
+        },
+    )
+    assert embed is not None
+    assert embed["color"] == 0xE74C3C  # red (loss)
+    fields_by_name = {f["name"]: f["value"] for f in embed["fields"]}
+    assert "-3.1%" in fields_by_name["PnL"]
+
+
+def test_surge_trade_small_price_formatting():
+    """가격 < 10 이면 소수점 4자리 포맷."""
+    h = _make_handler()
+    embed = h._format_event(
+        "info", "surge_trade",
+        "[Surge] LONG 1000PEPE/USDT @ 0.0089",
+        "Score=0.58 | Size=20.0 USDT (3x)",
+        {
+            "symbol": "1000PEPE/USDT",
+            "direction": "long",
+            "price": 0.0089,
+            "score": 0.58,
+            "size_usdt": 20.0,
+            "leverage": 3,
+        },
+    )
+    assert embed is not None
+    fields_by_name = {f["name"]: f["value"] for f in embed["fields"]}
+    assert "0.0089" in fields_by_name["가격"]
+
+
+def test_surge_trade_warning_ignored():
+    """surge_trade warning 레벨은 무시."""
+    h = _make_handler()
+    embed = h._format_event("warning", "surge_trade", "서지 경고", None, {})
+    assert embed is None
+
+
+# ── safe_order ───────────────────────────────────────────────────
+
+def test_safe_order_critical_embed():
+    """SafeOrder DB 실패 critical → 빨간 embed."""
+    h = _make_handler()
+    embed = h._format_event(
+        "critical", "safe_order",
+        "DB 기록 실패 — 거래소 주문은 실행됨: BTC/USDT buy",
+        "IntegrityError: duplicate key",
+        {},
+    )
+    assert embed is not None
+    assert "🚨" in embed["title"]
+    assert embed["color"] == 0xE74C3C  # red
+    assert "DB 기록 실패" in embed["title"]
+
+
+def test_safe_order_with_metadata():
+    """SafeOrder embed은 symbol/side 메타데이터 표시."""
+    h = _make_handler()
+    embed = h._format_event(
+        "critical", "safe_order",
+        "DB 기록 실패 — 거래소 주문은 실행됨: ETH/USDT sell",
+        "Connection refused",
+        {"symbol": "ETH/USDT", "side": "sell"},
+    )
+    assert embed is not None
+    fields_by_name = {f["name"]: f["value"] for f in embed["fields"]}
+    assert fields_by_name["심볼"] == "ETH/USDT"
+    assert fields_by_name["방향"] == "SELL"
+
+
+def test_safe_order_non_critical_ignored():
+    """safe_order warning/info 는 무시 (critical만 처리)."""
+    h = _make_handler()
+    embed = h._format_event("warning", "safe_order", "경고", None, {})
+    assert embed is None
+    embed2 = h._format_event("info", "safe_order", "정보", None, {})
+    assert embed2 is None

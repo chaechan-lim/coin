@@ -138,8 +138,24 @@ class RegimeDetector:
         # 코인별 레짐 저장
         self._per_coin[symbol] = raw
 
-        # 히스테리시스 적용
+        # 히스테리시스 적용 — 변경 여부 감지 후 이벤트 발행
+        prev_regime = self._current.regime if self._current else None
         confirmed = self._apply_hysteresis(raw)
+
+        if prev_regime is not None and confirmed.regime != prev_regime:
+            await emit_event(
+                "info", "strategy",
+                f"레짐 변경: {prev_regime.value} → {confirmed.regime.value}",
+                detail=f"신뢰도={confirmed.confidence:.0%}, ADX={confirmed.adx:.1f}",
+                metadata={
+                    "prev_regime": prev_regime.value,
+                    "new_regime": confirmed.regime.value,
+                    "confidence": confirmed.confidence,
+                    "adx": confirmed.adx,
+                    "symbol": symbol,
+                },
+            )
+
         return confirmed
 
     def _classify(
