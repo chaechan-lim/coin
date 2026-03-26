@@ -107,6 +107,14 @@ class DiscordAdapter(NotificationAdapter):
             return self._format_health(level, title, detail, meta)
         if category == "recovery":
             return self._format_recovery(title, detail, meta)
+        if category == "strategy" and level == "info":
+            return self._format_strategy(title, detail, meta)
+        if category == "balance_guard":
+            return self._format_balance_guard(level, title, detail, meta)
+        if category == "surge_trade" and level == "info":
+            return self._format_surge_trade(title, detail, meta)
+        if category == "safe_order" and level == "critical":
+            return self._format_safe_order(title, detail, meta)
         return None
 
     # ── 포맷 함수들 ──────────────────────────────────────────
@@ -406,6 +414,104 @@ class DiscordAdapter(NotificationAdapter):
             fields.append({"name": "잔고 변화", "value": f"{meta['old_cash']:.2f} → {meta['new_cash']:.2f}", "inline": True})
         desc = detail[:500] if detail else None
         return {"title": f"🔧 {title}", "description": desc, "color": COLOR_CYAN, "fields": fields}
+
+    def _format_strategy(self, title: str, detail: str | None, meta: dict) -> dict:
+        """AI 에이전트 전략 분석 알림 (시장 분석, 매매 회고, 성과 분석, 전략 어드바이저)."""
+        fields = []
+        if meta.get("state"):
+            fields.append({"name": "시장 상태", "value": meta["state"], "inline": True})
+        if meta.get("confidence") is not None:
+            fields.append({"name": "신뢰도", "value": f"{meta['confidence']:.0%}", "inline": True})
+        if meta.get("exchange"):
+            fields.append({"name": "거래소", "value": meta["exchange"], "inline": True})
+        if meta.get("total_trades") is not None:
+            fields.append({"name": "거래 수", "value": str(meta["total_trades"]), "inline": True})
+        if meta.get("win_rate") is not None:
+            fields.append({"name": "승률", "value": f"{meta['win_rate']:.0%}", "inline": True})
+        if meta.get("pnl") is not None:
+            pnl = meta["pnl"]
+            sign = "+" if pnl >= 0 else ""
+            fields.append({"name": "실현 손익", "value": f"{sign}{pnl:,.0f}", "inline": True})
+        # 레짐 변경 필드
+        if meta.get("prev_regime") and meta.get("new_regime"):
+            fields.append({"name": "이전 레짐", "value": meta["prev_regime"], "inline": True})
+            fields.append({"name": "새 레짐", "value": meta["new_regime"], "inline": True})
+        if meta.get("adx") is not None:
+            fields.append({"name": "ADX", "value": f"{meta['adx']:.1f}", "inline": True})
+        desc = detail[:500] if detail else None
+        return {"title": f"🧠 {title}", "description": desc, "color": COLOR_PURPLE, "fields": fields}
+
+    def _format_balance_guard(self, level: str, title: str, detail: str | None, meta: dict) -> dict:
+        """잔고 무결성 감시 알림 (잔고 괴리 경고, 자동 재동기화, 자동 재개)."""
+        if level == "critical":
+            color = COLOR_RED
+            icon = "🚨"
+        elif level == "warning":
+            color = COLOR_ORANGE
+            icon = "⚠️"
+        else:
+            color = COLOR_GREEN
+            icon = "✅"
+        fields = []
+        if meta.get("divergence_pct") is not None:
+            fields.append({"name": "괴리율", "value": f"{meta['divergence_pct']:.2f}%", "inline": True})
+        if meta.get("exchange_balance") is not None:
+            fields.append({"name": "거래소 잔고", "value": f"{meta['exchange_balance']:,.4f} USDT", "inline": True})
+        if meta.get("resync_count") is not None:
+            fields.append({"name": "재동기화 횟수", "value": str(meta["resync_count"]), "inline": True})
+        desc = detail[:500] if detail else None
+        return {"title": f"{icon} {title}", "description": desc, "color": color, "fields": fields}
+
+    def _format_surge_trade(self, title: str, detail: str | None, meta: dict) -> dict:
+        """서지 매매 알림 (진입/청산)."""
+        is_close = "CLOSED" in title or "청산" in title
+        if is_close:
+            pnl_pct = meta.get("pnl_pct")
+            color = (COLOR_GREEN if pnl_pct is not None and pnl_pct >= 0 else COLOR_RED)
+        elif "LONG" in title:
+            color = COLOR_GREEN
+        elif "SHORT" in title:
+            color = COLOR_RED
+        else:
+            color = COLOR_BLUE
+        fields = []
+        if meta.get("symbol"):
+            fields.append({"name": "심볼", "value": meta["symbol"], "inline": True})
+        if meta.get("direction"):
+            fields.append({"name": "방향", "value": meta["direction"].upper(), "inline": True})
+        if meta.get("price") is not None:
+            v = meta["price"]
+            fmt = f"{v:,.2f}" if v >= 10 else f"{v:,.4f}"
+            fields.append({"name": "가격", "value": f"{fmt} USDT", "inline": True})
+        if meta.get("score") is not None:
+            fields.append({"name": "서지 점수", "value": f"{meta['score']:.3f}", "inline": True})
+        if meta.get("size_usdt") is not None:
+            fields.append({"name": "포지션", "value": f"{meta['size_usdt']:.1f} USDT", "inline": True})
+        if meta.get("leverage") is not None:
+            fields.append({"name": "레버리지", "value": f"{meta['leverage']}x", "inline": True})
+        if meta.get("pnl_pct") is not None:
+            pnl = meta["pnl_pct"]
+            sign = "+" if pnl >= 0 else ""
+            fields.append({"name": "PnL", "value": f"{sign}{pnl:.1f}%", "inline": True})
+        if meta.get("pnl_usdt") is not None:
+            p = meta["pnl_usdt"]
+            sign = "+" if p >= 0 else ""
+            fields.append({"name": "손익", "value": f"{sign}{p:.2f} USDT", "inline": True})
+        if meta.get("reason"):
+            fields.append({"name": "사유", "value": meta["reason"], "inline": True})
+        if meta.get("hold_min") is not None:
+            fields.append({"name": "보유 시간", "value": f"{meta['hold_min']:.0f}분", "inline": True})
+        return {"title": f"⚡ {title}", "description": detail, "color": color, "fields": fields}
+
+    def _format_safe_order(self, title: str, detail: str | None, meta: dict) -> dict:
+        """SafeOrder 치명적 오류 알림 (거래소 실행 후 DB 기록 실패)."""
+        fields = []
+        if meta.get("symbol"):
+            fields.append({"name": "심볼", "value": meta["symbol"], "inline": True})
+        if meta.get("side"):
+            fields.append({"name": "방향", "value": meta["side"].upper(), "inline": True})
+        desc = detail[:500] if detail else None
+        return {"title": f"🚨 {title}", "description": desc, "color": COLOR_RED, "fields": fields}
 
     # ── 전송 ───────────────────────────────────────────────────
 

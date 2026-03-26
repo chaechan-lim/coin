@@ -3,6 +3,7 @@ import pytest
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 from engine.regime_detector import RegimeDetector, RegimeState
 from core.enums import Regime
@@ -200,3 +201,70 @@ class TestSafeIloc:
     def test_offset(self):
         df = pd.DataFrame({"col": [1.0, 2.0, 3.0, 4.0, 5.0]})
         assert RegimeDetector._safe_iloc(df, "col", offset=3) == 3.0
+
+
+# ── COIN-54: emit_event 레짐 변경 알림 테스트 ─────────────────────
+
+class TestRegimeChangeEmit:
+    @pytest.mark.asyncio
+    async def test_update_emits_on_regime_change(self):
+        """레짐 변경 시 emit_event('info', 'strategy', ...) 호출됨."""
+        detector = RegimeDetector(confirm_count=1, min_duration_h=0)
+
+        # 초기 레짐 설정 (ranging)
+        df_range = _make_df(adx=15, bb_upper=81000, bb_lower=79000, bb_mid=80000)
+        await detector.update(df_range, "BTC/USDT")
+        assert detector.current.regime == Regime.RANGING
+
+        # 레짐 변경 (trending_up)
+        df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        with patch("engine.regime_detector.emit_event", new_callable=AsyncMock) as mock_emit:
+            await detector.update(df_up, "BTC/USDT")
+            mock_emit.assert_called_once()
+            call_kwargs = mock_emit.call_args
+            # positional args: level, category, title
+            assert call_kwargs[0][0] == "info"
+            assert call_kwargs[0][1] == "strategy"
+            assert "레짐 변경" in call_kwargs[0][2]
+            assert "ranging" in call_kwargs[0][2]
+            assert "trending_up" in call_kwargs[0][2]
+
+    @pytest.mark.asyncio
+    async def test_update_no_emit_on_same_regime(self):
+        """같은 레짐 유지 시 emit_event 호출 안 됨."""
+        detector = RegimeDetector(confirm_count=1, min_duration_h=0)
+        df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+
+        await detector.update(df_up, "BTC/USDT")  # 초기 설정
+
+        with patch("engine.regime_detector.emit_event", new_callable=AsyncMock) as mock_emit:
+            await detector.update(df_up, "BTC/USDT")  # 같은 레짐
+            mock_emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_no_emit_on_first_detection(self):
+        """첫 레짐 감지(prev_regime=None)는 emit 안 됨."""
+        detector = RegimeDetector(confirm_count=1, min_duration_h=0)
+        df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+
+        with patch("engine.regime_detector.emit_event", new_callable=AsyncMock) as mock_emit:
+            await detector.update(df_up, "BTC/USDT")  # 최초 감지
+            mock_emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_emit_metadata_contains_required_fields(self):
+        """emit_event 메타데이터에 prev_regime, new_regime, confidence, adx, symbol 포함."""
+        detector = RegimeDetector(confirm_count=1, min_duration_h=0)
+
+        df_range = _make_df(adx=15, bb_upper=81000, bb_lower=79000, bb_mid=80000)
+        await detector.update(df_range, "ETH/USDT")
+
+        df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        with patch("engine.regime_detector.emit_event", new_callable=AsyncMock) as mock_emit:
+            await detector.update(df_up, "ETH/USDT")
+            meta = mock_emit.call_args[1]["metadata"]
+            assert "prev_regime" in meta
+            assert "new_regime" in meta
+            assert "confidence" in meta
+            assert "adx" in meta
+            assert meta["symbol"] == "ETH/USDT"
