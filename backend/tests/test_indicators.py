@@ -155,6 +155,13 @@ class TestComputeIndicators:
         assert "ema_20" in result.columns
         assert result["ema_20"].notna().any()
 
+    def test_does_not_mutate_input(self):
+        """입력 DataFrame이 변이되지 않아야 함."""
+        df = _make_ohlcv(50)
+        original_cols = set(df.columns)
+        _ = compute_indicators(df)
+        assert set(df.columns) == original_cols, "Input DataFrame was mutated"
+
 
 class TestRenameMapCompleteness:
     """_RENAME_MAP이 모든 pandas_ta 대문자 출력을 커버하는지 검증."""

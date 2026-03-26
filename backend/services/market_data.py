@@ -141,17 +141,6 @@ class MarketDataService:
         df.sort_index(inplace=True)
         return df
 
-    # COIN-52: _INDICATOR_RENAME → services.indicators._RENAME_MAP으로 통합 이관.
-    # 기존 테스트 호환을 위해 참조 유지.
-    _INDICATOR_RENAME: dict[str, str] = {
-        "ADX_14": "adx_14",
-        "DMP_14": "dmp_14",
-        "DMN_14": "dmn_14",
-        "MACD_12_26_9": "macd_line",
-        "MACDs_12_26_9": "macd_signal",
-        "MACDh_12_26_9": "macd_hist",
-    }
-
     def _compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Pre-compute commonly used technical indicators.
 

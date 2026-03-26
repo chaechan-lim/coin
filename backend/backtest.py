@@ -557,8 +557,8 @@ async def fetch_history(
     # ── 기술적 지표 계산 (COIN-52: 통합 파이프라인) ──────────
     df = compute_indicators(df)
 
-    # sma_200 등 장기 지표는 데이터 부족 시 NaN — 핵심 지표만 기준으로 dropna
-    _core_cols = [c for c in ["ema_20", "rsi_14", "atr_14", "sma_20"] if c in df.columns]
+    # sma_200 등 장기 지표는 데이터 부족 시 NaN — 전략/시장감지에 필요한 지표만 기준으로 dropna
+    _core_cols = [c for c in ["ema_20", "rsi_14", "atr_14", "sma_20", "sma_50", "sma_60"] if c in df.columns]
     df.dropna(subset=_core_cols, inplace=True)
 
     # 날짜 필터: 최근 N일
@@ -1091,8 +1091,8 @@ class Backtester:
 
 def _is_downtrend(row) -> bool:
     """SMA20 < SMA60이면 하락 추세로 판단."""
-    sma20 = row.get("SMA_20")
-    sma60 = row.get("SMA_60")
+    sma20 = row.get("sma_20", row.get("SMA_20"))
+    sma60 = row.get("sma_60", row.get("SMA_60"))
     if sma20 is None or sma60 is None or pd.isna(sma20) or pd.isna(sma60):
         return False
     return float(sma20) < float(sma60)
@@ -1105,10 +1105,10 @@ def _detect_market_state_legacy(row) -> str:
     """
     from core.enums import MarketState
 
-    sma20 = row.get("SMA_20")
-    sma60 = row.get("SMA_60")
-    adx = row.get("ADX_14")
-    rsi = row.get("RSI_14")
+    sma20 = row.get("sma_20", row.get("SMA_20"))
+    sma60 = row.get("sma_60", row.get("SMA_60"))
+    adx = row.get("adx_14", row.get("ADX_14"))
+    rsi = row.get("rsi_14", row.get("RSI_14"))
 
     # 기본값
     if any(v is None or (isinstance(v, float) and pd.isna(v))
@@ -1150,7 +1150,7 @@ def _detect_market_state_v2(row, df: pd.DataFrame, i: int) -> tuple[str, float]:
     current_price = float(row["close"])
 
     # 1. Price vs SMA20 거리
-    sma20 = row.get("SMA_20")
+    sma20 = row.get("sma_20", row.get("SMA_20"))
     if sma20 is not None and not (isinstance(sma20, float) and pd.isna(sma20)):
         sma20 = float(sma20)
         if sma20 > 0:
@@ -1167,7 +1167,7 @@ def _detect_market_state_v2(row, df: pd.DataFrame, i: int) -> tuple[str, float]:
                 scores[MarketState.SIDEWAYS] += 1
 
     # 2. SMA20 vs SMA50 정렬
-    sma50 = row.get("SMA_50")
+    sma50 = row.get("sma_50", row.get("SMA_50"))
     if (sma20 is not None and sma50 is not None
             and not (isinstance(sma20, float) and pd.isna(sma20))
             and not (isinstance(sma50, float) and pd.isna(sma50))):
@@ -1180,7 +1180,7 @@ def _detect_market_state_v2(row, df: pd.DataFrame, i: int) -> tuple[str, float]:
             scores[MarketState.DOWNTREND] += 1
 
     # 3. RSI
-    rsi = row.get("RSI_14")
+    rsi = row.get("rsi_14", row.get("RSI_14"))
     if rsi is not None and not (isinstance(rsi, float) and pd.isna(rsi)):
         rsi = float(rsi)
         if rsi > 70:
@@ -1324,7 +1324,7 @@ def _calc_dynamic_sl(row, price: float, market_state: str) -> float:
     atr_mult, floor_pct, cap_pct = _DYNAMIC_SL_PROFILES.get(
         market_state, _DEFAULT_SL_PROFILE,
     )
-    atr_val = row.get("ATRr_14")
+    atr_val = row.get("atr_14", row.get("ATRr_14"))
     if atr_val is None or (isinstance(atr_val, float) and pd.isna(atr_val)) or price <= 0:
         return cap_pct  # ATR 없으면 캡으로 폴백
 
@@ -2673,7 +2673,7 @@ class FuturesBacktester:
                     eff_position_pct = self._position_pct
 
                 # ATR 적응형 리스크: 마진/레버리지 축소 (차단 대신)
-                _atr_val = row.get("ATRr_14")
+                _atr_val = row.get("atr_14", row.get("ATRr_14"))
                 _atr_pct = (float(_atr_val) / current_price * 100) if (_atr_val and not pd.isna(_atr_val) and current_price > 0) else None
                 # ATR 티어: (threshold, margin_mult, lev_override)
                 _atr_margin_mult = 1.0
@@ -3760,7 +3760,7 @@ class FuturesPortfolioBacktester:
                 # 변동성 필터: ATR 높은데 신뢰도 낮으면 스킵
                 if self._volatility_filter:
                     _vf_row = all_data[sym].loc[ts]
-                    _vf_atr = _vf_row.get("ATRr_14")
+                    _vf_atr = _vf_row.get("atr_14", _vf_row.get("ATRr_14"))
                     if _vf_atr and not pd.isna(_vf_atr):
                         _vf_atr_pct = float(_vf_atr) / float(_vf_row["close"]) * 100
                         # 고변동(ATR>5%) + 낮은 신뢰도 → 스킵

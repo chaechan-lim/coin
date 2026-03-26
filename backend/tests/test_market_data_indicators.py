@@ -157,36 +157,23 @@ class TestComputeIndicators:
 class TestBacktestColumnParity:
     """COIN-52: 라이브/백테스트가 동일한 indicators._RENAME_MAP을 사용하는지 검증."""
 
-    def test_rename_map_covers_adx(self):
-        rename = MarketDataService._INDICATOR_RENAME
-        assert rename.get("ADX_14") == "adx_14"
+    def test_unified_rename_map_covers_adx(self):
+        from services.indicators import _RENAME_MAP
+        assert _RENAME_MAP.get("ADX_14") == "adx_14"
+        assert _RENAME_MAP.get("DMP_14") == "dmp_14"
+        assert _RENAME_MAP.get("DMN_14") == "dmn_14"
 
-    def test_rename_map_covers_macd(self):
-        rename = MarketDataService._INDICATOR_RENAME
-        assert rename.get("MACD_12_26_9") == "macd_line"
-        assert rename.get("MACDs_12_26_9") == "macd_signal"
-        assert rename.get("MACDh_12_26_9") == "macd_hist"
+    def test_unified_rename_map_covers_macd(self):
+        from services.indicators import _RENAME_MAP
+        assert _RENAME_MAP.get("MACD_12_26_9") == "macd_line"
+        assert _RENAME_MAP.get("MACDs_12_26_9") == "macd_signal"
+        assert _RENAME_MAP.get("MACDh_12_26_9") == "macd_hist"
 
     def test_backtest_v2_uses_unified_rename_map(self):
-        """COIN-52: backtest_v2._RENAME_MAP이 indicators._RENAME_MAP과 동일 객체.
-
-        이전에는 두 개의 독립 dict였으나, 이제 통합 모듈에서 re-export.
-        """
+        """COIN-52: backtest_v2._RENAME_MAP이 indicators._RENAME_MAP과 동일 객체."""
         from backtest_v2 import _RENAME_MAP as backtest_rename
         from services.indicators import _RENAME_MAP as unified_rename
 
         assert backtest_rename is unified_rename, (
             "backtest_v2._RENAME_MAP should be the same object as indicators._RENAME_MAP"
         )
-
-    def test_live_indicator_rename_subset_of_unified(self):
-        """MarketDataService._INDICATOR_RENAME의 모든 항목이 통합 맵에 포함."""
-        from services.indicators import _RENAME_MAP as unified_rename
-
-        live_rename = MarketDataService._INDICATOR_RENAME
-        for key, target in live_rename.items():
-            assert key in unified_rename, f"Missing key in unified map: {key}"
-            assert unified_rename[key] == target, (
-                f"Value mismatch for '{key}': "
-                f"live={target!r}, unified={unified_rename[key]!r}"
-            )

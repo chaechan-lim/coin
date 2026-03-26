@@ -54,9 +54,13 @@ class VolatilityRegimeStrategy(BaseStrategy):
             return self._hold("데이터 부족")
 
         # ── 지표 준비 ──
-        atr_col = f"ATRr_{self._atr_period}"
+        # unified pipeline은 atr_14 (lowercase), pandas_ta append는 ATRr_14
+        atr_col = f"atr_{self._atr_period}"
+        if atr_col not in df.columns:
+            atr_col = f"ATRr_{self._atr_period}"
         if atr_col not in df.columns:
             df.ta.atr(length=self._atr_period, append=True)
+            atr_col = f"ATRr_{self._atr_period}"
         if atr_col not in df.columns:
             return self._hold("ATR 계산 실패")
 
@@ -64,22 +68,28 @@ class VolatilityRegimeStrategy(BaseStrategy):
         if rsi_col not in df.columns:
             df[rsi_col] = ta.rsi(df["close"], length=self._rsi_period)
 
-        # 볼린저 밴드
-        bb_prefix = f"BBL_{self._bb_period}_"
-        bbl_cols = [c for c in df.columns if c.startswith(bb_prefix)]
-        if not bbl_cols:
-            bbands = ta.bbands(df["close"], length=self._bb_period, std=self._bb_std)
-            if bbands is not None:
-                df = pd.concat([df, bbands], axis=1)
-                bbl_cols = [c for c in df.columns if c.startswith(bb_prefix)]
+        # 볼린저 밴드 — unified pipeline은 bb_lower_20 등 lowercase로 출력
+        bbl_col = f"bb_lower_{self._bb_period}"
+        bbm_col = f"bb_mid_{self._bb_period}"
+        bbu_col = f"bb_upper_{self._bb_period}"
 
-        if not bbl_cols:
-            return self._hold("볼린저 밴드 계산 실패")
+        if bbl_col not in df.columns:
+            # fallback: raw pandas_ta prefix (BBL_20_2.0 등)
+            bb_prefix = f"BBL_{self._bb_period}_"
+            bbl_cols = [c for c in df.columns if c.startswith(bb_prefix)]
+            if not bbl_cols:
+                bbands = ta.bbands(df["close"], length=self._bb_period, std=self._bb_std)
+                if bbands is not None:
+                    df = pd.concat([df, bbands], axis=1)
+                    bbl_cols = [c for c in df.columns if c.startswith(bb_prefix)]
 
-        suffix = bbl_cols[0][len("BBL") :]
-        bbl_col = f"BBL{suffix}"
-        bbm_col = f"BBM{suffix}"
-        bbu_col = f"BBU{suffix}"
+            if not bbl_cols:
+                return self._hold("볼린저 밴드 계산 실패")
+
+            suffix = bbl_cols[0][len("BBL"):]
+            bbl_col = f"BBL{suffix}"
+            bbm_col = f"BBM{suffix}"
+            bbu_col = f"BBU{suffix}"
 
         # 거래량 SMA
         if "volume_sma_20" not in df.columns and "Volume_SMA_20" not in df.columns:

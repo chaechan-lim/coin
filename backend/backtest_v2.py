@@ -393,8 +393,8 @@ class SpotStrategyAdapter(RegimeStrategy):
         # COIN-52: 통합 지표 계산 파이프라인 사용
         ohlcv = compute_indicators(ohlcv)
 
-        # sma_200 등 장기 지표는 데이터 부족으로 NaN일 수 있음 — 핵심 지표만 기준으로 dropna
-        _core_cols = [c for c in ["ema_20", "rsi_14", "atr_14", "sma_20"] if c in ohlcv.columns]
+        # sma_200 등 장기 지표는 데이터 부족 시 NaN — 전략에 필요한 지표만 기준으로 dropna
+        _core_cols = [c for c in ["ema_20", "rsi_14", "atr_14", "sma_20", "sma_50", "sma_60"] if c in ohlcv.columns]
         ohlcv.dropna(subset=_core_cols, inplace=True)
         return ohlcv
 
@@ -515,8 +515,8 @@ def compute_v2_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # 통합 지표 계산 파이프라인 사용
     df = compute_indicators(df)
 
-    # sma_200 등 장기 지표는 데이터 부족 시 NaN — 핵심 지표만 기준으로 dropna
-    _core_cols = [c for c in ["ema_20", "rsi_14", "atr_14", "sma_20"] if c in df.columns]
+    # sma_200 등 장기 지표는 데이터 부족 시 NaN — 전략에 필요한 지표만 기준으로 dropna
+    _core_cols = [c for c in ["ema_20", "rsi_14", "atr_14", "sma_20", "sma_50", "sma_60"] if c in df.columns]
     df.dropna(subset=_core_cols, inplace=True)
 
     # 날짜 필터

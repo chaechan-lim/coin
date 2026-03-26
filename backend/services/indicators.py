@@ -21,7 +21,11 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 # ── pandas_ta 대문자 → lowercase 통합 매핑 ──────────────────────────
-# backtest_v2._RENAME_MAP + market_data._INDICATOR_RENAME 통합
+# backtest_v2._RENAME_MAP + market_data._INDICATOR_RENAME 통합.
+#
+# NOTE: SMA/EMA/RSI/ATR 항목은 compute_indicators()에서 직접 lowercase로 할당되므로
+# 함수 내부에서는 트리거되지 않음. 외부 소비자(backtest_v2 re-export)와
+# pandas_ta .ta.xxx(append=True) 방식으로 생성된 컬럼을 위해 유지.
 _RENAME_MAP: dict[str, str] = {
     # EMA
     "EMA_9": "ema_9",
@@ -111,6 +115,10 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     if len(df) < 2:
         return df
+
+    # 입력 DataFrame 복사 — pd.concat가 df를 리바인드하므로
+    # 호출자의 원본이 부분적으로만 변이되는 것을 방지.
+    df = df.copy()
 
     # ── SMA ───────────────────────────────────────────────────────
     df["sma_5"] = ta.sma(df["close"], length=5)
