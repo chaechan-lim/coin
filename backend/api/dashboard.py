@@ -243,12 +243,18 @@ def _get_v2_regime(exchange: str) -> dict | None:
     }
 
 
+# COIN-53: 에이전트 비활성 상태 플래그 (API 응답에 포함)
+_MARKET_ANALYSIS_DISABLED_REASON = "매매 미사용 — 엔진 자체 시장 판정 사용 중 (현물: _detect_market_state, 선물: RegimeDetector)"
+
+
 # -- Agent endpoints --
 @router.get("/agents/market-analysis/latest")
 async def get_latest_market_analysis(
     exchange: str = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
+    from agents.coordinator import MARKET_ANALYSIS_ENABLED
+
     v2_regime = _get_v2_regime(exchange)
 
     coord = _get_coordinator(exchange)
@@ -260,6 +266,8 @@ async def get_latest_market_analysis(
             "volatility_level": analysis.volatility_level,
             "recommended_weights": analysis.recommended_weights,
             "reasoning": analysis.reasoning,
+            "disabled": not MARKET_ANALYSIS_ENABLED,
+            "disabled_reason": _MARKET_ANALYSIS_DISABLED_REASON if not MARKET_ANALYSIS_ENABLED else None,
         }
         if v2_regime:
             resp["v2_regime"] = v2_regime
@@ -275,10 +283,19 @@ async def get_latest_market_analysis(
     log = result.scalar_one_or_none()
     if log:
         resp = dict(log.result) if log.result else {}
+        resp["disabled"] = not MARKET_ANALYSIS_ENABLED
+        if not MARKET_ANALYSIS_ENABLED:
+            resp["disabled_reason"] = _MARKET_ANALYSIS_DISABLED_REASON
         if v2_regime:
             resp["v2_regime"] = v2_regime
         return resp
-    resp = {"state": "unknown", "message": "No analysis available yet"}
+    resp = {
+        "state": "unknown",
+        "message": "No analysis available yet",
+        "disabled": not MARKET_ANALYSIS_ENABLED,
+    }
+    if not MARKET_ANALYSIS_ENABLED:
+        resp["disabled_reason"] = _MARKET_ANALYSIS_DISABLED_REASON
     if v2_regime:
         resp["v2_regime"] = v2_regime
     return resp
