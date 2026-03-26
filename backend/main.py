@@ -596,15 +596,18 @@ async def lifespan(app: FastAPI):
 
     # 바이낸스 스케줄 잡 추가
     from engine.scheduler import _wrap
+    from agents.coordinator import MARKET_ANALYSIS_ENABLED
     if config.binance.enabled and _binance_engine:
         binance_coord = engine_registry.get_coordinator("binance_futures")
         binance_pm = engine_registry.get_portfolio_manager("binance_futures")
         if binance_coord and binance_pm:
-            _scheduler.add_job(
-                _wrap(binance_coord.run_market_analysis),
-                name="binance_market_analysis",
-                seconds=900,
-            )
+            # COIN-53: MarketAnalysisAgent 비활성화 — 에이전트 판정이 매매에 미사용
+            if MARKET_ANALYSIS_ENABLED:
+                _scheduler.add_job(
+                    _wrap(binance_coord.run_market_analysis),
+                    name="binance_market_analysis",
+                    seconds=900,
+                )
 
             async def binance_risk_check():
                 await binance_coord.run_risk_evaluation(binance_pm.cash_balance)
@@ -633,11 +636,13 @@ async def lifespan(app: FastAPI):
         spot_coord = engine_registry.get_coordinator("binance_spot")
         spot_pm = engine_registry.get_portfolio_manager("binance_spot")
         if spot_coord and spot_pm:
-            _scheduler.add_job(
-                _wrap(spot_coord.run_market_analysis),
-                name="binance_spot_market_analysis",
-                seconds=900,
-            )
+            # COIN-53: MarketAnalysisAgent 비활성화 — 에이전트 판정이 매매에 미사용
+            if MARKET_ANALYSIS_ENABLED:
+                _scheduler.add_job(
+                    _wrap(spot_coord.run_market_analysis),
+                    name="binance_spot_market_analysis",
+                    seconds=900,
+                )
 
             async def binance_spot_risk_check():
                 await spot_coord.run_risk_evaluation(spot_pm.cash_balance)
@@ -972,10 +977,13 @@ async def _build_positions_summary(registry) -> str:
 
 
 async def _run_initial_analysis(coordinator, portfolio_mgr, config):
-    """Run initial market analysis, risk check, and trade review on startup."""
+    """Run initial risk check and trade review on startup.
+
+    COIN-53: Market analysis startup call removed — MarketAnalysisAgent 비활성화.
+    """
     await asyncio.sleep(5)  # Let everything settle
     try:
-        await coordinator.run_market_analysis()
+        # COIN-53: run_market_analysis() 제거 — MARKET_ANALYSIS_ENABLED=False
         await coordinator.run_risk_evaluation(portfolio_mgr.cash_balance)
         await coordinator.run_trade_review()
     except Exception as e:

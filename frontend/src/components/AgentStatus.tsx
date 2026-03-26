@@ -193,43 +193,51 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
     <div className="space-y-4">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Market Analysis Agent */}
-        <div className="bg-gray-800 rounded-xl p-4">
+        <div className={`bg-gray-800 rounded-xl p-4 ${analysis?.disabled ? 'opacity-60' : ''}`}>
           <div className="flex items-center gap-2 mb-3">
-            <div className={`w-2 h-2 rounded-full ${dotColor}`} />
+            <div className={`w-2 h-2 rounded-full ${analysis?.disabled ? 'bg-gray-500' : dotColor}`} />
             <h3 className="text-white font-semibold text-sm">시장 분석 에이전트</h3>
+            {analysis?.disabled && (
+              <span className="ml-auto text-xs bg-gray-700 text-gray-400 px-2 py-0.5 rounded-full border border-gray-600">
+                비활성
+              </span>
+            )}
           </div>
 
-          {analysis && analysis.confidence != null ? (
+          {/* V2 Regime — always shown if available, regardless of disabled state */}
+          {hasV2 && (
+            <div className="space-y-2 mb-3">
+              <div className="flex items-center justify-between">
+                <span className="text-gray-400 text-sm">V2 레짐</span>
+                <span className={`font-bold text-sm ${(REGIME_COLORS[v2.regime] ?? 'bg-gray-500').replace('bg-', 'text-')}`}>
+                  {REGIME_KR[v2.regime] ?? v2.regime}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-400 text-sm">레짐 신뢰도</span>
+                <div className="flex items-center gap-2">
+                  <div className="w-24 bg-gray-700 rounded-full h-1.5">
+                    <div
+                      className="bg-cyan-500 h-1.5 rounded-full"
+                      style={{ width: `${(v2.confidence ?? 0) * 100}%` }}
+                    />
+                  </div>
+                  <span className="text-white text-xs">{((v2.confidence ?? 0) * 100).toFixed(0)}%</span>
+                </div>
+              </div>
+              <div className="flex items-center justify-between text-xs text-gray-500">
+                <span>ADX {v2.adx.toFixed(1)}</span>
+                <span>ATR {v2.atr_pct.toFixed(2)}%</span>
+                <span>방향 {v2.trend_direction > 0 ? '↑' : v2.trend_direction < 0 ? '↓' : '→'}</span>
+              </div>
+              {!analysis?.disabled && <div className="border-t border-gray-700 my-1" />}
+            </div>
+          )}
+
+          {/* Agent state section — hidden when disabled */}
+          {!analysis?.disabled && analysis && analysis.confidence != null ? (
             <div className="space-y-3">
-              {/* V2 Regime — primary when available */}
-              {hasV2 && (
-                <>
-                  <div className="flex items-center justify-between">
-                    <span className="text-gray-400 text-sm">V2 레짐</span>
-                    <span className={`font-bold text-sm ${(REGIME_COLORS[v2.regime] ?? 'bg-gray-500').replace('bg-', 'text-')}`}>
-                      {REGIME_KR[v2.regime] ?? v2.regime}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-gray-400 text-sm">레짐 신뢰도</span>
-                    <div className="flex items-center gap-2">
-                      <div className="w-24 bg-gray-700 rounded-full h-1.5">
-                        <div
-                          className="bg-cyan-500 h-1.5 rounded-full"
-                          style={{ width: `${(v2.confidence ?? 0) * 100}%` }}
-                        />
-                      </div>
-                      <span className="text-white text-xs">{((v2.confidence ?? 0) * 100).toFixed(0)}%</span>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between text-xs text-gray-500">
-                    <span>ADX {v2.adx.toFixed(1)}</span>
-                    <span>ATR {v2.atr_pct.toFixed(2)}%</span>
-                    <span>방향 {v2.trend_direction > 0 ? '↑' : v2.trend_direction < 0 ? '↓' : '→'}</span>
-                  </div>
-                  <div className="border-t border-gray-700 my-1" />
-                </>
-              )}
+              {hasV2 && <div className="border-t border-gray-700 my-1" />}
 
               {/* Agent market state — secondary when V2 present */}
               <div className="flex items-center justify-between">
@@ -289,6 +297,10 @@ export function AgentStatus({ exchange = 'bithumb' }: { exchange?: ExchangeName 
                   <div className="text-gray-300 text-xs leading-relaxed">{analysis.reasoning}</div>
                 </div>
               )}
+            </div>
+          ) : analysis?.disabled ? (
+            <div className="text-gray-600 text-xs mt-1">
+              에이전트 분석 비활성 — 엔진 자체 시장 판정 사용 중
             </div>
           ) : (
             <div className="text-gray-500 text-sm">분석 데이터 없음</div>

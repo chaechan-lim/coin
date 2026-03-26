@@ -97,11 +97,14 @@ def setup_scheduler(
 
     # 빗썸 관련 잡 (coordinator가 있을 때만)
     if coordinator:
-        scheduler.add_job(
-            _wrap(coordinator.run_market_analysis),
-            name="market_analysis",
-            seconds=900,
-        )
+        # COIN-53: MarketAnalysisAgent 비활성화 — 에이전트 판정이 매매에 미사용
+        from agents.coordinator import MARKET_ANALYSIS_ENABLED
+        if MARKET_ANALYSIS_ENABLED:
+            scheduler.add_job(
+                _wrap(coordinator.run_market_analysis),
+                name="market_analysis",
+                seconds=900,
+            )
 
         if portfolio_manager:
             async def risk_check():
