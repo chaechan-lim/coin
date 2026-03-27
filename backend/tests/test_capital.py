@@ -5,13 +5,9 @@ Tests for Capital Transaction (v0.17):
 - restore_state_from_db peak_value initialization
 - API endpoints
 """
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
-import pytest_asyncio
-from sqlalchemy import select, func
-
 from core.models import CapitalTransaction, PortfolioSnapshot
 from engine.portfolio_manager import PortfolioManager
 
@@ -314,8 +310,6 @@ async def test_sync_binance_deposits_default_exchange_name(session):
 async def test_sync_binance_deposits_custom_exchange_name(session):
     """sync_binance_deposits: exchange_name 파라미터로 커스텀 거래소 이름 지원."""
     from unittest.mock import AsyncMock, MagicMock
-    from sqlalchemy import select
-    from core.models import CapitalTransaction
     from engine.capital_sync import sync_binance_deposits
 
     adapter = MagicMock()
