@@ -880,6 +880,9 @@ class PortfolioManager:
                     price=entry_price, invested=round(invested, 2),
                     direction=direction, leverage=leverage,
                 )
+            elif db_pos.quantity <= 0:
+                # 닫힌 포지션(qty=0)은 다른 엔진 소유일 수 있음 → 부활 방지
+                continue
             elif abs(db_pos.quantity - bal.total) / max(db_pos.quantity, 0.0001) > 0.01:
                 # DB 수량과 거래소 수량이 1% 이상 차이 → 거래소 기준으로 보정
                 old_qty = db_pos.quantity
@@ -937,6 +940,9 @@ class PortfolioManager:
                 # DB에 이미 있는 포지션 → 메타데이터만 보정
                 if pair in db_positions:
                     db_pos = db_positions[pair]
+                    # 닫힌 포지션(qty=0)은 다른 엔진 소유일 수 있음 → 부활 방지
+                    if db_pos.quantity <= 0:
+                        continue
                     fp_margin = float(fp_data.get("initialMargin", 0) or 0)
                     fp_direction = fp_data.get("side", "long")
                     fp_raw_lev = fp_data.get("leverage")

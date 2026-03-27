@@ -3168,3 +3168,56 @@ async def test_futures_sync_race_condition_no_double_cash(session):
 
     # cash가 변하지 않아야 함 — 엔진이 이미 처리
     assert pm.cash_balance == pytest.approx(cash_before, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_sync_does_not_revive_closed_position_from_fetch_positions(session):
+    """닫힌 포지션(qty=0)이 fetch_positions 데이터로 부활하지 않아야 함.
+
+    시나리오: SurgeEngine이 생성한 포지션이 거래소에 존재하지만,
+    FuturesEngine PM의 DB에는 같은 심볼의 닫힌 레코드(qty=0)가 있을 때,
+    sync가 이 레코드를 거래소 값으로 업데이트하면 안 됨.
+    """
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"JUP/USDT": 0.14}),
+        initial_balance_krw=250.0,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # DB에 닫힌 포지션 (다른 엔진이 사용 중인 거래소 포지션의 잔재)
+    closed_pos = Position(
+        exchange="binance_futures", symbol="JUP/USDT",
+        quantity=0, average_buy_price=0.14,
+        total_invested=0, is_paper=False,
+        direction="short", leverage=3, margin_used=0,
+    )
+    session.add(closed_pos)
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=250, used=0, total=250),
+    })
+    # 거래소에 JUP 포지션 존재 (SurgeEngine이 생성)
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[{
+        "symbol": "JUP/USDT:USDT",
+        "contracts": 347.0,
+        "initialMargin": 16.6,
+        "entryPrice": 0.1431,
+        "liquidationPrice": 0.19,
+        "side": "short",
+        "leverage": "3",
+        "notional": -49.8,
+    }])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["JUP/USDT"])
+    await session.flush()
+
+    # qty=0인 닫힌 포지션이 부활하지 않아야 함
+    await session.refresh(closed_pos)
+    assert closed_pos.quantity == 0, "Closed position must not be revived by sync"
