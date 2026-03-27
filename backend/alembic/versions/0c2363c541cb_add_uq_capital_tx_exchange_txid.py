@@ -1,6 +1,6 @@
 """add uq_capital_tx_exchange_txid partial index
 
-Revision ID: a1b2c3d4e5f6
+Revision ID: 0c2363c541cb
 Revises: b033178c02bc
 Create Date: 2026-03-27 00:00:00.000000
 

@@ -651,6 +651,45 @@ async def test_sync_binance_internal_transfers_api_error_graceful(session):
 
 
 @pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_partial_direction_failure(session):
+    """MAIN_UMFUTURE 성공 + UMFUTURE_MAIN 실패 → new_txs 반환되지만 all_ok=False."""
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    call_count = 0
+
+    async def _sapi_get(params):
+        nonlocal call_count
+        call_count += 1
+        if params.get("type") == "MAIN_UMFUTURE":
+            return {
+                "total": 1,
+                "rows": [
+                    {
+                        "asset": "USDT",
+                        "amount": "250.0",
+                        "type": "MAIN_UMFUTURE",
+                        "status": "CONFIRMED",
+                        "tranId": 777999,
+                    }
+                ],
+            }
+        raise RuntimeError("UMFUTURE_MAIN API error")
+
+    adapter = MagicMock()
+    adapter._exchange = MagicMock()
+    adapter._exchange.sapiGetAssetTransfer = _sapi_get
+
+    result, all_ok = await sync_binance_internal_transfers(session, adapter)
+
+    # MAIN_UMFUTURE 1건 기록됨
+    assert len(result) == 1
+    assert result[0].tx_type == "deposit"
+    assert result[0].amount == 250.0
+    # UMFUTURE_MAIN 오류 → all_ok=False (타임스탬프 전진 금지)
+    assert all_ok is False
+
+
+@pytest.mark.asyncio
 async def test_sync_binance_internal_transfers_returns_txs_for_caller(session):
     """함수는 TX만 반환하며, PM cash 조정은 호출자(main.py)가 commit 후 수행."""
     from engine.capital_sync import sync_binance_internal_transfers
