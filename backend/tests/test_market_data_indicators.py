@@ -3,6 +3,7 @@
 COIN-51: 라이브 RegimeDetector + 레짐 전략이 필요한 컬럼이
 _compute_indicators()에서 올바른 이름으로 생성되는지 검증.
 """
+
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -19,13 +20,15 @@ def _make_ohlcv(n: int = 200) -> pd.DataFrame:
     high = close + np.abs(np.random.randn(n) * 50)
     low = close - np.abs(np.random.randn(n) * 50)
     volume = np.random.rand(n) * 1000 + 500
-    df = pd.DataFrame({
-        "open": close,
-        "high": high,
-        "low": low,
-        "close": close,
-        "volume": volume,
-    })
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        }
+    )
     return df
 
 
@@ -54,7 +57,9 @@ class TestComputeIndicators:
     def test_adx_lowercase(self, df_with_indicators):
         """ADX_14 → adx_14 리네임 검증 (RegimeDetector 필수)."""
         assert "adx_14" in df_with_indicators.columns
-        assert "ADX_14" not in df_with_indicators.columns, "ADX_14 should be renamed to adx_14"
+        assert "ADX_14" not in df_with_indicators.columns, (
+            "ADX_14 should be renamed to adx_14"
+        )
 
     def test_adx_di_lowercase(self, df_with_indicators):
         """DMP_14 → dmp_14, DMN_14 → dmn_14 리네임 검증 (+DI/-DI)."""
@@ -97,9 +102,15 @@ class TestComputeIndicators:
                    bb_upper_20, bb_lower_20, bb_mid_20
         """
         required = [
-            "close", "volume", "adx_14", "atr_14",
-            "ema_20", "ema_50",
-            "bb_upper_20", "bb_lower_20", "bb_mid_20",
+            "close",
+            "volume",
+            "adx_14",
+            "atr_14",
+            "ema_20",
+            "ema_50",
+            "bb_upper_20",
+            "bb_lower_20",
+            "bb_mid_20",
         ]
         for col in required:
             assert col in df_with_indicators.columns, (
@@ -134,9 +145,7 @@ class TestComputeIndicators:
         """지표 값이 전부 NaN이 아닌지 확인 (충분한 데이터 제공 시)."""
         key_cols = ["ema_20", "ema_50", "adx_14", "bb_upper_20", "rsi_14", "atr_14"]
         for col in key_cols:
-            assert df_with_indicators[col].notna().any(), (
-                f"Column '{col}' is all NaN"
-            )
+            assert df_with_indicators[col].notna().any(), f"Column '{col}' is all NaN"
 
     def test_short_dataframe_no_error(self, svc):
         """데이터 1행이어도 에러 없이 원본 반환 (len < 2 조기 반환)."""
@@ -146,34 +155,25 @@ class TestComputeIndicators:
 
 
 class TestBacktestColumnParity:
-    """backtest_v2._RENAME_MAP과 라이브 _INDICATOR_RENAME 사이의 일관성 검증.
+    """COIN-52: 라이브/백테스트가 동일한 indicators._RENAME_MAP을 사용하는지 검증."""
 
-    두 맵의 교집합 키에 대해 동일한 target 컬럼명을 가져야 함.
-    한쪽 맵이 변경되면 다른 쪽도 같이 업데이트해야 함을 보장.
-    """
+    def test_unified_rename_map_covers_adx(self):
+        from services.indicators import _RENAME_MAP
+        assert _RENAME_MAP.get("ADX_14") == "adx_14"
+        assert _RENAME_MAP.get("DMP_14") == "dmp_14"
+        assert _RENAME_MAP.get("DMN_14") == "dmn_14"
 
-    def test_rename_map_covers_adx(self):
-        rename = MarketDataService._INDICATOR_RENAME
-        assert rename.get("ADX_14") == "adx_14"
+    def test_unified_rename_map_covers_macd(self):
+        from services.indicators import _RENAME_MAP
+        assert _RENAME_MAP.get("MACD_12_26_9") == "macd_line"
+        assert _RENAME_MAP.get("MACDs_12_26_9") == "macd_signal"
+        assert _RENAME_MAP.get("MACDh_12_26_9") == "macd_hist"
 
-    def test_rename_map_covers_macd(self):
-        rename = MarketDataService._INDICATOR_RENAME
-        assert rename.get("MACD_12_26_9") == "macd_line"
-        assert rename.get("MACDs_12_26_9") == "macd_signal"
-        assert rename.get("MACDh_12_26_9") == "macd_hist"
-
-    def test_shared_keys_produce_same_targets(self):
-        """backtest_v2._RENAME_MAP과 공유하는 키는 동일한 target을 가져야 함.
-
-        예: 둘 다 'ADX_14'를 가지면 둘 다 'adx_14'로 매핑해야 함.
-        한 맵에서 target을 바꾸면 라이브/백테스트 컬럼 불일치가 재발.
-        """
+    def test_backtest_v2_uses_unified_rename_map(self):
+        """COIN-52: backtest_v2._RENAME_MAP이 indicators._RENAME_MAP과 동일 객체."""
         from backtest_v2 import _RENAME_MAP as backtest_rename
+        from services.indicators import _RENAME_MAP as unified_rename
 
-        live_rename = MarketDataService._INDICATOR_RENAME
-        shared_keys = set(backtest_rename) & set(live_rename)
-        for key in shared_keys:
-            assert live_rename[key] == backtest_rename[key], (
-                f"Column rename conflict for '{key}': "
-                f"live={live_rename[key]!r}, backtest={backtest_rename[key]!r}"
-            )
+        assert backtest_rename is unified_rename, (
+            "backtest_v2._RENAME_MAP should be the same object as indicators._RENAME_MAP"
+        )

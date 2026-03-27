@@ -128,19 +128,20 @@ class MLSignalFilter:
         sma20 = row.get("SMA_20", row.get("sma_20", price))
         sma50 = row.get("SMA_50", row.get("sma_50", price))
         vol = row.get("volume", 0)
-        vol_sma = row.get("Volume_SMA_20", vol if vol > 0 else 1)
+        vol_sma = row.get("volume_sma_20", row.get("Volume_SMA_20", vol if vol > 0 else 1))
 
-        # BBands
-        bb_upper = None
-        bb_lower = None
-        bb_middle = None
-        for col in row.index:
-            if col.startswith("BBU_"):
-                bb_upper = row[col]
-            elif col.startswith("BBL_"):
-                bb_lower = row[col]
-            elif col.startswith("BBM_"):
-                bb_middle = row[col]
+        # BBands — unified pipeline outputs bb_upper_20 etc., fallback to raw BBU_ prefix
+        bb_upper = row.get("bb_upper_20")
+        bb_lower = row.get("bb_lower_20")
+        bb_middle = row.get("bb_mid_20")
+        if bb_upper is None:
+            for col in row.index:
+                if col.startswith("BBU_"):
+                    bb_upper = row[col]
+                elif col.startswith("BBL_"):
+                    bb_lower = row[col]
+                elif col.startswith("BBM_"):
+                    bb_middle = row[col]
 
         if bb_upper and bb_lower and bb_middle and not pd.isna(bb_middle) and bb_middle > 0:
             band_width = (float(bb_upper) - float(bb_lower)) / float(bb_middle)

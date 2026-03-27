@@ -2,7 +2,6 @@ import asyncio
 import time
 import structlog
 import pandas as pd
-import pandas_ta as ta
 from collections import OrderedDict
 from exchange.base import ExchangeAdapter
 from exchange.data_models import Candle, Ticker
@@ -61,12 +60,17 @@ class MarketDataService:
             except Exception as e:
                 last_err = e
                 if attempt < _MAX_RETRIES - 1:
-                    wait = _RETRY_BASE_SEC * (2 ** attempt)
+                    wait = _RETRY_BASE_SEC * (2**attempt)
                     err_str = str(e)
                     # 삭제된 심볼은 재시도 없이 즉시 실패
                     if "does not have market symbol" in err_str:
                         raise e
-                    logger.warning("market_data_retry", attempt=attempt + 1, wait=wait, error=err_str)
+                    logger.warning(
+                        "market_data_retry",
+                        attempt=attempt + 1,
+                        wait=wait,
+                        error=err_str,
+                    )
                     await asyncio.sleep(wait)
         raise last_err
 
@@ -90,7 +94,10 @@ class MarketDataService:
         return df
 
     async def get_ohlcv_df(
-        self, symbol: str, timeframe: str = "1h", limit: int = 200,
+        self,
+        symbol: str,
+        timeframe: str = "1h",
+        limit: int = 200,
     ) -> pd.DataFrame:
         """Alias for get_candles (v2 엔진 호환)."""
         return await self.get_candles(symbol, timeframe, limit)
@@ -101,9 +108,7 @@ class MarketDataService:
         if cached is not None:
             return cached
 
-        ticker = await self._fetch_with_retry(
-            self._exchange.fetch_ticker, symbol
-        )
+        ticker = await self._fetch_with_retry(self._exchange.fetch_ticker, symbol)
         self._ticker_cache.put(symbol, ticker)
         return ticker
 
@@ -136,88 +141,15 @@ class MarketDataService:
         df.sort_index(inplace=True)
         return df
 
-    # pandas_ta 출력 → 라이브 전략 컬럼명 매핑 (backtest_v2._RENAME_MAP과 일치)
-    _INDICATOR_RENAME: dict[str, str] = {
-        "ADX_14": "adx_14",
-        "DMP_14": "dmp_14",
-        "DMN_14": "dmn_14",
-        "MACD_12_26_9": "macd_line",
-        "MACDs_12_26_9": "macd_signal",
-        "MACDh_12_26_9": "macd_hist",
-    }
-
     def _compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Pre-compute commonly used technical indicators.
 
-        컬럼 규칙: 라이브 = lowercase (sma_20, rsi_14, adx_14, bb_upper_20 등).
-        pandas_ta가 대문자로 출력하는 지표(ADX, BBands, MACD)는 리네임 처리.
+        COIN-52: services.indicators.compute_indicators()로 위임.
+        백테스트/라이브 동일 파이프라인 사용.
         """
-        if len(df) < 2:
-            return df
+        from services.indicators import compute_indicators
 
-        # Simple Moving Averages
-        df["sma_9"] = ta.sma(df["close"], length=9)
-        df["sma_20"] = ta.sma(df["close"], length=20)
-        df["sma_50"] = ta.sma(df["close"], length=50)
-        df["sma_200"] = ta.sma(df["close"], length=200)
-
-        # Exponential Moving Averages — v2 레짐 전략 필수 (ema_9/20/21/50)
-        df["ema_9"] = ta.ema(df["close"], length=9)
-        df["ema_12"] = ta.ema(df["close"], length=12)
-        df["ema_20"] = ta.ema(df["close"], length=20)
-        df["ema_21"] = ta.ema(df["close"], length=21)
-        df["ema_26"] = ta.ema(df["close"], length=26)
-        df["ema_50"] = ta.ema(df["close"], length=50)
-
-        # RSI
-        df["rsi_14"] = ta.rsi(df["close"], length=14)
-
-        # MACD — pandas_ta 출력: MACD_12_26_9, MACDs_12_26_9, MACDh_12_26_9
-        macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
-        if macd is not None:
-            df = pd.concat([df, macd], axis=1)
-
-        # Bollinger Bands — pandas_ta 출력: BBL_20_2.0, BBM_20_2.0, BBU_20_2.0
-        bbands = ta.bbands(df["close"], length=20, std=2.0)
-        if bbands is not None:
-            df = pd.concat([df, bbands], axis=1)
-
-        # ATR (Average True Range)
-        df["atr_14"] = ta.atr(df["high"], df["low"], df["close"], length=14)
-
-        # ADX (Average Directional Index) — pandas_ta 출력: ADX_14, DMP_14, DMN_14
-        adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
-        if adx_df is not None:
-            df = pd.concat([df, adx_df], axis=1)
-
-        # SMA 60 — 시장 추세 판단용
-        df["sma_60"] = ta.sma(df["close"], length=60)
-
-        # Volume SMA
-        df["volume_sma_20"] = ta.sma(df["volume"], length=20)
-
-        # ── pandas_ta 대문자 컬럼 → lowercase 리네임 ──
-        df.rename(columns=self._INDICATOR_RENAME, inplace=True)
-
-        # BB 컬럼명은 pandas_ta 버전에 따라 suffix가 다를 수 있음 (BBU_20_2.0 vs BBU_20_2.0_2.0)
-        # 한 번에 dict를 빌드한 뒤 단일 rename 호출
-        _bb_prefix_map = {
-            "BBU_20": "bb_upper_20",
-            "BBL_20": "bb_lower_20",
-            "BBM_20": "bb_mid_20",
-            "BBB_20": "bb_bandwidth_20",
-            "BBP_20": "bb_percent_20",
-        }
-        bb_rename: dict[str, str] = {}
-        for col in df.columns:
-            for prefix, target in _bb_prefix_map.items():
-                if col.startswith(prefix) and target not in df.columns:
-                    bb_rename[col] = target
-                    break
-        if bb_rename:
-            df.rename(columns=bb_rename, inplace=True)
-
-        return df
+        return compute_indicators(df)
 
     def clear_cache(self) -> None:
         self._ohlcv_cache.clear()

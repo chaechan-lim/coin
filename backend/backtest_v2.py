@@ -23,7 +23,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
-import pandas_ta as ta
 
 # structlog 로그 레벨을 WARNING으로 올려서 불필요한 출력 제거
 logging.basicConfig(level=logging.WARNING)
@@ -50,19 +49,8 @@ SPOT_1H_LOOKBACK = 400    # 현물 4전략 모드: 1h→4h 리샘플링용 ((30+
 
 COINS_DEFAULT = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT"]
 
-# pandas_ta → v2 전략 컬럼 매핑
-_RENAME_MAP = {
-    "EMA_9": "ema_9",
-    "EMA_21": "ema_21",
-    "EMA_20": "ema_20",
-    "EMA_50": "ema_50",
-    "RSI_14": "rsi_14",
-    "ATRr_14": "atr_14",
-    "ADX_14": "adx_14",
-    "BBU_20_2.0": "bb_upper_20",
-    "BBL_20_2.0": "bb_lower_20",
-    "BBM_20_2.0": "bb_mid_20",
-}
+# COIN-52: 지표 계산 → services.indicators 통합 모듈 사용
+from services.indicators import compute_indicators, _RENAME_MAP  # noqa: F401 (테스트 호환)
 
 
 # v1 전략 → v2 레짐 매핑 (미니 앙상블)
@@ -402,45 +390,12 @@ class SpotStrategyAdapter(RegimeStrategy):
         if len(ohlcv) < 30:
             return None
 
-        # 현물 전략에 필요한 인디케이터 계산 (lowercase — 백테스트 컨벤션)
-        ohlcv.ta.sma(length=5, append=True)
-        ohlcv.ta.sma(length=20, append=True)
-        ohlcv.ta.sma(length=50, append=True)
-        ohlcv.ta.sma(length=60, append=True)
-        ohlcv.ta.ema(length=9, append=True)
-        ohlcv.ta.ema(length=12, append=True)
-        ohlcv.ta.ema(length=20, append=True)
-        ohlcv.ta.ema(length=21, append=True)
-        ohlcv.ta.ema(length=26, append=True)
-        ohlcv.ta.ema(length=50, append=True)
-        ohlcv.ta.rsi(length=14, append=True)
-        ohlcv.ta.atr(length=14, append=True)
-        ohlcv.ta.adx(length=14, append=True)
-        ohlcv.ta.bbands(length=20, std=2, append=True)
-        ohlcv.ta.macd(fast=12, slow=26, signal=9, append=True)
-        ohlcv["Volume_SMA_20"] = ohlcv["volume"].rolling(window=20).mean()
+        # COIN-52: 통합 지표 계산 파이프라인 사용
+        ohlcv = compute_indicators(ohlcv)
 
-        # pandas_ta → lowercase 매핑
-        ohlcv.rename(columns=_RENAME_MAP, inplace=True)
-        for col in ohlcv.columns:
-            if col.startswith("BBU_20") and "bb_upper_20" not in ohlcv.columns:
-                ohlcv.rename(columns={col: "bb_upper_20"}, inplace=True)
-            elif col.startswith("BBL_20") and "bb_lower_20" not in ohlcv.columns:
-                ohlcv.rename(columns={col: "bb_lower_20"}, inplace=True)
-            elif col.startswith("BBM_20") and "bb_mid_20" not in ohlcv.columns:
-                ohlcv.rename(columns={col: "bb_mid_20"}, inplace=True)
-
-        # 추가 lowercase alias (현물 전략이 사용하는 컬럼명)
-        _spot_rename = {
-            "SMA_5": "sma_5", "SMA_20": "sma_20", "SMA_50": "sma_50", "SMA_60": "sma_60",
-            "EMA_12": "ema_12", "EMA_26": "ema_26",
-            "MACDh_12_26_9": "macd_hist",
-            "MACD_12_26_9": "macd_line",
-            "MACDs_12_26_9": "macd_signal",
-        }
-        ohlcv.rename(columns=_spot_rename, inplace=True)
-
-        ohlcv.dropna(inplace=True)
+        # sma_200 등 장기 지표는 데이터 부족 시 NaN — 전략에 필요한 지표만 기준으로 dropna
+        _core_cols = [c for c in ["ema_20", "rsi_14", "atr_14", "sma_20", "sma_50", "sma_60"] if c in ohlcv.columns]
+        ohlcv.dropna(subset=_core_cols, inplace=True)
         return ohlcv
 
 
@@ -551,42 +506,18 @@ async def fetch_ohlcv_cached(
 
 
 def compute_v2_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """v2 전략 + v1 전략에 필요한 기술적 지표 계산."""
+    """v2 전략 + v1 전략에 필요한 기술적 지표 계산.
+
+    COIN-52: services.indicators.compute_indicators()로 위임.
+    """
     df = df.copy()
 
-    # v2 전략용
-    df.ta.ema(length=9, append=True)
-    df.ta.ema(length=20, append=True)
-    df.ta.ema(length=21, append=True)
-    df.ta.ema(length=50, append=True)
-    df.ta.rsi(length=14, append=True)
-    df.ta.atr(length=14, append=True)
-    df.ta.adx(length=14, append=True)
-    df.ta.bbands(length=20, std=2, append=True)
+    # 통합 지표 계산 파이프라인 사용
+    df = compute_indicators(df)
 
-    # v1 전략용 추가 지표
-    df.ta.sma(length=5, append=True)
-    df.ta.sma(length=20, append=True)
-    df.ta.sma(length=50, append=True)
-    df.ta.sma(length=60, append=True)
-    df.ta.ema(length=12, append=True)
-    df.ta.ema(length=26, append=True)
-    df.ta.macd(fast=12, slow=26, signal=9, append=True)
-    df["Volume_SMA_20"] = df["volume"].rolling(window=20).mean()
-
-    # 컬럼 이름 변환: pandas_ta uppercase → v2 lowercase
-    df.rename(columns=_RENAME_MAP, inplace=True)
-
-    # BB 컬럼은 pandas_ta 버전에 따라 suffix가 다름 — 동적 매핑
-    for col in df.columns:
-        if col.startswith("BBU_20") and "bb_upper_20" not in df.columns:
-            df.rename(columns={col: "bb_upper_20"}, inplace=True)
-        elif col.startswith("BBL_20") and "bb_lower_20" not in df.columns:
-            df.rename(columns={col: "bb_lower_20"}, inplace=True)
-        elif col.startswith("BBM_20") and "bb_mid_20" not in df.columns:
-            df.rename(columns={col: "bb_mid_20"}, inplace=True)
-
-    df.dropna(inplace=True)
+    # sma_200 등 장기 지표는 데이터 부족 시 NaN — 전략에 필요한 지표만 기준으로 dropna
+    _core_cols = [c for c in ["ema_20", "rsi_14", "atr_14", "sma_20", "sma_50", "sma_60"] if c in df.columns]
+    df.dropna(subset=_core_cols, inplace=True)
 
     # 날짜 필터
     cutoff = datetime.now(timezone.utc) - timedelta(days=1000)
