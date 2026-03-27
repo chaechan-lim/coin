@@ -667,7 +667,7 @@ async def lifespan(app: FastAPI):
             )
 
     # ── 입출금 자동 감지 스케줄러 ───────────────────────────────
-    from engine.capital_sync import sync_binance_deposits, detect_bithumb_balance_change
+    from engine.capital_sync import sync_binance_deposits, sync_binance_internal_transfers, detect_bithumb_balance_change
 
     if config.binance.enabled and _binance_engine and not (config.binance_trading.mode == "paper"):
         binance_adapter_for_sync = engine_registry.get_engine("binance_futures")
@@ -685,6 +685,27 @@ async def lifespan(app: FastAPI):
                 _wrap(capital_sync_binance),
                 name="capital_sync_binance",
                 seconds=1800,
+            )
+
+            async def capital_sync_internal_transfers():
+                """spot↔futures 내부 이체 자동 감지 (5분 주기)."""
+                sf = get_session_factory()
+                async with sf() as sess:
+                    b_pm = engine_registry.get_portfolio_manager("binance_futures")
+                    transfer_txs = await sync_binance_internal_transfers(
+                        sess,
+                        binance_adapter_for_sync._exchange,
+                        futures_pm=b_pm,
+                        exchange_name="binance_futures",
+                    )
+                    if transfer_txs:
+                        if b_pm:
+                            await b_pm.load_initial_balance_from_db(sess)
+                    await sess.commit()
+            _scheduler.add_job(
+                _wrap(capital_sync_internal_transfers),
+                name="capital_sync_internal_transfers",
+                seconds=300,
             )
 
     if config.exchange.enabled and config.trading.mode != "paper":

@@ -399,3 +399,320 @@ async def test_detect_bithumb_balance_change_default_exchange(session):
 
     result = await detect_bithumb_balance_change(session, pm, adapter)
     assert result is None
+
+
+# ── sync_binance_internal_transfers Tests ─────────────────────
+
+
+def _make_adapter(transfer_responses: dict):
+    """Create a mock adapter whose _exchange.sapiGetAssetTransfer returns configured responses."""
+    from unittest.mock import MagicMock
+
+    async def _sapi_get_asset_transfer(params):
+        transfer_type = params.get("type", "")
+        return transfer_responses.get(transfer_type, {"total": 0, "rows": []})
+
+    adapter = MagicMock()
+    adapter._exchange = MagicMock()
+    adapter._exchange.sapiGetAssetTransfer = _sapi_get_asset_transfer
+    return adapter
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_empty(session):
+    """이체 없음 → 빈 결과."""
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    adapter = _make_adapter({
+        "MAIN_UMFUTURE": {"total": 0, "rows": []},
+        "UMFUTURE_MAIN": {"total": 0, "rows": []},
+    })
+    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_spot_to_futures(session):
+    """MAIN_UMFUTURE 이체 감지 → deposit TX 생성 및 PM cash 증가."""
+    from unittest.mock import MagicMock
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    adapter = _make_adapter({
+        "MAIN_UMFUTURE": {
+            "total": 1,
+            "rows": [
+                {
+                    "asset": "USDT",
+                    "amount": "500.0",
+                    "type": "MAIN_UMFUTURE",
+                    "status": "CONFIRMED",
+                    "tranId": 111222333,
+                }
+            ],
+        },
+        "UMFUTURE_MAIN": {"total": 0, "rows": []},
+    })
+
+    pm = MagicMock()
+    pm.cash_balance = 1000.0
+
+    result = await sync_binance_internal_transfers(session, adapter, futures_pm=pm)
+
+    assert len(result) == 1
+    tx = result[0]
+    assert tx.tx_type == "deposit"
+    assert tx.amount == 500.0
+    assert tx.currency == "USDT"
+    assert tx.exchange == "binance_futures"
+    assert tx.exchange_tx_id == "transfer_111222333"
+    assert tx.source == "auto_detected"
+    assert tx.confirmed is False
+
+    # PM cash가 즉시 조정되어야 함
+    assert pm.cash_balance == 1500.0
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_futures_to_spot(session):
+    """UMFUTURE_MAIN 이체 감지 → withdrawal TX 생성 및 PM cash 감소."""
+    from unittest.mock import MagicMock
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    adapter = _make_adapter({
+        "MAIN_UMFUTURE": {"total": 0, "rows": []},
+        "UMFUTURE_MAIN": {
+            "total": 1,
+            "rows": [
+                {
+                    "asset": "USDT",
+                    "amount": "200.0",
+                    "type": "UMFUTURE_MAIN",
+                    "status": "CONFIRMED",
+                    "tranId": 444555666,
+                }
+            ],
+        },
+    })
+
+    pm = MagicMock()
+    pm.cash_balance = 800.0
+
+    result = await sync_binance_internal_transfers(session, adapter, futures_pm=pm)
+
+    assert len(result) == 1
+    tx = result[0]
+    assert tx.tx_type == "withdrawal"
+    assert tx.amount == 200.0
+    assert tx.exchange_tx_id == "transfer_444555666"
+
+    # PM cash가 감소해야 함
+    assert pm.cash_balance == 600.0
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_dedup(session):
+    """동일 tranId는 중복 기록하지 않음."""
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    # 이미 기록된 TX
+    session.add(CapitalTransaction(
+        exchange="binance_futures",
+        tx_type="deposit",
+        amount=100.0,
+        currency="USDT",
+        source="auto_detected",
+        confirmed=False,
+        exchange_tx_id="transfer_999888777",
+    ))
+    await session.flush()
+
+    adapter = _make_adapter({
+        "MAIN_UMFUTURE": {
+            "total": 1,
+            "rows": [
+                {
+                    "asset": "USDT",
+                    "amount": "100.0",
+                    "type": "MAIN_UMFUTURE",
+                    "status": "CONFIRMED",
+                    "tranId": 999888777,
+                }
+            ],
+        },
+        "UMFUTURE_MAIN": {"total": 0, "rows": []},
+    })
+
+    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    assert result == []  # 중복 → 새 TX 없음
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_both_directions(session):
+    """두 방향 동시에 감지."""
+    from unittest.mock import MagicMock
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    adapter = _make_adapter({
+        "MAIN_UMFUTURE": {
+            "total": 1,
+            "rows": [
+                {
+                    "asset": "USDT",
+                    "amount": "300.0",
+                    "type": "MAIN_UMFUTURE",
+                    "status": "CONFIRMED",
+                    "tranId": 100001,
+                }
+            ],
+        },
+        "UMFUTURE_MAIN": {
+            "total": 1,
+            "rows": [
+                {
+                    "asset": "USDT",
+                    "amount": "100.0",
+                    "type": "UMFUTURE_MAIN",
+                    "status": "CONFIRMED",
+                    "tranId": 100002,
+                }
+            ],
+        },
+    })
+
+    pm = MagicMock()
+    pm.cash_balance = 500.0
+
+    result = await sync_binance_internal_transfers(session, adapter, futures_pm=pm)
+
+    assert len(result) == 2
+    types = {tx.tx_type for tx in result}
+    assert types == {"deposit", "withdrawal"}
+
+    # net: +300 - 100 = +200 → final 700
+    assert pm.cash_balance == 700.0
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_non_usdt_ignored(session):
+    """USDT가 아닌 자산은 무시."""
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    adapter = _make_adapter({
+        "MAIN_UMFUTURE": {
+            "total": 1,
+            "rows": [
+                {
+                    "asset": "BNB",
+                    "amount": "10.0",
+                    "type": "MAIN_UMFUTURE",
+                    "status": "CONFIRMED",
+                    "tranId": 777001,
+                }
+            ],
+        },
+        "UMFUTURE_MAIN": {"total": 0, "rows": []},
+    })
+
+    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_unconfirmed_ignored(session):
+    """CONFIRMED가 아닌 이체는 무시."""
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    adapter = _make_adapter({
+        "MAIN_UMFUTURE": {
+            "total": 1,
+            "rows": [
+                {
+                    "asset": "USDT",
+                    "amount": "100.0",
+                    "type": "MAIN_UMFUTURE",
+                    "status": "PENDING",
+                    "tranId": 888001,
+                }
+            ],
+        },
+        "UMFUTURE_MAIN": {"total": 0, "rows": []},
+    })
+
+    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_api_error_graceful(session):
+    """API 호출 실패 시 예외를 삼키고 빈 리스트 반환."""
+    from unittest.mock import MagicMock
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    async def _fail(params):
+        raise RuntimeError("network error")
+
+    adapter = MagicMock()
+    adapter._exchange = MagicMock()
+    adapter._exchange.sapiGetAssetTransfer = _fail
+
+    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_no_pm_cash_adjustment(session):
+    """futures_pm=None이면 PM cash 조정 없이 TX만 생성."""
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    adapter = _make_adapter({
+        "MAIN_UMFUTURE": {
+            "total": 1,
+            "rows": [
+                {
+                    "asset": "USDT",
+                    "amount": "150.0",
+                    "type": "MAIN_UMFUTURE",
+                    "status": "CONFIRMED",
+                    "tranId": 555001,
+                }
+            ],
+        },
+        "UMFUTURE_MAIN": {"total": 0, "rows": []},
+    })
+
+    # PM이 None이어도 TX는 정상 생성되어야 함
+    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    assert len(result) == 1
+    assert result[0].tx_type == "deposit"
+    assert result[0].amount == 150.0
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_withdrawal_floor_zero(session):
+    """출금 금액이 현재 cash보다 크면 0으로 내려가야 하며 음수가 되지 않음."""
+    from unittest.mock import MagicMock
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    adapter = _make_adapter({
+        "MAIN_UMFUTURE": {"total": 0, "rows": []},
+        "UMFUTURE_MAIN": {
+            "total": 1,
+            "rows": [
+                {
+                    "asset": "USDT",
+                    "amount": "9999.0",
+                    "type": "UMFUTURE_MAIN",
+                    "status": "CONFIRMED",
+                    "tranId": 666001,
+                }
+            ],
+        },
+    })
+
+    pm = MagicMock()
+    pm.cash_balance = 50.0
+
+    result = await sync_binance_internal_transfers(session, adapter, futures_pm=pm)
+    assert len(result) == 1
+    # 50 - 9999 = -9949 → floor at 0
+    assert pm.cash_balance == 0.0
