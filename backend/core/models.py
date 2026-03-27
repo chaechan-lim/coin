@@ -206,6 +206,9 @@ class CapitalTransaction(Base):
     __tablename__ = "capital_transactions"
     __table_args__ = (
         Index("ix_capital_tx_exchange_at", "exchange", "created_at"),
+        # exchange_tx_id가 NULL이 아닌 경우 (exchange, exchange_tx_id) 쌍 중복 방지
+        # → 동시 스케줄러 틱에서 같은 tranId가 이중 삽입될 때 IntegrityError로 차단
+        UniqueConstraint("exchange", "exchange_tx_id", name="uq_capital_tx_exchange_txid"),
     )
 
     id = Column(Integer, primary_key=True)

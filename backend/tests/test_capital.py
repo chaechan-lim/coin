@@ -421,7 +421,7 @@ async def test_sync_binance_internal_transfers_empty(session):
         "MAIN_UMFUTURE": {"total": 0, "rows": []},
         "UMFUTURE_MAIN": {"total": 0, "rows": []},
     })
-    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    result = await sync_binance_internal_transfers(session, adapter)
     assert result == []
 
 
@@ -450,7 +450,7 @@ async def test_sync_binance_internal_transfers_spot_to_futures(session):
     pm = MagicMock()
     pm.cash_balance = 1000.0
 
-    result = await sync_binance_internal_transfers(session, adapter, futures_pm=pm)
+    result = await sync_binance_internal_transfers(session, adapter)
 
     assert len(result) == 1
     tx = result[0]
@@ -462,7 +462,9 @@ async def test_sync_binance_internal_transfers_spot_to_futures(session):
     assert tx.source == "auto_detected"
     assert tx.confirmed is False
 
-    # PM cash가 즉시 조정되어야 함
+    # PM cash 조정은 호출자 책임 (commit 후 수행)
+    for t in result:
+        pm.cash_balance = pm.cash_balance + t.amount if t.tx_type == "deposit" else max(0.0, pm.cash_balance - t.amount)
     assert pm.cash_balance == 1500.0
 
 
@@ -491,7 +493,7 @@ async def test_sync_binance_internal_transfers_futures_to_spot(session):
     pm = MagicMock()
     pm.cash_balance = 800.0
 
-    result = await sync_binance_internal_transfers(session, adapter, futures_pm=pm)
+    result = await sync_binance_internal_transfers(session, adapter)
 
     assert len(result) == 1
     tx = result[0]
@@ -499,7 +501,9 @@ async def test_sync_binance_internal_transfers_futures_to_spot(session):
     assert tx.amount == 200.0
     assert tx.exchange_tx_id == "transfer_444555666"
 
-    # PM cash가 감소해야 함
+    # PM cash 조정은 호출자 책임
+    for t in result:
+        pm.cash_balance = pm.cash_balance + t.amount if t.tx_type == "deposit" else max(0.0, pm.cash_balance - t.amount)
     assert pm.cash_balance == 600.0
 
 
@@ -536,7 +540,7 @@ async def test_sync_binance_internal_transfers_dedup(session):
         "UMFUTURE_MAIN": {"total": 0, "rows": []},
     })
 
-    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    result = await sync_binance_internal_transfers(session, adapter)
     assert result == []  # 중복 → 새 TX 없음
 
 
@@ -576,13 +580,15 @@ async def test_sync_binance_internal_transfers_both_directions(session):
     pm = MagicMock()
     pm.cash_balance = 500.0
 
-    result = await sync_binance_internal_transfers(session, adapter, futures_pm=pm)
+    result = await sync_binance_internal_transfers(session, adapter)
 
     assert len(result) == 2
     types = {tx.tx_type for tx in result}
     assert types == {"deposit", "withdrawal"}
 
-    # net: +300 - 100 = +200 → final 700
+    # PM cash 조정은 호출자 책임: net +300 - 100 = +200 → final 700
+    for t in result:
+        pm.cash_balance = pm.cash_balance + t.amount if t.tx_type == "deposit" else max(0.0, pm.cash_balance - t.amount)
     assert pm.cash_balance == 700.0
 
 
@@ -607,7 +613,7 @@ async def test_sync_binance_internal_transfers_non_usdt_ignored(session):
         "UMFUTURE_MAIN": {"total": 0, "rows": []},
     })
 
-    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    result = await sync_binance_internal_transfers(session, adapter)
     assert result == []
 
 
@@ -632,7 +638,7 @@ async def test_sync_binance_internal_transfers_unconfirmed_ignored(session):
         "UMFUTURE_MAIN": {"total": 0, "rows": []},
     })
 
-    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    result = await sync_binance_internal_transfers(session, adapter)
     assert result == []
 
 
@@ -649,13 +655,13 @@ async def test_sync_binance_internal_transfers_api_error_graceful(session):
     adapter._exchange = MagicMock()
     adapter._exchange.sapiGetAssetTransfer = _fail
 
-    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    result = await sync_binance_internal_transfers(session, adapter)
     assert result == []
 
 
 @pytest.mark.asyncio
-async def test_sync_binance_internal_transfers_no_pm_cash_adjustment(session):
-    """futures_pm=None이면 PM cash 조정 없이 TX만 생성."""
+async def test_sync_binance_internal_transfers_returns_txs_for_caller(session):
+    """함수는 TX만 반환하며, PM cash 조정은 호출자(main.py)가 commit 후 수행."""
     from engine.capital_sync import sync_binance_internal_transfers
 
     adapter = _make_adapter({
@@ -674,8 +680,7 @@ async def test_sync_binance_internal_transfers_no_pm_cash_adjustment(session):
         "UMFUTURE_MAIN": {"total": 0, "rows": []},
     })
 
-    # PM이 None이어도 TX는 정상 생성되어야 함
-    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    result = await sync_binance_internal_transfers(session, adapter)
     assert len(result) == 1
     assert result[0].tx_type == "deposit"
     assert result[0].amount == 150.0
@@ -706,9 +711,11 @@ async def test_sync_binance_internal_transfers_withdrawal_floor_zero(session):
     pm = MagicMock()
     pm.cash_balance = 50.0
 
-    result = await sync_binance_internal_transfers(session, adapter, futures_pm=pm)
+    result = await sync_binance_internal_transfers(session, adapter)
     assert len(result) == 1
-    # 50 - 9999 = -9949 → floor at 0
+    # PM cash 조정은 호출자 책임: 50 - 9999 = -9949 → floor at 0
+    for t in result:
+        pm.cash_balance = pm.cash_balance + t.amount if t.tx_type == "deposit" else max(0.0, pm.cash_balance - t.amount)
     assert pm.cash_balance == 0.0
 
 
@@ -732,7 +739,7 @@ async def test_sync_binance_internal_transfers_missing_tran_id(session):
         "UMFUTURE_MAIN": {"total": 0, "rows": []},
     })
 
-    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    result = await sync_binance_internal_transfers(session, adapter)
     assert result == []
 
 
@@ -752,7 +759,7 @@ async def test_sync_binance_internal_transfers_zero_amount(session):
         "UMFUTURE_MAIN": {"total": 0, "rows": []},
     })
 
-    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    result = await sync_binance_internal_transfers(session, adapter)
     assert result == []
 
 
@@ -783,7 +790,7 @@ async def test_sync_binance_internal_transfers_pagination(session):
     adapter._exchange.sapiGetAssetTransfer = _sapi_get
 
     result = await sync_binance_internal_transfers(
-        session, adapter, futures_pm=None,
+        session, adapter,
         exchange_name="binance_futures",
     )
 
@@ -822,10 +829,50 @@ async def test_sync_binance_internal_transfers_start_time_forwarded(session):
     expected_ms = int(fixed_time.timestamp() * 1000)
 
     await sync_binance_internal_transfers(
-        session, adapter, futures_pm=None,
+        session, adapter,
         last_sync_time=fixed_time,
     )
 
     assert len(captured) == 2  # MAIN_UMFUTURE + UMFUTURE_MAIN
     for call in captured:
         assert call["startTime"] == expected_ms
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_naive_datetime_from_db(session):
+    """DB에서 timezone-naive datetime을 반환해도 UTC로 정규화하여 startTime 계산."""
+    from datetime import datetime, timezone
+    from engine.capital_sync import sync_binance_internal_transfers
+    from unittest.mock import MagicMock
+
+    # DB에 기존 transfer_* TX 삽입 (SQLite는 naive datetime 반환)
+    session.add(CapitalTransaction(
+        exchange="binance_futures",
+        tx_type="deposit",
+        amount=100.0,
+        currency="USDT",
+        source="auto_detected",
+        confirmed=False,
+        exchange_tx_id="transfer_naive_test",
+    ))
+    await session.flush()
+
+    captured: list[dict] = []
+
+    async def _sapi_get(params):
+        captured.append(dict(params))
+        return {"total": 0, "rows": []}
+
+    adapter = MagicMock()
+    adapter._exchange = MagicMock()
+    adapter._exchange.sapiGetAssetTransfer = _sapi_get
+
+    # last_sync_time=None → DB에서 max(created_at) 읽음
+    # SQLite는 timezone-naive datetime을 반환할 수 있음 → UTC로 보정해야 함
+    await sync_binance_internal_transfers(session, adapter, exchange_name="binance_futures")
+
+    assert len(captured) == 2
+    # startTime이 미래가 아닌 합리적인 값이어야 함 (에러 없이 완료)
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    for call in captured:
+        assert call["startTime"] <= now_ms

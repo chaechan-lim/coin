@@ -135,6 +135,15 @@ def migrate(db_path: str) -> None:
         else:
             print("  positions unique constraint already correct — skip")
 
+    # 4. capital_transactions (exchange, exchange_tx_id) 유니크 인덱스 추가
+    #    SQLite는 CREATE UNIQUE INDEX IF NOT EXISTS 지원
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_capital_tx_exchange_txid
+        ON capital_transactions (exchange, exchange_tx_id)
+        WHERE exchange_tx_id IS NOT NULL
+    """)
+    print("  uq_capital_tx_exchange_txid index ensured")
+
     conn.commit()
     conn.close()
     print("Migration complete!")

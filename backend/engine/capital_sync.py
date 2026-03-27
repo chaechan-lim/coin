@@ -77,18 +77,19 @@ async def sync_binance_deposits(
 async def sync_binance_internal_transfers(
     session: AsyncSession,
     adapter,
-    futures_pm,
     exchange_name: str = "binance_futures",
     last_sync_time: datetime | None = None,
 ) -> list[CapitalTransaction]:
-    """바이낸스 spot↔futures 내부 이체를 자동 감지하여 선물 PM cash 조정.
+    """바이낸스 spot↔futures 내부 이체를 자동 감지.
 
     Binance Universal Transfer API (/sapi/v1/asset/transfer)로 다음 두 방향 조회:
     - MAIN_UMFUTURE: 현물 → USDM 선물 (선물 PM 입금)
     - UMFUTURE_MAIN: USDM 선물 → 현물 (선물 PM 출금)
 
     각 이체는 exchange_tx_id='transfer_{tranId}' 형식으로 중복 방지.
-    미확인(confirmed=False) CapitalTransaction으로 기록하고 futures_pm.cash_balance를 즉시 조정.
+    새 CapitalTransaction을 flush하고 반환.
+    PM cash 조정은 호출자가 session.commit() 성공 후 수행해야 함
+    (커밋 실패 시 재시도에서 이중 조정 방지).
     """
     # 기존 DB에서 이미 기록된 transfer exchange_tx_id 로드
     result = await session.execute(
@@ -98,7 +99,7 @@ async def sync_binance_internal_transfers(
             CapitalTransaction.exchange_tx_id.like("transfer_%"),
         )
     )
-    existing_ids = {row for row in result.scalars()}
+    existing_ids = set(result.scalars())
 
     # last_sync_time 기준 타임스탬프 (ms).
     # None이면 DB에서 가장 최근 transfer_* TX의 created_at을 조회해 재시작 후 누락 방지.
@@ -111,6 +112,9 @@ async def sync_binance_internal_transfers(
                 CapitalTransaction.exchange_tx_id.like("transfer_%"),
             )
         )
+        # SQLite는 timezone=True 컬럼을 naive datetime으로 반환 → UTC로 명시 보정
+        if latest_at is not None and latest_at.tzinfo is None:
+            latest_at = latest_at.replace(tzinfo=timezone.utc)
         last_sync_time = latest_at or datetime.now(timezone.utc) - timedelta(hours=24)
     start_ts = int(last_sync_time.timestamp() * 1000)
 
@@ -135,7 +139,7 @@ async def sync_binance_internal_transfers(
                 )
                 break
 
-            rows = resp.get("rows") or [] if isinstance(resp, dict) else []
+            rows = (resp.get("rows") or []) if isinstance(resp, dict) else []
             for row in rows:
                 # USDT만 처리
                 if row.get("asset", "").upper() != "USDT":
@@ -152,7 +156,7 @@ async def sync_binance_internal_transfers(
                 if exchange_tx_id in existing_ids:
                     continue
 
-                amount = float(row.get("amount", 0))
+                amount = float(row.get("amount") or 0)
                 if amount <= 0:
                     continue
 
@@ -193,20 +197,6 @@ async def sync_binance_internal_transfers(
 
     if new_txs:
         await session.flush()
-
-        # futures PM cash_balance 즉시 조정
-        if futures_pm is not None:
-            for tx in new_txs:
-                if tx.tx_type == "deposit":
-                    futures_pm.cash_balance = futures_pm.cash_balance + tx.amount
-                else:
-                    futures_pm.cash_balance = max(0.0, futures_pm.cash_balance - tx.amount)
-                logger.info(
-                    "futures_pm_cash_adjusted_for_transfer",
-                    tx_type=tx.tx_type,
-                    amount=tx.amount,
-                    new_cash=futures_pm.cash_balance,
-                )
 
         for tx in new_txs:
             direction = "입금" if tx.tx_type == "deposit" else "출금"

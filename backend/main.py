@@ -690,21 +690,37 @@ async def lifespan(app: FastAPI):
             _last_internal_transfer_sync: datetime | None = None
 
             async def capital_sync_internal_transfers():
-                """spot↔futures 내부 이체 자동 감지 (5분 주기)."""
+                """spot↔futures 내부 이체 자동 감지 (5분 주기).
+
+                PM cash 조정은 sess.commit() 성공 후에 수행하여
+                커밋 실패 → 롤백 → 재시도 시 이중 조정을 방지.
+                """
                 nonlocal _last_internal_transfer_sync
                 sf = get_session_factory()
                 sync_from = _last_internal_transfer_sync
                 async with sf() as sess:
-                    b_pm = engine_registry.get_portfolio_manager("binance_futures")
-                    await sync_binance_internal_transfers(
+                    new_txs = await sync_binance_internal_transfers(
                         sess,
                         binance_adapter_for_sync._exchange,
-                        futures_pm=b_pm,
                         exchange_name="binance_futures",
                         last_sync_time=sync_from,
                     )
                     await sess.commit()
                 _last_internal_transfer_sync = datetime.now(timezone.utc)
+                if new_txs:
+                    b_pm = engine_registry.get_portfolio_manager("binance_futures")
+                    if b_pm is not None:
+                        for tx in new_txs:
+                            if tx.tx_type == "deposit":
+                                b_pm.cash_balance += tx.amount
+                            else:
+                                b_pm.cash_balance = max(0.0, b_pm.cash_balance - tx.amount)
+                            logger.info(
+                                "futures_pm_cash_adjusted_for_transfer",
+                                tx_type=tx.tx_type,
+                                amount=tx.amount,
+                                new_cash=b_pm.cash_balance,
+                            )
             _scheduler.add_job(
                 _wrap(capital_sync_internal_transfers),
                 name="capital_sync_internal_transfers",
