@@ -699,14 +699,17 @@ async def lifespan(app: FastAPI):
                 sf = get_session_factory()
                 sync_from = _last_internal_transfer_sync
                 async with sf() as sess:
-                    new_txs = await sync_binance_internal_transfers(
+                    new_txs, all_ok = await sync_binance_internal_transfers(
                         sess,
                         binance_adapter_for_sync._exchange,
                         exchange_name="binance_futures",
                         last_sync_time=sync_from,
                     )
                     await sess.commit()
-                _last_internal_transfer_sync = datetime.now(timezone.utc)
+                # 방향 중 하나라도 API 오류 시 타임스탬프를 전진시키지 않음
+                # → 다음 틱에서 동일 윈도우를 재조회해 누락 방지
+                if all_ok:
+                    _last_internal_transfer_sync = datetime.now(timezone.utc)
                 if new_txs:
                     b_pm = engine_registry.get_portfolio_manager("binance_futures")
                     if b_pm is not None:

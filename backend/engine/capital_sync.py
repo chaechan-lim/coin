@@ -79,7 +79,7 @@ async def sync_binance_internal_transfers(
     adapter,
     exchange_name: str = "binance_futures",
     last_sync_time: datetime | None = None,
-) -> list[CapitalTransaction]:
+) -> tuple[list[CapitalTransaction], bool]:
     """바이낸스 spot↔futures 내부 이체를 자동 감지.
 
     Binance Universal Transfer API (/sapi/v1/asset/transfer)로 다음 두 방향 조회:
@@ -90,6 +90,10 @@ async def sync_binance_internal_transfers(
     새 CapitalTransaction을 flush하고 반환.
     PM cash 조정은 호출자가 session.commit() 성공 후 수행해야 함
     (커밋 실패 시 재시도에서 이중 조정 방지).
+
+    Returns:
+        (new_txs, all_ok): all_ok=False이면 1개 이상의 방향에서 API 오류 발생.
+        호출자는 all_ok=False 시 last_sync_time을 전진시키지 않아야 함.
     """
     # 기존 DB에서 이미 기록된 transfer exchange_tx_id 로드
     result = await session.execute(
@@ -119,6 +123,7 @@ async def sync_binance_internal_transfers(
     start_ts = int(last_sync_time.timestamp() * 1000)
 
     new_txs: list[CapitalTransaction] = []
+    had_error = False
     _PAGE_SIZE = 100
 
     for transfer_type in (_TRANSFER_SPOT_TO_FUTURES, _TRANSFER_FUTURES_TO_SPOT):
@@ -137,6 +142,7 @@ async def sync_binance_internal_transfers(
                     transfer_type=transfer_type,
                     error=str(e),
                 )
+                had_error = True
                 break
 
             rows = (resp.get("rows") or []) if isinstance(resp, dict) else []
@@ -156,7 +162,11 @@ async def sync_binance_internal_transfers(
                 if exchange_tx_id in existing_ids:
                     continue
 
-                amount = float(row.get("amount") or 0)
+                try:
+                    amount = float(row.get("amount") or 0)
+                except (TypeError, ValueError):
+                    logger.warning("invalid_transfer_amount", tran_id=tran_id, row=row)
+                    continue
                 if amount <= 0:
                     continue
 
@@ -207,7 +217,7 @@ async def sync_binance_internal_transfers(
                 metadata={"exchange_tx_id": tx.exchange_tx_id, "amount": tx.amount, "currency": "USDT", "tx_type": tx.tx_type},
             )
 
-    return new_txs
+    return new_txs, not had_error
 
 
 async def detect_bithumb_balance_change(
