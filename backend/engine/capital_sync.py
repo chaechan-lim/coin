@@ -7,7 +7,7 @@
 import structlog
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from core.models import CapitalTransaction
 from core.event_bus import emit_event
@@ -100,9 +100,18 @@ async def sync_binance_internal_transfers(
     )
     existing_ids = {row for row in result.scalars()}
 
-    # last_sync_time 기준 타임스탬프 (ms), 없으면 10분 이내 (poll 간격 5분보다 약간 넓게)
+    # last_sync_time 기준 타임스탬프 (ms).
+    # None이면 DB에서 가장 최근 transfer_* TX의 created_at을 조회해 재시작 후 누락 방지.
+    # DB에 기록이 없으면 24시간 이내로 fallback.
     if last_sync_time is None:
-        last_sync_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+        latest_at = await session.scalar(
+            select(func.max(CapitalTransaction.created_at))
+            .where(
+                CapitalTransaction.exchange == exchange_name,
+                CapitalTransaction.exchange_tx_id.like("transfer_%"),
+            )
+        )
+        last_sync_time = latest_at or datetime.now(timezone.utc) - timedelta(hours=24)
     start_ts = int(last_sync_time.timestamp() * 1000)
 
     new_txs: list[CapitalTransaction] = []

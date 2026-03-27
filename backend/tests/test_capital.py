@@ -710,3 +710,122 @@ async def test_sync_binance_internal_transfers_withdrawal_floor_zero(session):
     assert len(result) == 1
     # 50 - 9999 = -9949 → floor at 0
     assert pm.cash_balance == 0.0
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_missing_tran_id(session):
+    """tranId 없는 row는 조용히 무시."""
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    adapter = _make_adapter({
+        "MAIN_UMFUTURE": {
+            "total": 1,
+            "rows": [
+                {
+                    "asset": "USDT",
+                    "amount": "100.0",
+                    "status": "CONFIRMED",
+                    # tranId 키 없음
+                }
+            ],
+        },
+        "UMFUTURE_MAIN": {"total": 0, "rows": []},
+    })
+
+    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_zero_amount(session):
+    """amount=0 또는 음수인 row는 무시."""
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    adapter = _make_adapter({
+        "MAIN_UMFUTURE": {
+            "total": 2,
+            "rows": [
+                {"asset": "USDT", "amount": "0", "status": "CONFIRMED", "tranId": 11},
+                {"asset": "USDT", "amount": "-5.0", "status": "CONFIRMED", "tranId": 12},
+            ],
+        },
+        "UMFUTURE_MAIN": {"total": 0, "rows": []},
+    })
+
+    result = await sync_binance_internal_transfers(session, adapter, futures_pm=None)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_pagination(session):
+    """page=1에서 정확히 100건 반환 시 page=2 조회; page=2에서 빈 목록이면 종료."""
+    from engine.capital_sync import sync_binance_internal_transfers
+    from unittest.mock import MagicMock
+
+    _PAGE_SIZE = 100  # 모듈 상수와 동일
+    calls: list[dict] = []
+
+    # page 1: 100건 (full page), page 2: 0건 → 루프 종료
+    page1_rows = [
+        {"asset": "USDT", "amount": "1.0", "status": "CONFIRMED", "tranId": i}
+        for i in range(1, _PAGE_SIZE + 1)
+    ]
+
+    async def _sapi_get(params):
+        calls.append(dict(params))
+        page = params.get("current", 1)
+        if page == 1:
+            return {"total": _PAGE_SIZE, "rows": page1_rows}
+        return {"total": 0, "rows": []}
+
+    adapter = MagicMock()
+    adapter._exchange = MagicMock()
+    adapter._exchange.sapiGetAssetTransfer = _sapi_get
+
+    result = await sync_binance_internal_transfers(
+        session, adapter, futures_pm=None,
+        exchange_name="binance_futures",
+    )
+
+    # 100건 모두 기록
+    assert len(result) == _PAGE_SIZE
+
+    # MAIN_UMFUTURE 방향에서 2페이지 요청이 발생했음을 확인
+    main_calls = [c for c in calls if c.get("type") == "MAIN_UMFUTURE"]
+    assert len(main_calls) == 2
+    assert main_calls[0]["current"] == 1
+    assert main_calls[1]["current"] == 2
+
+    # 모든 tranId가 정확히 1회씩 기록됨 (중복 없음)
+    tx_ids = {tx.exchange_tx_id for tx in result}
+    assert len(tx_ids) == _PAGE_SIZE
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_start_time_forwarded(session):
+    """last_sync_time이 startTime(ms)으로 정확히 변환되어 API에 전달됨."""
+    from datetime import datetime, timezone
+    from engine.capital_sync import sync_binance_internal_transfers
+    from unittest.mock import MagicMock
+
+    captured: list[dict] = []
+
+    async def _sapi_get(params):
+        captured.append(dict(params))
+        return {"total": 0, "rows": []}
+
+    adapter = MagicMock()
+    adapter._exchange = MagicMock()
+    adapter._exchange.sapiGetAssetTransfer = _sapi_get
+
+    fixed_time = datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+    expected_ms = int(fixed_time.timestamp() * 1000)
+
+    await sync_binance_internal_transfers(
+        session, adapter, futures_pm=None,
+        last_sync_time=fixed_time,
+    )
+
+    assert len(captured) == 2  # MAIN_UMFUTURE + UMFUTURE_MAIN
+    for call in captured:
+        assert call["startTime"] == expected_ms
