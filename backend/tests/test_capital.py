@@ -761,7 +761,7 @@ async def test_sync_binance_internal_transfers_pagination(session):
     """
     from engine.capital_sync import sync_binance_internal_transfers
 
-    _PAGE_SIZE = 100  # 모듈 상수와 동일
+    _PAGE_SIZE = 100  # capital_sync._INTERNAL_TRANSFER_PAGE_SIZE 와 동일
     calls: list[dict] = []
 
     # MAIN_UMFUTURE: tranId 1-100 (page1=full, page2=empty)

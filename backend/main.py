@@ -712,7 +712,12 @@ async def lifespan(app: FastAPI):
                     _last_internal_transfer_sync = datetime.now(timezone.utc)
                 if new_txs:
                     b_pm = engine_registry.get_portfolio_manager("binance_futures")
-                    if b_pm is not None:
+                    if b_pm is None:
+                        logger.warning(
+                            "pm_cash_adjustment_skipped_pm_unavailable",
+                            tx_ids=[tx.exchange_tx_id for tx in new_txs],
+                        )
+                    else:
                         for tx in new_txs:
                             if tx.tx_type == "deposit":
                                 b_pm.cash_balance += tx.amount

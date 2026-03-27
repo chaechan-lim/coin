@@ -18,6 +18,8 @@ logger = structlog.get_logger(__name__)
 _TRANSFER_SPOT_TO_FUTURES = "MAIN_UMFUTURE"   # 현물 → USDM 선물
 _TRANSFER_FUTURES_TO_SPOT = "UMFUTURE_MAIN"   # USDM 선물 → 현물
 
+_INTERNAL_TRANSFER_PAGE_SIZE = 100  # Binance Universal Transfer API max rows per page
+
 
 async def sync_binance_deposits(
     session: AsyncSession, adapter, exchange_name: str = "binance_futures"
@@ -124,7 +126,6 @@ async def sync_binance_internal_transfers(
 
     new_txs: list[CapitalTransaction] = []
     had_error = False
-    _PAGE_SIZE = 100
 
     for transfer_type in (_TRANSFER_SPOT_TO_FUTURES, _TRANSFER_FUTURES_TO_SPOT):
         page = 1
@@ -133,7 +134,7 @@ async def sync_binance_internal_transfers(
                 resp = await adapter._exchange.sapiGetAssetTransfer({
                     "type": transfer_type,
                     "startTime": start_ts,
-                    "size": _PAGE_SIZE,
+                    "size": _INTERNAL_TRANSFER_PAGE_SIZE,
                     "current": page,
                 })
             except Exception as e:
@@ -201,7 +202,7 @@ async def sync_binance_internal_transfers(
                 )
 
             # 마지막 페이지면 루프 종료
-            if len(rows) < _PAGE_SIZE:
+            if len(rows) < _INTERNAL_TRANSFER_PAGE_SIZE:
                 break
             page += 1
 
