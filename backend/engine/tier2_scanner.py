@@ -13,6 +13,7 @@ COIN-23: surge_backtest에서 안전 필터 포팅
 - 정규화 점수: vol_signal*0.40 + price_signal*0.35 + accel_signal*0.25
 - SL 3.5%, TP 4.5%, trail 1.5%/1.0%, max_concurrent 3, cooldown 60분
 """
+import asyncio
 import structlog
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -84,8 +85,10 @@ class Tier2Scanner:
         exhaustion_pct: float = 8.0,
         min_score: float = 0.55,
         consecutive_sl_cooldown_sec: int = 10800,  # 180분
+        close_lock: asyncio.Lock | None = None,
     ):
         self._safe_order = safe_order
+        self._close_lock = close_lock or asyncio.Lock()
         self._positions = position_tracker
         self._exchange = exchange
         self._pm = portfolio_manager
@@ -417,49 +420,55 @@ class Tier2Scanner:
     async def _close_tier2(
         self, session: AsyncSession, symbol: str, state: PositionState, reason: str,
     ) -> None:
-        """Tier 2 포지션 청산."""
+        """Tier 2 포지션 청산. close_lock으로 WS/eval 동시 청산 방지 (COIN-48)."""
         try:
             ticker = await self._exchange.fetch_ticker(symbol)
             price = ticker.last
         except Exception:
             return
 
-        request = OrderRequest(
-            symbol=symbol,
-            direction=state.direction,
-            action="close",
-            quantity=state.quantity,
-            price=price,
-            margin=state.margin,
-            leverage=self._leverage,
-            strategy_name="tier2_surge",
-            confidence=0.5,
-            tier="tier2",
-            entry_price=state.entry_price,
-        )
+        async with self._close_lock:
+            # 락 획득 후 인메모리 상태 재확인 — WS/Tier1이 먼저 청산했을 수 있음
+            if not self._positions.get(symbol):
+                logger.debug("tier2_close_skipped_already_closed", symbol=symbol)
+                return
 
-        resp = await self._safe_order.execute_order(session, request)
-        if resp.success:
-            self._positions.close_position(symbol)
+            request = OrderRequest(
+                symbol=symbol,
+                direction=state.direction,
+                action="close",
+                quantity=state.quantity,
+                price=price,
+                margin=state.margin,
+                leverage=self._leverage,
+                strategy_name="tier2_surge",
+                confidence=0.5,
+                tier="tier2",
+                entry_price=state.entry_price,
+            )
 
-            # COIN-23: 연속 SL 카운트 + 장기 쿨다운
-            is_sl = reason.startswith("SL:")
-            if is_sl:
-                count = self._consecutive_sl_count.get(symbol, 0) + 1
-                self._consecutive_sl_count[symbol] = count
-                if count >= 2:
-                    self._cooldown_override_map[symbol] = datetime.now(timezone.utc)
-                    logger.warning(
-                        "tier2_consecutive_sl_cooldown",
-                        symbol=symbol,
-                        consecutive_sl=count,
-                        cooldown_min=self._consecutive_sl_cooldown_sec // 60,
-                    )
-            else:
-                # SL이 아닌 경우 연속 카운트 리셋
-                self._consecutive_sl_count.pop(symbol, None)
+            resp = await self._safe_order.execute_order(session, request)
+            if resp.success:
+                self._positions.close_position(symbol)
 
-            logger.info("tier2_closed", symbol=symbol, reason=reason)
+                # COIN-23: 연속 SL 카운트 + 장기 쿨다운
+                is_sl = reason.startswith("SL:")
+                if is_sl:
+                    count = self._consecutive_sl_count.get(symbol, 0) + 1
+                    self._consecutive_sl_count[symbol] = count
+                    if count >= 2:
+                        self._cooldown_override_map[symbol] = datetime.now(timezone.utc)
+                        logger.warning(
+                            "tier2_consecutive_sl_cooldown",
+                            symbol=symbol,
+                            consecutive_sl=count,
+                            cooldown_min=self._consecutive_sl_cooldown_sec // 60,
+                        )
+                else:
+                    # SL이 아닌 경우 연속 카운트 리셋
+                    self._consecutive_sl_count.pop(symbol, None)
+
+                logger.info("tier2_closed", symbol=symbol, reason=reason)
 
     def _in_cooldown(self, symbol: str) -> bool:
         """쿨다운 확인 (일반 + 연속 SL 장기)."""

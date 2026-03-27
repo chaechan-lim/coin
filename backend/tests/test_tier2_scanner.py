@@ -897,6 +897,89 @@ class TestRegimeFilter:
         assert len(close_calls) > 0
 
 
+class TestCloseLock:
+    """COIN-48: Tier2 close_lock으로 WS 이중 청산 방지."""
+
+    def test_close_lock_shared(self):
+        """외부에서 전달한 close_lock을 사용."""
+        import asyncio
+        lock = asyncio.Lock()
+        scanner = Tier2Scanner(
+            safe_order=MagicMock(),
+            position_tracker=PositionStateTracker(),
+            exchange=AsyncMock(),
+            portfolio_manager=MagicMock(),
+            close_lock=lock,
+        )
+        assert scanner._close_lock is lock
+
+    def test_close_lock_default(self):
+        """close_lock 미전달 시 자체 생성."""
+        import asyncio
+        scanner = Tier2Scanner(
+            safe_order=MagicMock(),
+            position_tracker=PositionStateTracker(),
+            exchange=AsyncMock(),
+            portfolio_manager=MagicMock(),
+        )
+        assert isinstance(scanner._close_lock, asyncio.Lock)
+
+    @pytest.mark.asyncio
+    async def test_close_skips_already_closed(self, tier2, mock_exchange, session):
+        """close_lock 획득 후 인메모리에 없으면 청산 스킵."""
+        state = PositionState(
+            symbol="BTC/USDT", direction=Direction.LONG, quantity=0.01,
+            entry_price=80000.0, margin=25.0, leverage=3,
+            extreme_price=80000.0, stop_loss_atr=3.5, take_profit_atr=4.5,
+            trailing_activation_atr=1.5, trailing_stop_atr=1.0,
+            tier="tier2",
+        )
+        # 포지션 열지 않고 직접 _close_tier2 호출 → 인메모리에 없어서 스킵
+        await tier2._close_tier2(session, "BTC/USDT", state, "SL: test")
+        tier2._safe_order.execute_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_close_with_lock_prevents_double(self, mock_exchange, session):
+        """close_lock 공유 시 동시 청산 방지."""
+        import asyncio
+        lock = asyncio.Lock()
+        safe_order = AsyncMock(spec=SafeOrderPipeline)
+        safe_order.execute_order = AsyncMock(return_value=OrderResponse(
+            success=True, order_id=1, executed_price=80800.0,
+            executed_quantity=0.01, fee=0.32,
+        ))
+        tracker = PositionStateTracker()
+        pm = MagicMock(spec=PortfolioManager)
+        pm.cash_balance = 500.0
+        pm._is_paper = False
+
+        scanner = Tier2Scanner(
+            safe_order=safe_order,
+            position_tracker=tracker,
+            exchange=mock_exchange,
+            portfolio_manager=pm,
+            close_lock=lock,
+        )
+
+        state = PositionState(
+            symbol="BTC/USDT", direction=Direction.LONG, quantity=0.01,
+            entry_price=80000.0, margin=25.0, leverage=3,
+            extreme_price=80000.0, stop_loss_atr=3.5, take_profit_atr=4.5,
+            trailing_activation_atr=1.5, trailing_stop_atr=1.0,
+            tier="tier2",
+        )
+        tracker.open_position(state)
+
+        # 첫 번째 청산 성공
+        await scanner._close_tier2(session, "BTC/USDT", state, "TP: 5%")
+        assert safe_order.execute_order.call_count == 1
+
+        # 두 번째 청산 시도 — 인메모리에서 이미 제거됨 → 스킵
+        safe_order.execute_order.reset_mock()
+        await scanner._close_tier2(session, "BTC/USDT", state, "TP: 5%")
+        safe_order.execute_order.assert_not_called()
+
+
 class TestResetDaily:
     def test_reset(self, tier2):
         tier2._daily_trades = 5

@@ -212,6 +212,7 @@ class FuturesEngineV2:
             max_position_pct=v2_cfg.tier2_max_position_pct,
             max_hold_minutes=v2_cfg.tier2_max_hold_minutes,
             vol_threshold=v2_cfg.tier2_vol_threshold,
+            close_lock=self._close_lock,
             price_threshold=v2_cfg.tier2_price_threshold,
             sl_pct=v2_cfg.tier2_sl_pct,
             tp_pct=v2_cfg.tier2_tp_pct,
