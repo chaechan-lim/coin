@@ -1065,6 +1065,107 @@ class TestReconnectStorm:
         assert mock_exchange.create_ws_exchange.call_count == 1
 
 
+class TestWSPositionLoopClosedSkip:
+    """qty=0인 닫힌 포지션은 WS 루프에서 무시 (좀비 부활 방지)."""
+
+    @pytest.mark.asyncio
+    async def test_closed_position_not_revived(
+        self, engine, mock_exchange, session, session_factory
+    ):
+        """qty=0인 DB 포지션이 WS 데이터로 부활하지 않아야 함."""
+        # 닫힌 포지션 (qty=0)
+        db_pos = Position(
+            symbol="JUP/USDT",
+            exchange="binance_futures",
+            quantity=0,
+            average_buy_price=0.14,
+            total_invested=0,
+            current_value=0,
+        )
+        session.add(db_pos)
+        await session.commit()
+
+        call_count = 0
+
+        async def mock_watch():
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise asyncio.CancelledError()
+            # 거래소에 JUP 포지션 존재 (SurgeEngine이 생성)
+            return [
+                {
+                    "symbol": "JUP/USDT:USDT",
+                    "contracts": 347.0,
+                    "initialMargin": 16.6,
+                    "entryPrice": 0.1431,
+                    "liquidationPrice": 0.19,
+                    "unrealizedPnl": 0.5,
+                    "markPrice": 0.142,
+                }
+            ]
+
+        mock_exchange.watch_positions = AsyncMock(side_effect=mock_watch)
+        engine._is_running = True
+
+        with patch(
+            "engine.futures_engine_v2.get_session_factory",
+            return_value=session_factory,
+        ):
+            await engine._ws_position_loop()
+
+        # qty=0인 포지션이 부활하지 않아야 함
+        await session.refresh(db_pos)
+        assert db_pos.quantity == 0, "Closed position must not be revived by WS loop"
+
+    @pytest.mark.asyncio
+    async def test_active_position_still_updated(
+        self, engine, mock_exchange, session, session_factory
+    ):
+        """qty>0인 활성 포지션은 정상적으로 업데이트."""
+        db_pos = Position(
+            symbol="BTC/USDT",
+            exchange="binance_futures",
+            quantity=0.01,
+            average_buy_price=80000.0,
+            total_invested=100.0,
+            current_value=100.0,
+        )
+        session.add(db_pos)
+        await session.commit()
+
+        call_count = 0
+
+        async def mock_watch():
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise asyncio.CancelledError()
+            return [
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "contracts": 0.015,
+                    "initialMargin": 300.0,
+                    "entryPrice": 81000.0,
+                    "liquidationPrice": 51000.0,
+                    "unrealizedPnl": 5.0,
+                    "markPrice": 81500.0,
+                }
+            ]
+
+        mock_exchange.watch_positions = AsyncMock(side_effect=mock_watch)
+        engine._is_running = True
+
+        with patch(
+            "engine.futures_engine_v2.get_session_factory",
+            return_value=session_factory,
+        ):
+            await engine._ws_position_loop()
+
+        await session.refresh(db_pos)
+        assert db_pos.quantity == 0.015, "Active position must be updated"
+
+
 class TestWSPositionLoopExternalClose:
     @pytest.mark.asyncio
     async def test_contracts_zero_detects_external_close(

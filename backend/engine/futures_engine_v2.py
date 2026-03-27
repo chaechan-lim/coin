@@ -1058,6 +1058,7 @@ class FuturesEngineV2:
                             select(Position).where(
                                 Position.symbol == sym,
                                 Position.exchange == self.EXCHANGE_NAME,
+                                Position.quantity > 0,
                             )
                         )
                         db_pos = result.scalar_one_or_none()
