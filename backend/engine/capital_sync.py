@@ -5,7 +5,7 @@
 - 빗썸: KRW 잔고 변동 감지 (설명 불가능한 증가 → 입금 후보)
 """
 import structlog
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -100,78 +100,87 @@ async def sync_binance_internal_transfers(
     )
     existing_ids = {row for row in result.scalars()}
 
-    # last_sync_time 기준 타임스탬프 (ms), 없으면 24시간 이내
+    # last_sync_time 기준 타임스탬프 (ms), 없으면 10분 이내 (poll 간격 5분보다 약간 넓게)
     if last_sync_time is None:
-        from datetime import timedelta
-        last_sync_time = datetime.now(timezone.utc) - timedelta(hours=24)
+        last_sync_time = datetime.now(timezone.utc) - timedelta(minutes=10)
     start_ts = int(last_sync_time.timestamp() * 1000)
 
     new_txs: list[CapitalTransaction] = []
+    _PAGE_SIZE = 100
 
     for transfer_type in (_TRANSFER_SPOT_TO_FUTURES, _TRANSFER_FUTURES_TO_SPOT):
-        try:
-            resp = await adapter._exchange.sapiGetAssetTransfer({
-                "type": transfer_type,
-                "startTime": start_ts,
-                "size": 100,
-            })
-        except Exception as e:
-            logger.warning(
-                "fetch_binance_internal_transfers_failed",
-                transfer_type=transfer_type,
-                error=str(e),
-            )
-            continue
+        page = 1
+        while True:
+            try:
+                resp = await adapter._exchange.sapiGetAssetTransfer({
+                    "type": transfer_type,
+                    "startTime": start_ts,
+                    "size": _PAGE_SIZE,
+                    "current": page,
+                })
+            except Exception as e:
+                logger.warning(
+                    "fetch_binance_internal_transfers_failed",
+                    transfer_type=transfer_type,
+                    error=str(e),
+                )
+                break
 
-        rows = resp.get("rows") or [] if isinstance(resp, dict) else []
-        for row in rows:
-            # USDT만 처리
-            if row.get("asset", "").upper() != "USDT":
-                continue
-            # CONFIRMED 상태만 처리
-            if row.get("status", "").upper() != "CONFIRMED":
-                continue
+            rows = resp.get("rows") or [] if isinstance(resp, dict) else []
+            for row in rows:
+                # USDT만 처리
+                if row.get("asset", "").upper() != "USDT":
+                    continue
+                # CONFIRMED 상태만 처리
+                if row.get("status", "").upper() != "CONFIRMED":
+                    continue
 
-            tran_id = row.get("tranId") or row.get("tran_id")
-            if not tran_id:
-                continue
-            exchange_tx_id = f"transfer_{tran_id}"
-            if exchange_tx_id in existing_ids:
-                continue
+                # sapiGetAssetTransfer는 raw Binance JSON 반환 → 항상 "tranId"
+                tran_id = row.get("tranId")
+                if not tran_id:
+                    continue
+                exchange_tx_id = f"transfer_{tran_id}"
+                if exchange_tx_id in existing_ids:
+                    continue
 
-            amount = float(row.get("amount", 0))
-            if amount <= 0:
-                continue
+                amount = float(row.get("amount", 0))
+                if amount <= 0:
+                    continue
 
-            # 방향 결정: spot→futures = 선물 PM 입금, futures→spot = 선물 PM 출금
-            if transfer_type == _TRANSFER_SPOT_TO_FUTURES:
-                tx_type = "deposit"
-                direction_note = "현물→선물 내부 이체"
-            else:
-                tx_type = "withdrawal"
-                direction_note = "선물→현물 내부 이체"
+                # 방향 결정: spot→futures = 선물 PM 입금, futures→spot = 선물 PM 출금
+                if transfer_type == _TRANSFER_SPOT_TO_FUTURES:
+                    tx_type = "deposit"
+                    direction_note = "현물→선물 내부 이체"
+                else:
+                    tx_type = "withdrawal"
+                    direction_note = "선물→현물 내부 이체"
 
-            tx = CapitalTransaction(
-                exchange=exchange_name,
-                tx_type=tx_type,
-                amount=amount,
-                currency="USDT",
-                note=f"자동 감지 ({direction_note}, tranId: {tran_id})",
-                source="auto_detected",
-                confirmed=False,
-                exchange_tx_id=exchange_tx_id,
-            )
-            session.add(tx)
-            existing_ids.add(exchange_tx_id)
-            new_txs.append(tx)
+                tx = CapitalTransaction(
+                    exchange=exchange_name,
+                    tx_type=tx_type,
+                    amount=amount,
+                    currency="USDT",
+                    note=f"자동 감지 ({direction_note}, tranId: {tran_id})",
+                    source="auto_detected",
+                    confirmed=False,
+                    exchange_tx_id=exchange_tx_id,
+                )
+                session.add(tx)
+                existing_ids.add(exchange_tx_id)
+                new_txs.append(tx)
 
-            logger.info(
-                "binance_internal_transfer_detected",
-                transfer_type=transfer_type,
-                tran_id=tran_id,
-                amount=amount,
-                tx_type=tx_type,
-            )
+                logger.info(
+                    "binance_internal_transfer_detected",
+                    transfer_type=transfer_type,
+                    tran_id=tran_id,
+                    amount=amount,
+                    tx_type=tx_type,
+                )
+
+            # 마지막 페이지면 루프 종료
+            if len(rows) < _PAGE_SIZE:
+                break
+            page += 1
 
     if new_txs:
         await session.flush()
@@ -196,7 +205,7 @@ async def sync_binance_internal_transfers(
                 "info", "capital",
                 f"바이낸스 선물 내부 이체 {direction} 감지: {tx.amount:.2f} USDT",
                 detail=f"tranId: {tx.exchange_tx_id}",
-                metadata={"tx_id": tx.id, "amount": tx.amount, "currency": "USDT", "tx_type": tx.tx_type},
+                metadata={"exchange_tx_id": tx.exchange_tx_id, "amount": tx.amount, "currency": "USDT", "tx_type": tx.tx_type},
             )
 
     return new_txs
