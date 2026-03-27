@@ -610,9 +610,9 @@ class TestStrategyMode:
         assert "vol_breakout" in strats
 
     def test_regime_mode_eval_interval(self, regime_engine):
-        """regime 모드 eval_interval이 설정대로 적용 (COIN-50: 4h→15min)."""
-        assert regime_engine._long_evaluator.eval_interval_sec == 900
-        assert regime_engine._short_evaluator.eval_interval_sec == 900
+        """regime 모드 eval_interval이 백테스트 최적 4h로 적용."""
+        assert regime_engine._long_evaluator.eval_interval_sec == 14400
+        assert regime_engine._short_evaluator.eval_interval_sec == 14400
 
     def test_regime_mode_status(self, regime_engine):
         """regime 모드 get_status()에 strategy_mode 포함."""
@@ -675,10 +675,10 @@ class TestStrategyMode:
     # ── Regime config params ──
 
     def test_regime_eval_interval_default(self):
-        """기본 regime eval_interval은 900초 (15min) — COIN-50: 4h→15min 조정."""
+        """기본 regime eval_interval은 14400초 (4h) — 백테스트 최적값."""
         from config import FuturesV2Config
         cfg = FuturesV2Config()
-        assert cfg.tier1_regime_eval_interval_sec == 900
+        assert cfg.tier1_regime_eval_interval_sec == 14400
 
     def test_regime_cooldown_default(self):
         """기본 regime cooldown은 26h."""
