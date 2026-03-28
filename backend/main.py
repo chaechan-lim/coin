@@ -694,10 +694,13 @@ async def lifespan(app: FastAPI):
 
                 PM cash 조정은 sess.commit() 성공 후에 수행하여
                 커밋 실패 → 롤백 → 재시도 시 이중 조정을 방지.
+                ORM 속성은 세션 닫히기 전에 추출 (DetachedInstanceError 방지).
                 """
                 nonlocal _last_internal_transfer_sync
                 sf = get_session_factory()
                 sync_from = _last_internal_transfer_sync
+                # ORM 속성을 세션 안에서 plain dict로 추출
+                tx_snapshots: list[dict] = []
                 async with sf() as sess:
                     new_txs, all_ok = await sync_binance_internal_transfers(
                         sess,
@@ -705,28 +708,35 @@ async def lifespan(app: FastAPI):
                         exchange_name="binance_futures",
                         last_sync_time=sync_from,
                     )
+                    # 세션 닫히기 전에 필요한 값 추출
+                    for tx in new_txs:
+                        tx_snapshots.append({
+                            "tx_type": tx.tx_type,
+                            "amount": tx.amount,
+                            "exchange_tx_id": tx.exchange_tx_id,
+                        })
                     await sess.commit()
                 # 방향 중 하나라도 API 오류 시 타임스탬프를 전진시키지 않음
                 # → 다음 틱에서 동일 윈도우를 재조회해 누락 방지
                 if all_ok:
                     _last_internal_transfer_sync = datetime.now(timezone.utc)
-                if new_txs:
+                if tx_snapshots:
                     b_pm = engine_registry.get_portfolio_manager("binance_futures")
                     if b_pm is None:
                         logger.warning(
                             "pm_cash_adjustment_skipped_pm_unavailable",
-                            tx_ids=[tx.exchange_tx_id for tx in new_txs],
+                            tx_ids=[s["exchange_tx_id"] for s in tx_snapshots],
                         )
                     else:
-                        for tx in new_txs:
-                            if tx.tx_type == "deposit":
-                                b_pm.cash_balance += tx.amount
+                        for s in tx_snapshots:
+                            if s["tx_type"] == "deposit":
+                                b_pm.cash_balance += s["amount"]
                             else:
-                                b_pm.cash_balance = max(0.0, b_pm.cash_balance - tx.amount)
+                                b_pm.cash_balance = max(0.0, b_pm.cash_balance - s["amount"])
                             logger.info(
                                 "futures_pm_cash_adjusted_for_transfer",
-                                tx_type=tx.tx_type,
-                                amount=tx.amount,
+                                tx_type=s["tx_type"],
+                                amount=s["amount"],
                                 new_cash=b_pm.cash_balance,
                             )
             _scheduler.add_job(
