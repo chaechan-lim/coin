@@ -667,7 +667,7 @@ async def lifespan(app: FastAPI):
             )
 
     # ── 입출금 자동 감지 스케줄러 ───────────────────────────────
-    from engine.capital_sync import sync_binance_deposits, detect_bithumb_balance_change
+    from engine.capital_sync import sync_binance_deposits, sync_binance_internal_transfers, detect_bithumb_balance_change
 
     if config.binance.enabled and _binance_engine and not (config.binance_trading.mode == "paper"):
         binance_adapter_for_sync = engine_registry.get_engine("binance_futures")
@@ -685,6 +685,64 @@ async def lifespan(app: FastAPI):
                 _wrap(capital_sync_binance),
                 name="capital_sync_binance",
                 seconds=1800,
+            )
+
+            _last_internal_transfer_sync: datetime | None = None
+
+            async def capital_sync_internal_transfers():
+                """spot↔futures 내부 이체 자동 감지 (5분 주기).
+
+                PM cash 조정은 sess.commit() 성공 후에 수행하여
+                커밋 실패 → 롤백 → 재시도 시 이중 조정을 방지.
+                ORM 속성은 세션 닫히기 전에 추출 (DetachedInstanceError 방지).
+                """
+                nonlocal _last_internal_transfer_sync
+                sf = get_session_factory()
+                sync_from = _last_internal_transfer_sync
+                # ORM 속성을 세션 안에서 plain dict로 추출
+                tx_snapshots: list[dict] = []
+                async with sf() as sess:
+                    new_txs, all_ok = await sync_binance_internal_transfers(
+                        sess,
+                        binance_adapter_for_sync._exchange,
+                        exchange_name="binance_futures",
+                        last_sync_time=sync_from,
+                    )
+                    # 세션 닫히기 전에 필요한 값 추출
+                    for tx in new_txs:
+                        tx_snapshots.append({
+                            "tx_type": tx.tx_type,
+                            "amount": tx.amount,
+                            "exchange_tx_id": tx.exchange_tx_id,
+                        })
+                    await sess.commit()
+                # 방향 중 하나라도 API 오류 시 타임스탬프를 전진시키지 않음
+                # → 다음 틱에서 동일 윈도우를 재조회해 누락 방지
+                if all_ok:
+                    _last_internal_transfer_sync = datetime.now(timezone.utc)
+                if tx_snapshots:
+                    b_pm = engine_registry.get_portfolio_manager("binance_futures")
+                    if b_pm is None:
+                        logger.warning(
+                            "pm_cash_adjustment_skipped_pm_unavailable",
+                            tx_ids=[s["exchange_tx_id"] for s in tx_snapshots],
+                        )
+                    else:
+                        for s in tx_snapshots:
+                            if s["tx_type"] == "deposit":
+                                b_pm.cash_balance += s["amount"]
+                            else:
+                                b_pm.cash_balance = max(0.0, b_pm.cash_balance - s["amount"])
+                            logger.info(
+                                "futures_pm_cash_adjusted_for_transfer",
+                                tx_type=s["tx_type"],
+                                amount=s["amount"],
+                                new_cash=b_pm.cash_balance,
+                            )
+            _scheduler.add_job(
+                _wrap(capital_sync_internal_transfers),
+                name="capital_sync_internal_transfers",
+                seconds=300,
             )
 
     if config.exchange.enabled and config.trading.mode != "paper":
