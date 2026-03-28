@@ -915,3 +915,46 @@ async def test_sync_binance_internal_transfers_naive_datetime_from_db(session):
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     for call in captured:
         assert call["startTime"] <= now_ms
+
+
+@pytest.mark.asyncio
+async def test_sync_binance_internal_transfers_session_safe_extraction(db_engine):
+    """expire_on_commit=True 세션에서 tx_snapshots 패턴으로 안전하게 값 추출.
+
+    프로덕션 기본값 expire_on_commit=True 세션을 사용해
+    main.py의 DetachedInstanceError 방지 패턴을 검증.
+    세션 닫힌 후 ORM 속성 대신 plain dict를 사용해야 함을 확인.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    from engine.capital_sync import sync_binance_internal_transfers
+
+    # 프로덕션과 동일한 expire_on_commit=True 세션 팩토리
+    factory = async_sessionmaker(
+        bind=db_engine, class_=AsyncSession, expire_on_commit=True
+    )
+
+    adapter = _make_adapter({
+        "MAIN_UMFUTURE": {
+            "total": 1,
+            "rows": [{"asset": "USDT", "amount": "100.0", "status": "CONFIRMED", "tranId": 12345}],
+        },
+        "UMFUTURE_MAIN": {"total": 0, "rows": []},
+    })
+
+    tx_snapshots = []
+    async with factory() as sess:
+        result, all_ok = await sync_binance_internal_transfers(sess, adapter)
+        # 세션 닫히기 전에 plain dict로 추출 — main.py capital_sync_internal_transfers 패턴
+        for tx in result:
+            tx_snapshots.append({
+                "tx_type": tx.tx_type,
+                "amount": tx.amount,
+                "exchange_tx_id": tx.exchange_tx_id,
+            })
+        await sess.commit()
+    # 세션 닫힌 후에도 plain dict는 접근 가능 (DetachedInstanceError 없음)
+    assert len(tx_snapshots) == 1
+    assert tx_snapshots[0]["tx_type"] == "deposit"
+    assert tx_snapshots[0]["amount"] == 100.0
+    assert tx_snapshots[0]["exchange_tx_id"] == "transfer_12345"
+    assert all_ok is True
