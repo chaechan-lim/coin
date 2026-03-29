@@ -524,14 +524,12 @@ class SurgeEngine:
         now = datetime.now(timezone.utc)
 
         for sym in self._scan_symbols:
+            # Skip any symbol that already has an active or pending-exit position.
+            # COIN-58: pending_exit positions are kept in _positions until DB cleanup
+            # succeeds, so this single guard correctly blocks both cases.
             if sym in self._positions:
                 continue
             if sym not in tickers:
-                continue
-
-            # COIN-58: Block symbols with pending exit (cleanup not yet confirmed)
-            pos = self._positions.get(sym)
-            if pos and pos.pending_exit:
                 continue
 
             # Cooldown check
@@ -839,6 +837,32 @@ class SurgeEngine:
 
         return False, ""
 
+    async def _zero_db_position(self, session, symbol: str) -> bool:
+        """Zero a DB position row.
+
+        Returns True if the row existed AND had quantity > 0 (i.e. cash should be credited).
+        Returns False if the row was missing or already had quantity == 0 (idempotent — no
+        cash adjustment needed to avoid double-crediting on repeated calls).
+        """
+        result = await session.execute(
+            select(Position).where(
+                Position.symbol == symbol,
+                Position.exchange == EXCHANGE_NAME,
+            )
+        )
+        db_pos = result.scalar_one_or_none()
+        if db_pos and db_pos.quantity > 0:
+            now = datetime.now(timezone.utc)
+            db_pos.quantity = 0
+            db_pos.average_buy_price = 0
+            db_pos.total_invested = 0
+            db_pos.is_surge = False
+            db_pos.entered_at = None
+            db_pos.last_trade_at = now
+            db_pos.last_sell_at = now
+            return True
+        return False
+
     async def _exit_position(
         self, symbol: str, pos: SurgePositionState, price: float, reason: str,
     ) -> None:
@@ -846,10 +870,17 @@ class SurgeEngine:
 
         COIN-58: Prevents zombie positions when exchange succeeds but DB fails.
         - Phase 1: Execute exchange order. If fails → increment retry count, leave in memory.
-        - Phase 2: DB cleanup + PM cash. If fails → mark pending_exit=True, store results.
-        - PM cash is adjusted AFTER successful commit to prevent cash corruption.
+        - Phase 2: DB cleanup. If fails → mark pending_exit=True, store results.
+        - PM cash is adjusted OUTSIDE the async-with block to prevent double-crediting if
+          session.__aexit__ raises after a successful commit.
         """
-        # ── Phase 1: Execute exchange order ───────────────────────────
+        # Variables captured inside async-with, used after it exits
+        cost_return = 0.0
+        net_pnl_pct = 0.0
+        pnl_usdt = 0.0
+        needs_cash_update = False
+
+        # ── Phase 1 + 2 (same session so the order row and position zero are atomic) ──
         try:
             sf = get_session_factory()
             async with sf() as session:
@@ -888,36 +919,16 @@ class SurgeEngine:
                 net_pnl_pct = lev_pnl_pct - fee_pct
                 pnl_usdt = pos.margin * net_pnl_pct / 100
                 cost_return = pos.margin + pnl_usdt
-                hold_min = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
 
                 # ── Phase 2: DB cleanup ────────────────────────────────
                 try:
-                    # DB Position 직접 업데이트 (PM 거치지 않음)
-                    pos_result = await session.execute(
-                        select(Position).where(
-                            Position.symbol == symbol,
-                            Position.exchange == EXCHANGE_NAME,
-                        )
-                    )
-                    db_pos = pos_result.scalar_one_or_none()
-                    now = datetime.now(timezone.utc)
-                    if db_pos:
-                        db_pos.quantity = 0
-                        db_pos.average_buy_price = 0
-                        db_pos.total_invested = 0
-                        db_pos.is_surge = False
-                        db_pos.entered_at = None
-                        db_pos.last_trade_at = now
-                        db_pos.last_sell_at = now
-
+                    needs_cash_update = await self._zero_db_position(session, symbol)
                     await session.commit()
-
-                    # COIN-58: PM cash adjusted AFTER successful commit (prevents corruption)
-                    self._futures_pm.cash_balance += cost_return
+                    # Note: cash is applied OUTSIDE async-with (see below)
 
                 except Exception as db_err:
-                    # COIN-58: Exchange order succeeded but DB failed → pending exit
-                    # Do NOT clean up in-memory state, mark as pending for retry
+                    # COIN-58: Exchange order succeeded but DB failed → pending exit.
+                    # Do NOT clean up in-memory state; mark pending for retry next cycle.
                     pos.pending_exit = True
                     pos.exit_reason = reason
                     pos.exit_exec_price = exec_price
@@ -926,7 +937,6 @@ class SurgeEngine:
                     pos.exit_cost_return = cost_return
                     pos.exit_net_pnl_pct = net_pnl_pct
                     pos.exit_pnl_usdt = pnl_usdt
-                    pos.exit_hold_min = hold_min
                     logger.error(
                         "surge_exit_db_failed_pending",
                         symbol=symbol,
@@ -936,8 +946,16 @@ class SurgeEngine:
                     return
 
         except Exception as e:
-            # COIN-58: Exchange order failed — position stays open, will retry next cycle
+            # COIN-58: Phase-1 failure (exchange order rejected or __aexit__ raised after
+            # a successful commit — treated conservatively as a retry trigger).
             pos.exit_retry_count += 1
+            if pos.exit_retry_count >= MAX_EXIT_RETRIES:
+                logger.error(
+                    "surge_exit_exchange_max_retries",
+                    symbol=symbol,
+                    retry_count=pos.exit_retry_count,
+                    msg="Persistent exchange failure — manual intervention may be required",
+                )
             logger.error(
                 "surge_exit_exchange_failed",
                 symbol=symbol,
@@ -946,8 +964,15 @@ class SurgeEngine:
             )
             return
 
+        # ── Apply cash OUTSIDE async-with ─────────────────────────────
+        # Idempotency: only credit if _zero_db_position confirmed the row had quantity > 0.
+        # This prevents a double-credit if session.__aexit__ raised after a successful commit
+        # and this code path is re-entered before the position is removed from _positions.
+        if needs_cash_update:
+            self._futures_pm.cash_balance += cost_return
+
         # ── Cleanup: counters + memory (only on full success) ─────────
-        await self._finalize_exit_cleanup(symbol, pos, net_pnl_pct, pnl_usdt, reason, hold_min)
+        await self._finalize_exit_cleanup(symbol, pos, net_pnl_pct, pnl_usdt, reason)
 
     async def _finalize_exit_cleanup(
         self,
@@ -956,9 +981,14 @@ class SurgeEngine:
         net_pnl_pct: float,
         pnl_usdt: float,
         reason: str,
-        hold_min: float,
     ) -> None:
-        """Finalize in-memory cleanup after successful DB commit."""
+        """Finalize in-memory cleanup after successful DB commit.
+
+        hold_min is computed here from pos.entry_time so that retried exits (which may
+        complete minutes after the initial exchange order) report the true position lifetime
+        rather than the stale value captured at Phase-1 execution time.
+        """
+        hold_min = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
         # Update counters
         if net_pnl_pct < 0:
             self._daily_losses += 1
@@ -1020,6 +1050,11 @@ class SurgeEngine:
 
         Called at the start of each scan cycle.
         After MAX_EXIT_RETRIES, force-cleans the position to prevent permanent zombies.
+
+        Cash is applied OUTSIDE each async-with block to prevent double-crediting if
+        session.__aexit__ raises after a successful commit.  _zero_db_position() returns
+        False when the row already has quantity == 0 (prior commit succeeded but __aexit__
+        threw), ensuring the credit is applied at most once.
         """
         pending = [
             (sym, pos)
@@ -1036,26 +1071,14 @@ class SurgeEngine:
                     retry_count=pos.exit_retry_count,
                     reason=pos.exit_reason,
                 )
+                needs_cash = False
                 try:
                     sf = get_session_factory()
                     async with sf() as session:
-                        pos_result = await session.execute(
-                            select(Position).where(
-                                Position.symbol == symbol,
-                                Position.exchange == EXCHANGE_NAME,
-                            )
-                        )
-                        db_pos = pos_result.scalar_one_or_none()
-                        now = datetime.now(timezone.utc)
-                        if db_pos:
-                            db_pos.quantity = 0
-                            db_pos.average_buy_price = 0
-                            db_pos.total_invested = 0
-                            db_pos.is_surge = False
-                            db_pos.entered_at = None
-                            db_pos.last_trade_at = now
-                            db_pos.last_sell_at = now
+                        needs_cash = await self._zero_db_position(session, symbol)
                         await session.commit()
+                    # Apply cash OUTSIDE async-with (idempotent: only if row had qty > 0)
+                    if needs_cash:
                         self._futures_pm.cash_balance += pos.exit_cost_return
                 except Exception as force_err:
                     logger.error(
@@ -1068,7 +1091,7 @@ class SurgeEngine:
                 await self._finalize_exit_cleanup(
                     symbol, pos,
                     pos.exit_net_pnl_pct, pos.exit_pnl_usdt,
-                    pos.exit_reason, pos.exit_hold_min,
+                    pos.exit_reason,
                 )
                 await emit_event(
                     "warning", "surge_trade",
@@ -1079,28 +1102,14 @@ class SurgeEngine:
                 continue
 
             # Retry DB cleanup
+            needs_cash = False
             try:
                 sf = get_session_factory()
                 async with sf() as session:
-                    pos_result = await session.execute(
-                        select(Position).where(
-                            Position.symbol == symbol,
-                            Position.exchange == EXCHANGE_NAME,
-                        )
-                    )
-                    db_pos = pos_result.scalar_one_or_none()
-                    now = datetime.now(timezone.utc)
-                    if db_pos:
-                        db_pos.quantity = 0
-                        db_pos.average_buy_price = 0
-                        db_pos.total_invested = 0
-                        db_pos.is_surge = False
-                        db_pos.entered_at = None
-                        db_pos.last_trade_at = now
-                        db_pos.last_sell_at = now
+                    needs_cash = await self._zero_db_position(session, symbol)
                     await session.commit()
-
-                    # PM cash adjusted AFTER successful commit
+                # Apply cash OUTSIDE async-with (idempotent: only if row had qty > 0)
+                if needs_cash:
                     self._futures_pm.cash_balance += pos.exit_cost_return
 
                 logger.info(
@@ -1112,7 +1121,7 @@ class SurgeEngine:
                 await self._finalize_exit_cleanup(
                     symbol, pos,
                     pos.exit_net_pnl_pct, pos.exit_pnl_usdt,
-                    pos.exit_reason, pos.exit_hold_min,
+                    pos.exit_reason,
                 )
 
             except Exception as retry_err:
@@ -1147,9 +1156,12 @@ class SurgeEngine:
         exchange_symbols: set[str] = set()
         for ep in exchange_positions:
             try:
-                # ExchangePosition may be a dict or object
+                # ExchangePosition may be a ccxt unified object or a raw dict
                 if isinstance(ep, dict):
                     sym = ep.get("symbol", "")
+                    # "contracts" is the ccxt unified field; "positionAmt" is the raw
+                    # Binance REST API field (not present in unified objects) — included
+                    # as a fallback for adapters that return raw Binance dicts.
                     qty = float(ep.get("contracts", 0) or ep.get("positionAmt", 0) or 0)
                 else:
                     sym = getattr(ep, "symbol", "")
@@ -1185,22 +1197,7 @@ class SurgeEngine:
                 try:
                     sf = get_session_factory()
                     async with sf() as session:
-                        pos_result = await session.execute(
-                            select(Position).where(
-                                Position.symbol == symbol,
-                                Position.exchange == EXCHANGE_NAME,
-                            )
-                        )
-                        db_pos = pos_result.scalar_one_or_none()
-                        now = datetime.now(timezone.utc)
-                        if db_pos and db_pos.quantity > 0:
-                            db_pos.quantity = 0
-                            db_pos.average_buy_price = 0
-                            db_pos.total_invested = 0
-                            db_pos.is_surge = False
-                            db_pos.entered_at = None
-                            db_pos.last_trade_at = now
-                            db_pos.last_sell_at = now
+                        await self._zero_db_position(session, symbol)
                         await session.commit()
                 except Exception as cleanup_err:
                     logger.error(
@@ -1210,7 +1207,13 @@ class SurgeEngine:
                     )
                     continue
 
-                # Remove from memory without cash adjustment (position already gone on exchange)
+                # Remove from memory WITHOUT adjusting cash.
+                # Intentional design: for liquidations the margin is already gone, so
+                # crediting it would overstate the balance.  For near-entry missed exits
+                # the exchange wallet does reflect returned collateral, but we skip the
+                # credit here to avoid double-counting until a full walletBalance
+                # reconciliation (like initialize_cash_from_exchange) can be done.
+                # TODO: file a follow-up to reconcile cash_balance after zombie cleanup.
                 del self._positions[symbol]
                 normal_cooldown_time = datetime.now(timezone.utc) + timedelta(seconds=self._cooldown_sec)
                 existing_cooldown = self._cooldowns.get(symbol)

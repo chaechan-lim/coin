@@ -1919,7 +1919,13 @@ class TestPendingExitRetry:
 
     @pytest.mark.asyncio
     async def test_pending_exit_blocks_new_entry(self, surge_engine):
-        """COIN-58: Symbol with pending_exit is blocked from new entries in _scan_for_entries."""
+        """COIN-58: pending_exit=True position in _positions blocks new entry.
+
+        COIN-58 keeps pending-exit positions in _positions (not removed until DB cleanup
+        succeeds).  The existing `if sym in self._positions: continue` guard therefore
+        handles both active positions AND pending-exit positions with the same code path.
+        This test verifies that a pending-exit position does NOT allow re-entry.
+        """
         sym = "BTC/USDT"
         pos = SurgePositionState(
             symbol=sym, direction="long",
@@ -1931,7 +1937,7 @@ class TestPendingExitRetry:
         pos.pending_exit = True
         surge_engine._positions[sym] = pos
 
-        # Set up good surge conditions (would normally trigger entry)
+        # Set up good surge conditions (would normally trigger entry on a fresh symbol)
         surge_engine._candle_vol_ratios[sym] = 10.0
         surge_engine._candle_price_chgs[sym] = 3.0
         surge_engine._candle_vol_accel[sym] = 2.0
@@ -1944,8 +1950,76 @@ class TestPendingExitRetry:
         with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
             await surge_engine._scan_for_entries(tickers)
 
-        # Should NOT have tried to enter (sym is in _positions → skipped)
+        # Entry must be blocked: sym is in _positions (pending-exit), so `continue` fires
         enter_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_active_position_also_blocks_new_entry(self, surge_engine):
+        """COIN-58: pending_exit=False (active) position in _positions also blocks entry.
+
+        Confirms the pre-COIN-58 guard still works, and that the single `sym in _positions`
+        check covers both active and pending-exit cases.
+        """
+        sym = "ETH/USDT"
+        pos = SurgePositionState(
+            symbol=sym, direction="long",
+            entry_price=3500.0, quantity=0.01,
+            margin=10.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=3500.0, trough_price=3500.0,
+        )
+        pos.pending_exit = False  # regular active position
+        surge_engine._positions[sym] = pos
+
+        surge_engine._candle_vol_ratios[sym] = 10.0
+        surge_engine._candle_price_chgs[sym] = 3.0
+        surge_engine._candle_vol_accel[sym] = 2.0
+        surge_engine._candle_atr_pct[sym] = 1.5
+
+        tickers = {sym: {"last": 3510.0, "bid": 3509.0, "ask": 3511.0}}
+        enter_mock = AsyncMock()
+        surge_engine._enter_position = enter_mock
+
+        with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+            await surge_engine._scan_for_entries(tickers)
+
+        enter_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retry_idempotent_db_already_zeroed(self, surge_engine, session):
+        """COIN-58: When DB row already has quantity=0 (prior commit succeeded but
+        __aexit__ threw), cash must NOT be incremented on the next retry call.
+
+        This directly tests the critical double-cash-update bug: if a prior attempt
+        committed successfully but the session context manager raised during cleanup,
+        the position remains in _positions with pending_exit=True.  On the next call to
+        _retry_pending_exits the DB row has quantity=0; _zero_db_position returns False
+        and the cash credit must be skipped.
+        """
+        sym = "BTC/USDT"
+        pos = self._make_pending_pos(sym)
+        surge_engine._positions[sym] = pos
+        initial_cash = surge_engine._futures_pm.cash_balance
+
+        # DB row already has quantity=0 (prior commit succeeded)
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=0,  # already zeroed
+            average_buy_price=0.0,
+            total_invested=0.0, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._retry_pending_exits()
+
+        # Cash must NOT have changed (row was already clean → idempotent guard fired)
+        assert surge_engine._futures_pm.cash_balance == initial_cash
+        # Position must still be cleaned up from memory
+        assert sym not in surge_engine._positions
 
     @pytest.mark.asyncio
     async def test_retry_pending_sets_cooldown_on_success(self, surge_engine, session):
