@@ -284,6 +284,32 @@ async def test_strategies_update_params_valid_exchange_accepted():
         _restore(exchange, saved)
 
 
+@pytest.mark.asyncio
+async def test_strategies_update_weight_valid_exchange_accepted():
+    """PUT /strategies/{name}/weight with valid exchange is not rejected by type validation."""
+    exchange = "binance_futures"
+    saved = _save_state(exchange)
+    mock_combiner = MagicMock()
+    mock_combiner.weights = {}
+    engine_registry._engines[exchange] = None
+    engine_registry._portfolio_managers[exchange] = None
+    engine_registry._combiners[exchange] = mock_combiner
+    engine_registry._coordinators[exchange] = None
+    try:
+        app = _make_app(strategies_router)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.put(
+                "/strategies/rsi/weight",
+                params={"exchange": exchange},
+                json={"weight": 0.5},
+            )
+        assert resp.status_code != 422
+    finally:
+        _restore(exchange, saved)
+
+
 # ── Bug 2: WebSocket idle timeout ─────────────────────────────────────────────
 
 
@@ -354,11 +380,12 @@ def test_ws_idle_timeout_default_is_positive():
 
 
 def test_ws_idle_timeout_env_var_override(monkeypatch):
-    """APP_WS_IDLE_TIMEOUT_SEC env var is read lazily so per-connection overrides take effect."""
+    """APP_WS_IDLE_TIMEOUT_SEC env var is honoured by AppConfig regardless of call order."""
     monkeypatch.setenv("APP_WS_IDLE_TIMEOUT_SEC", "120")
-    from config import get_config
+    # Use AppConfig() directly to avoid any lru_cache concerns on get_config
+    from config import AppConfig
 
-    assert get_config().ws_idle_timeout_sec == 120
+    assert AppConfig().ws_idle_timeout_sec == 120
 
 
 def test_websocket_ping_pong_handled_before_timeout():

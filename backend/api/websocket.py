@@ -55,10 +55,9 @@ ws_manager = ConnectionManager()
 
 @router.websocket("/ws/dashboard")
 async def websocket_dashboard(websocket: WebSocket):
-    # Read per-connection so APP_WS_IDLE_TIMEOUT_SEC env-var overrides take effect
+    # get_config() creates a fresh AppConfig on each call (not lru_cache-decorated)
     timeout = get_config().ws_idle_timeout_sec
     await ws_manager.connect(websocket)
-    disconnected = False
     try:
         while True:
             try:
@@ -72,16 +71,13 @@ async def websocket_dashboard(websocket: WebSocket):
                     await websocket.close(code=1000)
                 except Exception:
                     logger.debug("ws_close_on_idle_failed", exc_info=True)
-                finally:
-                    await ws_manager.disconnect(websocket)
-                    disconnected = True
                 return
             # Client can send ping/pong or commands
             if data == "ping":
                 await websocket.send_text(json.dumps({"event": "pong"}))
     except WebSocketDisconnect:
-        if not disconnected:
-            await ws_manager.disconnect(websocket)
+        pass
     except Exception:
-        if not disconnected:
-            await ws_manager.disconnect(websocket)
+        logger.exception("ws_unexpected_error")
+    finally:
+        await ws_manager.disconnect(websocket)
