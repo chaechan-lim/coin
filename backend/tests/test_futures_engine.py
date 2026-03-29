@@ -942,7 +942,8 @@ class TestFuturesMetadataFlush:
 
         session = AsyncMock()
         session.flush = track_flush
-        session.execute = AsyncMock(return_value=meta_result)
+        # _open_long makes exactly one session.execute call (metadata Position query)
+        session.execute = AsyncMock(side_effect=[meta_result])
 
         filled_order = MagicMock(status="filled", exchange_order_id="o1", fee=1.0)
         futures_engine._order_manager.create_order = AsyncMock(return_value=filled_order)
@@ -1051,7 +1052,10 @@ class TestShortTrackerExtremePriceRestore:
         # tracker가 없으면 DB에서 복원
         assert "BTC/USDT" not in futures_engine._position_trackers
 
-        with patch("engine.futures_engine.emit_event", new_callable=AsyncMock):
+        with (
+            patch("engine.futures_engine.emit_event", new_callable=AsyncMock),
+            patch.object(futures_engine, "_get_atr_pct", return_value=None),
+        ):
             await futures_engine._check_futures_stop_conditions(session, "BTC/USDT", position)
 
         tracker = futures_engine._position_trackers.get("BTC/USDT")
@@ -1073,7 +1077,10 @@ class TestShortTrackerExtremePriceRestore:
 
         futures_engine._position_trackers.pop("BTC/USDT", None)
 
-        with patch("engine.futures_engine.emit_event", new_callable=AsyncMock):
+        with (
+            patch("engine.futures_engine.emit_event", new_callable=AsyncMock),
+            patch.object(futures_engine, "_get_atr_pct", return_value=None),
+        ):
             await futures_engine._check_futures_stop_conditions(session, "BTC/USDT", position)
 
         tracker = futures_engine._position_trackers.get("BTC/USDT")
@@ -1093,7 +1100,10 @@ class TestShortTrackerExtremePriceRestore:
 
         futures_engine._position_trackers.pop("BTC/USDT", None)
 
-        with patch("engine.futures_engine.emit_event", new_callable=AsyncMock):
+        with (
+            patch("engine.futures_engine.emit_event", new_callable=AsyncMock),
+            patch.object(futures_engine, "_get_atr_pct", return_value=None),
+        ):
             await futures_engine._check_futures_stop_conditions(session, "BTC/USDT", position)
 
         tracker = futures_engine._position_trackers.get("BTC/USDT")
@@ -1131,7 +1141,10 @@ class TestShortTrackerExtremePriceRestore:
 
         futures_engine._position_trackers.pop("ETH/USDT", None)
 
-        with patch("engine.futures_engine.emit_event", new_callable=AsyncMock):
+        with (
+            patch("engine.futures_engine.emit_event", new_callable=AsyncMock),
+            patch.object(futures_engine, "_get_atr_pct", return_value=None),
+        ):
             await futures_engine._check_futures_stop_conditions(session, "ETH/USDT", position)
 
         tracker = futures_engine._position_trackers.get("ETH/USDT")

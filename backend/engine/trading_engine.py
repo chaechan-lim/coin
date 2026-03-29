@@ -374,7 +374,7 @@ class TradingEngine:
             pos.trailing_active = tracker.trailing_active
             # 방향별 extreme_price 저장: 롱 → highest_price, 숏 → lowest_price
             # 반대 컬럼을 None으로 클리어해 롱→숏(또는 숏→롱) 전환 시 스테일 값 방지
-            if getattr(pos, "direction", "long") == "short":
+            if (pos.direction or "long") == "short":
                 pos.lowest_price = tracker.extreme_price
                 pos.highest_price = None
             else:

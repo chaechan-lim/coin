@@ -1470,6 +1470,8 @@ class BinanceFuturesEngine(TradingEngine):
             pos.leverage = effective_lev
             pos.liquidation_price = price * (1 - 1 / effective_lev + self._futures_fee)
             pos.margin_used = margin
+            pos.highest_price = price   # initialise extreme_price for long
+            pos.lowest_price = None     # clear any prior short-session value
             await session.flush()
 
         # SL/TP 트래커 — 레버리지 축소 + 동적 SL

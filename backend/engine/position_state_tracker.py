@@ -264,7 +264,7 @@ class PositionStateTracker:
             else:
                 pos.highest_price = state.extreme_price
                 pos.lowest_price = None
-            pos.direction = state.direction.value
+            pos.direction = direction_val   # already "long" when state.direction is None
             pos.strategy_name = state.strategy_name
             updated += 1
 
