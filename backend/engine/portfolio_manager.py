@@ -1093,6 +1093,9 @@ class PortfolioManager:
                 invested = db_pos.total_invested or 0
                 direction = getattr(db_pos, "direction", "long")
                 leverage = getattr(db_pos, "leverage", 1) or 1
+                # TOCTOU 방지용: await 전 타임스탬프 기록
+                # (이 시점 이후에 생성된 Order는 sync 자신이 만든 것이므로 재확인에서 제외)
+                _processing_start = datetime.now(timezone.utc)
                 try:
                     current_price = await self._market_data.get_current_price(db_sym)
                 except Exception:
@@ -1107,6 +1110,45 @@ class PortfolioManager:
                 strategy_name, reason = await self._determine_close_reason(
                     db_sym, db_pos, current_price, pnl_pct, exchange_adapter,
                 )
+
+                # TOCTOU 재확인: await(get_current_price, _determine_close_reason) 이후
+                # 엔진이 동시에 포지션을 닫아 이미 cash를 반환했을 수 있음 → 재확인
+                # 이 시점은 session.add(order) 이전이므로 sync 자신의 Order가 없음
+                if is_futures and invested > 0:
+                    # 재확인 1: fresh_qty가 여전히 > 0인지 (await 사이 엔진 청산 감지)
+                    fresh_qty_recheck_result = await session.execute(
+                        text(
+                            "SELECT quantity FROM positions "
+                            "WHERE exchange = :ex AND symbol = :sym"
+                        ),
+                        {"ex": self._exchange_name, "sym": db_sym},
+                    )
+                    fresh_qty_recheck_row = fresh_qty_recheck_result.first()
+                    if fresh_qty_recheck_row is None or fresh_qty_recheck_row[0] <= 0:
+                        logger.warning(
+                            "futures_sync_cash_skip_concurrent_close",
+                            symbol=db_sym,
+                            reason="position closed by engine during sync await points",
+                        )
+                        continue
+
+                    # 재확인 2: await 기간(_processing_start 이후) 동안 엔진 Order 생성 감지
+                    # sync 자신의 Order는 아직 session.add() 전이므로 여기서 조회되지 않음
+                    recent_recheck_result = await session.execute(
+                        select(Order.id).where(
+                            Order.exchange == self._exchange_name,
+                            Order.symbol == db_sym,
+                            Order.strategy_name != "position_sync",
+                            Order.created_at >= _processing_start,
+                        ).limit(1)
+                    )
+                    if recent_recheck_result.first() is not None:
+                        logger.warning(
+                            "futures_sync_cash_skip_recent_order",
+                            symbol=db_sym,
+                            reason="engine order created during sync await points",
+                        )
+                        continue
 
                 old_qty = db_pos.quantity
                 now = datetime.now(timezone.utc)

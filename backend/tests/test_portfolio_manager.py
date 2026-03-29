@@ -3396,3 +3396,203 @@ async def test_sync_does_not_create_position_for_active_surge(session):
         f"Surge position must not be duplicated as futures position, "
         f"got {len(futures_positions)}"
     )
+
+
+@pytest.mark.asyncio
+async def test_futures_sync_no_cash_return_when_fresh_qty_zero_at_cash_return(session):
+    """TOCTOU 방지: await 이후 DB qty=0이면 cash 반환 스킵.
+
+    시나리오:
+    1. sync가 DB 스냅샷(qty>0) 읽고 초기 fresh_qty 체크 통과 (qty>0)
+    2. get_current_price / _determine_close_reason await 중 엔진이 포지션 청산 (DB qty=0, cash 반환)
+    3. sync가 cash 반환 직전 fresh_qty 재확인 → qty=0 감지 → cash 반환 스킵
+    4. 이중 cash 반환 없음
+    """
+    from exchange.base import Balance
+
+    initial_cash = 300.0
+    invested = 20.0
+    pm = PortfolioManager(
+        market_data=_make_market_data({"LINK/USDT": 14.5}),
+        initial_balance_krw=500.0,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+    # 엔진이 포지션을 닫고 이미 cash를 반환한 상태
+    pm.cash_balance = initial_cash
+
+    # DB에 활성 포지션 (qty>0 — 초기 fresh_qty 체크 통과)
+    pos = Position(
+        exchange="binance_futures", symbol="LINK/USDT",
+        quantity=5.0, average_buy_price=14.2,
+        total_invested=invested, is_paper=False,
+        direction="long", leverage=3, margin_used=invested,
+    )
+    session.add(pos)
+    await session.flush()
+
+    # get_current_price 호출 시 엔진이 포지션을 닫는 것을 시뮬레이션
+    original_price = 14.5
+
+    async def get_price_and_close_position(sym):
+        """가격 조회 중 엔진이 포지션을 닫음 (TOCTOU 시뮬레이션)."""
+        # 엔진이 포지션 청산 — DB qty=0으로 변경
+        pos.quantity = 0
+        await session.flush()
+        return original_price
+
+    market_data = AsyncMock()
+    market_data.get_current_price = get_price_and_close_position
+    pm._market_data = market_data
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=300, used=0, total=300),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    cash_before = pm.cash_balance
+    await pm.sync_exchange_positions(session, adapter, ["LINK/USDT"])
+    await session.flush()
+
+    # cash가 변하지 않아야 함 — 재확인에서 qty=0 감지, 이중 반환 방지
+    assert pm.cash_balance == pytest.approx(cash_before, abs=0.01), (
+        f"Expected no cash change (double return prevented), "
+        f"but cash changed from {cash_before} to {pm.cash_balance}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_futures_sync_no_cash_return_when_engine_order_created_during_await(session):
+    """TOCTOU 방지: await 기간 중 엔진 Order가 생성됐으면 cash 반환 스킵.
+
+    시나리오:
+    1. sync가 초기 fresh_qty + recent Order 체크 통과
+    2. _determine_close_reason await 중 엔진이 현재 시각으로 청산 Order 생성
+       (= _processing_start 이후 생성)
+    3. sync가 TOCTOU 재확인 → 엔진 Order 감지(_processing_start 이후) → 전체 스킵
+    4. 이중 cash 반환 없음
+    """
+    from exchange.base import Balance
+
+    initial_cash = 500.0
+    invested = 15.0
+    pm = PortfolioManager(
+        market_data=_make_market_data({"DOT/USDT": 7.8}),
+        initial_balance_krw=700.0,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+    pm.cash_balance = initial_cash
+
+    # DB에 활성 포지션 (qty>0)
+    pos = Position(
+        exchange="binance_futures", symbol="DOT/USDT",
+        quantity=4.0, average_buy_price=7.5,
+        total_invested=invested, is_paper=False,
+        direction="long", leverage=3, margin_used=invested,
+    )
+    session.add(pos)
+    await session.flush()
+
+    # _determine_close_reason 호출 시 엔진이 현재 시각으로 Order를 생성
+    # (_processing_start 이후 생성 → TOCTOU 재확인에 걸림)
+    engine_order_created = False
+
+    async def determine_close_reason_and_create_order(sym, db_pos, current_price, pnl_pct, adapter):
+        """청산 사유 판별 중 엔진이 Order를 생성함 (TOCTOU 시뮬레이션).
+        created_at을 명시하지 않으면 DB 기본값(현재 시각)이 적용됨.
+        """
+        nonlocal engine_order_created
+        if not engine_order_created:
+            engine_order_created = True
+            # 엔진이 현재 시각으로 Order 생성 (_processing_start 이후)
+            engine_order = Order(
+                exchange="binance_futures", symbol="DOT/USDT",
+                side="sell", order_type="market", status="filled",
+                requested_price=7.8, executed_price=7.8,
+                requested_quantity=4.0, executed_quantity=4.0,
+                fee=0.0, fee_currency="USDT", is_paper=False,
+                direction="long", leverage=3, margin_used=0,
+                strategy_name="rsi",
+                realized_pnl=0.36, realized_pnl_pct=2.4,
+                # created_at 미지정 → DB default(현재 시각) 적용 → _processing_start 이후
+            )
+            session.add(engine_order)
+            await session.flush()
+        return "rsi", "tp_hit"
+
+    pm._determine_close_reason = determine_close_reason_and_create_order
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=500, used=0, total=500),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    cash_before = pm.cash_balance
+    await pm.sync_exchange_positions(session, adapter, ["DOT/USDT"])
+    await session.flush()
+
+    # cash가 변하지 않아야 함 — 재확인에서 엔진 Order 감지, 이중 반환 방지
+    assert pm.cash_balance == pytest.approx(cash_before, abs=0.01), (
+        f"Expected no cash change (double return prevented), "
+        f"but cash changed from {cash_before} to {pm.cash_balance}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_futures_sync_cash_returns_normally_when_toctou_checks_pass(session):
+    """TOCTOU 재확인 통과 시 정상적으로 cash 반환 (정상 플로우 회귀 테스트).
+
+    시나리오: await 중 엔진 개입 없음 → 두 재확인 모두 통과 → cash 정상 반환.
+    """
+    from exchange.base import Balance
+
+    initial_cash = 200.0
+    invested = 12.0
+    entry_price = 8.0
+    current_price = 8.4  # 5% 상승, 3x → 15% PnL
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"OP/USDT": current_price}),
+        initial_balance_krw=400.0,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+    pm.cash_balance = initial_cash
+
+    # DB에 활성 포지션 (qty>0)
+    pos = Position(
+        exchange="binance_futures", symbol="OP/USDT",
+        quantity=4.5, average_buy_price=entry_price,
+        total_invested=invested, is_paper=False,
+        direction="long", leverage=3, margin_used=invested,
+    )
+    session.add(pos)
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=200, used=0, total=200),
+    })
+    # 거래소에 OP 포지션 없음 (수동 청산)
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    cash_before = pm.cash_balance
+    await pm.sync_exchange_positions(session, adapter, ["OP/USDT"])
+    await session.flush()
+
+    # pnl_pct = (8.4 - 8.0) / 8.0 * 3 * 100 = 15%
+    expected_pnl = invested * 0.15
+    expected_cash_returned = invested + expected_pnl
+    assert pm.cash_balance == pytest.approx(cash_before + expected_cash_returned, abs=0.01), (
+        f"Expected cash {cash_before + expected_cash_returned:.2f}, "
+        f"got {pm.cash_balance:.2f}"
+    )
