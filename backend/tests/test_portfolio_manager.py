@@ -3335,3 +3335,64 @@ async def test_sync_creates_order_when_no_recent_engine_order(session):
     orders = result.scalars().all()
     assert len(orders) == 1, f"Expected 1 sync order, got {len(orders)}"
     assert orders[0].strategy_name == "position_sync"
+
+
+@pytest.mark.asyncio
+async def test_sync_does_not_create_position_for_active_surge(session):
+    """서지 엔진이 보유 중인 포지션을 선물 PM sync가 신규 생성하지 않아야 함.
+
+    시나리오: SurgeEngine이 SUI 숏 보유 중 → 선물 PM sync가 거래소에서
+    SUI 포지션 감지 → binance_surge에 활성 포지션이 있으므로 스킵.
+    """
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"SUI/USDT": 0.86}),
+        initial_balance_krw=3000.0,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # 서지 엔진의 활성 포지션
+    surge_pos = Position(
+        exchange="binance_surge", symbol="SUI/USDT",
+        quantity=616.6, average_buy_price=0.85,
+        total_invested=175.7, is_paper=False,
+        direction="short", leverage=3, margin_used=175.7,
+    )
+    session.add(surge_pos)
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=3000, used=0, total=3000),
+    })
+    # 거래소에 SUI 포지션 존재 (서지 엔진 소유)
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[{
+        "symbol": "SUI/USDT:USDT",
+        "contracts": 616.6,
+        "initialMargin": 175.7,
+        "entryPrice": 0.85,
+        "liquidationPrice": 1.13,
+        "side": "short",
+        "leverage": "3",
+        "notional": -527.0,
+    }])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["SUI/USDT"])
+    await session.flush()
+
+    # binance_futures로 신규 포지션이 생성되지 않아야 함
+    result = await session.execute(
+        select(Position).where(
+            Position.exchange == "binance_futures",
+            Position.symbol == "SUI/USDT",
+        )
+    )
+    futures_positions = result.scalars().all()
+    assert len(futures_positions) == 0, (
+        f"Surge position must not be duplicated as futures position, "
+        f"got {len(futures_positions)}"
+    )

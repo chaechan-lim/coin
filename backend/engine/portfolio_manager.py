@@ -991,6 +991,23 @@ class PortfolioManager:
                 margin = float(fp_data.get("initialMargin", 0) or 0)
                 if margin < 1.0:
                     continue
+
+                # 서지 엔진이 보유 중인 포지션인지 확인 → 중복 생성 방지
+                # (같은 물리 거래소를 공유하므로 fetch_positions에 서지 포지션도 나옴)
+                surge_check = await session.execute(
+                    select(Position.id).where(
+                        Position.symbol == pair,
+                        Position.exchange == "binance_surge",
+                        Position.quantity > 0,
+                    ).limit(1)
+                )
+                if surge_check.first() is not None:
+                    logger.info(
+                        "sync_skip_surge_position",
+                        symbol=pair,
+                        reason="active surge position exists",
+                    )
+                    continue
                 direction = fp_data.get("side", "long")
                 raw_lev = fp_data.get("leverage")
                 if raw_lev:
@@ -1054,18 +1071,14 @@ class PortfolioManager:
 
                 # 레이스 컨디션 방지 2: 최근 5분 이내 같은 심볼 청산 Order가 있으면
                 # 엔진이 이미 청산 처리 중인 것 → sync Order 생성 스킵
-                _five_min_ago = (
-                    datetime.now(timezone.utc) - timedelta(minutes=5)
-                ).isoformat()
+                _five_min_ago = datetime.now(timezone.utc) - timedelta(minutes=5)
                 recent_close_result = await session.execute(
-                    text(
-                        "SELECT id FROM orders "
-                        "WHERE exchange = :ex AND symbol = :sym "
-                        "AND strategy_name != 'position_sync' "
-                        "AND created_at >= :since "
-                        "LIMIT 1"
-                    ),
-                    {"ex": self._exchange_name, "sym": db_sym, "since": _five_min_ago},
+                    select(Order.id).where(
+                        Order.exchange == self._exchange_name,
+                        Order.symbol == db_sym,
+                        Order.strategy_name != "position_sync",
+                        Order.created_at >= _five_min_ago,
+                    ).limit(1)
                 )
                 if recent_close_result.first() is not None:
                     logger.info(
