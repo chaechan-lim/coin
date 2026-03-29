@@ -369,8 +369,8 @@ class SafeOrderPipeline:
                 pnl_pct = (exec_price - request.entry_price) / request.entry_price
             else:
                 pnl_pct = (request.entry_price - exec_price) / request.entry_price
-            realized_pnl_pct = pnl_pct * 100
-            realized_pnl = request.margin * request.leverage * pnl_pct - fee
+            realized_pnl_pct = pnl_pct * 100          # raw 가격변동% (레버리지 미적용); Order.leverage 참조
+            realized_pnl = request.margin * request.leverage * pnl_pct - fee  # 금액은 마진×레버리지 기준
 
         # Order record
         order = Order(

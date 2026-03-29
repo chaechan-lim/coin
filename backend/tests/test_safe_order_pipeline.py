@@ -495,11 +495,13 @@ class TestPnLCalculation:
         from sqlalchemy import select
         order = (await session.execute(select(Order))).scalars().first()
         assert order.realized_pnl_pct is not None
-        assert order.realized_pnl_pct > 0  # 롱 수익
+        # COIN-65: realized_pnl_pct는 레버리지 미적용 raw 가격변동%.
+        # 80000→82000 = 2.5% (3× 레버리지여도 15%가 아님)
+        assert order.realized_pnl_pct == pytest.approx(2.5)
 
     @pytest.mark.asyncio
     async def test_short_profit_pnl(self, pipeline, mock_exchange, session):
-        """숏 수익 PnL 계산."""
+        """숏 수익 PnL 계산 — raw 가격변동% (레버리지 미적용)."""
         pos = Position(
             exchange="binance_futures",
             symbol="BTC/USDT",
@@ -530,7 +532,8 @@ class TestPnLCalculation:
 
         from sqlalchemy import select
         order = (await session.execute(select(Order))).scalars().first()
-        assert order.realized_pnl_pct > 0  # 숏 수익 (가격 하락)
+        # COIN-65: 80000→78000 숏 수익 = 2.5% raw (3× 레버리지여도 7.5%가 아님)
+        assert order.realized_pnl_pct == pytest.approx(2.5)
 
 
 class TestQuantityPrecisionAdjustment:

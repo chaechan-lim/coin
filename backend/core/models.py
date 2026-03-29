@@ -71,8 +71,8 @@ class Order(Base):
 
     # PnL (sell/close orders only)
     entry_price = Column(Float, nullable=True)         # 진입 평단가
-    realized_pnl = Column(Float, nullable=True)        # 실현 손익 (금액)
-    realized_pnl_pct = Column(Float, nullable=True)    # 실현 손익 (%)
+    realized_pnl = Column(Float, nullable=True)        # 실현 손익 (금액, 레버리지 반영)
+    realized_pnl_pct = Column(Float, nullable=True)    # 실현 손익 — raw 가격변동% (레버리지 미적용). 레버리지 표시는 Order.leverage 참조.
 
     # Strategy attribution
     strategy_name = Column(String(50), nullable=False)
