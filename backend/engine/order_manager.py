@@ -133,8 +133,6 @@ class OrderManager:
                 calc_pnl_pct = (entry_price - exec_price) / entry_price * 100
             else:
                 calc_pnl_pct = (exec_price - entry_price) / entry_price * 100
-            if leverage and leverage > 1:
-                calc_pnl_pct *= leverage
             calc_pnl = (result.filled or amount) * abs(exec_price - entry_price)
             if direction == "short" and exec_price > entry_price:
                 calc_pnl = -calc_pnl

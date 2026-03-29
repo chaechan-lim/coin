@@ -369,7 +369,7 @@ class SafeOrderPipeline:
                 pnl_pct = (exec_price - request.entry_price) / request.entry_price
             else:
                 pnl_pct = (request.entry_price - exec_price) / request.entry_price
-            realized_pnl_pct = pnl_pct * request.leverage * 100
+            realized_pnl_pct = pnl_pct * 100
             realized_pnl = request.margin * request.leverage * pnl_pct - fee
 
         # Order record
