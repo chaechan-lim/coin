@@ -1048,6 +1048,17 @@ class PortfolioManager:
         if is_futures:
             for fp_sym in futures_positions:
                 exchange_symbols.add(fp_sym.replace(":USDT", ""))
+            # 서지 엔진이 활성 포지션(qty > 0)을 보유 중인 심볼도 exchange_symbols에 포함.
+            # 서지와 선물 엔진은 같은 물리 거래소 계정을 공유하므로, 서지가 포지션을 닫으면
+            # fetch_positions에서 해당 심볼이 사라져 선물 DB 포지션이 오진 청산될 수 있음.
+            surge_active_result = await session.execute(
+                select(Position.symbol).where(
+                    Position.exchange == "binance_surge",
+                    Position.quantity > 0,
+                )
+            )
+            for surge_sym in surge_active_result.scalars().all():
+                exchange_symbols.add(surge_sym)
         for db_sym, db_pos in db_positions.items():
             if db_pos.quantity > 0 and db_sym not in exchange_symbols:
                 # 레이스 컨디션 방지: identity map 우회하여 DB에서 직접 확인

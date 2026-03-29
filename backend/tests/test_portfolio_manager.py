@@ -1013,6 +1013,190 @@ async def test_sync_cleared_position_futures_liquidation(session):
     assert order.realized_pnl_pct < -80  # 강제청산 수준
 
 
+# ── COIN-56: 서지 포지션 미포함으로 오진 청산 방지 테스트 ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sync_does_not_clear_futures_when_surge_active(session):
+    """서지 엔진이 같은 심볼 활성 포지션 보유 시 선물 DB 포지션 오진 청산 방지.
+
+    서지와 선물 엔진은 같은 물리 계정을 공유하므로, 서지가 포지션을 닫으면
+    exchange_symbols에서 해당 심볼이 사라져 선물 DB 포지션이 거짓 청산될 수 있다.
+    서지 DB에 qty>0 포지션이 있으면 exchange_symbols에 포함되어야 한다.
+    """
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"BTC/USDT": 50000.0}),
+        initial_balance_krw=1000,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # 선물 DB 포지션: BTC/USDT qty=0.01 (active)
+    session.add(Position(
+        exchange="binance_futures", symbol="BTC/USDT",
+        quantity=0.01, average_buy_price=50000.0,
+        total_invested=166.7, is_paper=False,
+        direction="long", leverage=3, margin_used=166.7,
+    ))
+    # 서지 DB 포지션: 같은 BTC/USDT, qty=0.005 (서지 엔진이 활성 보유 중)
+    session.add(Position(
+        exchange="binance_surge", symbol="BTC/USDT",
+        quantity=0.005, average_buy_price=50000.0,
+        total_invested=83.3, is_paper=False,
+        direction="long", leverage=3,
+    ))
+    await session.flush()
+
+    # 거래소 API: 포지션 없음 (서지가 이미 닫았거나, 조회 타이밍 문제)
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=500, used=0, total=500),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["BTC/USDT"])
+    await session.flush()
+
+    # 선물 DB 포지션은 그대로 유지돼야 한다 (오진 청산 금지)
+    result = await session.execute(
+        select(Position).where(
+            Position.symbol == "BTC/USDT",
+            Position.exchange == "binance_futures",
+        )
+    )
+    pos = result.scalar_one()
+    assert pos.quantity == 0.01, "surge 활성 포지션이 있으면 futures 포지션을 오진 청산하면 안 됨"
+
+    # _cleared_positions에 기록되지 않아야 함
+    assert len(pm._cleared_positions) == 0, "오진 청산이 발생해서는 안 됨"
+
+
+@pytest.mark.asyncio
+async def test_sync_clears_futures_when_surge_also_closed(session):
+    """서지 포지션도 닫혀 있으면(qty=0) 선물 DB 포지션은 정상적으로 청산돼야 한다."""
+    from exchange.base import Balance
+    from core.models import Order as OrderModel
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"ETH/USDT": 1500.0}),
+        initial_balance_krw=1000,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # 선물 DB 포지션: ETH/USDT qty=0.1 (active)
+    session.add(Position(
+        exchange="binance_futures", symbol="ETH/USDT",
+        quantity=0.1, average_buy_price=2000.0,
+        total_invested=66.7, is_paper=False,
+        direction="long", leverage=3, margin_used=66.7,
+    ))
+    # 서지 DB 포지션: 같은 ETH/USDT, qty=0 (서지도 이미 닫음)
+    session.add(Position(
+        exchange="binance_surge", symbol="ETH/USDT",
+        quantity=0.0, average_buy_price=2000.0,
+        total_invested=0.0, is_paper=False,
+        direction="long", leverage=3,
+    ))
+    await session.flush()
+
+    # 거래소 API: ETH 포지션 없음
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=300, used=0, total=300),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["ETH/USDT"])
+    await session.flush()
+
+    # 선물 DB 포지션은 청산돼야 한다 (서지도 qty=0이므로 보호 불필요)
+    result = await session.execute(
+        select(Position).where(
+            Position.symbol == "ETH/USDT",
+            Position.exchange == "binance_futures",
+        )
+    )
+    pos = result.scalar_one()
+    assert pos.quantity == 0, "서지도 닫혀 있으면 선물 포지션은 정상 청산돼야 함"
+
+    # _cleared_positions에 기록돼야 함
+    assert len(pm._cleared_positions) == 1
+    assert pm._cleared_positions[0]["symbol"] == "ETH/USDT"
+
+    # Order 기록이 생성돼야 함
+    order_result = await session.execute(
+        select(OrderModel).where(
+            OrderModel.symbol == "ETH/USDT",
+            OrderModel.exchange == "binance_futures",
+        )
+    )
+    order = order_result.scalar_one_or_none()
+    assert order is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_clears_futures_when_no_surge_position(session):
+    """서지 포지션이 아예 없는 경우 선물 ghost 포지션은 정상 청산돼야 한다."""
+    from exchange.base import Balance
+    from core.models import Order as OrderModel
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"SOL/USDT": 20.0}),
+        initial_balance_krw=1000,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # 선물 DB 포지션만 존재, 서지 DB 포지션 없음
+    session.add(Position(
+        exchange="binance_futures", symbol="SOL/USDT",
+        quantity=5.0, average_buy_price=25.0,
+        total_invested=41.7, is_paper=False,
+        direction="long", leverage=3, margin_used=41.7,
+    ))
+    await session.flush()
+
+    # 거래소 API: SOL 포지션 없음 (ghost position)
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=100, used=0, total=100),
+    })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["SOL/USDT"])
+    await session.flush()
+
+    # 선물 DB 포지션은 청산돼야 한다
+    result = await session.execute(
+        select(Position).where(
+            Position.symbol == "SOL/USDT",
+            Position.exchange == "binance_futures",
+        )
+    )
+    pos = result.scalar_one()
+    assert pos.quantity == 0, "서지 포지션이 없으면 ghost 선물 포지션은 정상 청산돼야 함"
+
+    assert len(pm._cleared_positions) == 1
+    assert pm._cleared_positions[0]["symbol"] == "SOL/USDT"
+
+    order_result = await session.execute(
+        select(OrderModel).where(
+            OrderModel.symbol == "SOL/USDT",
+            OrderModel.exchange == "binance_futures",
+        )
+    )
+    assert order_result.scalar_one_or_none() is not None
+
+
 # ── COIN-14: 포지션 종료 사유 판별 테스트 ──────────────────────────
 
 
