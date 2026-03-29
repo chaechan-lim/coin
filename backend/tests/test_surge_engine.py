@@ -2454,13 +2454,28 @@ class TestCOIN63CashLock:
     async def test_cash_lock_prevents_overdraw_on_concurrent_entries(self, surge_engine, session):
         """COIN-63: Two concurrent _enter_position calls cannot jointly overdraw cash.
 
-        position_pct=0.08, score>=0.70 → each entry wants cash*0.08 USDT.
-        cash=70 → each wants 5.6 USDT; together that is 11.2 USDT which would
-        overdraw if both read cash=70 simultaneously.  With the lock the second
-        call sees pre-reduced cash after the first pre-reserves its share.
+        position_pct=0.6, cash=10.0 → each entry wants 6.0 USDT.
+        Without the lock both goroutines read cash=10, both pass `margin > cash`,
+        and together they deduct 12.0 from a 10.0 balance (negative).
+        With the lock the second entry sees cash=4.0 (post-reservation) and its
+        size_usdt=4.0*0.6=2.4 < 5 minimum → rejected.  Final cash = 10 - 6 = 4.0.
         """
         import asyncio as _asyncio
-        surge_engine._futures_pm.cash_balance = 70.0
+        # Use pct > 0.5 so that 2× allocation exceeds initial cash
+        surge_engine._position_pct = 0.6
+        initial_cash = 10.0
+        surge_engine._futures_pm.cash_balance = initial_cash
+
+        # Return order with executed_quantity matching the requested amount so
+        # actual_margin == size_usdt; use a small truthy fee to avoid the
+        # fee-fallback calculation (order.fee=0.0 is falsy → triggers FEE_PCT path).
+        async def _consistent_order(session, symbol, side, amount, price, **kwargs):
+            o = MagicMock()
+            o.executed_price = price
+            o.executed_quantity = amount
+            o.fee = price * amount * 0.0004  # explicit fee, matches FEE_PCT constant
+            return o
+        surge_engine._order_manager.create_order = _consistent_order
 
         mock_factory = MagicMock()
         mock_ctx = MagicMock()
@@ -2482,8 +2497,15 @@ class TestCOIN63CashLock:
                     return_exceptions=True,
                 )
 
-        # Cash must never go negative regardless of concurrent interleaving
+        # Cash must never go negative regardless of concurrent interleaving.
+        # Tighter bound: at most one entry can succeed (the second sees
+        # reduced cash=4.0 → size_usdt=2.4 < 5 min → rejected), so the total
+        # deduction equals single_margin + fee (≈ margin * 1.0004).
+        single_margin = initial_cash * surge_engine._position_pct  # 6.0
         assert surge_engine._futures_pm.cash_balance >= 0
+        # Allow a small fee on top of single_margin; two entries would leave
+        # cash well below initial_cash - single_margin * 1.01.
+        assert surge_engine._futures_pm.cash_balance >= initial_cash - single_margin * 1.01
 
     @pytest.mark.asyncio
     async def test_cash_refunded_on_entry_failure(self, surge_engine, session):
@@ -2542,6 +2564,34 @@ class TestCOIN63CashLock:
         assert surge_engine._futures_pm.cash_balance == _pytest.approx(initial_cash, abs=0.01)
 
     @pytest.mark.asyncio
+    async def test_cash_not_refunded_on_post_commit_failure(self, surge_engine, session):
+        """COIN-63: Cash is NOT refunded when emit_event fails after a successful commit.
+
+        Once session.commit() succeeds the position exists in the DB; refunding
+        cash at that point would inflate the balance and cause over-allocation.
+        """
+        import pytest as _pytest
+        initial_cash = 300.0
+        surge_engine._futures_pm.cash_balance = initial_cash
+
+        # Order and DB commit succeed, but notification fails
+        with patch("engine.surge_engine.get_session_factory", return_value=MagicMock(
+            return_value=MagicMock(
+                __aenter__=AsyncMock(return_value=session),
+                __aexit__=AsyncMock(return_value=False),
+            )
+        )):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock,
+                       side_effect=Exception("Notification failed")):
+                await surge_engine._enter_position(
+                    "ETH/USDT", "long", 0.75,
+                    {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
+                )
+
+        # Cash must NOT be restored — the position is in the DB and cost real margin
+        assert surge_engine._futures_pm.cash_balance < initial_cash
+
+    @pytest.mark.asyncio
     async def test_cash_lock_is_released_after_check(self, surge_engine, session):
         """COIN-63: Cash lock is released after the check, allowing subsequent entries."""
         import asyncio
@@ -2564,6 +2614,16 @@ class TestCOIN63CashLock:
         assert not surge_engine._cash_lock.locked()
 
 
+def _coin63_session_ctx(session):
+    """Shared helper: build a mock session-factory context for COIN-63 tests."""
+    mock_factory = MagicMock()
+    mock_ctx = MagicMock()
+    mock_ctx.__aenter__ = AsyncMock(return_value=session)
+    mock_ctx.__aexit__ = AsyncMock(return_value=False)
+    mock_factory.return_value = mock_ctx
+    return mock_factory
+
+
 class TestCOIN63ZeroDivision:
     """COIN-63 Bug 2: ZeroDivisionError guard when entry_price=0."""
 
@@ -2578,12 +2638,7 @@ class TestCOIN63ZeroDivision:
         )
 
     def _make_session_ctx(self, session):
-        mock_factory = MagicMock()
-        mock_ctx = MagicMock()
-        mock_ctx.__aenter__ = AsyncMock(return_value=session)
-        mock_ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_factory.return_value = mock_ctx
-        return mock_factory
+        return _coin63_session_ctx(session)
 
     @pytest.mark.asyncio
     async def test_exit_position_zero_entry_price_no_exception(self, surge_engine, session):
@@ -2682,12 +2737,7 @@ class TestCOIN63RetryOffByOne:
         return pos
 
     def _make_session_ctx(self, session):
-        mock_factory = MagicMock()
-        mock_ctx = MagicMock()
-        mock_ctx.__aenter__ = AsyncMock(return_value=session)
-        mock_ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_factory.return_value = mock_ctx
-        return mock_factory
+        return _coin63_session_ctx(session)
 
     @pytest.mark.asyncio
     async def test_force_cleanup_triggers_at_max_exit_retries(self, surge_engine, session):

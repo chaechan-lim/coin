@@ -625,6 +625,10 @@ class SurgeEngine:
         # except block can refund exactly what was taken (covers both the
         # pre-reservation inside the lock AND any post-order adjustment).
         _total_deducted = 0.0
+        # Sentinel: True only after session.commit() succeeds, meaning the
+        # position already exists in the DB.  Post-commit failures (e.g.
+        # emit_event) must NOT refund cash — the order is real.
+        _order_committed = False
 
         # COIN-63: acquire cash lock to atomically check and reserve balance,
         # preventing concurrent entries from overdrawing shared cash.
@@ -742,6 +746,8 @@ class SurgeEngine:
 
                 await session.commit()
 
+            _order_committed = True  # position persisted — no cash refund past this point
+
             # Track in memory
             self._positions[symbol] = SurgePositionState(
                 symbol=symbol,
@@ -777,10 +783,11 @@ class SurgeEngine:
             )
 
         except Exception as e:
-            # Refund exactly what was removed from cash — covers both the
-            # pre-reservation (margin) and any adjustment applied after order
-            # success but before DB commit (actual_margin + fee).
-            if _total_deducted > 0:
+            # Only refund cash when the order was never committed to the DB.
+            # Post-commit failures (e.g. emit_event) must not touch cash because
+            # the position record already exists; refunding would inflate
+            # cash_balance and cause over-allocation on subsequent entries.
+            if not _order_committed and _total_deducted > 0:
                 self._futures_pm.cash_balance += _total_deducted
             logger.error("surge_entry_failed", symbol=symbol, error=str(e), exc_info=True)
 
@@ -1182,7 +1189,7 @@ class SurgeEngine:
         ]
         for symbol, pos in pending:
             pos.exit_retry_count += 1
-            if pos.exit_retry_count >= MAX_EXIT_RETRIES:  # COIN-63: >= to trigger at exactly MAX_EXIT_RETRIES
+            if pos.exit_retry_count >= MAX_EXIT_RETRIES:  # COIN-63: >= so force-cleanup fires on the MAX_EXIT_RETRIES-th call, not the (MAX+1)-th
                 # Force cleanup to prevent permanent zombie
                 logger.warning(
                     "surge_pending_exit_force_cleanup",
