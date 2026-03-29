@@ -793,23 +793,20 @@ class BinanceFuturesEngine(TradingEngine):
 
     async def _evaluate_futures_coin(self, session: AsyncSession, symbol: str) -> None:
         """선물 코인 평가: SL/TP + 청산가 체크 + 양방향 매매."""
-        # 포지션 조회
-        result = await session.execute(
-            select(Position).where(
-                Position.symbol == symbol,
-                Position.quantity > 0,
-                Position.exchange == self._exchange_name,
+        position = None
+        # 포지션 조회 + SL/TP 체크 (모니터와 동시 청산 방지 — lock 내부에서 쿼리)
+        async with self._close_lock:
+            result = await session.execute(
+                select(Position).where(
+                    Position.symbol == symbol,
+                    Position.quantity > 0,
+                    Position.exchange == self._exchange_name,
+                )
             )
-        )
-        position = result.scalar_one_or_none()
+            position = result.scalar_one_or_none()
 
-        # 포지션 있으면 SL/TP/청산가 체크 (모니터와 동시 청산 방지)
-        if position:
-            async with self._close_lock:
-                # 락 획득 후 포지션 재확인 (모니터가 먼저 청산했을 수 있음)
-                await session.refresh(position)
-                if position.quantity <= 0:
-                    return
+            # 포지션 있으면 SL/TP/청산가 체크
+            if position:
                 sold = await self._check_futures_stop_conditions(session, symbol, position)
                 if sold:
                     return

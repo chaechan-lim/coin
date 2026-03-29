@@ -872,6 +872,167 @@ class TestStopEventThrottle:
         assert "BTC/USDT" not in futures_engine._last_stop_event_time
 
 
+# ── COIN-62: Race Condition Fix (Position Query inside _close_lock) ──────────
+
+
+class TestEvaluateFuturesCoinLockOrder:
+    """COIN-62: _evaluate_futures_coin()에서 포지션 쿼리가 _close_lock 내부에서 실행되어야 함.
+
+    레이스 컨디션: 락 바깥에서 쿼리하면, 쿼리 완료 후 락 획득 전 모니터가 포지션을 닫을 수 있음.
+    """
+
+    @pytest.mark.asyncio
+    async def test_position_query_inside_lock(self, futures_engine, monkeypatch):
+        """포지션 쿼리가 _close_lock 내부에서 실행되는지 확인.
+
+        테스트 방식: _close_lock 획득/해제 순서와 session.execute 호출 순서를 추적.
+        lock을 획득 후 쿼리가 실행되고, 쿼리 후 lock을 해제해야 함.
+        """
+        lock_acquire_called = False
+        execute_called = False
+        lock_release_called = False
+        call_order = []
+
+        # Mock AsyncContext Manager for _close_lock
+        class TrackingAsyncContextManager:
+            async def __aenter__(self):
+                nonlocal lock_acquire_called
+                lock_acquire_called = True
+                call_order.append("lock_acquire")
+                return None
+
+            async def __aexit__(self, *args):
+                nonlocal lock_release_called
+                lock_release_called = True
+                call_order.append("lock_release")
+
+        tracking_lock = TrackingAsyncContextManager()
+        monkeypatch.setattr(futures_engine, "_close_lock", tracking_lock)
+
+        # Mock session to track execute call
+        session = AsyncMock()
+        position = MagicMock(spec=Position)
+        position.symbol = "BTC/USDT"
+        position.quantity = 0.001
+        position.exchange = "binance_futures"
+
+        async def tracked_execute(*args, **kwargs):
+            nonlocal execute_called
+            execute_called = True
+            call_order.append("execute")
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = position
+            return result
+
+        session.execute = tracked_execute
+
+        # Mock stop condition check to skip it
+        futures_engine._check_futures_stop_conditions = AsyncMock(return_value=False)
+        futures_engine._check_cooldown = MagicMock(return_value=False)
+        futures_engine._collect_signals = AsyncMock(return_value=None)
+
+        # Call the method
+        await futures_engine._evaluate_futures_coin(session, "BTC/USDT")
+
+        # Assertions
+        assert lock_acquire_called, "Lock should be acquired"
+        assert execute_called, "Session.execute should be called"
+        assert lock_release_called, "Lock should be released"
+
+        # Most importantly: lock_acquire should happen before execute
+        assert (
+            call_order.index("lock_acquire") < call_order.index("execute")
+        ), f"Lock must be acquired before execute. Order: {call_order}"
+
+        # And execute before release
+        assert (
+            call_order.index("execute") < call_order.index("lock_release")
+        ), f"Execute must happen before lock release. Order: {call_order}"
+
+    @pytest.mark.asyncio
+    async def test_no_position_skips_stop_check(self, futures_engine):
+        """포지션이 없으면 _check_futures_stop_conditions를 호출하지 않음."""
+        session = AsyncMock()
+
+        # Mock session to return no position
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(return_value=mock_result)
+
+        # Mock cooldown and signal collection
+        futures_engine._check_cooldown = MagicMock(return_value=False)
+        futures_engine._collect_signals = AsyncMock(return_value=None)
+        futures_engine._check_futures_stop_conditions = AsyncMock(
+            return_value=False
+        )
+
+        await futures_engine._evaluate_futures_coin(session, "BTC/USDT")
+
+        # Verify stop check was NOT called
+        futures_engine._check_futures_stop_conditions.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sold_early_returns_without_signal_collection(self, futures_engine):
+        """포지션이 SL/TP로 청산되면 신호 수집 없이 반환."""
+        session = AsyncMock()
+        position = MagicMock(spec=Position)
+        position.symbol = "BTC/USDT"
+        position.quantity = 0.001
+        position.exchange = "binance_futures"
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = position
+        session.execute = AsyncMock(return_value=mock_result)
+
+        # Simulate position was sold during SL/TP check
+        futures_engine._check_futures_stop_conditions = AsyncMock(
+            return_value=True  # True means position was sold
+        )
+        futures_engine._collect_signals = AsyncMock(return_value=None)
+
+        await futures_engine._evaluate_futures_coin(session, "BTC/USDT")
+
+        # Verify signals were NOT collected (early return)
+        futures_engine._collect_signals.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_position_checked_after_lock_acquired(self, futures_engine):
+        """Lock 획득 후 포지션을 체크해야 함 (monitor의 동시 청산 방지)."""
+        session = AsyncMock()
+        position = MagicMock(spec=Position)
+        position.symbol = "BTC/USDT"
+        position.quantity = 0.001
+        position.exchange = "binance_futures"
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = position
+        session.execute = AsyncMock(return_value=mock_result)
+
+        futures_engine._check_futures_stop_conditions = AsyncMock(
+            return_value=False
+        )
+        futures_engine._check_cooldown = MagicMock(return_value=False)
+        futures_engine._collect_signals = AsyncMock(
+            return_value=[
+                MagicMock(
+                    symbol="BTC/USDT", signal_type="BUY", confidence=0.7
+                )
+            ]
+        )
+        futures_engine._order_manager = MagicMock()
+        futures_engine._order_manager.log_signal_only = AsyncMock()
+        futures_engine._combiner = MagicMock()
+        futures_engine._combiner.combine = MagicMock()
+        futures_engine._combiner.combine.return_value = MagicMock(
+            action="HOLD"
+        )
+
+        await futures_engine._evaluate_futures_coin(session, "BTC/USDT")
+
+        # Verify that stop condition check happened
+        futures_engine._check_futures_stop_conditions.assert_called_once()
+
+
 # ── Harness Conformance Tests (COIN-10) ────────────────────────────────────
 
 
