@@ -740,6 +740,47 @@ class PortfolioManager:
         # 5. 폴백
         return ("position_sync", "다운타임 중 포지션 종료")
 
+    @staticmethod
+    def _calculate_leverage_from_futures(margin: float, raw_lev, notional: float) -> int:
+        """선물 거래소 데이터에서 leverage를 계산.
+
+        Args:
+            margin: initialMargin 값
+            raw_lev: leverage 필드 (None이면 notional/margin으로 계산)
+            notional: notional 값 (leverage가 없을 때 사용)
+
+        Returns:
+            계산된 leverage (최소 1)
+        """
+        if raw_lev:
+            return int(raw_lev)
+        elif margin > 0:
+            # ccxt가 leverage=None 반환 시 notional/margin으로 계산
+            abs_notional = abs(notional) if notional else 0
+            return max(1, round(abs_notional / margin)) if abs_notional > 0 else 1
+        else:
+            return 1
+
+    def _is_dust_position(self, invested_or_margin: float) -> bool:
+        """포지션이 dust(무시해도 될 정도로 작은 잔고)인지 판별.
+
+        선물: margin < 1 USD
+        현물: value < 1 USD (바이낸스) 또는 value < 1000 KRW (빗썸)
+
+        Args:
+            invested_or_margin: 선물은 margin, 현물은 value (수량 * 가격)
+
+        Returns:
+            dust이면 True
+        """
+        if self._is_futures:
+            # 선물: margin 기준
+            return invested_or_margin < 1.0
+        else:
+            # 현물: value 기준 (거래소별 최소값)
+            min_value = 1.0 if "binance" in self._exchange_name else 1000
+            return invested_or_margin < min_value
+
     async def sync_exchange_positions(
         self, session: AsyncSession, exchange_adapter, tracked_coins: list[str]
     ) -> None:
@@ -794,8 +835,10 @@ class PortfolioManager:
 
             # 선물: 최근 거래된 포지션의 margin 오버라이트 보호 (grace period 10분)
             # sync가 거래 직후 exchange API에서 일시적으로 틀린 initialMargin을 읽어서
-            # total_invested를 오염시키는 것을 방지
-            from datetime import datetime, timezone, timedelta
+            # total_invested를 오염시키는 것을 방지.
+            # 주의: 이 보호는 이미 거래된 포지션(last_trade_at이 설정됨)에만 적용.
+            # 새로 sync된 포지션은 last_trade_at이 None이므로 보호되지 않지만, 이는 정상이므로
+            # (아직 거래 이력이 없음). last_trade_at은 거래 시 설정됨 (trading_engine.py, surge_engine.py 참조).
             _margin_grace = timedelta(minutes=10)
             _now_utc = datetime.now(timezone.utc)
             _protected_syms: set[str] = set()
@@ -815,9 +858,7 @@ class PortfolioManager:
                 try:
                     current_price = await self._market_data.get_current_price(pair)
                     coin_value = bal.total * current_price
-                    # 바이낸스: 1 USDT 미만, 빗썸: 1000원 미만 무시
-                    min_value = 1.0 if "binance" in self._exchange_name else 1000
-                    if coin_value < min_value:
+                    if self._is_dust_position(coin_value):
                         continue  # dust: 좀비 탐지에도 포함 안 됨
                     exchange_symbols.add(pair)
                 except Exception:
@@ -831,14 +872,8 @@ class PortfolioManager:
                     margin = float(fp_data.get("initialMargin", 0) or 0)
                     direction = fp_data.get("side", "long")
                     raw_lev = fp_data.get("leverage")
-                    if raw_lev:
-                        leverage = int(raw_lev)
-                    elif margin > 0:
-                        # ccxt가 leverage=None 반환 시 notional/margin으로 계산
-                        notional = abs(float(fp_data.get("notional", 0) or 0))
-                        leverage = max(1, round(notional / margin)) if notional > 0 else 1
-                    else:
-                        leverage = 1
+                    notional = abs(float(fp_data.get("notional", 0) or 0))
+                    leverage = self._calculate_leverage_from_futures(margin, raw_lev, notional)
                     entry_price = float(fp_data.get("entryPrice", 0) or current_price)
                     liq_price = float(fp_data.get("liquidationPrice", 0) or 0) or None
                     invested = margin  # 선물: 마진이 실제 투자금
@@ -872,7 +907,6 @@ class PortfolioManager:
                             continue
 
                     # DB에 없는 포지션 → 신규 생성 (기존 보유 코인)
-                    from datetime import datetime, timezone
                     new_pos = Position(
                         exchange=self._exchange_name,
                         symbol=pair,
@@ -942,7 +976,6 @@ class PortfolioManager:
 
             # 선물: fetch_positions에만 있고 balances에 없는 포지션 동기화
             if is_futures and futures_positions:
-                from datetime import datetime, timezone
                 for fp_sym, fp_data in futures_positions.items():
                     # fp_sym 형식: "SOL/USDT:USDT" → pair: "SOL/USDT"
                     pair = fp_sym.replace(":USDT", "")
@@ -961,13 +994,8 @@ class PortfolioManager:
                         fp_margin = float(fp_data.get("initialMargin", 0) or 0)
                         fp_direction = fp_data.get("side", "long")
                         fp_raw_lev = fp_data.get("leverage")
-                        if fp_raw_lev:
-                            fp_leverage = int(fp_raw_lev)
-                        elif fp_margin > 0:
-                            fp_notional = abs(float(fp_data.get("notional", 0) or 0))
-                            fp_leverage = max(1, round(fp_notional / fp_margin)) if fp_notional > 0 else 1
-                        else:
-                            fp_leverage = 1
+                        fp_notional = abs(float(fp_data.get("notional", 0) or 0))
+                        fp_leverage = self._calculate_leverage_from_futures(fp_margin, fp_raw_lev, fp_notional)
                         fp_liq = float(fp_data.get("liquidationPrice", 0) or 0) or None
                         fp_entry = float(fp_data.get("entryPrice", 0) or 0)
                         fp_contracts = float(fp_data.get("contracts", 0) or 0)
@@ -1004,7 +1032,7 @@ class PortfolioManager:
                     if contracts <= 0:
                         continue
                     margin = float(fp_data.get("initialMargin", 0) or 0)
-                    if margin < 1.0:
+                    if self._is_dust_position(margin):
                         continue
 
                     # 서지 엔진이 보유 중인 포지션인지 확인 → 중복 생성 방지
@@ -1025,13 +1053,8 @@ class PortfolioManager:
                         continue
                     direction = fp_data.get("side", "long")
                     raw_lev = fp_data.get("leverage")
-                    if raw_lev:
-                        leverage = int(raw_lev)
-                    elif margin > 0:
-                        notional = abs(float(fp_data.get("notional", 0) or 0))
-                        leverage = max(1, round(notional / margin)) if notional > 0 else 1
-                    else:
-                        leverage = 1
+                    notional = abs(float(fp_data.get("notional", 0) or 0))
+                    leverage = self._calculate_leverage_from_futures(margin, raw_lev, notional)
                     entry_price = float(fp_data.get("entryPrice", 0) or 0)
                     liq_price = float(fp_data.get("liquidationPrice", 0) or 0) or None
 

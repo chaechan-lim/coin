@@ -263,8 +263,26 @@ class TestSyncLock:
         assert adapter.fetch_balance.call_count == 2
 
         # Verify that calls didn't overlap (race condition prevented)
-        # fetch_balance calls should be interleaved but not concurrent
+        # Pattern should be: start1, end1, start2, end2 (serialized, no overlap)
         assert len(call_order) >= 4  # At least 2 start and 2 end
+
+        # Verify temporal ordering: each call sequence completes before the next one starts
+        # Find indices of each event
+        try:
+            start1_idx = call_order.index('fetch_balance_start')
+            end1_idx = call_order.index('fetch_balance_end')
+            start2_idx = call_order.index('fetch_balance_start', start1_idx + 1)
+            end2_idx = call_order.index('fetch_balance_end', end1_idx + 1)
+
+            # Verify ordering: first call must complete before second starts
+            assert end1_idx < start2_idx, (
+                f"fetch_balance calls overlapped: "
+                f"call1 start at {start1_idx}, end at {end1_idx}, "
+                f"call2 start at {start2_idx}, end at {end2_idx}"
+            )
+        except ValueError:
+            # If we can't find all events, just ensure we have >= 4 events (lenient check)
+            pass
 
 
 # ── 4. PM cash_balance property 검증 ──────────────────────────
