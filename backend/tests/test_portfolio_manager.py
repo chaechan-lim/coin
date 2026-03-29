@@ -3221,3 +3221,117 @@ async def test_sync_does_not_revive_closed_position_from_fetch_positions(session
     # qty=0인 닫힌 포지션이 부활하지 않아야 함
     await session.refresh(closed_pos)
     assert closed_pos.quantity == 0, "Closed position must not be revived by sync"
+
+
+@pytest.mark.asyncio
+async def test_sync_skips_duplicate_order_when_recent_engine_order_exists(session):
+    """엔진이 최근 청산한 심볼에 대해 sync가 중복 Order를 생성하지 않아야 함.
+
+    시나리오: vol_breakout이 BTC 숏을 SL 청산 → 1분 후 sync 실행 →
+    거래소에 BTC 포지션 없음 → sync가 "사라진 포지션" 감지하지만,
+    최근 5분 이내 Order가 있으므로 스킵.
+    """
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"BTC/USDT": 66680.0}),
+        initial_balance_krw=3000.0,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # DB에 활성 포지션 (아직 qty > 0 — 엔진이 DB 업데이트 전)
+    pos = Position(
+        exchange="binance_futures", symbol="BTC/USDT",
+        quantity=0.019, average_buy_price=66610.0,
+        total_invested=421.8, is_paper=False,
+        direction="short", leverage=3, margin_used=421.8,
+    )
+    session.add(pos)
+
+    # 최근 엔진이 생성한 청산 Order (1분 전)
+    recent_order = Order(
+        exchange="binance_futures", symbol="BTC/USDT",
+        side="buy", order_type="market", status="filled",
+        requested_price=66682.0, executed_price=66682.0,
+        requested_quantity=0.019, executed_quantity=0.019,
+        fee=0.507, fee_currency="USDT", is_paper=False,
+        direction="short", leverage=3, margin_used=0,
+        strategy_name="vol_breakout",
+        realized_pnl=-1.93, realized_pnl_pct=-0.3,
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    session.add(recent_order)
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=3000, used=0, total=3000),
+    })
+    # 거래소에 BTC 포지션 없음 (이미 청산됨)
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["BTC/USDT"])
+    await session.flush()
+
+    # sync가 중복 Order를 생성하지 않아야 함
+    result = await session.execute(
+        select(Order).where(
+            Order.exchange == "binance_futures",
+            Order.symbol == "BTC/USDT",
+        )
+    )
+    orders = result.scalars().all()
+    assert len(orders) == 1, f"Expected 1 order (engine only), got {len(orders)}"
+    assert orders[0].strategy_name == "vol_breakout"
+
+
+@pytest.mark.asyncio
+async def test_sync_creates_order_when_no_recent_engine_order(session):
+    """최근 5분 이내 엔진 Order가 없으면 sync가 정상적으로 Order를 생성해야 함.
+
+    시나리오: 다운타임 중 수동 청산 — 엔진 Order 없음 → sync가 기록.
+    """
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"ETH/USDT": 2010.0}),
+        initial_balance_krw=3000.0,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # DB에 활성 포지션
+    pos = Position(
+        exchange="binance_futures", symbol="ETH/USDT",
+        quantity=0.5, average_buy_price=2000.0,
+        total_invested=333.3, is_paper=False,
+        direction="long", leverage=3, margin_used=333.3,
+    )
+    session.add(pos)
+    await session.flush()
+
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=3000, used=0, total=3000),
+    })
+    # 거래소에 ETH 포지션 없음 (다운타임 중 수동 청산)
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["ETH/USDT"])
+    await session.flush()
+
+    # 최근 엔진 Order 없으므로 sync가 Order를 생성해야 함
+    result = await session.execute(
+        select(Order).where(
+            Order.exchange == "binance_futures",
+            Order.symbol == "ETH/USDT",
+        )
+    )
+    orders = result.scalars().all()
+    assert len(orders) == 1, f"Expected 1 sync order, got {len(orders)}"
+    assert orders[0].strategy_name == "position_sync"

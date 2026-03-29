@@ -1052,6 +1052,29 @@ class PortfolioManager:
                     )
                     continue
 
+                # 레이스 컨디션 방지 2: 최근 5분 이내 같은 심볼 청산 Order가 있으면
+                # 엔진이 이미 청산 처리 중인 것 → sync Order 생성 스킵
+                _five_min_ago = (
+                    datetime.now(timezone.utc) - timedelta(minutes=5)
+                ).isoformat()
+                recent_close_result = await session.execute(
+                    text(
+                        "SELECT id FROM orders "
+                        "WHERE exchange = :ex AND symbol = :sym "
+                        "AND strategy_name != 'position_sync' "
+                        "AND created_at >= :since "
+                        "LIMIT 1"
+                    ),
+                    {"ex": self._exchange_name, "sym": db_sym, "since": _five_min_ago},
+                )
+                if recent_close_result.first() is not None:
+                    logger.info(
+                        "sync_skip_recent_order_exists",
+                        symbol=db_sym,
+                        reason="engine order within last 5 minutes",
+                    )
+                    continue
+
                 # 추정 PnL 계산 (db_pos 사용 — 스냅샷 시점 데이터)
                 entry = db_pos.average_buy_price or 0
                 invested = db_pos.total_invested or 0
