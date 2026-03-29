@@ -2,12 +2,9 @@
 SurgeEngine 단위 테스트
 =======================
 """
-import asyncio
 import pytest
-import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone, timedelta
-from collections import deque
 
 from core.models import Position
 from core.enums import SignalType
@@ -15,7 +12,6 @@ from engine.surge_engine import (
     SurgeEngine,
     SurgePositionState,
     SymbolState,
-    EXCHANGE_NAME,
     FEE_PCT,
 )
 from config import SurgeTradingConfig
@@ -1612,3 +1608,832 @@ class TestBidirectionalPositions:
         # Same direction = no conflict
         no_conflict = surge_engine._check_cross_engine_conflict("BTC/USDT", "long")
         assert no_conflict is False
+
+
+# ── COIN-58: Exit failure handling ───────────────────────────────
+
+class TestExitFailureHandling:
+    """COIN-58: Tests for _exit_position failure scenarios."""
+
+    def _make_pos(self, symbol="BTC/USDT", direction="long", entry=65000.0):
+        return SurgePositionState(
+            symbol=symbol, direction=direction,
+            entry_price=entry, quantity=0.001,
+            margin=10.0,
+            entry_time=datetime.now(timezone.utc) - timedelta(minutes=15),
+            peak_price=entry, trough_price=entry,
+        )
+
+    def _make_session_ctx(self, session):
+        mock_factory = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_ctx
+        return mock_factory
+
+    @pytest.mark.asyncio
+    async def test_exchange_failure_position_stays_in_memory(self, surge_engine, session):
+        """COIN-58: When exchange order fails, position must stay in memory for retry."""
+        sym = "BTC/USDT"
+        pos = self._make_pos(sym)
+        surge_engine._positions[sym] = pos
+
+        # Make exchange order fail
+        surge_engine._order_manager.create_order = AsyncMock(
+            side_effect=Exception("Exchange API error")
+        )
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._exit_position(sym, pos, 65100.0, "TP")
+
+        # Position must still be in memory
+        assert sym in surge_engine._positions
+
+    @pytest.mark.asyncio
+    async def test_exchange_failure_increments_retry_count(self, surge_engine, session):
+        """COIN-58: Exchange failure increments exit_retry_count on the position."""
+        sym = "ETH/USDT"
+        pos = self._make_pos(sym, entry=3500.0)
+        surge_engine._positions[sym] = pos
+        assert pos.exit_retry_count == 0
+
+        surge_engine._order_manager.create_order = AsyncMock(
+            side_effect=Exception("Connection timeout")
+        )
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._exit_position(sym, pos, 3450.0, "SL")
+
+        assert pos.exit_retry_count == 1
+
+        # Retry again → count increments
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._exit_position(sym, pos, 3450.0, "SL")
+
+        assert pos.exit_retry_count == 2
+
+    @pytest.mark.asyncio
+    async def test_exchange_max_retries_emits_error_event_exactly_once(self, surge_engine, session):
+        """COIN-58: emit_event('error') fires exactly once when exit_retry_count == MAX_EXIT_RETRIES.
+
+        With `>= MAX_EXIT_RETRIES` the event would spam on every subsequent cycle;
+        with `== MAX_EXIT_RETRIES` it fires exactly once and the position is frozen
+        via pending_exit so _check_all_exits stops triggering new exchange orders.
+        """
+        from engine.surge_engine import MAX_EXIT_RETRIES
+
+        sym = "BTC/USDT"
+        pos = self._make_pos(sym)
+        surge_engine._positions[sym] = pos
+
+        surge_engine._order_manager.create_order = AsyncMock(
+            side_effect=Exception("Exchange rejected")
+        )
+
+        mock_factory = self._make_session_ctx(session)
+        emit_mock = AsyncMock()
+
+        # Call MAX_EXIT_RETRIES - 1 times: event must NOT fire yet
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", emit_mock):
+                for _ in range(MAX_EXIT_RETRIES - 1):
+                    await surge_engine._exit_position(sym, pos, 65000.0, "TP")
+
+        assert pos.exit_retry_count == MAX_EXIT_RETRIES - 1
+        assert emit_mock.call_count == 0, "event must not fire before MAX_EXIT_RETRIES"
+
+        # MAX_EXIT_RETRIES-th call: event fires exactly once, position frozen
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", emit_mock):
+                await surge_engine._exit_position(sym, pos, 65000.0, "TP")
+
+        assert pos.exit_retry_count == MAX_EXIT_RETRIES
+        assert emit_mock.call_count == 1
+        # Verify the event is the error-severity stuck-exit alert
+        severity, event_type, message = emit_mock.call_args[0][:3]
+        assert severity == "error"
+        assert "stuck_exit" in str(emit_mock.call_args)
+        # Position must be frozen via pending_exit (no more exchange orders next cycle)
+        assert pos.pending_exit is True
+
+        # One more call: count increments but event does NOT fire again
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", emit_mock):
+                await surge_engine._exit_position(sym, pos, 65000.0, "TP")
+
+        # emit_event call count stays at 1 (pending_exit blocks _check_all_exits,
+        # but _exit_position itself was called directly here)
+        assert emit_mock.call_count == 1, "event must not fire again after MAX_EXIT_RETRIES"
+
+    @pytest.mark.asyncio
+    async def test_aexit_failure_after_commit_credits_cash_and_marks_pending(
+        self, surge_engine, session
+    ):
+        """COIN-58: session.__aexit__ raising after successful DB commit must credit cash
+        immediately (commit is confirmed) and mark pending_exit for memory cleanup,
+        NOT increment exit_retry_count (this is not a Phase-1 exchange failure).
+        """
+        sym = "ETH/USDT"
+        pos = self._make_pos(sym, entry=3500.0)
+        surge_engine._positions[sym] = pos
+        initial_cash = surge_engine._futures_pm.cash_balance
+
+        order = MagicMock()
+        order.executed_price = 3550.0
+        order.executed_quantity = 0.001
+        order.fee = 0.001
+        surge_engine._order_manager.create_order = AsyncMock(return_value=order)
+
+        # DB position with quantity > 0 so _zero_db_position returns True
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=0.001, average_buy_price=3500.0,
+            total_invested=10.0, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        # __aexit__ raises AFTER session.commit() succeeds
+        mock_factory = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_ctx.__aexit__ = AsyncMock(side_effect=Exception("teardown error"))
+        mock_factory.return_value = mock_ctx
+
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._exit_position(sym, pos, 3550.0, "TP")
+
+        # Cash must have been credited (commit confirmed the DB cleanup)
+        assert surge_engine._futures_pm.cash_balance > initial_cash
+        # Position must be marked pending_exit so _finalize_exit_cleanup runs next cycle
+        assert pos.pending_exit is True
+        # This is NOT a Phase-1 exchange failure — retry count must not increment
+        assert pos.exit_retry_count == 0
+        # exit_cost_return must be 0 (cash already applied above, idempotency guard)
+        assert pos.exit_cost_return == 0.0
+
+    @pytest.mark.asyncio
+    async def test_db_failure_creates_pending_exit(self, surge_engine, session):
+        """COIN-58: Exchange succeeds, DB fails → position marked as pending_exit."""
+        sym = "SOL/USDT"
+        pos = self._make_pos(sym, entry=150.0)
+        surge_engine._positions[sym] = pos
+
+        # Order succeeds
+        order = MagicMock()
+        order.executed_price = 152.0
+        order.executed_quantity = pos.quantity
+        order.fee = 0.001
+        surge_engine._order_manager.create_order = AsyncMock(return_value=order)
+
+        # DB commit fails
+        session.commit = AsyncMock(side_effect=Exception("DB connection lost"))
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=pos.quantity, average_buy_price=150.0,
+            total_invested=10.0, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._exit_position(sym, pos, 152.0, "TP")
+
+        # Position must still be in memory AND marked as pending
+        assert sym in surge_engine._positions
+        assert pos.pending_exit is True
+        assert pos.exit_reason == "TP"
+
+    @pytest.mark.asyncio
+    async def test_pm_cash_not_corrupted_on_db_failure(self, surge_engine, session):
+        """COIN-58: PM cash must NOT change when DB commit fails."""
+        sym = "ADA/USDT"
+        pos = self._make_pos(sym, entry=0.50)
+        surge_engine._positions[sym] = pos
+        initial_cash = surge_engine._futures_pm.cash_balance
+
+        order = MagicMock()
+        order.executed_price = 0.51
+        order.executed_quantity = pos.quantity
+        order.fee = 0.0001
+        surge_engine._order_manager.create_order = AsyncMock(return_value=order)
+
+        # DB commit fails
+        session.commit = AsyncMock(side_effect=Exception("Timeout"))
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._exit_position(sym, pos, 0.51, "TP")
+
+        # PM cash must be unchanged
+        assert surge_engine._futures_pm.cash_balance == initial_cash
+
+    @pytest.mark.asyncio
+    async def test_pending_exit_state_stores_exec_results(self, surge_engine, session):
+        """COIN-58: Pending exit stores execution results for retry."""
+        sym = "LINK/USDT"
+        pos = self._make_pos(sym, entry=15.0)
+        surge_engine._positions[sym] = pos
+
+        order = MagicMock()
+        order.executed_price = 15.3
+        order.executed_quantity = pos.quantity
+        order.fee = 0.001
+        surge_engine._order_manager.create_order = AsyncMock(return_value=order)
+
+        session.commit = AsyncMock(side_effect=Exception("DB error"))
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._exit_position(sym, pos, 15.3, "Trailing")
+
+        # Verify stored state
+        assert pos.pending_exit is True
+        assert pos.exit_exec_price == 15.3
+        assert pos.exit_exec_qty == pos.quantity
+        assert pos.exit_reason == "Trailing"
+        # long entry=15.0 → exec=15.3, leverage=3, margin=10.0
+        # raw_pnl_pct = (15.3-15.0)/15.0*100 = 2.0%; lev = 6.0%; fee_pct = 0.04%*3*2*100 = 0.24%
+        # net_pnl_pct = 5.76%; pnl_usdt = 10.0 * 5.76/100 = 0.576; cost_return = 10.576
+        assert abs(pos.exit_cost_return - 10.576) < 0.001
+
+    @pytest.mark.asyncio
+    async def test_successful_exit_removes_position_and_updates_cash(self, surge_engine, session):
+        """COIN-58: Successful exit removes position from memory and updates cash AFTER commit."""
+        sym = "DOT/USDT"
+        pos = self._make_pos(sym, entry=7.0)
+        surge_engine._positions[sym] = pos
+        initial_cash = surge_engine._futures_pm.cash_balance
+
+        order = MagicMock()
+        order.executed_price = 7.1
+        order.executed_quantity = pos.quantity
+        order.fee = 0.0001
+        surge_engine._order_manager.create_order = AsyncMock(return_value=order)
+
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=pos.quantity, average_buy_price=7.0,
+            total_invested=10.0, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._exit_position(sym, pos, 7.1, "TP")
+
+        # Position removed, cash updated
+        assert sym not in surge_engine._positions
+        assert surge_engine._futures_pm.cash_balance > initial_cash
+
+
+# ── COIN-58: Pending exit retry tests ────────────────────────────
+
+class TestPendingExitRetry:
+    """COIN-58: Tests for _retry_pending_exits logic."""
+
+    def _make_pending_pos(self, symbol="BTC/USDT"):
+        pos = SurgePositionState(
+            symbol=symbol, direction="long",
+            entry_price=65000.0, quantity=0.001,
+            margin=10.0,
+            entry_time=datetime.now(timezone.utc) - timedelta(minutes=20),
+            peak_price=65000.0, trough_price=65000.0,
+        )
+        pos.pending_exit = True
+        pos.exit_reason = "TP"
+        pos.exit_exec_price = 65500.0
+        pos.exit_exec_qty = 0.001
+        pos.exit_fee = 0.003
+        pos.exit_cost_return = 10.5
+        pos.exit_net_pnl_pct = 1.2
+        pos.exit_pnl_usdt = 0.12
+        pos.exit_retry_count = 1
+        return pos
+
+    def _make_session_ctx(self, session):
+        mock_factory = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_ctx
+        return mock_factory
+
+    @pytest.mark.asyncio
+    async def test_no_pending_exits_does_nothing(self, surge_engine, session):
+        """No pending exits → _retry_pending_exits is a no-op."""
+        surge_engine._positions.clear()
+        initial_cash = surge_engine._futures_pm.cash_balance
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._retry_pending_exits()
+
+        assert surge_engine._futures_pm.cash_balance == initial_cash
+
+    @pytest.mark.asyncio
+    async def test_retry_pending_exit_success(self, surge_engine, session):
+        """COIN-58: Pending exit retried successfully → position removed, cash updated."""
+        sym = "BTC/USDT"
+        pos = self._make_pending_pos(sym)
+        surge_engine._positions[sym] = pos
+        initial_cash = surge_engine._futures_pm.cash_balance
+
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=0.001, average_buy_price=65000.0,
+            total_invested=10.0, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._retry_pending_exits()
+
+        # Position removed, cash updated with cost_return
+        assert sym not in surge_engine._positions
+        assert surge_engine._futures_pm.cash_balance == initial_cash + pos.exit_cost_return
+
+    @pytest.mark.asyncio
+    async def test_retry_pending_exit_still_failing(self, surge_engine, session):
+        """COIN-58: Retry still fails → position stays pending, retry_count increments."""
+        sym = "ETH/USDT"
+        pos = self._make_pending_pos(sym)
+        pos.exit_retry_count = 2
+        surge_engine._positions[sym] = pos
+
+        session.commit = AsyncMock(side_effect=Exception("Still broken"))
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._retry_pending_exits()
+
+        # Still in memory, still pending
+        assert sym in surge_engine._positions
+        assert pos.pending_exit is True
+        # Retry count incremented
+        assert pos.exit_retry_count == 3
+
+    @pytest.mark.asyncio
+    async def test_max_retries_triggers_force_cleanup(self, surge_engine, session):
+        """COIN-58: After MAX_EXIT_RETRIES, position is force-cleaned."""
+        from engine.surge_engine import MAX_EXIT_RETRIES
+
+        sym = "SOL/USDT"
+        pos = self._make_pending_pos(sym)
+        pos.exit_retry_count = MAX_EXIT_RETRIES  # already at limit
+        surge_engine._positions[sym] = pos
+        initial_cash = surge_engine._futures_pm.cash_balance
+
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=0.001, average_buy_price=150.0,
+            total_invested=10.0, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._retry_pending_exits()
+
+        # Position should be force-cleaned from memory
+        assert sym not in surge_engine._positions
+        # Cash should be updated
+        assert surge_engine._futures_pm.cash_balance == initial_cash + pos.exit_cost_return
+
+    @pytest.mark.asyncio
+    async def test_pending_exit_blocks_new_entry(self, surge_engine):
+        """COIN-58: pending_exit=True position in _positions blocks new entry.
+
+        COIN-58 keeps pending-exit positions in _positions (not removed until DB cleanup
+        succeeds).  The existing `if sym in self._positions: continue` guard therefore
+        handles both active positions AND pending-exit positions with the same code path.
+        This test verifies that a pending-exit position does NOT allow re-entry.
+        """
+        sym = "BTC/USDT"
+        pos = SurgePositionState(
+            symbol=sym, direction="long",
+            entry_price=65000.0, quantity=0.001,
+            margin=10.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=65000.0, trough_price=65000.0,
+        )
+        pos.pending_exit = True
+        surge_engine._positions[sym] = pos
+
+        # Set up good surge conditions (would normally trigger entry on a fresh symbol)
+        surge_engine._candle_vol_ratios[sym] = 10.0
+        surge_engine._candle_price_chgs[sym] = 3.0
+        surge_engine._candle_vol_accel[sym] = 2.0
+        surge_engine._candle_atr_pct[sym] = 1.5
+
+        tickers = {sym: {"last": 65100.0, "bid": 65090.0, "ask": 65110.0}}
+        enter_mock = AsyncMock()
+        surge_engine._enter_position = enter_mock
+
+        with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+            await surge_engine._scan_for_entries(tickers)
+
+        # Entry must be blocked: sym is in _positions (pending-exit), so `continue` fires
+        enter_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_active_position_also_blocks_new_entry(self, surge_engine):
+        """COIN-58: pending_exit=False (active) position in _positions also blocks entry.
+
+        Confirms the pre-COIN-58 guard still works, and that the single `sym in _positions`
+        check covers both active and pending-exit cases.
+        """
+        sym = "ETH/USDT"
+        pos = SurgePositionState(
+            symbol=sym, direction="long",
+            entry_price=3500.0, quantity=0.01,
+            margin=10.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=3500.0, trough_price=3500.0,
+        )
+        pos.pending_exit = False  # regular active position
+        surge_engine._positions[sym] = pos
+
+        surge_engine._candle_vol_ratios[sym] = 10.0
+        surge_engine._candle_price_chgs[sym] = 3.0
+        surge_engine._candle_vol_accel[sym] = 2.0
+        surge_engine._candle_atr_pct[sym] = 1.5
+
+        tickers = {sym: {"last": 3510.0, "bid": 3509.0, "ask": 3511.0}}
+        enter_mock = AsyncMock()
+        surge_engine._enter_position = enter_mock
+
+        with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+            await surge_engine._scan_for_entries(tickers)
+
+        enter_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retry_idempotent_db_already_zeroed(self, surge_engine, session):
+        """COIN-58: When DB row already has quantity=0 (prior commit succeeded but
+        __aexit__ threw), cash must NOT be incremented on the next retry call.
+
+        This directly tests the critical double-cash-update bug: if a prior attempt
+        committed successfully but the session context manager raised during cleanup,
+        the position remains in _positions with pending_exit=True.  On the next call to
+        _retry_pending_exits the DB row has quantity=0; _zero_db_position returns False
+        and the cash credit must be skipped.
+        """
+        sym = "BTC/USDT"
+        pos = self._make_pending_pos(sym)
+        surge_engine._positions[sym] = pos
+        initial_cash = surge_engine._futures_pm.cash_balance
+
+        # DB row already has quantity=0 (prior commit succeeded)
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=0,  # already zeroed
+            average_buy_price=0.0,
+            total_invested=0.0, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._retry_pending_exits()
+
+        # Cash must NOT have changed (row was already clean → idempotent guard fired)
+        assert surge_engine._futures_pm.cash_balance == initial_cash
+        # Position must still be cleaned up from memory
+        assert sym not in surge_engine._positions
+
+    @pytest.mark.asyncio
+    async def test_retry_pending_sets_cooldown_on_success(self, surge_engine, session):
+        """COIN-58: After successful retry, cooldown is set."""
+        sym = "AVAX/USDT"
+        pos = self._make_pending_pos(sym)
+        surge_engine._positions[sym] = pos
+        surge_engine._cooldowns.pop(sym, None)
+
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=0.001, average_buy_price=35.0,
+            total_invested=10.0, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._retry_pending_exits()
+
+        # Cooldown set
+        assert sym in surge_engine._cooldowns
+
+    @pytest.mark.asyncio
+    async def test_phase1_force_cleanup_does_not_reset_consecutive_losses(self, surge_engine, session):
+        """COIN-58: Phase-1 max-retry force-cleanup (exit_exec_price==0) must NOT
+        reset _consecutive_losses to 0 via the profit-branch in _finalize_exit_cleanup.
+        Pre-existing losses must be preserved (and incremented by the unknown-loss helper).
+        """
+        from engine.surge_engine import MAX_EXIT_RETRIES
+
+        sym = "ETH/USDT"
+        pos = SurgePositionState(
+            symbol=sym, direction="long",
+            entry_price=3500.0, quantity=0.01,
+            margin=10.0,
+            entry_time=datetime.now(timezone.utc) - timedelta(minutes=20),
+            peak_price=3500.0, trough_price=3500.0,
+        )
+        pos.pending_exit = True
+        pos.exit_retry_count = MAX_EXIT_RETRIES  # incremented to MAX+1 → force-cleanup
+        pos.exit_exec_price = 0.0               # Phase-1: no confirmed exchange order
+        pos.exit_pnl_usdt = 0.0
+        pos.exit_net_pnl_pct = 0.0
+        pos.exit_reason = "SL"
+        surge_engine._positions[sym] = pos
+        surge_engine._consecutive_losses = 2    # pre-existing losses to preserve
+
+        # DB row already zeroed (or irrelevant — no cash should be credited anyway)
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=0, average_buy_price=0.0,
+            total_invested=0.0, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._retry_pending_exits()
+
+        # Position removed from memory
+        assert sym not in surge_engine._positions
+        # consecutive_losses must be >= 2 — incremented, never reset to 0
+        assert surge_engine._consecutive_losses >= 2
+
+
+# ── COIN-58: Zombie detection tests ──────────────────────────────
+
+class TestZombieDetection:
+    """COIN-58: Tests for _detect_zombie_positions."""
+
+    def _make_pos(self, symbol="BTC/USDT"):
+        return SurgePositionState(
+            symbol=symbol, direction="long",
+            entry_price=65000.0, quantity=0.001,
+            margin=10.0,
+            entry_time=datetime.now(timezone.utc) - timedelta(hours=1),
+            peak_price=65000.0, trough_price=65000.0,
+        )
+
+    def _make_session_ctx(self, session):
+        mock_factory = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_ctx
+        return mock_factory
+
+    @pytest.mark.asyncio
+    async def test_no_positions_no_scan(self, surge_engine):
+        """No positions → zombie scan is a no-op."""
+        surge_engine._positions.clear()
+        surge_engine._exchange.fetch_positions = AsyncMock()
+
+        await surge_engine._detect_zombie_positions()
+
+        # fetch_positions not called when no positions
+        surge_engine._exchange.fetch_positions.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_zombie_detected_and_cleaned(self, surge_engine, session):
+        """COIN-58: In-memory position not on exchange → zombie cleaned up with warning event."""
+        sym = "BTC/USDT"
+        pos = self._make_pos(sym)
+        surge_engine._positions[sym] = pos
+
+        # Exchange returns empty positions (nothing open)
+        surge_engine._exchange.fetch_positions = AsyncMock(return_value=[])
+
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=0.001, average_buy_price=65000.0,
+            total_invested=10.0, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = self._make_session_ctx(session)
+        emit_mock = AsyncMock()
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", emit_mock):
+                await surge_engine._detect_zombie_positions()
+
+        # Zombie removed from memory
+        assert sym not in surge_engine._positions
+        # Warning event emitted with correct severity and ZOMBIE in message
+        emit_mock.assert_called()
+        first_call = emit_mock.call_args_list[0]
+        assert first_call[0][0] == "warning"
+        assert "ZOMBIE" in first_call[0][2].upper()
+
+    @pytest.mark.asyncio
+    async def test_normal_position_not_flagged(self, surge_engine, session):
+        """COIN-58: Position on exchange is NOT flagged as zombie."""
+        sym = "ETH/USDT"
+        pos = self._make_pos(sym)
+        surge_engine._positions[sym] = pos
+
+        # Exchange returns this position as open
+        exchange_pos = {"symbol": "ETH/USDT:USDT", "contracts": 0.01}
+        surge_engine._exchange.fetch_positions = AsyncMock(return_value=[exchange_pos])
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._detect_zombie_positions()
+
+        # Position stays in memory (it's on exchange)
+        assert sym in surge_engine._positions
+
+    @pytest.mark.asyncio
+    async def test_zombie_sets_cooldown(self, surge_engine, session):
+        """COIN-58: Zombie cleanup sets cooldown to prevent re-entry."""
+        sym = "SOL/USDT"
+        pos = self._make_pos(sym)
+        surge_engine._positions[sym] = pos
+        surge_engine._cooldowns.pop(sym, None)
+
+        surge_engine._exchange.fetch_positions = AsyncMock(return_value=[])
+
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=0.001, average_buy_price=150.0,
+            total_invested=10.0, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._detect_zombie_positions()
+
+        assert sym in surge_engine._cooldowns
+
+    @pytest.mark.asyncio
+    async def test_fetch_positions_failure_does_not_crash(self, surge_engine):
+        """COIN-58: fetch_positions failure is handled gracefully."""
+        sym = "DOGE/USDT"
+        pos = self._make_pos(sym)
+        surge_engine._positions[sym] = pos
+
+        surge_engine._exchange.fetch_positions = AsyncMock(
+            side_effect=Exception("API error")
+        )
+
+        # Should not raise
+        await surge_engine._detect_zombie_positions()
+
+        # Position unchanged
+        assert sym in surge_engine._positions
+
+    @pytest.mark.asyncio
+    async def test_pending_exit_skipped_in_zombie_scan(self, surge_engine, session):
+        """COIN-58: Positions with pending_exit are not processed by zombie detection."""
+        sym = "BNB/USDT"
+        pos = self._make_pos(sym)
+        pos.pending_exit = True  # Already being handled
+        surge_engine._positions[sym] = pos
+
+        # Exchange returns empty (would normally trigger zombie cleanup)
+        surge_engine._exchange.fetch_positions = AsyncMock(return_value=[])
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._detect_zombie_positions()
+
+        # NOT removed (pending_exit, let retry handle it)
+        assert sym in surge_engine._positions
+
+    @pytest.mark.asyncio
+    async def test_zombie_scan_interval_constant(self, surge_engine):
+        """COIN-58: Zombie scan interval is 5 minutes."""
+        from engine.surge_engine import ZOMBIE_SCAN_INTERVAL_SEC
+        assert ZOMBIE_SCAN_INTERVAL_SEC == 300
+
+    @pytest.mark.asyncio
+    async def test_zombie_scan_usdm_key_normalized(self, surge_engine, session):
+        """COIN-58: Exchange key BTC/USDT:USDT is normalized to BTC/USDT."""
+        sym = "BTC/USDT"
+        pos = self._make_pos(sym)
+        surge_engine._positions[sym] = pos
+
+        # Exchange returns USDM-format key
+        exchange_pos = {"symbol": "BTC/USDT:USDT", "contracts": 0.001}
+        surge_engine._exchange.fetch_positions = AsyncMock(return_value=[exchange_pos])
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._detect_zombie_positions()
+
+        # After normalization, BTC/USDT:USDT → BTC/USDT → position found on exchange → not zombie
+        assert sym in surge_engine._positions
+
+
+# ── COIN-58: New constants tests ─────────────────────────────────
+
+class TestCOIN58Constants:
+    """COIN-58: Tests for new constants and dataclass fields."""
+
+    def test_max_exit_retries_constant(self):
+        """MAX_EXIT_RETRIES is 5."""
+        from engine.surge_engine import MAX_EXIT_RETRIES
+        assert MAX_EXIT_RETRIES == 5
+
+    def test_zombie_scan_interval_constant(self):
+        """ZOMBIE_SCAN_INTERVAL_SEC is 300 (5 minutes)."""
+        from engine.surge_engine import ZOMBIE_SCAN_INTERVAL_SEC
+        assert ZOMBIE_SCAN_INTERVAL_SEC == 300
+
+    def test_surge_position_state_has_pending_exit_field(self):
+        """SurgePositionState has pending_exit field defaulting to False."""
+        pos = SurgePositionState(
+            symbol="BTC/USDT", direction="long",
+            entry_price=65000.0, quantity=0.001,
+            margin=10.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=65000.0, trough_price=65000.0,
+        )
+        assert pos.pending_exit is False
+
+    def test_surge_position_state_has_exit_retry_count(self):
+        """SurgePositionState has exit_retry_count defaulting to 0."""
+        pos = SurgePositionState(
+            symbol="BTC/USDT", direction="long",
+            entry_price=65000.0, quantity=0.001,
+            margin=10.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=65000.0, trough_price=65000.0,
+        )
+        assert pos.exit_retry_count == 0
+
+    def test_surge_position_state_exit_fields_default_zero(self):
+        """SurgePositionState exit result fields default to empty/zero."""
+        pos = SurgePositionState(
+            symbol="ETH/USDT", direction="short",
+            entry_price=3500.0, quantity=0.01,
+            margin=15.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=3500.0, trough_price=3500.0,
+        )
+        assert pos.exit_reason == ""
+        assert pos.exit_exec_price == 0.0
+        assert pos.exit_exec_qty == 0.0
+        assert pos.exit_fee == 0.0
+        assert pos.exit_cost_return == 0.0
+        assert pos.exit_net_pnl_pct == 0.0
+        assert pos.exit_pnl_usdt == 0.0
+
+    def test_engine_has_last_zombie_scan_attr(self, surge_engine):
+        """SurgeEngine has _last_zombie_scan attribute."""
+        assert hasattr(surge_engine, "_last_zombie_scan")
+        assert surge_engine._last_zombie_scan == 0.0
+
+    def test_surge_position_state_backward_compatible(self):
+        """Existing SurgePositionState fields still work (no regressions)."""
+        pos = SurgePositionState(
+            symbol="SOL/USDT", direction="long",
+            entry_price=150.0, quantity=1.0,
+            margin=50.0,
+            entry_time=datetime.now(timezone.utc),
+            peak_price=150.0, trough_price=150.0,
+            trailing_active=True,
+            surge_score=0.75,
+        )
+        assert pos.trailing_active is True
+        assert pos.surge_score == 0.75
+        assert pos.symbol == "SOL/USDT"
