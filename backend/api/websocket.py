@@ -53,32 +53,35 @@ class ConnectionManager:
 ws_manager = ConnectionManager()
 
 
-_WS_RECEIVE_TIMEOUT: int = get_config().ws_idle_timeout_sec  # set via APP_WS_IDLE_TIMEOUT_SEC env var (read at startup)
-
-
 @router.websocket("/ws/dashboard")
 async def websocket_dashboard(websocket: WebSocket):
+    # Read per-connection so APP_WS_IDLE_TIMEOUT_SEC env-var overrides take effect
+    timeout = get_config().ws_idle_timeout_sec
     await ws_manager.connect(websocket)
+    disconnected = False
     try:
         while True:
             try:
                 # Keep connection alive, receive client messages if needed
                 data = await asyncio.wait_for(
-                    websocket.receive_text(), timeout=_WS_RECEIVE_TIMEOUT
+                    websocket.receive_text(), timeout=timeout
                 )
             except asyncio.TimeoutError:
-                logger.info("ws_client_idle_timeout", timeout_sec=_WS_RECEIVE_TIMEOUT)
+                logger.info("ws_client_idle_timeout", timeout_sec=timeout)
                 try:
                     await websocket.close(code=1000)
                 except Exception:
-                    pass
+                    logger.debug("ws_close_on_idle_failed", exc_info=True)
                 finally:
                     await ws_manager.disconnect(websocket)
+                    disconnected = True
                 return
             # Client can send ping/pong or commands
             if data == "ping":
                 await websocket.send_text(json.dumps({"event": "pong"}))
     except WebSocketDisconnect:
-        await ws_manager.disconnect(websocket)
+        if not disconnected:
+            await ws_manager.disconnect(websocket)
     except Exception:
-        await ws_manager.disconnect(websocket)
+        if not disconnected:
+            await ws_manager.disconnect(websocket)

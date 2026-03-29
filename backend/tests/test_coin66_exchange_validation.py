@@ -289,26 +289,21 @@ async def test_strategies_update_params_valid_exchange_accepted():
 
 @pytest.mark.asyncio
 async def test_websocket_timeout_disconnects_idle_connection():
-    """WebSocket handler calls close(1000) then disconnect on asyncio.TimeoutError."""
+    """WebSocket handler calls close(1000) then disconnect exactly once on asyncio.TimeoutError."""
     from fastapi import WebSocket
     from api.websocket import websocket_dashboard, ws_manager
 
-    # Build a mock WebSocket that satisfies accept/close/receive_text
     mock_ws = MagicMock(spec=WebSocket)
     mock_ws.accept = AsyncMock()
     mock_ws.receive_text = AsyncMock()
     mock_ws.send_text = AsyncMock()
     mock_ws.close = AsyncMock()
 
-    disconnect_called = False
-
-    async def _mock_disconnect(ws):
-        nonlocal disconnect_called
-        disconnect_called = True
+    mock_disconnect = AsyncMock()
 
     with (
         unittest.mock.patch.object(ws_manager, "connect", new=AsyncMock()),
-        unittest.mock.patch.object(ws_manager, "disconnect", new=_mock_disconnect),
+        unittest.mock.patch.object(ws_manager, "disconnect", new=mock_disconnect),
         unittest.mock.patch(
             "api.websocket.asyncio.wait_for", side_effect=asyncio.TimeoutError
         ),
@@ -316,12 +311,14 @@ async def test_websocket_timeout_disconnects_idle_connection():
         await websocket_dashboard(mock_ws)
 
     mock_ws.close.assert_awaited_once_with(code=1000)
-    assert disconnect_called, "ws_manager.disconnect should have been called on timeout"
+    assert mock_disconnect.call_count == 1, (
+        f"disconnect should be called exactly once, got {mock_disconnect.call_count}"
+    )
 
 
 @pytest.mark.asyncio
 async def test_websocket_timeout_disconnect_called_even_if_close_raises():
-    """ws_manager.disconnect is called even when websocket.close() raises (race condition)."""
+    """ws_manager.disconnect is called exactly once even when websocket.close() raises."""
     from fastapi import WebSocket
     from api.websocket import websocket_dashboard, ws_manager
 
@@ -331,30 +328,37 @@ async def test_websocket_timeout_disconnect_called_even_if_close_raises():
     mock_ws.send_text = AsyncMock()
     mock_ws.close = AsyncMock(side_effect=RuntimeError("already closed"))
 
-    disconnect_called = False
-
-    async def _mock_disconnect(ws):
-        nonlocal disconnect_called
-        disconnect_called = True
+    mock_disconnect = AsyncMock()
 
     with (
         unittest.mock.patch.object(ws_manager, "connect", new=AsyncMock()),
-        unittest.mock.patch.object(ws_manager, "disconnect", new=_mock_disconnect),
+        unittest.mock.patch.object(ws_manager, "disconnect", new=mock_disconnect),
         unittest.mock.patch(
             "api.websocket.asyncio.wait_for", side_effect=asyncio.TimeoutError
         ),
     ):
         await websocket_dashboard(mock_ws)
 
-    assert disconnect_called, "disconnect must be called even when close() raises"
+    assert mock_disconnect.call_count == 1, (
+        f"disconnect must be called exactly once even when close() raises, got {mock_disconnect.call_count}"
+    )
 
 
-def test_websocket_timeout_constant_is_set():
-    """_WS_RECEIVE_TIMEOUT is defined and is a positive number."""
-    from api.websocket import _WS_RECEIVE_TIMEOUT
+def test_ws_idle_timeout_default_is_positive():
+    """AppConfig.ws_idle_timeout_sec defaults to a positive integer."""
+    from config import AppConfig
 
-    assert isinstance(_WS_RECEIVE_TIMEOUT, (int, float))
-    assert _WS_RECEIVE_TIMEOUT > 0
+    cfg = AppConfig()
+    assert isinstance(cfg.ws_idle_timeout_sec, int)
+    assert cfg.ws_idle_timeout_sec > 0
+
+
+def test_ws_idle_timeout_env_var_override(monkeypatch):
+    """APP_WS_IDLE_TIMEOUT_SEC env var is read lazily so per-connection overrides take effect."""
+    monkeypatch.setenv("APP_WS_IDLE_TIMEOUT_SEC", "120")
+    from config import get_config
+
+    assert get_config().ws_idle_timeout_sec == 120
 
 
 def test_websocket_ping_pong_handled_before_timeout():
