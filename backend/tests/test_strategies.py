@@ -154,13 +154,11 @@ class TestRSILenGuard:
 
     @pytest.mark.asyncio
     async def test_exactly_min_candles_no_crash(self, strategy):
-        """min_candles_required 행 수에서 iloc[-2] 크래시 없음."""
+        """min_candles_required 행 수에서 iloc[-2] 크래시 없음 → RSI 50 중립 → HOLD."""
         df = _make_df(strategy.min_candles_required)
-        df["rsi_14"] = 50.0
-        # prev_rsi = 50 is not NaN, so normal neutral result
+        df["rsi_14"] = 50.0  # flat neutral RSI; prev_rsi also 50
         signal = await strategy.analyze(df, _ticker())
-        # Should return a valid signal (not crash)
-        assert signal is not None
+        assert signal.signal_type == SignalType.HOLD
         assert signal.strategy_name == "rsi"
 
     @pytest.mark.asyncio
@@ -1020,13 +1018,16 @@ class TestStochasticRSIStrategy:
         assert signal.signal_type == SignalType.SELL
         assert signal.confidence >= 0.60
 
-    def test_param_mapping_stoch_is_length(self, strategy):
-        """stoch_length → ta.stochrsi(length=...) 매핑 확인 (기본값)."""
-        import inspect
-        import pandas_ta as ta
-        sig = inspect.signature(ta.stochrsi)
-        assert "length" in sig.parameters
-        assert "rsi_length" in sig.parameters
+    @pytest.mark.asyncio
+    async def test_param_mapping_stoch_is_length(self, strategy):
+        """default params: ta.stochrsi가 length=14, rsi_length=14로 호출되는지 확인."""
+        df = _make_df(60)
+        with patch("strategies.stochastic_rsi.ta.stochrsi", return_value=None) as mock_stochrsi:
+            await strategy.analyze(df, _ticker())
+        mock_stochrsi.assert_called_once()
+        _, kwargs = mock_stochrsi.call_args
+        assert kwargs["length"] == 14      # stoch_length
+        assert kwargs["rsi_length"] == 14  # rsi_length
 
     @pytest.mark.asyncio
     async def test_param_mapping_asymmetric(self):
@@ -1041,6 +1042,23 @@ class TestStochasticRSIStrategy:
         _, kwargs = mock_stochrsi.call_args
         assert kwargs["length"] == 20    # stoch_length, not rsi_length
         assert kwargs["rsi_length"] == 10  # rsi_length, not stoch_length
+
+    @pytest.mark.asyncio
+    async def test_param_mapping_asymmetric_column_resolution(self):
+        """비대칭 파라미터에서 컬럼명 해석까지 정상 작동: BUY 시그널 생성 확인."""
+        from strategies.stochastic_rsi import StochasticRSIStrategy
+        strategy = StochasticRSIStrategy(rsi_length=10, stoch_length=20)
+        df = _make_df(60)
+        # pandas_ta emits STOCHRSIk_{length}_{rsi_length}_{k}_{d}
+        # With stoch_length=20, rsi_length=10: STOCHRSIk_20_10_3_3
+        k_col, d_col = "STOCHRSIk_20_10_3_3", "STOCHRSId_20_10_3_3"
+        mock_result = pd.DataFrame(
+            {k_col: [50.0] * 58 + [12.0, 18.0],   # K cross above D in oversold
+             d_col: [50.0] * 58 + [16.0, 16.0]},
+        )
+        with patch("strategies.stochastic_rsi.ta.stochrsi", return_value=mock_result):
+            signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.BUY
 
     def test_get_params(self, strategy):
         """get_params 반환값 확인."""

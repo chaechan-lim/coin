@@ -59,6 +59,14 @@ class RSIStrategy(BaseStrategy):
                 reason="RSI value not available",
             )
 
+        if pd.isna(prev_rsi):
+            return Signal(
+                signal_type=SignalType.HOLD,
+                confidence=0.0,
+                strategy_name=self.name,
+                reason="RSI prev value not available (warm-up)",
+            )
+
         indicators = {
             "rsi": round(current_rsi, 2),
             "prev_rsi": round(prev_rsi, 2) if not pd.isna(prev_rsi) else None,
