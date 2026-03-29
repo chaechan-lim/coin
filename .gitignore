@@ -52,7 +52,5 @@ build/
 backend/nohup.out
 
 # Symphony orchestrator (session-specific)
-.symphony-workpad.md
-.symphony-followup.json
-.symphony-subtasks.json
-.symphony-result.json
+.symphony-*.md
+.symphony-*.json
