@@ -372,7 +372,11 @@ class TradingEngine:
             pos.trailing_activation_pct = tracker.trailing_activation_pct
             pos.trailing_stop_pct = tracker.trailing_stop_pct
             pos.trailing_active = tracker.trailing_active
-            pos.highest_price = tracker.extreme_price
+            # 방향별 extreme_price 저장: 롱 → highest_price, 숏 → lowest_price
+            if getattr(pos, "direction", "long") == "short":
+                pos.lowest_price = tracker.extreme_price
+            else:
+                pos.highest_price = tracker.extreme_price
             pos.max_hold_hours = tracker.max_hold_hours
             await session.flush()
 

@@ -903,3 +903,343 @@ class TestEngineConfigConformance:
         """_ec.min_trade_interval_sec이 EngineConfig에 올바르게 매핑된다."""
         # mock_config에서 binance_trading.min_trade_interval_sec = 1036800
         assert futures_engine._ec.min_trade_interval_sec == 1036800
+
+
+# ── COIN-64: flush 누락 + 숏 tracker extreme_price 오류 ─────────────────────
+
+
+class TestFuturesMetadataFlush:
+    """Bug 1 — _execute_long/short_entry 에서 flush 누락 수정 검증."""
+
+    @pytest.mark.asyncio
+    async def test_long_entry_metadata_flushed(self, futures_engine):
+        """롱 진입 후 direction/leverage/margin_used가 flush()로 DB에 반영된다."""
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+        from core.models import Base, Position as PositionModel
+
+        engine_db = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        async with engine_db.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        factory = async_sessionmaker(bind=engine_db, class_=AsyncSession, expire_on_commit=False)
+
+        async with factory() as session:
+            # 미리 포지션 생성 (update_position_on_buy 역할 대체)
+            pos = PositionModel(
+                exchange="binance_futures",
+                symbol="BTC/USDT",
+                quantity=0.001,
+                average_buy_price=65000.0,
+                total_invested=65.0,
+                is_paper=True,
+            )
+            session.add(pos)
+            await session.flush()
+
+            # session.flush가 호출됐는지 추적
+            flush_called = []
+            original_flush = session.flush
+
+            async def tracking_flush(*args, **kwargs):
+                flush_called.append(True)
+                return await original_flush(*args, **kwargs)
+
+            session.flush = tracking_flush
+
+            # futures metadata 설정 (Bug 1 수정 코드와 동일 패턴)
+            from sqlalchemy import select
+            result = await session.execute(
+                select(PositionModel).where(
+                    PositionModel.symbol == "BTC/USDT",
+                    PositionModel.exchange == "binance_futures",
+                )
+            )
+            fetched_pos = result.scalar_one_or_none()
+            assert fetched_pos is not None
+            fetched_pos.direction = "long"
+            fetched_pos.leverage = 5
+            fetched_pos.liquidation_price = 65000.0 * (1 - 1 / 5 + 0.0004)
+            fetched_pos.margin_used = 65.0
+            await session.flush()  # Bug 1 fix: explicit flush
+
+            # flush가 최소 1번 호출됐는지 확인
+            assert len(flush_called) >= 1
+
+            # refresh해서 DB에 실제로 반영됐는지 확인
+            await session.refresh(fetched_pos)
+            assert fetched_pos.direction == "long"
+            assert fetched_pos.leverage == 5
+            assert fetched_pos.margin_used == pytest.approx(65.0)
+
+        await engine_db.dispose()
+
+    @pytest.mark.asyncio
+    async def test_short_entry_metadata_flushed(self, futures_engine):
+        """숏 진입 후 direction/leverage/margin_used가 flush()로 DB에 반영된다."""
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+        from core.models import Base, Position as PositionModel
+
+        engine_db = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        async with engine_db.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        factory = async_sessionmaker(bind=engine_db, class_=AsyncSession, expire_on_commit=False)
+
+        async with factory() as session:
+            pos = PositionModel(
+                exchange="binance_futures",
+                symbol="ETH/USDT",
+                quantity=0.05,
+                average_buy_price=3200.0,
+                total_invested=160.0,
+                is_paper=True,
+            )
+            session.add(pos)
+            await session.flush()
+
+            from sqlalchemy import select
+            result = await session.execute(
+                select(PositionModel).where(
+                    PositionModel.symbol == "ETH/USDT",
+                    PositionModel.exchange == "binance_futures",
+                )
+            )
+            fetched_pos = result.scalar_one_or_none()
+            assert fetched_pos is not None
+            fetched_pos.direction = "short"
+            fetched_pos.leverage = 3
+            fetched_pos.liquidation_price = 3200.0 * (1 + 1 / 3 - 0.0004)
+            fetched_pos.margin_used = 160.0
+            await session.flush()  # Bug 1 fix: explicit flush
+
+            await session.refresh(fetched_pos)
+            assert fetched_pos.direction == "short"
+            assert fetched_pos.leverage == 3
+            assert fetched_pos.margin_used == pytest.approx(160.0)
+
+        await engine_db.dispose()
+
+
+class TestShortTrackerExtremePriceRestore:
+    """Bug 2 — 숏 tracker extreme_price 복원이 lowest_price 컬럼을 사용하는지 검증."""
+
+    def _make_short_position(self, lowest_price=None, highest_price=None):
+        """숏 포지션 MagicMock 생성 헬퍼."""
+        position = MagicMock(spec=Position)
+        position.symbol = "BTC/USDT"
+        position.direction = "short"
+        position.average_buy_price = 65000.0
+        position.quantity = 0.001
+        position.leverage = 3
+        position.margin_used = 21.67
+        position.liquidation_price = None
+        position.entered_at = None
+        position.is_surge = False
+        position.max_hold_hours = 0
+        position.stop_loss_pct = 2.83
+        position.take_profit_pct = 5.66
+        position.trailing_activation_pct = 1.77
+        position.trailing_stop_pct = 1.24
+        position.trailing_active = False
+        position.lowest_price = lowest_price
+        position.highest_price = highest_price
+        return position
+
+    @pytest.mark.asyncio
+    async def test_short_tracker_uses_lowest_price_when_available(
+        self, futures_engine, mock_market_data
+    ):
+        """숏 포지션 복원 시 lowest_price가 있으면 extreme_price로 사용한다."""
+        mock_market_data.get_current_price = AsyncMock(return_value=65000.0)
+
+        position = self._make_short_position(lowest_price=60000.0, highest_price=65000.0)
+
+        session = AsyncMock()
+
+        # tracker가 없으면 DB에서 복원
+        assert "BTC/USDT" not in futures_engine._position_trackers
+
+        with patch("engine.futures_engine.emit_event", new_callable=AsyncMock):
+            await futures_engine._check_futures_stop_conditions(session, "BTC/USDT", position)
+
+        tracker = futures_engine._position_trackers.get("BTC/USDT")
+        assert tracker is not None
+        # lowest_price=60000.0이 extreme_price로 복원되어야 함
+        assert tracker.extreme_price == pytest.approx(60000.0)
+
+    @pytest.mark.asyncio
+    async def test_short_tracker_falls_back_to_highest_price_when_lowest_absent(
+        self, futures_engine, mock_market_data
+    ):
+        """숏 포지션 복원 시 lowest_price가 None이면 highest_price로 대체한다."""
+        mock_market_data.get_current_price = AsyncMock(return_value=65000.0)
+
+        # lowest_price=None, highest_price에 기존 값 존재 (backward compat)
+        position = self._make_short_position(lowest_price=None, highest_price=62000.0)
+
+        session = AsyncMock()
+
+        futures_engine._position_trackers.pop("BTC/USDT", None)
+
+        with patch("engine.futures_engine.emit_event", new_callable=AsyncMock):
+            await futures_engine._check_futures_stop_conditions(session, "BTC/USDT", position)
+
+        tracker = futures_engine._position_trackers.get("BTC/USDT")
+        assert tracker is not None
+        assert tracker.extreme_price == pytest.approx(62000.0)
+
+    @pytest.mark.asyncio
+    async def test_short_tracker_falls_back_to_entry_price_when_both_absent(
+        self, futures_engine, mock_market_data
+    ):
+        """숏 포지션 복원 시 lowest_price, highest_price 모두 None이면 entry price 사용."""
+        mock_market_data.get_current_price = AsyncMock(return_value=65000.0)
+
+        position = self._make_short_position(lowest_price=None, highest_price=None)
+
+        session = AsyncMock()
+
+        futures_engine._position_trackers.pop("BTC/USDT", None)
+
+        with patch("engine.futures_engine.emit_event", new_callable=AsyncMock):
+            await futures_engine._check_futures_stop_conditions(session, "BTC/USDT", position)
+
+        tracker = futures_engine._position_trackers.get("BTC/USDT")
+        assert tracker is not None
+        assert tracker.extreme_price == pytest.approx(65000.0)  # average_buy_price
+
+    @pytest.mark.asyncio
+    async def test_long_tracker_still_uses_highest_price(
+        self, futures_engine, mock_market_data
+    ):
+        """롱 포지션 복원은 여전히 highest_price를 사용한다 (regression guard)."""
+        # 현재가 = entry price와 동일 → pnl=0 → tracker_changed=False → _save_tracker_to_db 미호출
+        mock_market_data.get_current_price = AsyncMock(return_value=3000.0)
+
+        position = MagicMock(spec=Position)
+        position.symbol = "ETH/USDT"
+        position.direction = "long"
+        position.average_buy_price = 3000.0
+        position.quantity = 0.05
+        position.leverage = 3
+        position.margin_used = 50.0
+        position.liquidation_price = None
+        position.entered_at = None
+        position.is_surge = False
+        position.max_hold_hours = 0
+        position.stop_loss_pct = 2.83
+        position.take_profit_pct = 5.66
+        position.trailing_activation_pct = 1.77
+        position.trailing_stop_pct = 1.24
+        position.trailing_active = False
+        position.highest_price = 3500.0
+        position.lowest_price = None
+
+        session = AsyncMock()
+
+        futures_engine._position_trackers.pop("ETH/USDT", None)
+
+        with patch("engine.futures_engine.emit_event", new_callable=AsyncMock):
+            await futures_engine._check_futures_stop_conditions(session, "ETH/USDT", position)
+
+        tracker = futures_engine._position_trackers.get("ETH/USDT")
+        assert tracker is not None
+        assert tracker.extreme_price == pytest.approx(3500.0)  # highest_price
+
+
+class TestSaveTrackerDirectionAware:
+    """_save_tracker_to_db — 방향별 extreme_price 저장 검증."""
+
+    @pytest.mark.asyncio
+    async def test_long_saves_to_highest_price(self):
+        """롱 포지션 tracker → highest_price에 저장."""
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+        from core.models import Base, Position as PositionModel
+        from engine.trading_engine import TradingEngine, PositionTracker
+
+        engine_db = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        async with engine_db.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        factory = async_sessionmaker(bind=engine_db, class_=AsyncSession, expire_on_commit=False)
+
+        async with factory() as session:
+            pos = PositionModel(
+                exchange="binance_futures",
+                symbol="BTC/USDT",
+                quantity=0.001,
+                average_buy_price=65000.0,
+                total_invested=65.0,
+                is_paper=False,
+                direction="long",
+            )
+            session.add(pos)
+            await session.flush()
+
+            eng = TradingEngine.__new__(TradingEngine)
+            eng._exchange_name = "binance_futures"
+
+            tracker = PositionTracker(
+                entry_price=65000.0,
+                extreme_price=70000.0,
+                stop_loss_pct=3.0,
+                take_profit_pct=6.0,
+                trailing_activation_pct=2.0,
+                trailing_stop_pct=1.5,
+                trailing_active=False,
+            )
+            await eng._save_tracker_to_db(session, "BTC/USDT", tracker)
+
+            await session.refresh(pos)
+            assert pos.highest_price == pytest.approx(70000.0)
+            # lowest_price should remain None for long positions
+            assert pos.lowest_price is None
+
+        await engine_db.dispose()
+
+    @pytest.mark.asyncio
+    async def test_short_saves_to_lowest_price(self):
+        """숏 포지션 tracker → lowest_price에 저장."""
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+        from core.models import Base, Position as PositionModel
+        from engine.trading_engine import TradingEngine, PositionTracker
+
+        engine_db = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        async with engine_db.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        factory = async_sessionmaker(bind=engine_db, class_=AsyncSession, expire_on_commit=False)
+
+        async with factory() as session:
+            pos = PositionModel(
+                exchange="binance_futures",
+                symbol="ETH/USDT",
+                quantity=0.05,
+                average_buy_price=3200.0,
+                total_invested=160.0,
+                is_paper=False,
+                direction="short",
+            )
+            session.add(pos)
+            await session.flush()
+
+            eng = TradingEngine.__new__(TradingEngine)
+            eng._exchange_name = "binance_futures"
+
+            tracker = PositionTracker(
+                entry_price=3200.0,
+                extreme_price=2800.0,  # 숏 최저가
+                stop_loss_pct=3.0,
+                take_profit_pct=6.0,
+                trailing_activation_pct=2.0,
+                trailing_stop_pct=1.5,
+                trailing_active=True,
+            )
+            await eng._save_tracker_to_db(session, "ETH/USDT", tracker)
+
+            await session.refresh(pos)
+            assert pos.lowest_price == pytest.approx(2800.0)
+            # highest_price should remain None for short positions
+            assert pos.highest_price is None
+
+        await engine_db.dispose()

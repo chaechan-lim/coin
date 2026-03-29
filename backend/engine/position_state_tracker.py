@@ -212,7 +212,11 @@ class PositionStateTracker:
                 entry_price=pos.average_buy_price,
                 margin=pos.total_invested,
                 leverage=pos.leverage or 3,
-                extreme_price=pos.highest_price or pos.average_buy_price,
+                extreme_price=(
+                    (pos.lowest_price or pos.highest_price or pos.average_buy_price)
+                    if pos.direction == "short"
+                    else (pos.highest_price or pos.average_buy_price)
+                ),
                 stop_loss_atr=pos.stop_loss_pct or 1.5,
                 take_profit_atr=pos.take_profit_pct or 3.0,
                 trailing_activation_atr=pos.trailing_activation_pct or 2.0,
@@ -251,7 +255,11 @@ class PositionStateTracker:
             pos.trailing_activation_pct = state.trailing_activation_atr
             pos.trailing_stop_pct = state.trailing_stop_atr
             pos.trailing_active = state.trailing_active
-            pos.highest_price = state.extreme_price
+            # 방향별 extreme_price 저장: 롱 → highest_price, 숏 → lowest_price
+            if state.direction.value == "short":
+                pos.lowest_price = state.extreme_price
+            else:
+                pos.highest_price = state.extreme_price
             pos.direction = state.direction.value
             pos.strategy_name = state.strategy_name
             updated += 1
