@@ -366,7 +366,7 @@ class AppConfig(BaseSettings):
     futures_v2: FuturesV2Config = Field(default_factory=FuturesV2Config)
     discord_bot: DiscordBotConfig = Field(default_factory=DiscordBotConfig)
     log_level: str = "INFO"
-    ws_idle_timeout_sec: int = 300  # WebSocket idle timeout; override via APP_WS_IDLE_TIMEOUT_SEC
+    ws_idle_timeout_sec: int = Field(default=300, ge=1)  # WebSocket idle timeout; set via APP_WS_IDLE_TIMEOUT_SEC (read at startup)
 
     model_config = {"env_prefix": "APP_"}
 

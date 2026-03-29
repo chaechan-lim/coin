@@ -319,6 +319,36 @@ async def test_websocket_timeout_disconnects_idle_connection():
     assert disconnect_called, "ws_manager.disconnect should have been called on timeout"
 
 
+@pytest.mark.asyncio
+async def test_websocket_timeout_disconnect_called_even_if_close_raises():
+    """ws_manager.disconnect is called even when websocket.close() raises (race condition)."""
+    from fastapi import WebSocket
+    from api.websocket import websocket_dashboard, ws_manager
+
+    mock_ws = MagicMock(spec=WebSocket)
+    mock_ws.accept = AsyncMock()
+    mock_ws.receive_text = AsyncMock()
+    mock_ws.send_text = AsyncMock()
+    mock_ws.close = AsyncMock(side_effect=RuntimeError("already closed"))
+
+    disconnect_called = False
+
+    async def _mock_disconnect(ws):
+        nonlocal disconnect_called
+        disconnect_called = True
+
+    with (
+        unittest.mock.patch.object(ws_manager, "connect", new=AsyncMock()),
+        unittest.mock.patch.object(ws_manager, "disconnect", new=_mock_disconnect),
+        unittest.mock.patch(
+            "api.websocket.asyncio.wait_for", side_effect=asyncio.TimeoutError
+        ),
+    ):
+        await websocket_dashboard(mock_ws)
+
+    assert disconnect_called, "disconnect must be called even when close() raises"
+
+
 def test_websocket_timeout_constant_is_set():
     """_WS_RECEIVE_TIMEOUT is defined and is a positive number."""
     from api.websocket import _WS_RECEIVE_TIMEOUT
