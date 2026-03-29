@@ -2441,6 +2441,16 @@ class TestCOIN58Constants:
 
 # ── COIN-63: Bug fixes tests ──────────────────────────────────────
 
+def _coin63_session_ctx(session):
+    """Shared helper: build a mock session-factory context for COIN-63 tests."""
+    mock_factory = MagicMock()
+    mock_ctx = MagicMock()
+    mock_ctx.__aenter__ = AsyncMock(return_value=session)
+    mock_ctx.__aexit__ = AsyncMock(return_value=False)
+    mock_factory.return_value = mock_ctx
+    return mock_factory
+
+
 class TestCOIN63CashLock:
     """COIN-63 Bug 1: Cash lock prevents negative balance on concurrent entries."""
 
@@ -2477,9 +2487,20 @@ class TestCOIN63CashLock:
             return o
         surge_engine._order_manager.create_order = _consistent_order
 
+        # Give each concurrent coroutine its own independent mock session so they
+        # never share session state (shared sessions cause non-deterministic failures
+        # under asyncio interleaving — add/flush/commit collisions).
+        def _fresh_session():
+            s = MagicMock()
+            s.add = MagicMock()
+            s.flush = AsyncMock()
+            s.commit = AsyncMock()
+            s.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None)))
+            return s
+
         mock_factory = MagicMock()
         mock_ctx = MagicMock()
-        mock_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_ctx.__aenter__ = AsyncMock(side_effect=lambda: _fresh_session())
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
         mock_factory.return_value = mock_ctx
 
@@ -2580,9 +2601,18 @@ class TestCOIN63CashLock:
         Once session.commit() succeeds the position exists in the DB; refunding
         cash at that point would inflate the balance and cause over-allocation.
         """
-        import pytest as _pytest
         initial_cash = 300.0
         surge_engine._futures_pm.cash_balance = initial_cash
+
+        # Provide real float values so actual_margin + fee arithmetic is valid
+        # and cash_balance remains a float throughout (not a MagicMock).
+        async def _ok_order(session, symbol, side, amount, price, **kwargs):
+            o = MagicMock()
+            o.executed_price = price
+            o.executed_quantity = amount
+            o.fee = price * amount * 0.0004
+            return o
+        surge_engine._order_manager.create_order = _ok_order
 
         # Order and DB commit succeed, but notification fails
         with patch("engine.surge_engine.get_session_factory", return_value=MagicMock(
@@ -2598,7 +2628,9 @@ class TestCOIN63CashLock:
                     {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
                 )
 
-        # Cash must NOT be restored — the position is in the DB and cost real margin
+        # Cash must NOT be restored — the position is in the DB and cost real margin.
+        # Verify cash_balance is a real float (not a MagicMock) before comparing.
+        assert isinstance(surge_engine._futures_pm.cash_balance, float)
         assert surge_engine._futures_pm.cash_balance < initial_cash
 
     @pytest.mark.asyncio
@@ -2622,16 +2654,6 @@ class TestCOIN63CashLock:
 
         # Lock must be released (not held) after method returns
         assert not surge_engine._cash_lock.locked()
-
-
-def _coin63_session_ctx(session):
-    """Shared helper: build a mock session-factory context for COIN-63 tests."""
-    mock_factory = MagicMock()
-    mock_ctx = MagicMock()
-    mock_ctx.__aenter__ = AsyncMock(return_value=session)
-    mock_ctx.__aexit__ = AsyncMock(return_value=False)
-    mock_factory.return_value = mock_ctx
-    return mock_factory
 
 
 class TestCOIN63ZeroDivision:

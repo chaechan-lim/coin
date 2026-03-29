@@ -747,8 +747,10 @@ class SurgeEngine:
                 _total_deducted = actual_margin + fee  # full amount now deducted
 
                 await session.commit()
-
-            _order_committed = True  # position persisted — no cash refund past this point
+                # Set sentinel INSIDE the async-with block so any __aexit__ exception
+                # (e.g. connection pool exhaustion) does not bypass it and cause
+                # the finally block to refund cash for a committed trade.
+                _order_committed = True
 
             # Track in memory
             self._positions[symbol] = SurgePositionState(
@@ -1195,7 +1197,9 @@ class SurgeEngine:
         ]
         for symbol, pos in pending:
             pos.exit_retry_count += 1
-            if pos.exit_retry_count >= MAX_EXIT_RETRIES:  # COIN-63: >= so force-cleanup fires on the MAX_EXIT_RETRIES-th call, not the (MAX+1)-th
+            # COIN-63: exit_retry_count was already incremented above;
+            # >= fires when it reaches MAX_EXIT_RETRIES (the MAX-th call), not (MAX+1)-th.
+            if pos.exit_retry_count >= MAX_EXIT_RETRIES:
                 # Force cleanup to prevent permanent zombie
                 logger.warning(
                     "surge_pending_exit_force_cleanup",
