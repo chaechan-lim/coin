@@ -49,8 +49,8 @@ class StochasticRSIStrategy(BaseStrategy):
         # Stochastic RSI 계산
         stochrsi = ta.stochrsi(
             df["close"],
-            length=self._rsi_length,
-            rsi_length=self._stoch_length,
+            length=self._stoch_length,
+            rsi_length=self._rsi_length,
             k=self._k_smooth,
             d=self._d_smooth,
         )
