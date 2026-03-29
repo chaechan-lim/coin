@@ -11,7 +11,7 @@ import asyncio
 import math
 import structlog
 import pandas as pd
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -84,6 +84,7 @@ class BinanceFuturesEngine(TradingEngine):
         self._leverage = config.binance.default_leverage
         self._max_leverage = config.binance.max_leverage
         self._futures_fee = config.binance.futures_fee
+        self._maintenance_margin_rate = config.binance.maintenance_margin_rate
         self._funding_rates: dict[str, float] = {}
         self._last_funding_update: datetime | None = None
         # 동적 종목 선정 (비활성 — 추적 코인만 사용)
@@ -1473,7 +1474,8 @@ class BinanceFuturesEngine(TradingEngine):
         if pos:
             pos.direction = "long"
             pos.leverage = effective_lev
-            pos.liquidation_price = price * (1 - 1 / effective_lev + self._futures_fee)
+            # Liquidation estimate: entry * (1 - 1/lev + mmr). WS sync keeps this accurate.
+            pos.liquidation_price = price * (1 - 1 / effective_lev + self._maintenance_margin_rate)
             pos.margin_used = margin
             pos.highest_price = price   # initialise extreme_price for long
             pos.lowest_price = None     # clear any prior short-session value
@@ -1648,7 +1650,8 @@ class BinanceFuturesEngine(TradingEngine):
         if pos:
             pos.direction = "short"
             pos.leverage = effective_lev
-            pos.liquidation_price = price * (1 + 1 / effective_lev - self._futures_fee)
+            # Liquidation estimate: entry * (1 + 1/lev - mmr). WS sync keeps this accurate.
+            pos.liquidation_price = price * (1 + 1 / effective_lev - self._maintenance_margin_rate)
             pos.margin_used = margin
             pos.lowest_price = price   # initialise extreme_price for short (prevents stale long data)
             pos.highest_price = None   # clear any prior long-session value

@@ -5,8 +5,7 @@ BinanceFuturesEngine 단위 테스트
 import asyncio
 import math
 import pytest
-import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
 from core.models import Position
@@ -29,6 +28,7 @@ def mock_config():
     config.binance.default_leverage = 5
     config.binance.max_leverage = 10
     config.binance.futures_fee = 0.0004
+    config.binance.maintenance_margin_rate = 0.004
     config.binance.tracked_coins = ["BTC/USDT", "ETH/USDT"]
     config.binance.testnet = True
     config.binance_trading.evaluation_interval_sec = 300
@@ -117,13 +117,27 @@ class TestLeverageSizing:
         assert abs(expected_sl - 8.0 / sqrt_lev) < 0.01
         assert abs(expected_tp - 16.0 / sqrt_lev) < 0.01
 
+    def test_maintenance_margin_rate_wired_from_config(self, futures_engine):
+        """_maintenance_margin_rate가 config에서 0.004로 주입되는지 확인."""
+        assert futures_engine._maintenance_margin_rate == 0.004
+
     def test_liquidation_price_long(self, futures_engine):
-        """롱 청산가 = entry * (1 - 1/lev + fee)."""
+        """롱 청산가 = entry * (1 - 1/lev + mmr): engine 속성으로 계산."""
         entry = 65000.0
-        lev = 5
-        fee = 0.0004
-        expected = entry * (1 - 1 / lev + fee)
-        assert abs(expected - entry * 0.8004) < 1.0
+        lev = futures_engine._leverage       # 5 (from fixture)
+        mmr = futures_engine._maintenance_margin_rate  # 0.004 (from fixture)
+        expected = entry * (1 - 1 / lev + mmr)
+        # 1 - 1/5 + 0.004 = 0.804  →  65000 * 0.804 = 52260
+        assert abs(expected - 52260.0) < 1.0
+
+    def test_liquidation_price_short(self, futures_engine):
+        """숏 청산가 = entry * (1 + 1/lev - mmr): engine 속성으로 계산."""
+        entry = 65000.0
+        lev = futures_engine._leverage       # 5
+        mmr = futures_engine._maintenance_margin_rate  # 0.004
+        expected = entry * (1 + 1 / lev - mmr)
+        # 1 + 1/5 - 0.004 = 1.196  →  65000 * 1.196 = 77740
+        assert abs(expected - 77740.0) < 1.0
 
 
 class TestShortTracking:

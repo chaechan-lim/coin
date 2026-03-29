@@ -9,6 +9,7 @@ os.environ.setdefault("EXCHANGE_API_SECRET", "test")
 os.environ.setdefault("TRADING_MODE", "paper")
 
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -138,6 +139,39 @@ class TestRSIStrategy:
         signal_falling = await strategy.analyze(df2, _ticker())
 
         assert signal_rising.confidence > signal_falling.confidence
+
+
+# ── RSI Len Guard ──────────────────────────────────────────────
+
+
+class TestRSILenGuard:
+    """Tests for the defensive len(df) >= 2 guard before iloc[-2]."""
+
+    @pytest.fixture
+    def strategy(self):
+        from strategies.rsi_strategy import RSIStrategy
+        return RSIStrategy()
+
+    @pytest.mark.asyncio
+    async def test_exactly_min_candles_no_crash(self, strategy):
+        """min_candles_required 행 수에서 iloc[-2] 크래시 없음 → RSI 50 중립 → HOLD."""
+        df = _make_df(strategy.min_candles_required)
+        df["rsi_14"] = 50.0  # flat neutral RSI; prev_rsi also 50
+        signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.HOLD
+        assert signal.strategy_name == "rsi"
+
+    @pytest.mark.asyncio
+    async def test_len_guard_prevents_index_error(self, strategy):
+        """len(df) < 2 가드: rsi_14 유효해도 prev_rsi 접근에서 IndexError 없음."""
+        # Lower min_candles so the 1-row df reaches the iloc[-2] line
+        strategy.min_candles_required = 1
+        df = _make_df(1)
+        df["rsi_14"] = 50.0  # valid current_rsi; no second row for prev_rsi
+        # Without the guard this would raise IndexError; with it returns HOLD
+        signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.HOLD
+        assert signal.strategy_name == "rsi"
 
 
 # ── MA Crossover Strategy ─────────────────────────────────────
@@ -923,3 +957,113 @@ class TestBBSqueezeStrategy:
         assert signal.indicators is not None
         assert "squeeze" in signal.indicators
         assert "momentum" in signal.indicators
+
+
+# ── Stochastic RSI Strategy ───────────────────────────────────
+
+
+class TestStochasticRSIStrategy:
+    """Tests for StochasticRSIStrategy signal logic and parameter mapping."""
+
+    @pytest.fixture
+    def strategy(self):
+        from strategies.stochastic_rsi import StochasticRSIStrategy
+        return StochasticRSIStrategy()
+
+    @pytest.mark.asyncio
+    async def test_insufficient_data_hold(self, strategy):
+        """데이터 부족 시 HOLD."""
+        df = _make_df(10)
+        signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.HOLD
+        assert signal.confidence == 0.0
+
+    @pytest.mark.asyncio
+    async def test_returns_valid_signal(self, strategy):
+        """충분한 데이터로 유효한 시그널 반환."""
+        df = _make_df(60)
+        signal = await strategy.analyze(df, _ticker())
+        assert signal is not None
+        assert signal.signal_type in (SignalType.BUY, SignalType.SELL, SignalType.HOLD)
+        assert signal.strategy_name == "stochastic_rsi"
+
+    @pytest.mark.asyncio
+    async def test_golden_cross_oversold_buy(self, strategy):
+        """과매도 구간에서 K가 D를 상향 돌파 → BUY."""
+        df = _make_df(60)
+        # Build a fake stochrsi DataFrame that the strategy will receive:
+        # K_prev=15 < D_prev=18  →  K_now=22 > D_now=18 → bullish cross in oversold
+        k_col, d_col = "STOCHRSIk_14_14_3_3", "STOCHRSId_14_14_3_3"
+        mock_result = pd.DataFrame(
+            {k_col: [50.0] * 58 + [15.0, 22.0],
+             d_col: [50.0] * 58 + [18.0, 18.0]},
+        )
+        with patch("strategies.stochastic_rsi.ta.stochrsi", return_value=mock_result):
+            signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.60
+
+    @pytest.mark.asyncio
+    async def test_dead_cross_overbought_sell(self, strategy):
+        """과매수 구간에서 K가 D를 하향 돌파 → SELL."""
+        df = _make_df(60)
+        # K_prev=85 > D_prev=82  →  K_now=78 < D_now=82 → bearish cross in overbought
+        k_col, d_col = "STOCHRSIk_14_14_3_3", "STOCHRSId_14_14_3_3"
+        mock_result = pd.DataFrame(
+            {k_col: [50.0] * 58 + [85.0, 78.0],
+             d_col: [50.0] * 58 + [82.0, 82.0]},
+        )
+        with patch("strategies.stochastic_rsi.ta.stochrsi", return_value=mock_result):
+            signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.SELL
+        assert signal.confidence >= 0.60
+
+    @pytest.mark.asyncio
+    async def test_param_mapping_stoch_is_length(self, strategy):
+        """default params: ta.stochrsi가 length=14, rsi_length=14로 호출되는지 확인."""
+        df = _make_df(60)
+        with patch("strategies.stochastic_rsi.ta.stochrsi", return_value=None) as mock_stochrsi:
+            await strategy.analyze(df, _ticker())
+        mock_stochrsi.assert_called_once()
+        _, kwargs = mock_stochrsi.call_args
+        assert kwargs["length"] == 14      # stoch_length
+        assert kwargs["rsi_length"] == 14  # rsi_length
+
+    @pytest.mark.asyncio
+    async def test_param_mapping_asymmetric(self):
+        """rsi_length≠stoch_length 일 때 ta.stochrsi 인자가 올바르게 매핑되는지 확인."""
+        from strategies.stochastic_rsi import StochasticRSIStrategy
+        strategy = StochasticRSIStrategy(rsi_length=10, stoch_length=20)
+        df = _make_df(60)
+        with patch("strategies.stochastic_rsi.ta.stochrsi", return_value=None) as mock_stochrsi:
+            await strategy.analyze(df, _ticker())
+        # length=stoch_length=20, rsi_length=rsi_length=10 — not swapped
+        mock_stochrsi.assert_called_once()
+        _, kwargs = mock_stochrsi.call_args
+        assert kwargs["length"] == 20    # stoch_length, not rsi_length
+        assert kwargs["rsi_length"] == 10  # rsi_length, not stoch_length
+
+    @pytest.mark.asyncio
+    async def test_param_mapping_asymmetric_column_resolution(self):
+        """비대칭 파라미터에서 컬럼명 해석까지 정상 작동: BUY 시그널 생성 확인."""
+        from strategies.stochastic_rsi import StochasticRSIStrategy
+        strategy = StochasticRSIStrategy(rsi_length=10, stoch_length=20)
+        df = _make_df(60)
+        # pandas_ta emits STOCHRSIk_{length}_{rsi_length}_{k}_{d}
+        # With stoch_length=20, rsi_length=10: STOCHRSIk_20_10_3_3
+        k_col, d_col = "STOCHRSIk_20_10_3_3", "STOCHRSId_20_10_3_3"
+        mock_result = pd.DataFrame(
+            {k_col: [50.0] * 58 + [12.0, 18.0],   # K cross above D in oversold
+             d_col: [50.0] * 58 + [16.0, 16.0]},
+        )
+        with patch("strategies.stochastic_rsi.ta.stochrsi", return_value=mock_result):
+            signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.BUY
+
+    def test_get_params(self, strategy):
+        """get_params 반환값 확인."""
+        params = strategy.get_params()
+        assert "rsi_length" in params
+        assert "stoch_length" in params
+        assert params["rsi_length"] == 14
+        assert params["stoch_length"] == 14
