@@ -4,6 +4,8 @@ import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from typing import Any
 
+from config import get_config
+
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
@@ -51,7 +53,7 @@ class ConnectionManager:
 ws_manager = ConnectionManager()
 
 
-_WS_RECEIVE_TIMEOUT = 300  # seconds — idle connections closed after 5 minutes
+_WS_RECEIVE_TIMEOUT: int = get_config().ws_idle_timeout_sec  # override via APP_WS_IDLE_TIMEOUT_SEC
 
 
 @router.websocket("/ws/dashboard")
@@ -66,6 +68,7 @@ async def websocket_dashboard(websocket: WebSocket):
                 )
             except asyncio.TimeoutError:
                 logger.info("ws_client_idle_timeout", timeout_sec=_WS_RECEIVE_TIMEOUT)
+                await websocket.close(code=1000)
                 await ws_manager.disconnect(websocket)
                 return
             # Client can send ping/pong or commands

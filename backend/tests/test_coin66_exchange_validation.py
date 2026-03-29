@@ -5,7 +5,8 @@ Tests for COIN-66:
 """
 import asyncio
 import json
-from unittest.mock import MagicMock
+import unittest.mock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -45,7 +46,8 @@ async def _db_override():
     await engine.dispose()
 
 
-def _save_and_clear(exchange: str):
+def _save_state(exchange: str) -> dict:
+    """Save current engine registry state for the given exchange."""
     return {
         "engine": engine_registry._engines.get(exchange),
         "pm": engine_registry._portfolio_managers.get(exchange),
@@ -189,7 +191,7 @@ async def test_dashboard_valid_exchange_not_422():
     from db.session import get_db
 
     exchange = "bithumb"
-    saved = _save_and_clear(exchange)
+    saved = _save_state(exchange)
     engine_registry._engines.pop(exchange, None)
     engine_registry._combiners.pop(exchange, None)
     try:
@@ -204,6 +206,19 @@ async def test_dashboard_valid_exchange_not_422():
         assert resp.status_code != 422
     finally:
         _restore(exchange, saved)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_agent_risk_alerts_invalid_exchange_returns_422():
+    """GET /agents/risk/alerts with invalid exchange → 422 (agent endpoint coverage)."""
+    app = _make_app(dashboard_router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get(
+            "/agents/risk/alerts", params={"exchange": "bad"}
+        )
+    assert resp.status_code == 422
 
 
 # ── Bug 1: strategies.py exchange validation ──────────────────────────────────
@@ -243,7 +258,7 @@ async def test_strategies_update_weight_invalid_exchange_returns_422():
 async def test_strategies_update_params_valid_exchange_accepted():
     """PUT /strategies/{name}/params with valid exchange is not rejected by type validation."""
     exchange = "binance_futures"
-    saved = _save_and_clear(exchange)
+    saved = _save_state(exchange)
     mock_strategy = MagicMock()
     mock_strategy.set_params = MagicMock()
     mock_strategy.get_params = MagicMock(return_value={})
@@ -274,49 +289,37 @@ async def test_strategies_update_params_valid_exchange_accepted():
 
 @pytest.mark.asyncio
 async def test_websocket_timeout_disconnects_idle_connection():
-    """WebSocket handler disconnects after asyncio.TimeoutError (idle client)."""
-    from api.websocket import router as ws_router, ws_manager
+    """WebSocket handler calls close(1000) then disconnect on asyncio.TimeoutError."""
+    from fastapi import WebSocket
+    from api.websocket import websocket_dashboard, ws_manager
 
-    app = _make_app(ws_router)
+    # Build a mock WebSocket that satisfies accept/close/receive_text
+    mock_ws = MagicMock(spec=WebSocket)
+    mock_ws.accept = AsyncMock()
+    mock_ws.receive_text = AsyncMock()
+    mock_ws.send_text = AsyncMock()
+    mock_ws.close = AsyncMock()
 
-    # Track whether disconnect was called
     disconnect_called = False
-    original_disconnect = ws_manager.disconnect
 
-    async def _mock_disconnect(websocket):
+    async def _mock_disconnect(ws):
         nonlocal disconnect_called
         disconnect_called = True
-        await original_disconnect(websocket)
 
-    ws_manager.disconnect = _mock_disconnect
+    with (
+        unittest.mock.patch.object(ws_manager, "connect", new=AsyncMock()),
+        unittest.mock.patch.object(ws_manager, "disconnect", new=_mock_disconnect),
+        unittest.mock.patch(
+            "api.websocket.asyncio.wait_for", side_effect=asyncio.TimeoutError
+        ),
+    ):
+        await websocket_dashboard(mock_ws)
 
-    # Simulate timeout by patching asyncio.wait_for to raise TimeoutError immediately
-    original_wf = asyncio.wait_for
-
-    async def patched_wait_for(coro, timeout):
-        coro.close()
-        raise asyncio.TimeoutError()
-
-    asyncio.wait_for = patched_wait_for
-
-    try:
-        from fastapi.testclient import TestClient
-
-        with TestClient(app) as client:
-            try:
-                with client.websocket_connect("/ws/dashboard"):
-                    pass
-            except Exception:
-                pass
-    finally:
-        asyncio.wait_for = original_wf
-        ws_manager.disconnect = original_disconnect
-
+    mock_ws.close.assert_awaited_once_with(code=1000)
     assert disconnect_called, "ws_manager.disconnect should have been called on timeout"
 
 
-@pytest.mark.asyncio
-async def test_websocket_timeout_constant_is_set():
+def test_websocket_timeout_constant_is_set():
     """_WS_RECEIVE_TIMEOUT is defined and is a positive number."""
     from api.websocket import _WS_RECEIVE_TIMEOUT
 
@@ -324,15 +327,12 @@ async def test_websocket_timeout_constant_is_set():
     assert _WS_RECEIVE_TIMEOUT > 0
 
 
-@pytest.mark.asyncio
-async def test_websocket_ping_pong_handled_before_timeout():
+def test_websocket_ping_pong_handled_before_timeout():
     """A ping message gets a pong response without triggering disconnect."""
     from api.websocket import router as ws_router
-
-    app = _make_app(ws_router)
-
     from fastapi.testclient import TestClient
 
+    app = _make_app(ws_router)
     with TestClient(app) as client:
         with client.websocket_connect("/ws/dashboard") as ws:
             ws.send_text("ping")
