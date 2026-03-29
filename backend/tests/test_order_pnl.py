@@ -80,7 +80,7 @@ class TestOrderPnlCalculation:
 
     @pytest.mark.asyncio
     async def test_futures_long_close_profit(self):
-        """선물 롱 청산 수익 — 레버리지 적용."""
+        """선물 롱 청산 수익 — 레버리지 미적용, 가격 변동% 저장."""
         om = _make_order_manager(exchange_name="binance_futures")
         om._exchange.create_market_sell = AsyncMock(
             return_value=_make_order_result(price=105.0, filled=1.0)
@@ -92,9 +92,11 @@ class TestOrderPnlCalculation:
             order_type="market", direction="long", leverage=3, entry_price=100.0,
         )
 
-        # 기본 PnL: 5%, 레버리지 3x → 15%
-        assert order.realized_pnl_pct == pytest.approx(15.0)
-        assert order.realized_pnl == pytest.approx(5.0)  # 금액은 레버리지 무관
+        # PnL%: (105-100)/100*100 = 5% (레버리지 미적용 — leverage는 Order.leverage 별도 저장)
+        assert order.realized_pnl_pct == pytest.approx(5.0)
+        # 금액: qty(notional 포지션) × |price_diff| = 1.0 × 5 = 5 USDT.
+        # notional에 레버리지가 이미 반영돼 있으므로 realized_pnl도 레버리지 반영 금액임.
+        assert order.realized_pnl == pytest.approx(5.0)
 
     @pytest.mark.asyncio
     async def test_futures_short_close_profit(self):
@@ -112,8 +114,8 @@ class TestOrderPnlCalculation:
             order_type="market", direction="short", leverage=3, entry_price=100.0,
         )
 
-        # 숏: (100 - 95) / 100 * 100 = 5%, 레버리지 3x → 15%
-        assert order.realized_pnl_pct == pytest.approx(15.0)
+        # 숏: (100 - 95) / 100 * 100 = 5% (레버리지 미적용)
+        assert order.realized_pnl_pct == pytest.approx(5.0)
         assert order.realized_pnl == pytest.approx(5.0)
 
     @pytest.mark.asyncio
@@ -131,8 +133,8 @@ class TestOrderPnlCalculation:
             order_type="market", direction="short", leverage=3, entry_price=100.0,
         )
 
-        # 숏: (100 - 110) / 100 * 100 = -10%, 레버리지 3x → -30%
-        assert order.realized_pnl_pct == pytest.approx(-30.0)
+        # 숏: (100 - 110) / 100 * 100 = -10% (레버리지 미적용)
+        assert order.realized_pnl_pct == pytest.approx(-10.0)
         assert order.realized_pnl == pytest.approx(-10.0)
 
     @pytest.mark.asyncio

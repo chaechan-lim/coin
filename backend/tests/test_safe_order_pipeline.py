@@ -495,11 +495,15 @@ class TestPnLCalculation:
         from sqlalchemy import select
         order = (await session.execute(select(Order))).scalars().first()
         assert order.realized_pnl_pct is not None
-        assert order.realized_pnl_pct > 0  # 롱 수익
+        # COIN-65: realized_pnl_pct는 레버리지 미적용 raw 가격변동%.
+        # 80000→82000 = 2.5% (3× 레버리지여도 7.5%가 아님 — 구 공식: pnl_pct*leverage*100)
+        assert order.realized_pnl_pct == pytest.approx(2.5)
+        # realized_pnl (금액): margin * leverage * pnl_pct - fee = 100*3*0.025 - 0.33 = 7.17
+        assert order.realized_pnl == pytest.approx(7.17, abs=0.01)
 
     @pytest.mark.asyncio
     async def test_short_profit_pnl(self, pipeline, mock_exchange, session):
-        """숏 수익 PnL 계산."""
+        """숏 수익 PnL 계산 — raw 가격변동% (레버리지 미적용)."""
         pos = Position(
             exchange="binance_futures",
             symbol="BTC/USDT",
@@ -530,7 +534,42 @@ class TestPnLCalculation:
 
         from sqlalchemy import select
         order = (await session.execute(select(Order))).scalars().first()
-        assert order.realized_pnl_pct > 0  # 숏 수익 (가격 하락)
+        # COIN-65: 80000→78000 숏 수익 = 2.5% raw (3× 레버리지여도 7.5%가 아님)
+        assert order.realized_pnl_pct == pytest.approx(2.5)
+        # realized_pnl (금액): margin * leverage * pnl_pct - fee = 100*3*0.025 - 0.31 = 7.19
+        assert order.realized_pnl == pytest.approx(7.19, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_tier2_open_sets_is_surge_on_position(self, pipeline, mock_exchange, session):
+        """COIN-65 Bug 2 회귀 방지: tier2 주문은 position.is_surge=True를 설정해야 함.
+        safe_order_pipeline.py에서 is_surge=(request.tier == "tier2")로 전달하는 경로를 검증.
+        """
+        mock_exchange.create_market_buy.return_value = make_order_result()
+        req = make_request(tier="tier2")
+
+        resp = await pipeline.execute_order(session, req)
+        assert resp.success is True
+
+        from sqlalchemy import select
+        from core.models import Position
+        pos = (await session.execute(select(Position))).scalars().first()
+        assert pos is not None
+        assert pos.is_surge is True, "tier2 open must mark position as surge"
+
+    @pytest.mark.asyncio
+    async def test_tier1_open_does_not_set_is_surge(self, pipeline, mock_exchange, session):
+        """COIN-65 Bug 2 회귀 방지: tier1 주문은 position.is_surge=False여야 함."""
+        mock_exchange.create_market_buy.return_value = make_order_result()
+        req = make_request(tier="tier1")
+
+        resp = await pipeline.execute_order(session, req)
+        assert resp.success is True
+
+        from sqlalchemy import select
+        from core.models import Position
+        pos = (await session.execute(select(Position))).scalars().first()
+        assert pos is not None
+        assert pos.is_surge is False, "tier1 open must not mark position as surge"
 
 
 class TestQuantityPrecisionAdjustment:

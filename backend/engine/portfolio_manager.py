@@ -48,7 +48,14 @@ class PortfolioManager:
         self, session: AsyncSession, symbol: str, quantity: float, price: float, cost: float, fee: float,
         is_surge: bool = False, strategy_name: str | None = None,
     ) -> None:
-        """Update position after a buy trade."""
+        """Update position after a buy trade.
+
+        is_surge (default False): 포지션의 서지 분류를 **항상** 호출자 의도로 덮어씀.
+        기본값 False는 의도적 — 비서지 매수(trading_engine, futures_engine)는 is_surge를
+        생략해 기존 surge 포지션을 올바르게 비서지로 리셋한다.
+        서지 매수(trading_engine 서지 경로, safe_order_pipeline tier2)는 is_surge=True를
+        명시적으로 전달해야 한다.
+        """
         from datetime import datetime, timezone
         result = await session.execute(
             select(Position).where(
@@ -65,8 +72,7 @@ class PortfolioManager:
             position.quantity += quantity
             position.average_buy_price = total_cost / position.quantity if position.quantity > 0 else 0
             position.total_invested += cost + fee
-            if is_surge:
-                position.is_surge = True
+            position.is_surge = is_surge
             if strategy_name:
                 position.strategy_name = strategy_name
             if not position.entered_at:
