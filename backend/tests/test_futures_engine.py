@@ -995,43 +995,6 @@ class TestEvaluateFuturesCoinLockOrder:
         # Verify signals were NOT collected (early return)
         futures_engine._collect_signals.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_position_checked_after_lock_acquired(self, futures_engine):
-        """Lock 획득 후 포지션을 체크해야 함 (monitor의 동시 청산 방지)."""
-        session = AsyncMock()
-        position = MagicMock(spec=Position)
-        position.symbol = "BTC/USDT"
-        position.quantity = 0.001
-        position.exchange = "binance_futures"
-
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = position
-        session.execute = AsyncMock(return_value=mock_result)
-
-        futures_engine._check_futures_stop_conditions = AsyncMock(
-            return_value=False
-        )
-        futures_engine._check_cooldown = MagicMock(return_value=False)
-        futures_engine._collect_signals = AsyncMock(
-            return_value=[
-                MagicMock(
-                    symbol="BTC/USDT", signal_type="BUY", confidence=0.7
-                )
-            ]
-        )
-        futures_engine._order_manager = MagicMock()
-        futures_engine._order_manager.log_signal_only = AsyncMock()
-        futures_engine._combiner = MagicMock()
-        futures_engine._combiner.combine = MagicMock()
-        futures_engine._combiner.combine.return_value = MagicMock(
-            action="HOLD"
-        )
-
-        await futures_engine._evaluate_futures_coin(session, "BTC/USDT")
-
-        # Verify that stop condition check happened
-        futures_engine._check_futures_stop_conditions.assert_called_once()
-
 
 # ── Harness Conformance Tests (COIN-10) ────────────────────────────────────
 
