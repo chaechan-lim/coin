@@ -1,6 +1,6 @@
 import asyncio
 import structlog
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, case
 from core.utils import utcnow
@@ -1104,6 +1104,10 @@ class PortfolioManager:
                 invested = db_pos.total_invested or 0
                 direction = getattr(db_pos, "direction", "long")
                 leverage = getattr(db_pos, "leverage", 1) or 1
+                # TOCTOU 방지용: await 전 타임스탬프 기록
+                # (이 시점 이후에 생성된 Order는 sync 자신이 만든 것이므로 재확인에서 제외)
+                # Order.created_at은 Python-side default(_utcnow)를 사용하므로 동일 클럭 기준
+                processing_start = datetime.now(timezone.utc)
                 try:
                     current_price = await self._market_data.get_current_price(db_sym)
                 except Exception:
@@ -1118,6 +1122,61 @@ class PortfolioManager:
                 strategy_name, reason = await self._determine_close_reason(
                     db_sym, db_pos, current_price, pnl_pct, exchange_adapter,
                 )
+
+                # TOCTOU 재확인: await(get_current_price, _determine_close_reason) 이후
+                # 엔진이 동시에 포지션을 닫아 이미 cash를 반환했을 수 있음 → 재확인
+                # 이 시점은 session.add(order) 이전이므로 sync 자신의 Order가 없음
+                #
+                # 한계: 두 재확인 모두 READ COMMITTED 하에서 커밋된 변경만 감지함.
+                # 엔진이 포지션을 닫는 트랜잭션이 미커밋 상태일 때는 레이스 윈도우가 남음.
+                # SELECT … FOR UPDATE 없이는 완전한 보장 불가 — 빈도 감소 목적임.
+                if is_futures and invested > 0:
+                    # 재확인 1: fresh_qty가 여전히 > 0인지 (await 사이 엔진 청산 감지)
+                    # ORM select 사용 — text() raw SQL 대신 identity map과 일관성 유지
+                    fresh_qty_recheck_result = await session.execute(
+                        select(Position.quantity).where(
+                            Position.exchange == self._exchange_name,
+                            Position.symbol == db_sym,
+                        )
+                    )
+                    fresh_qty_recheck_row = fresh_qty_recheck_result.first()
+                    if (
+                        fresh_qty_recheck_row is None
+                        or fresh_qty_recheck_row[0] is None
+                        or fresh_qty_recheck_row[0] <= 0
+                    ):
+                        logger.warning(
+                            "futures_sync_cash_skip_concurrent_close",
+                            symbol=db_sym,
+                            reason="position closed by engine during sync await points",
+                        )
+                        # 전체 이터레이션 스킵 (의도적): qty=0은 엔진이 이미 포지션을 닫고
+                        # 현금을 반환했음을 의미. Order 중복 생성·cash 이중 반환 모두 방지.
+                        continue
+
+                    # 재확인 2: await 기간(processing_start 이후) 동안 엔진 SELL Order 생성 감지
+                    # - side == "sell" 만 체크: BUY Order는 cash 반환과 무관
+                    # - sync 자신의 Order는 아직 session.add() 전이므로 여기서 조회되지 않음
+                    # - Order.created_at은 Python-side _utcnow()이므로 동일 클럭 기준.
+                    #   50ms 마진: 동일 프로세스 내 서브밀리초 타임스탬프 순서 역전 방어
+                    recent_recheck_result = await session.execute(
+                        select(Order.id).where(
+                            Order.exchange == self._exchange_name,
+                            Order.symbol == db_sym,
+                            Order.strategy_name != "position_sync",
+                            Order.side == "sell",
+                            Order.created_at >= processing_start - timedelta(milliseconds=50),
+                        ).limit(1)
+                    )
+                    if recent_recheck_result.first() is not None:
+                        logger.warning(
+                            "futures_sync_cash_skip_recent_order",
+                            symbol=db_sym,
+                            reason="engine order created during sync await points",
+                        )
+                        # 전체 이터레이션 스킵 (의도적): 엔진 SELL Order는 cash가
+                        # 이미 반환됐음을 의미. Order 중복 생성·cash 이중 반환 방지.
+                        continue
 
                 old_qty = db_pos.quantity
                 now = datetime.now(timezone.utc)
