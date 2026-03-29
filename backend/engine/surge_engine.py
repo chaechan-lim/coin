@@ -15,6 +15,7 @@ import numpy as np
 import structlog
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import AppConfig, SurgeTradingConfig
 from core.enums import SignalType
@@ -841,7 +842,7 @@ class SurgeEngine:
 
         return False, ""
 
-    async def _zero_db_position(self, session, symbol: str) -> bool:
+    async def _zero_db_position(self, session: AsyncSession, symbol: str) -> bool:
         """Zero a DB position row.
 
         Returns True if the row existed AND had quantity > 0 (i.e. cash should be credited).
@@ -877,12 +878,19 @@ class SurgeEngine:
         - Phase 2: DB cleanup. If fails → mark pending_exit=True, store results.
         - PM cash is adjusted OUTSIDE the async-with block to prevent double-crediting if
           session.__aexit__ raises after a successful commit.
+        - db_committed flag distinguishes a post-commit __aexit__ failure (DB is clean,
+          cash should be applied immediately) from a genuine Phase-1 exchange rejection.
         """
-        # Variables captured inside async-with, used after it exits
+        # Initialise all variables that are read outside the async-with so they are
+        # always defined, even when the outer except fires before they were assigned.
+        exec_price = price
+        exec_qty = pos.quantity
+        fee = 0.0
         cost_return = 0.0
         net_pnl_pct = 0.0
         pnl_usdt = 0.0
         needs_cash_update = False
+        db_committed = False  # set to True only after session.commit() returns
 
         # ── Phase 1 + 2 (same session so the order row and position zero are atomic) ──
         try:
@@ -928,6 +936,7 @@ class SurgeEngine:
                 try:
                     needs_cash_update = await self._zero_db_position(session, symbol)
                     await session.commit()
+                    db_committed = True  # set after commit() returns successfully
                     # Note: cash is applied OUTSIDE async-with (see below)
 
                 except Exception as db_err:
@@ -950,34 +959,63 @@ class SurgeEngine:
                     return
 
         except Exception as e:
-            # COIN-58: Phase-1 failure (exchange order rejected or __aexit__ raised after
-            # a successful commit — treated conservatively as a retry trigger).
-            pos.exit_retry_count += 1
-            logger.error(
-                "surge_exit_exchange_failed",
-                symbol=symbol,
-                error=str(e),
-                retry_count=pos.exit_retry_count,
-            )
-            if pos.exit_retry_count >= MAX_EXIT_RETRIES:
-                logger.error(
-                    "surge_exit_exchange_max_retries",
+            if db_committed:
+                # DB commit succeeded but session.__aexit__ raised (e.g. connection drop
+                # during session teardown).  The position is already gone from the DB;
+                # apply cash immediately (idempotency guard: only if row had qty > 0) and
+                # mark pending_exit so _finalize_exit_cleanup handles memory/counters on
+                # the next _retry_pending_exits cycle.
+                if needs_cash_update:
+                    self._futures_pm.cash_balance += cost_return
+                pos.pending_exit = True
+                pos.exit_reason = reason
+                pos.exit_exec_price = exec_price
+                pos.exit_exec_qty = exec_qty
+                pos.exit_fee = fee
+                pos.exit_net_pnl_pct = net_pnl_pct
+                pos.exit_pnl_usdt = pnl_usdt
+                pos.exit_cost_return = 0.0  # cash already credited above
+                logger.warning(
+                    "surge_exit_aexit_failed_after_commit",
                     symbol=symbol,
+                    error=str(e),
+                    cash_credited=needs_cash_update,
+                )
+            else:
+                # COIN-58: Phase-1 failure — exchange order rejected, or __aexit__ raised
+                # before the commit could succeed.  Increment retry counter and leave the
+                # position open for the next _check_all_exits cycle.
+                pos.exit_retry_count += 1
+                logger.error(
+                    "surge_exit_exchange_failed",
+                    symbol=symbol,
+                    error=str(e),
                     retry_count=pos.exit_retry_count,
-                    msg="Persistent exchange failure — manual intervention may be required",
                 )
-                # Escalate via event so Discord / monitoring fires
-                await emit_event(
-                    "error", "surge_trade",
-                    f"[Surge] EXIT STUCK: {symbol} — {pos.exit_retry_count} consecutive exchange failures",
-                    detail=f"Reason={reason} | Manual intervention may be required",
-                    metadata={
-                        "symbol": symbol,
-                        "retry_count": pos.exit_retry_count,
-                        "reason": reason,
-                        "stuck_exit": True,
-                    },
-                )
+                if pos.exit_retry_count == MAX_EXIT_RETRIES:
+                    # Emit exactly once at this threshold — `>=` would spam every cycle.
+                    logger.error(
+                        "surge_exit_exchange_max_retries",
+                        symbol=symbol,
+                        retry_count=pos.exit_retry_count,
+                        msg="Persistent exchange failure — manual intervention may be required",
+                    )
+                    await emit_event(
+                        "error", "surge_trade",
+                        f"[Surge] EXIT STUCK: {symbol} — {pos.exit_retry_count} consecutive exchange failures",
+                        detail=f"Reason={reason} | Manual intervention may be required",
+                        metadata={
+                            "symbol": symbol,
+                            "retry_count": pos.exit_retry_count,
+                            "reason": reason,
+                            "stuck_exit": True,
+                        },
+                    )
+                    # Freeze _check_all_exits: mark pending so no new exchange orders are
+                    # placed.  _retry_pending_exits force-cleanup will reconcile shortly.
+                    pos.pending_exit = True
+                    pos.exit_reason = reason
+                    pos.exit_cost_return = 0.0  # no exchange order confirmed
             return
 
         # ── Apply cash OUTSIDE async-with ─────────────────────────────
@@ -1190,8 +1228,13 @@ class SurgeEngine:
                     # fire with the current binance_usdm adapter.
                     qty = float(ep.get("contracts", 0) or ep.get("positionAmt", 0) or 0)
                 else:
+                    # ccxt unified object: "contracts" is the standard field.
+                    # "positionAmt" fallback mirrors the dict branch in case a
+                    # non-ccxt adapter returns objects with that attribute instead.
                     sym = getattr(ep, "symbol", "")
-                    qty = float(getattr(ep, "contracts", 0) or 0)
+                    qty = float(
+                        getattr(ep, "contracts", 0) or getattr(ep, "positionAmt", 0) or 0
+                    )
                 # Normalize: "BTC/USDT:USDT" → "BTC/USDT"
                 sym = sym.replace(":USDT", "")
                 if sym and abs(qty) > 0:
@@ -1281,6 +1324,12 @@ class SurgeEngine:
 
     async def initialize(self) -> None:
         """Initialize engine state — restore open positions from DB."""
+        # Defer the first zombie scan by the full interval so that we don't call
+        # fetch_positions during engine boot before any positions are likely open.
+        # _last_zombie_scan=0.0 in __init__ would otherwise trigger on the very first tick
+        # (asyncio loop time is always > ZOMBIE_SCAN_INTERVAL_SEC at startup).
+        self._last_zombie_scan = asyncio.get_event_loop().time()
+
         try:
             sf = get_session_factory()
             async with sf() as session:
