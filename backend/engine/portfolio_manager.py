@@ -856,6 +856,24 @@ class PortfolioManager:
             db_pos = db_positions.get(pair)
 
             if db_pos is None:
+                # 서지 엔진이 보유 중인 포지션인지 확인 → 중복 생성 방지
+                # (선물: 같은 물리 거래소를 공유하므로 fetch_balance에 서지 포지션도 나옴)
+                if is_futures:
+                    surge_check = await session.execute(
+                        select(Position.id).where(
+                            Position.symbol == pair,
+                            Position.exchange == "binance_surge",
+                            Position.quantity > 0,
+                        ).limit(1)
+                    )
+                    if surge_check.first() is not None:
+                        logger.info(
+                            "sync_skip_surge_position",
+                            symbol=pair,
+                            reason="active surge position exists",
+                        )
+                        continue
+
                 # DB에 없는 포지션 → 신규 생성 (기존 보유 코인)
                 from datetime import datetime, timezone
                 new_pos = Position(

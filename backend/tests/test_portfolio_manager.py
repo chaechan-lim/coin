@@ -3809,3 +3809,107 @@ async def test_futures_sync_cash_returns_normally_when_toctou_checks_pass(sessio
     assert pm.cash_balance < cash_before + invested * 2, (
         f"Cash returned seems unexpectedly large: {pm.cash_balance - cash_before:.2f}"
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_balances_loop_skips_surge_symbol(session):
+    """balances 루프: 서지 포지션이 활성일 때 신규 포지션 생성 차단.
+
+    시나리오: SurgeEngine이 ARB를 숏 보유 중 → fetch_balance에 ARB 잔고 반영 →
+    balances 루프가 신규 포지션 생성하려 할 때 binance_surge에 활성 포지션이
+    있으므로 스킵.
+    """
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"ARB/USDT": 0.65}),
+        initial_balance_krw=3000.0,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # 서지 엔진의 활성 포지션 (ARB 숏)
+    surge_pos = Position(
+        exchange="binance_surge", symbol="ARB/USDT",
+        quantity=100.0, average_buy_price=0.65,
+        total_invested=32.5, is_paper=False,
+        direction="short", leverage=3, margin_used=32.5,
+    )
+    session.add(surge_pos)
+    await session.flush()
+
+    # fetch_balance에 ARB 잔고 반영됨 (서지 엔진이 보유)
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=3000, used=0, total=3000),
+        "ARB": Balance(currency="ARB", free=100, used=0, total=100),
+    })
+    # fetch_positions는 빈 상태 (ARB는 마진 데이터가 없다고 가정)
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["ARB/USDT"])
+    await session.flush()
+
+    # balances 루프에서 신규 ARB 포지션이 생성되지 않아야 함
+    result = await session.execute(
+        select(Position).where(
+            Position.exchange == "binance_futures",
+            Position.symbol == "ARB/USDT",
+        )
+    )
+    futures_positions = result.scalars().all()
+    assert len(futures_positions) == 0, (
+        f"Balances loop must skip ARB when surge position exists, "
+        f"but got {len(futures_positions)} futures position(s)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_balances_loop_creates_position_when_no_surge(session):
+    """balances 루프: 서지 포지션이 없을 때 신규 포지션 생성.
+
+    시나리오: SurgeEngine이 DOGE를 보유하지 않음 → fetch_balance에 DOGE 잔고 반영 →
+    balances 루프가 신규 포지션 생성 (정상).
+    """
+    from exchange.base import Balance
+
+    pm = PortfolioManager(
+        market_data=_make_market_data({"DOGE/USDT": 0.15}),
+        initial_balance_krw=3000.0,
+        is_paper=False,
+        exchange_name="binance_futures",
+    )
+
+    # 서지 엔진에는 DOGE 포지션 없음
+
+    # fetch_balance에 DOGE 잔고 반영됨 (어디선가 보유)
+    adapter = AsyncMock()
+    adapter.fetch_balance = AsyncMock(return_value={
+        "USDT": Balance(currency="USDT", free=3000, used=0, total=3000),
+        "DOGE": Balance(currency="DOGE", free=200, used=0, total=200),
+    })
+    # fetch_positions는 빈 상태
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
+    adapter.fetch_income = AsyncMock(return_value=[])
+
+    await pm.sync_exchange_positions(session, adapter, ["DOGE/USDT"])
+    await session.flush()
+
+    # balances 루프에서 신규 DOGE 포지션이 생성되어야 함
+    result = await session.execute(
+        select(Position).where(
+            Position.exchange == "binance_futures",
+            Position.symbol == "DOGE/USDT",
+        )
+    )
+    futures_positions = result.scalars().all()
+    assert len(futures_positions) == 1, (
+        f"Balances loop must create position when no surge exists, "
+        f"expected 1, got {len(futures_positions)}"
+    )
+    pos = futures_positions[0]
+    assert pos.quantity == pytest.approx(200, abs=0.01)
+    assert pos.average_buy_price == pytest.approx(0.15, abs=0.001)
