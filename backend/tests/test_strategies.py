@@ -9,6 +9,7 @@ os.environ.setdefault("EXCHANGE_API_SECRET", "test")
 os.environ.setdefault("TRADING_MODE", "paper")
 
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -163,12 +164,16 @@ class TestRSILenGuard:
         assert signal.strategy_name == "rsi"
 
     @pytest.mark.asyncio
-    async def test_single_row_returns_hold(self, strategy):
-        """단 1행만 있을 때 HOLD 반환 (min_candles 가드)."""
+    async def test_len_guard_prevents_index_error(self, strategy):
+        """len(df) < 2 가드: rsi_14 유효해도 prev_rsi 접근에서 IndexError 없음."""
+        # Lower min_candles so the 1-row df reaches the iloc[-2] line
+        strategy.min_candles_required = 1
         df = _make_df(1)
+        df["rsi_14"] = 50.0  # valid current_rsi; no second row for prev_rsi
+        # Without the guard this would raise IndexError; with it returns HOLD
         signal = await strategy.analyze(df, _ticker())
         assert signal.signal_type == SignalType.HOLD
-        assert signal.confidence == 0.0
+        assert signal.strategy_name == "rsi"
 
 
 # ── MA Crossover Strategy ─────────────────────────────────────
@@ -987,51 +992,55 @@ class TestStochasticRSIStrategy:
     @pytest.mark.asyncio
     async def test_golden_cross_oversold_buy(self, strategy):
         """과매도 구간에서 K가 D를 상향 돌파 → BUY."""
-        import pandas_ta as ta
         df = _make_df(60)
-        # Force stochrsi result: oversold + bullish cross
-        stochrsi = ta.stochrsi(df["close"], length=14, rsi_length=14, k=3, d=3)
-        if stochrsi is not None and not stochrsi.empty:
-            k_col, d_col = stochrsi.columns[0], stochrsi.columns[1]
-            # Simulate oversold bullish cross at last two rows
-            stochrsi.iloc[-2, stochrsi.columns.get_loc(k_col)] = 15.0  # K prev < D prev
-            stochrsi.iloc[-2, stochrsi.columns.get_loc(d_col)] = 18.0
-            stochrsi.iloc[-1, stochrsi.columns.get_loc(k_col)] = 22.0   # K now > D now (cross)
-            stochrsi.iloc[-1, stochrsi.columns.get_loc(d_col)] = 18.0
-            df[k_col] = stochrsi[k_col]
-            df[d_col] = stochrsi[d_col]
-        signal = await strategy.analyze(df, _ticker())
-        # Accept BUY or HOLD depending on whether pandas_ta recalculates
-        assert signal.signal_type in (SignalType.BUY, SignalType.HOLD)
+        # Build a fake stochrsi DataFrame that the strategy will receive:
+        # K_prev=15 < D_prev=18  →  K_now=22 > D_now=18 → bullish cross in oversold
+        k_col, d_col = "STOCHRSIk_14_14_3_3", "STOCHRSId_14_14_3_3"
+        mock_result = pd.DataFrame(
+            {k_col: [50.0] * 58 + [15.0, 22.0],
+             d_col: [50.0] * 58 + [18.0, 18.0]},
+        )
+        with patch("strategies.stochastic_rsi.ta.stochrsi", return_value=mock_result):
+            signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.BUY
+        assert signal.confidence >= 0.60
 
     @pytest.mark.asyncio
     async def test_dead_cross_overbought_sell(self, strategy):
         """과매수 구간에서 K가 D를 하향 돌파 → SELL."""
-        import pandas_ta as ta
         df = _make_df(60)
-        stochrsi = ta.stochrsi(df["close"], length=14, rsi_length=14, k=3, d=3)
-        if stochrsi is not None and not stochrsi.empty:
-            k_col, d_col = stochrsi.columns[0], stochrsi.columns[1]
-            stochrsi.iloc[-2, stochrsi.columns.get_loc(k_col)] = 85.0  # K prev > D prev
-            stochrsi.iloc[-2, stochrsi.columns.get_loc(d_col)] = 82.0
-            stochrsi.iloc[-1, stochrsi.columns.get_loc(k_col)] = 78.0   # K now < D now (cross)
-            stochrsi.iloc[-1, stochrsi.columns.get_loc(d_col)] = 82.0
-            df[k_col] = stochrsi[k_col]
-            df[d_col] = stochrsi[d_col]
-        signal = await strategy.analyze(df, _ticker())
-        assert signal.signal_type in (SignalType.SELL, SignalType.HOLD)
+        # K_prev=85 > D_prev=82  →  K_now=78 < D_now=82 → bearish cross in overbought
+        k_col, d_col = "STOCHRSIk_14_14_3_3", "STOCHRSId_14_14_3_3"
+        mock_result = pd.DataFrame(
+            {k_col: [50.0] * 58 + [85.0, 78.0],
+             d_col: [50.0] * 58 + [82.0, 82.0]},
+        )
+        with patch("strategies.stochastic_rsi.ta.stochrsi", return_value=mock_result):
+            signal = await strategy.analyze(df, _ticker())
+        assert signal.signal_type == SignalType.SELL
+        assert signal.confidence >= 0.60
 
     def test_param_mapping_stoch_is_length(self, strategy):
-        """stoch_length → ta.stochrsi(length=...) 매핑 확인."""
+        """stoch_length → ta.stochrsi(length=...) 매핑 확인 (기본값)."""
         import inspect
         import pandas_ta as ta
-        # Verify pandas_ta stochrsi signature: 'length' is Stochastic lookback, 'rsi_length' is RSI period
         sig = inspect.signature(ta.stochrsi)
         assert "length" in sig.parameters
         assert "rsi_length" in sig.parameters
-        # Our strategy stores _stoch_length=14 and _rsi_length=14
-        assert strategy._stoch_length == 14
-        assert strategy._rsi_length == 14
+
+    @pytest.mark.asyncio
+    async def test_param_mapping_asymmetric(self):
+        """rsi_length≠stoch_length 일 때 ta.stochrsi 인자가 올바르게 매핑되는지 확인."""
+        from strategies.stochastic_rsi import StochasticRSIStrategy
+        strategy = StochasticRSIStrategy(rsi_length=10, stoch_length=20)
+        df = _make_df(60)
+        with patch("strategies.stochastic_rsi.ta.stochrsi", return_value=None) as mock_stochrsi:
+            await strategy.analyze(df, _ticker())
+        # length=stoch_length=20, rsi_length=rsi_length=10 — not swapped
+        mock_stochrsi.assert_called_once()
+        _, kwargs = mock_stochrsi.call_args
+        assert kwargs["length"] == 20    # stoch_length, not rsi_length
+        assert kwargs["rsi_length"] == 10  # rsi_length, not stoch_length
 
     def test_get_params(self, strategy):
         """get_params 반환값 확인."""
