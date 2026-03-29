@@ -12,7 +12,7 @@ from core.schemas import (
     CapitalTransactionResponse,
     CapitalSummaryResponse,
 )
-from api.dependencies import engine_registry
+from api.dependencies import engine_registry, ExchangeNameType
 
 router = APIRouter(prefix="/capital", tags=["capital"])
 
@@ -60,7 +60,7 @@ async def create_transaction(
 
 @router.get("/transactions", response_model=list[CapitalTransactionResponse])
 async def list_transactions(
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     """입출금 이력 조회."""
@@ -129,7 +129,7 @@ async def delete_transaction(
 
 @router.get("/summary", response_model=CapitalSummaryResponse)
 async def get_summary(
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     """거래소별 입출금 요약."""

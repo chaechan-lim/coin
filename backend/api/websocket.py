@@ -51,13 +51,23 @@ class ConnectionManager:
 ws_manager = ConnectionManager()
 
 
+_WS_RECEIVE_TIMEOUT = 300  # seconds — idle connections closed after 5 minutes
+
+
 @router.websocket("/ws/dashboard")
 async def websocket_dashboard(websocket: WebSocket):
     await ws_manager.connect(websocket)
     try:
         while True:
-            # Keep connection alive, receive client messages if needed
-            data = await websocket.receive_text()
+            try:
+                # Keep connection alive, receive client messages if needed
+                data = await asyncio.wait_for(
+                    websocket.receive_text(), timeout=_WS_RECEIVE_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.info("ws_client_idle_timeout", timeout_sec=_WS_RECEIVE_TIMEOUT)
+                await ws_manager.disconnect(websocket)
+                return
             # Client can send ping/pong or commands
             if data == "ping":
                 await websocket.send_text(json.dumps({"event": "pong"}))
