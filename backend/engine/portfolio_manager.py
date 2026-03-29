@@ -740,6 +740,47 @@ class PortfolioManager:
         # 5. 폴백
         return ("position_sync", "다운타임 중 포지션 종료")
 
+    @staticmethod
+    def _calculate_leverage_from_futures(margin: float, raw_lev, notional: float) -> int:
+        """선물 거래소 데이터에서 leverage를 계산.
+
+        Args:
+            margin: initialMargin 값
+            raw_lev: leverage 필드 (None이면 notional/margin으로 계산)
+            notional: notional 값 (leverage가 없을 때 사용)
+
+        Returns:
+            계산된 leverage (최소 1)
+        """
+        if raw_lev:
+            return int(raw_lev)
+        elif margin > 0:
+            # ccxt가 leverage=None 반환 시 notional/margin으로 계산
+            abs_notional = abs(notional) if notional else 0
+            return max(1, round(abs_notional / margin)) if abs_notional > 0 else 1
+        else:
+            return 1
+
+    def _is_dust_position(self, invested_or_margin: float) -> bool:
+        """포지션이 dust(무시해도 될 정도로 작은 잔고)인지 판별.
+
+        선물: margin < 1 USD
+        현물: value < 1 USD (바이낸스) 또는 value < 1000 KRW (빗썸)
+
+        Args:
+            invested_or_margin: 선물은 margin, 현물은 value (수량 * 가격)
+
+        Returns:
+            dust이면 True
+        """
+        if self._is_futures:
+            # 선물: margin 기준
+            return invested_or_margin < 1.0
+        else:
+            # 현물: value 기준 (거래소별 최소값)
+            min_value = 1.0 if "binance" in self._exchange_name else 1000
+            return invested_or_margin < min_value
+
     async def sync_exchange_positions(
         self, session: AsyncSession, exchange_adapter, tracked_coins: list[str]
     ) -> None:
@@ -748,117 +789,259 @@ class PortfolioManager:
         - 거래소에 보유 중이지만 DB에 없는 코인 → 포지션 생성
         - DB 포지션 수량 vs 거래소 실제 수량 불일치 → 거래소 기준으로 보정
         - 실제 현금 잔고로 cash_balance 갱신
+
+        **Lock behavior (COIN-60 fix):**
+        이 메서드는 _sync_lock을 획득하여 동기화를 직렬화함. 동시 호출은 대기함 (skip하지 않음).
+        No deadlock risk: _sync_lock을 이미 보유한 상태에서 이 메서드를 호출하는 경로가 없음.
+        호출자 5곳 (main.py, recovery.py, health_monitor.py) 모두 eval 루프 외부에서 호출.
         """
-        if self._sync_lock.locked():
-            logger.info("sync_skipped_during_eval", exchange=self._exchange_name)
-            return
-
-        try:
-            balances = await exchange_adapter.fetch_balance()
-        except Exception as e:
-            logger.warning("sync_exchange_balances_failed", error=str(e))
-            return
-
-        # 현금 통화 결정
-        if "binance" in self._exchange_name:
-            cash_symbol = "USDT"
-        else:
-            cash_symbol = "KRW"
-
-        # 실제 현금 잔고
-        cash_bal = balances.get(cash_symbol)
-        actual_cash = cash_bal.free if cash_bal else 0
-
-        # 기존 DB 포지션 조회
-        result = await session.execute(
-            select(Position).where(Position.exchange == self._exchange_name)
-        )
-        db_positions = {p.symbol: p for p in result.scalars().all()}
-
-        # tracked_coins에 포함된 심볼 + 실제 잔고가 있는 코인 처리
-        synced_count = 0
-        total_invested = 0.0
-        # 좀비 탐지용: dust 필터를 통과한 심볼만 기록 (raw balances 재스캔 금지)
-        exchange_symbols: set[str] = set()
-
-        # 선물: fetch_positions로 실제 마진/방향/레버리지 조회
-        is_futures = self._is_futures
-        futures_positions = {}
-        if is_futures:
+        async with self._sync_lock:
             try:
-                raw_positions = await exchange_adapter._exchange.fetch_positions()
-                for fp in raw_positions:
-                    contracts = float(fp.get("contracts", 0) or 0)
-                    if contracts > 0:
-                        sym = fp.get("symbol", "")
-                        futures_positions[sym] = fp
+                balances = await exchange_adapter.fetch_balance()
             except Exception as e:
-                logger.warning("fetch_futures_positions_failed", error=str(e))
+                logger.warning("sync_exchange_balances_failed", error=str(e))
+                return
 
-        # 선물: 최근 거래된 포지션의 margin 오버라이트 보호 (grace period 10분)
-        # sync가 거래 직후 exchange API에서 일시적으로 틀린 initialMargin을 읽어서
-        # total_invested를 오염시키는 것을 방지
-        from datetime import datetime, timezone, timedelta
-        _margin_grace = timedelta(minutes=10)
-        _now_utc = datetime.now(timezone.utc)
-        _protected_syms: set[str] = set()
-        if is_futures:
-            for db_sym, db_pos in db_positions.items():
-                if db_pos.last_trade_at and (_now_utc - db_pos.last_trade_at) < _margin_grace:
-                    _protected_syms.add(db_sym)
-
-        for symbol, bal in balances.items():
-            if symbol == cash_symbol or bal.total <= 0:
-                continue
-
-            # 심볼 형식 변환: "ADA" → "ADA/KRW" 또는 "ADA/USDT"
-            pair = f"{symbol}/{cash_symbol}"
-
-            # 너무 작은 잔고 무시 (dust)
-            try:
-                current_price = await self._market_data.get_current_price(pair)
-                coin_value = bal.total * current_price
-                # 바이낸스: 1 USDT 미만, 빗썸: 1000원 미만 무시
-                min_value = 1.0 if "binance" in self._exchange_name else 1000
-                if coin_value < min_value:
-                    continue  # dust: 좀비 탐지에도 포함 안 됨
-                exchange_symbols.add(pair)
-            except Exception:
-                # 가격 조회 실패: 잔고가 실제 있다고 보수적으로 처리 (거짓 좀비 방지)
-                exchange_symbols.add(pair)
-                continue
-
-            # 선물: 실제 마진/방향/레버리지 가져오기
-            fp_data = futures_positions.get(f"{pair}:USDT") if is_futures else None
-            if is_futures and fp_data:
-                margin = float(fp_data.get("initialMargin", 0) or 0)
-                direction = fp_data.get("side", "long")
-                raw_lev = fp_data.get("leverage")
-                if raw_lev:
-                    leverage = int(raw_lev)
-                elif margin > 0:
-                    # ccxt가 leverage=None 반환 시 notional/margin으로 계산
-                    notional = abs(float(fp_data.get("notional", 0) or 0))
-                    leverage = max(1, round(notional / margin)) if notional > 0 else 1
-                else:
-                    leverage = 1
-                entry_price = float(fp_data.get("entryPrice", 0) or current_price)
-                liq_price = float(fp_data.get("liquidationPrice", 0) or 0) or None
-                invested = margin  # 선물: 마진이 실제 투자금
+            # 현금 통화 결정
+            if "binance" in self._exchange_name:
+                cash_symbol = "USDT"
             else:
-                margin = 0
-                direction = "long"
-                leverage = 1
-                entry_price = current_price
-                liq_price = None
-                invested = bal.total * current_price  # 현물: 노셔널
+                cash_symbol = "KRW"
 
-            db_pos = db_positions.get(pair)
+            # 실제 현금 잔고
+            cash_bal = balances.get(cash_symbol)
+            actual_cash = cash_bal.free if cash_bal else 0
 
-            if db_pos is None:
-                # 서지 엔진이 보유 중인 포지션인지 확인 → 중복 생성 방지
-                # (선물: 같은 물리 거래소를 공유하므로 fetch_balance에 서지 포지션도 나옴)
-                if is_futures:
+            # 기존 DB 포지션 조회
+            result = await session.execute(
+                select(Position).where(Position.exchange == self._exchange_name)
+            )
+            db_positions = {p.symbol: p for p in result.scalars().all()}
+
+            # tracked_coins에 포함된 심볼 + 실제 잔고가 있는 코인 처리
+            synced_count = 0
+            total_invested = 0.0
+            # 좀비 탐지용: dust 필터를 통과한 심볼만 기록 (raw balances 재스캔 금지)
+            exchange_symbols: set[str] = set()
+
+            # 선물: fetch_positions로 실제 마진/방향/레버리지 조회
+            is_futures = self._is_futures
+            futures_positions = {}
+            if is_futures:
+                try:
+                    raw_positions = await exchange_adapter._exchange.fetch_positions()
+                    for fp in raw_positions:
+                        contracts = float(fp.get("contracts", 0) or 0)
+                        if contracts > 0:
+                            sym = fp.get("symbol", "")
+                            futures_positions[sym] = fp
+                except Exception as e:
+                    logger.warning("fetch_futures_positions_failed", error=str(e))
+
+            # 선물: 최근 거래된 포지션의 margin 오버라이트 보호 (grace period 10분)
+            # sync가 거래 직후 exchange API에서 일시적으로 틀린 initialMargin을 읽어서
+            # total_invested를 오염시키는 것을 방지.
+            # 주의: 이 보호는 이미 거래된 포지션(last_trade_at이 설정됨)에만 적용.
+            # 새로 sync된 포지션은 last_trade_at이 None이므로 보호되지 않지만, 이는 정상이므로
+            # (아직 거래 이력이 없음). last_trade_at은 거래 시 설정됨 (trading_engine.py, surge_engine.py 참조).
+            _margin_grace = timedelta(minutes=10)
+            _now_utc = datetime.now(timezone.utc)
+            _protected_syms: set[str] = set()
+            if is_futures:
+                for db_sym, db_pos in db_positions.items():
+                    if db_pos.last_trade_at and (_now_utc - db_pos.last_trade_at) < _margin_grace:
+                        _protected_syms.add(db_sym)
+
+            for symbol, bal in balances.items():
+                if symbol == cash_symbol or bal.total <= 0:
+                    continue
+
+                # 심볼 형식 변환: "ADA" → "ADA/KRW" 또는 "ADA/USDT"
+                pair = f"{symbol}/{cash_symbol}"
+
+                # 너무 작은 잔고 무시 (dust)
+                try:
+                    current_price = await self._market_data.get_current_price(pair)
+                    coin_value = bal.total * current_price
+                    if self._is_dust_position(coin_value):
+                        continue  # dust: 좀비 탐지에도 포함 안 됨
+                    exchange_symbols.add(pair)
+                except Exception:
+                    # 가격 조회 실패: 잔고가 실제 있다고 보수적으로 처리 (거짓 좀비 방지)
+                    exchange_symbols.add(pair)
+                    continue
+
+                # 선물: 실제 마진/방향/레버리지 가져오기
+                fp_data = futures_positions.get(f"{pair}:USDT") if is_futures else None
+                if is_futures and fp_data:
+                    margin = float(fp_data.get("initialMargin", 0) or 0)
+                    direction = fp_data.get("side", "long")
+                    raw_lev = fp_data.get("leverage")
+                    notional = abs(float(fp_data.get("notional", 0) or 0))
+                    leverage = self._calculate_leverage_from_futures(margin, raw_lev, notional)
+                    entry_price = float(fp_data.get("entryPrice", 0) or current_price)
+                    liq_price = float(fp_data.get("liquidationPrice", 0) or 0) or None
+                    invested = margin  # 선물: 마진이 실제 투자금
+                else:
+                    margin = 0
+                    direction = "long"
+                    leverage = 1
+                    entry_price = current_price
+                    liq_price = None
+                    invested = bal.total * current_price  # 현물: 노셔널
+
+                db_pos = db_positions.get(pair)
+
+                if db_pos is None:
+                    # 서지 엔진이 보유 중인 포지션인지 확인 → 중복 생성 방지
+                    # (선물: 같은 물리 거래소를 공유하므로 fetch_balance에 서지 포지션도 나옴)
+                    if is_futures:
+                        surge_check = await session.execute(
+                            select(Position.id).where(
+                                Position.symbol == pair,
+                                Position.exchange == "binance_surge",
+                                Position.quantity > 0,
+                            ).limit(1)
+                        )
+                        if surge_check.first() is not None:
+                            logger.info(
+                                "sync_skip_surge_position",
+                                symbol=pair,
+                                reason="active surge position exists",
+                            )
+                            continue
+
+                    # DB에 없는 포지션 → 신규 생성 (기존 보유 코인)
+                    new_pos = Position(
+                        exchange=self._exchange_name,
+                        symbol=pair,
+                        quantity=bal.total,
+                        average_buy_price=entry_price,
+                        total_invested=invested,
+                        is_paper=self._is_paper,
+                        entered_at=datetime.now(timezone.utc),
+                        direction=direction,
+                        leverage=leverage,
+                        liquidation_price=liq_price,
+                        margin_used=margin,
+                    )
+                    session.add(new_pos)
+                    total_invested += new_pos.total_invested
+                    synced_count += 1
+                    logger.info(
+                        "position_synced_from_exchange",
+                        symbol=pair, quantity=bal.total,
+                        price=entry_price, invested=round(invested, 2),
+                        direction=direction, leverage=leverage,
+                    )
+                elif db_pos.quantity <= 0:
+                    # 닫힌 포지션(qty=0)은 다른 엔진 소유일 수 있음 → 부활 방지
+                    continue
+                elif abs(db_pos.quantity - bal.total) / max(db_pos.quantity, 0.0001) > 0.01:
+                    # DB 수량과 거래소 수량이 1% 이상 차이 → 거래소 기준으로 보정
+                    old_qty = db_pos.quantity
+                    db_pos.quantity = bal.total
+                    if is_futures and fp_data:
+                        if pair not in _protected_syms:
+                            db_pos.total_invested = margin
+                            db_pos.margin_used = margin
+                        db_pos.direction = direction
+                        db_pos.leverage = leverage
+                        db_pos.liquidation_price = liq_price
+                    elif old_qty > 0:
+                        ratio = bal.total / old_qty
+                        db_pos.total_invested *= ratio
+                    total_invested += db_pos.total_invested
+                    logger.info(
+                        "position_quantity_adjusted",
+                        symbol=pair, old=old_qty, new=bal.total,
+                    )
+                else:
+                    # 수량 일치 — 선물 메타데이터(레버리지/방향/마진) 보정
+                    if is_futures and fp_data:
+                        changed = False
+                        if leverage > 1 and getattr(db_pos, "leverage", 1) != leverage:
+                            db_pos.leverage = leverage
+                            changed = True
+                        if direction and getattr(db_pos, "direction", None) != direction:
+                            db_pos.direction = direction
+                            changed = True
+                        if margin > 0 and abs(getattr(db_pos, "margin_used", 0) - margin) > 0.01:
+                            if pair not in _protected_syms:
+                                db_pos.total_invested = margin
+                                db_pos.margin_used = margin
+                                changed = True
+                        if liq_price and getattr(db_pos, "liquidation_price", None) != liq_price:
+                            db_pos.liquidation_price = liq_price
+                            changed = True
+                        if changed:
+                            logger.info("position_metadata_corrected",
+                                        symbol=pair, leverage=leverage, direction=direction)
+                    total_invested += db_pos.total_invested
+
+            # 선물: fetch_positions에만 있고 balances에 없는 포지션 동기화
+            if is_futures and futures_positions:
+                for fp_sym, fp_data in futures_positions.items():
+                    # fp_sym 형식: "SOL/USDT:USDT" → pair: "SOL/USDT"
+                    pair = fp_sym.replace(":USDT", "")
+
+                    # balances 루프에서 이미 처리된 심볼은 스킵
+                    base_sym = pair.split("/")[0]
+                    if base_sym in balances and balances[base_sym].total > 0:
+                        continue
+
+                    # DB에 이미 있는 포지션 → 메타데이터만 보정
+                    if pair in db_positions:
+                        db_pos = db_positions[pair]
+                        # 닫힌 포지션(qty=0)은 다른 엔진 소유일 수 있음 → 부활 방지
+                        if db_pos.quantity <= 0:
+                            continue
+                        fp_margin = float(fp_data.get("initialMargin", 0) or 0)
+                        fp_direction = fp_data.get("side", "long")
+                        fp_raw_lev = fp_data.get("leverage")
+                        fp_notional = abs(float(fp_data.get("notional", 0) or 0))
+                        fp_leverage = self._calculate_leverage_from_futures(fp_margin, fp_raw_lev, fp_notional)
+                        fp_liq = float(fp_data.get("liquidationPrice", 0) or 0) or None
+                        fp_entry = float(fp_data.get("entryPrice", 0) or 0)
+                        fp_contracts = float(fp_data.get("contracts", 0) or 0)
+
+                        changed = False
+                        if fp_leverage > 1 and getattr(db_pos, "leverage", 1) != fp_leverage:
+                            db_pos.leverage = fp_leverage
+                            changed = True
+                        if fp_direction and getattr(db_pos, "direction", None) != fp_direction:
+                            db_pos.direction = fp_direction
+                            changed = True
+                        if fp_margin > 0 and abs(getattr(db_pos, "margin_used", 0) - fp_margin) > 0.01:
+                            if pair not in _protected_syms:
+                                db_pos.total_invested = fp_margin
+                                db_pos.margin_used = fp_margin
+                                changed = True
+                        if fp_liq and getattr(db_pos, "liquidation_price", None) != fp_liq:
+                            db_pos.liquidation_price = fp_liq
+                            changed = True
+                        if fp_entry > 0 and abs(db_pos.average_buy_price - fp_entry) > 0.0001:
+                            db_pos.average_buy_price = fp_entry
+                            changed = True
+                        if fp_contracts > 0 and abs(db_pos.quantity - fp_contracts) / max(db_pos.quantity, 0.0001) > 0.01:
+                            db_pos.quantity = fp_contracts
+                            changed = True
+                        if changed:
+                            logger.info("futures_metadata_corrected",
+                                        symbol=pair, leverage=fp_leverage,
+                                        direction=fp_direction, margin=round(fp_margin, 2))
+                        total_invested += db_pos.total_invested
+                        continue
+
+                    contracts = float(fp_data.get("contracts", 0) or 0)
+                    if contracts <= 0:
+                        continue
+                    margin = float(fp_data.get("initialMargin", 0) or 0)
+                    if self._is_dust_position(margin):
+                        continue
+
+                    # 서지 엔진이 보유 중인 포지션인지 확인 → 중복 생성 방지
+                    # (같은 물리 거래소를 공유하므로 fetch_positions에 서지 포지션도 나옴)
                     surge_check = await session.execute(
                         select(Position.id).where(
                             Position.symbol == pair,
@@ -873,436 +1056,278 @@ class PortfolioManager:
                             reason="active surge position exists",
                         )
                         continue
+                    direction = fp_data.get("side", "long")
+                    raw_lev = fp_data.get("leverage")
+                    notional = abs(float(fp_data.get("notional", 0) or 0))
+                    leverage = self._calculate_leverage_from_futures(margin, raw_lev, notional)
+                    entry_price = float(fp_data.get("entryPrice", 0) or 0)
+                    liq_price = float(fp_data.get("liquidationPrice", 0) or 0) or None
 
-                # DB에 없는 포지션 → 신규 생성 (기존 보유 코인)
-                from datetime import datetime, timezone
-                new_pos = Position(
-                    exchange=self._exchange_name,
-                    symbol=pair,
-                    quantity=bal.total,
-                    average_buy_price=entry_price,
-                    total_invested=invested,
-                    is_paper=self._is_paper,
-                    entered_at=datetime.now(timezone.utc),
-                    direction=direction,
-                    leverage=leverage,
-                    liquidation_price=liq_price,
-                    margin_used=margin,
-                )
-                session.add(new_pos)
-                total_invested += new_pos.total_invested
-                synced_count += 1
-                logger.info(
-                    "position_synced_from_exchange",
-                    symbol=pair, quantity=bal.total,
-                    price=entry_price, invested=round(invested, 2),
-                    direction=direction, leverage=leverage,
-                )
-            elif db_pos.quantity <= 0:
-                # 닫힌 포지션(qty=0)은 다른 엔진 소유일 수 있음 → 부활 방지
-                continue
-            elif abs(db_pos.quantity - bal.total) / max(db_pos.quantity, 0.0001) > 0.01:
-                # DB 수량과 거래소 수량이 1% 이상 차이 → 거래소 기준으로 보정
-                old_qty = db_pos.quantity
-                db_pos.quantity = bal.total
-                if is_futures and fp_data:
-                    if pair not in _protected_syms:
-                        db_pos.total_invested = margin
-                        db_pos.margin_used = margin
-                    db_pos.direction = direction
-                    db_pos.leverage = leverage
-                    db_pos.liquidation_price = liq_price
-                elif old_qty > 0:
-                    ratio = bal.total / old_qty
-                    db_pos.total_invested *= ratio
-                total_invested += db_pos.total_invested
-                logger.info(
-                    "position_quantity_adjusted",
-                    symbol=pair, old=old_qty, new=bal.total,
-                )
-            else:
-                # 수량 일치 — 선물 메타데이터(레버리지/방향/마진) 보정
-                if is_futures and fp_data:
-                    changed = False
-                    if leverage > 1 and getattr(db_pos, "leverage", 1) != leverage:
-                        db_pos.leverage = leverage
-                        changed = True
-                    if direction and getattr(db_pos, "direction", None) != direction:
-                        db_pos.direction = direction
-                        changed = True
-                    if margin > 0 and abs(getattr(db_pos, "margin_used", 0) - margin) > 0.01:
-                        if pair not in _protected_syms:
-                            db_pos.total_invested = margin
-                            db_pos.margin_used = margin
-                            changed = True
-                    if liq_price and getattr(db_pos, "liquidation_price", None) != liq_price:
-                        db_pos.liquidation_price = liq_price
-                        changed = True
-                    if changed:
-                        logger.info("position_metadata_corrected",
-                                    symbol=pair, leverage=leverage, direction=direction)
-                total_invested += db_pos.total_invested
+                    new_pos = Position(
+                        exchange=self._exchange_name,
+                        symbol=pair,
+                        quantity=contracts,
+                        average_buy_price=entry_price,
+                        total_invested=margin,
+                        is_paper=self._is_paper,
+                        entered_at=datetime.now(timezone.utc),
+                        direction=direction,
+                        leverage=leverage,
+                        liquidation_price=liq_price,
+                        margin_used=margin,
+                    )
+                    session.add(new_pos)
+                    total_invested += margin
+                    synced_count += 1
+                    logger.info(
+                        "futures_position_synced",
+                        symbol=pair, contracts=contracts, direction=direction,
+                        margin=round(margin, 2), leverage=leverage,
+                        entry_price=entry_price,
+                    )
 
-        # 선물: fetch_positions에만 있고 balances에 없는 포지션 동기화
-        if is_futures and futures_positions:
-            from datetime import datetime, timezone
-            for fp_sym, fp_data in futures_positions.items():
-                # fp_sym 형식: "SOL/USDT:USDT" → pair: "SOL/USDT"
-                pair = fp_sym.replace(":USDT", "")
-
-                # balances 루프에서 이미 처리된 심볼은 스킵
-                base_sym = pair.split("/")[0]
-                if base_sym in balances and balances[base_sym].total > 0:
-                    continue
-
-                # DB에 이미 있는 포지션 → 메타데이터만 보정
-                if pair in db_positions:
-                    db_pos = db_positions[pair]
-                    # 닫힌 포지션(qty=0)은 다른 엔진 소유일 수 있음 → 부활 방지
-                    if db_pos.quantity <= 0:
-                        continue
-                    fp_margin = float(fp_data.get("initialMargin", 0) or 0)
-                    fp_direction = fp_data.get("side", "long")
-                    fp_raw_lev = fp_data.get("leverage")
-                    if fp_raw_lev:
-                        fp_leverage = int(fp_raw_lev)
-                    elif fp_margin > 0:
-                        fp_notional = abs(float(fp_data.get("notional", 0) or 0))
-                        fp_leverage = max(1, round(fp_notional / fp_margin)) if fp_notional > 0 else 1
-                    else:
-                        fp_leverage = 1
-                    fp_liq = float(fp_data.get("liquidationPrice", 0) or 0) or None
-                    fp_entry = float(fp_data.get("entryPrice", 0) or 0)
-                    fp_contracts = float(fp_data.get("contracts", 0) or 0)
-
-                    changed = False
-                    if fp_leverage > 1 and getattr(db_pos, "leverage", 1) != fp_leverage:
-                        db_pos.leverage = fp_leverage
-                        changed = True
-                    if fp_direction and getattr(db_pos, "direction", None) != fp_direction:
-                        db_pos.direction = fp_direction
-                        changed = True
-                    if fp_margin > 0 and abs(getattr(db_pos, "margin_used", 0) - fp_margin) > 0.01:
-                        if pair not in _protected_syms:
-                            db_pos.total_invested = fp_margin
-                            db_pos.margin_used = fp_margin
-                            changed = True
-                    if fp_liq and getattr(db_pos, "liquidation_price", None) != fp_liq:
-                        db_pos.liquidation_price = fp_liq
-                        changed = True
-                    if fp_entry > 0 and abs(db_pos.average_buy_price - fp_entry) > 0.0001:
-                        db_pos.average_buy_price = fp_entry
-                        changed = True
-                    if fp_contracts > 0 and abs(db_pos.quantity - fp_contracts) / max(db_pos.quantity, 0.0001) > 0.01:
-                        db_pos.quantity = fp_contracts
-                        changed = True
-                    if changed:
-                        logger.info("futures_metadata_corrected",
-                                    symbol=pair, leverage=fp_leverage,
-                                    direction=fp_direction, margin=round(fp_margin, 2))
-                    total_invested += db_pos.total_invested
-                    continue
-
-                contracts = float(fp_data.get("contracts", 0) or 0)
-                if contracts <= 0:
-                    continue
-                margin = float(fp_data.get("initialMargin", 0) or 0)
-                if margin < 1.0:
-                    continue
-
-                # 서지 엔진이 보유 중인 포지션인지 확인 → 중복 생성 방지
-                # (같은 물리 거래소를 공유하므로 fetch_positions에 서지 포지션도 나옴)
-                surge_check = await session.execute(
-                    select(Position.id).where(
-                        Position.symbol == pair,
+            # DB에 있지만 거래소에 없는 포지션 → 청산/수동매도로 사라진 경우
+            # exchange_symbols는 위 루프에서 dust 필터 통과 심볼만 수집됨
+            if is_futures:
+                for fp_sym in futures_positions:
+                    exchange_symbols.add(fp_sym.replace(":USDT", ""))
+                # 서지 엔진이 활성 포지션(qty > 0)을 보유 중인 심볼도 exchange_symbols에 포함.
+                # 서지와 선물 엔진은 같은 물리 거래소 계정을 공유하므로, 서지가 포지션을 닫으면
+                # fetch_positions에서 해당 심볼이 사라져 선물 DB 포지션이 오진 청산될 수 있음.
+                surge_active_result = await session.execute(
+                    select(Position.symbol).where(
                         Position.exchange == "binance_surge",
                         Position.quantity > 0,
-                    ).limit(1)
-                )
-                if surge_check.first() is not None:
-                    logger.info(
-                        "sync_skip_surge_position",
-                        symbol=pair,
-                        reason="active surge position exists",
                     )
-                    continue
-                direction = fp_data.get("side", "long")
-                raw_lev = fp_data.get("leverage")
-                if raw_lev:
-                    leverage = int(raw_lev)
-                elif margin > 0:
-                    notional = abs(float(fp_data.get("notional", 0) or 0))
-                    leverage = max(1, round(notional / margin)) if notional > 0 else 1
-                else:
-                    leverage = 1
-                entry_price = float(fp_data.get("entryPrice", 0) or 0)
-                liq_price = float(fp_data.get("liquidationPrice", 0) or 0) or None
-
-                new_pos = Position(
-                    exchange=self._exchange_name,
-                    symbol=pair,
-                    quantity=contracts,
-                    average_buy_price=entry_price,
-                    total_invested=margin,
-                    is_paper=self._is_paper,
-                    entered_at=datetime.now(timezone.utc),
-                    direction=direction,
-                    leverage=leverage,
-                    liquidation_price=liq_price,
-                    margin_used=margin,
                 )
-                session.add(new_pos)
-                total_invested += margin
-                synced_count += 1
-                logger.info(
-                    "futures_position_synced",
-                    symbol=pair, contracts=contracts, direction=direction,
-                    margin=round(margin, 2), leverage=leverage,
-                    entry_price=entry_price,
-                )
-
-        # DB에 있지만 거래소에 없는 포지션 → 청산/수동매도로 사라진 경우
-        # exchange_symbols는 위 루프에서 dust 필터 통과 심볼만 수집됨
-        if is_futures:
-            for fp_sym in futures_positions:
-                exchange_symbols.add(fp_sym.replace(":USDT", ""))
-            # 서지 엔진이 활성 포지션(qty > 0)을 보유 중인 심볼도 exchange_symbols에 포함.
-            # 서지와 선물 엔진은 같은 물리 거래소 계정을 공유하므로, 서지가 포지션을 닫으면
-            # fetch_positions에서 해당 심볼이 사라져 선물 DB 포지션이 오진 청산될 수 있음.
-            surge_active_result = await session.execute(
-                select(Position.symbol).where(
-                    Position.exchange == "binance_surge",
-                    Position.quantity > 0,
-                )
-            )
-            for surge_sym in surge_active_result.scalars().all():
-                exchange_symbols.add(surge_sym)
-        for db_sym, db_pos in db_positions.items():
-            if db_pos.quantity > 0 and db_sym not in exchange_symbols:
-                # 레이스 컨디션 방지: identity map 우회하여 DB에서 직접 확인
-                # (sync 도중 surge/trading 엔진이 포지션을 닫았을 수 있음)
-                from sqlalchemy import text
-                fresh_qty_result = await session.execute(
-                    text(
-                        "SELECT quantity FROM positions "
-                        "WHERE exchange = :ex AND symbol = :sym"
-                    ),
-                    {"ex": self._exchange_name, "sym": db_sym},
-                )
-                fresh_qty_row = fresh_qty_result.first()
-                if fresh_qty_row is None or fresh_qty_row[0] <= 0:
-                    logger.info(
-                        "sync_skip_already_closed",
-                        symbol=db_sym,
-                        reason="position already closed by engine",
+                for surge_sym in surge_active_result.scalars().all():
+                    exchange_symbols.add(surge_sym)
+            for db_sym, db_pos in db_positions.items():
+                if db_pos.quantity > 0 and db_sym not in exchange_symbols:
+                    # 레이스 컨디션 방지: identity map 우회하여 DB에서 직접 확인
+                    # (sync 도중 surge/trading 엔진이 포지션을 닫았을 수 있음)
+                    from sqlalchemy import text
+                    fresh_qty_result = await session.execute(
+                        text(
+                            "SELECT quantity FROM positions "
+                            "WHERE exchange = :ex AND symbol = :sym"
+                        ),
+                        {"ex": self._exchange_name, "sym": db_sym},
                     )
-                    continue
-
-                # 레이스 컨디션 방지 2: 최근 5분 이내 같은 심볼 청산 Order가 있으면
-                # 엔진이 이미 청산 처리 중인 것 → sync Order 생성 스킵
-                _five_min_ago = datetime.now(timezone.utc) - timedelta(minutes=5)
-                recent_close_result = await session.execute(
-                    select(Order.id).where(
-                        Order.exchange == self._exchange_name,
-                        Order.symbol == db_sym,
-                        Order.strategy_name != "position_sync",
-                        Order.created_at >= _five_min_ago,
-                    ).limit(1)
-                )
-                if recent_close_result.first() is not None:
-                    logger.info(
-                        "sync_skip_recent_order_exists",
-                        symbol=db_sym,
-                        reason="engine order within last 5 minutes",
-                    )
-                    continue
-
-                # 추정 PnL 계산 (db_pos 사용 — 스냅샷 시점 데이터)
-                entry = db_pos.average_buy_price or 0
-                invested = db_pos.total_invested or 0
-                direction = getattr(db_pos, "direction", "long")
-                leverage = getattr(db_pos, "leverage", 1) or 1
-                # TOCTOU 방지용: await 전 타임스탬프 기록
-                # (이 시점 이후에 생성된 Order는 sync 자신이 만든 것이므로 재확인에서 제외)
-                # Order.created_at은 Python-side default(_utcnow)를 사용하므로 동일 클럭 기준
-                processing_start = datetime.now(timezone.utc)
-                try:
-                    current_price = await self._market_data.get_current_price(db_sym)
-                except Exception:
-                    current_price = entry  # 가격 조회 실패 시 entry로 추정
-
-                if direction == "short":
-                    pnl_pct = (entry - current_price) / entry * leverage * 100 if entry else 0
-                else:
-                    pnl_pct = (current_price - entry) / entry * leverage * 100 if entry else 0
-
-                # 실제 청산 사유 판별
-                strategy_name, reason = await self._determine_close_reason(
-                    db_sym, db_pos, current_price, pnl_pct, exchange_adapter,
-                )
-
-                # TOCTOU 재확인: await(get_current_price, _determine_close_reason) 이후
-                # 엔진이 동시에 포지션을 닫아 이미 cash를 반환했을 수 있음 → 재확인
-                # 이 시점은 session.add(order) 이전이므로 sync 자신의 Order가 없음
-                #
-                # 한계: 두 재확인 모두 READ COMMITTED 하에서 커밋된 변경만 감지함.
-                # 엔진이 포지션을 닫는 트랜잭션이 미커밋 상태일 때는 레이스 윈도우가 남음.
-                # SELECT … FOR UPDATE 없이는 완전한 보장 불가 — 빈도 감소 목적임.
-                if is_futures and invested > 0:
-                    # 재확인 1: fresh_qty가 여전히 > 0인지 (await 사이 엔진 청산 감지)
-                    # ORM select 사용 — text() raw SQL 대신 identity map과 일관성 유지
-                    fresh_qty_recheck_result = await session.execute(
-                        select(Position.quantity).where(
-                            Position.exchange == self._exchange_name,
-                            Position.symbol == db_sym,
-                        )
-                    )
-                    fresh_qty_recheck_row = fresh_qty_recheck_result.first()
-                    if (
-                        fresh_qty_recheck_row is None
-                        or fresh_qty_recheck_row[0] is None
-                        or fresh_qty_recheck_row[0] <= 0
-                    ):
-                        logger.warning(
-                            "futures_sync_cash_skip_concurrent_close",
+                    fresh_qty_row = fresh_qty_result.first()
+                    if fresh_qty_row is None or fresh_qty_row[0] <= 0:
+                        logger.info(
+                            "sync_skip_already_closed",
                             symbol=db_sym,
-                            reason="position closed by engine during sync await points",
+                            reason="position already closed by engine",
                         )
-                        # 전체 이터레이션 스킵 (의도적): qty=0은 엔진이 이미 포지션을 닫고
-                        # 현금을 반환했음을 의미. Order 중복 생성·cash 이중 반환 모두 방지.
                         continue
 
-                    # 재확인 2: await 기간(processing_start 이후) 동안 엔진 SELL Order 생성 감지
-                    # - side == "sell" 만 체크: BUY Order는 cash 반환과 무관
-                    # - sync 자신의 Order는 아직 session.add() 전이므로 여기서 조회되지 않음
-                    # - Order.created_at은 Python-side _utcnow()이므로 동일 클럭 기준.
-                    #   50ms 마진: 동일 프로세스 내 서브밀리초 타임스탬프 순서 역전 방어
-                    recent_recheck_result = await session.execute(
+                    # 레이스 컨디션 방지 2: 최근 5분 이내 같은 심볼 청산 Order가 있으면
+                    # 엔진이 이미 청산 처리 중인 것 → sync Order 생성 스킵
+                    _five_min_ago = datetime.now(timezone.utc) - timedelta(minutes=5)
+                    recent_close_result = await session.execute(
                         select(Order.id).where(
                             Order.exchange == self._exchange_name,
                             Order.symbol == db_sym,
                             Order.strategy_name != "position_sync",
-                            Order.side == "sell",
-                            Order.created_at >= processing_start - timedelta(milliseconds=50),
+                            Order.created_at >= _five_min_ago,
                         ).limit(1)
                     )
-                    if recent_recheck_result.first() is not None:
-                        logger.warning(
-                            "futures_sync_cash_skip_recent_order",
+                    if recent_close_result.first() is not None:
+                        logger.info(
+                            "sync_skip_recent_order_exists",
                             symbol=db_sym,
-                            reason="engine order created during sync await points",
+                            reason="engine order within last 5 minutes",
                         )
-                        # 전체 이터레이션 스킵 (의도적): 엔진 SELL Order는 cash가
-                        # 이미 반환됐음을 의미. Order 중복 생성·cash 이중 반환 방지.
                         continue
 
-                old_qty = db_pos.quantity
-                now = datetime.now(timezone.utc)
+                    # 추정 PnL 계산 (db_pos 사용 — 스냅샷 시점 데이터)
+                    entry = db_pos.average_buy_price or 0
+                    invested = db_pos.total_invested or 0
+                    direction = getattr(db_pos, "direction", "long")
+                    leverage = getattr(db_pos, "leverage", 1) or 1
+                    # TOCTOU 방지용: await 전 타임스탬프 기록
+                    # (이 시점 이후에 생성된 Order는 sync 자신이 만든 것이므로 재확인에서 제외)
+                    # Order.created_at은 Python-side default(_utcnow)를 사용하므로 동일 클럭 기준
+                    processing_start = datetime.now(timezone.utc)
+                    try:
+                        current_price = await self._market_data.get_current_price(db_sym)
+                    except Exception:
+                        current_price = entry  # 가격 조회 실패 시 entry로 추정
 
-                logger.warning(
-                    "position_cleared_not_on_exchange",
-                    symbol=db_sym, old_qty=old_qty,
-                    entry_price=entry, direction=direction,
-                    leverage=leverage, invested=round(invested, 2),
-                    reason=reason, strategy_name=strategy_name,
-                )
+                    if direction == "short":
+                        pnl_pct = (entry - current_price) / entry * leverage * 100 if entry else 0
+                    else:
+                        pnl_pct = (current_price - entry) / entry * leverage * 100 if entry else 0
 
-                # 거래 이력에 기록 (Order 생성)
-                pnl_amount = invested * pnl_pct / 100 if invested else 0
-                close_side = "sell" if direction != "short" else "buy"
-                order = Order(
-                    exchange=self._exchange_name,
-                    symbol=db_sym,
-                    side=close_side,
-                    order_type="market",
-                    status="filled",
-                    requested_price=current_price,
-                    executed_price=current_price,
-                    requested_quantity=old_qty,
-                    executed_quantity=old_qty,
-                    fee=0.0,
-                    fee_currency="USDT" if is_futures else cash_symbol,
-                    is_paper=db_pos.is_paper or False,
-                    direction=direction,
-                    leverage=leverage,
-                    margin_used=invested,
-                    entry_price=entry,
-                    realized_pnl=round(pnl_amount, 4),
-                    realized_pnl_pct=round(pnl_pct, 2),
-                    strategy_name=strategy_name,
-                    signal_confidence=0.0,
-                    signal_reason=reason,
-                    filled_at=now,
-                )
-                session.add(order)
-
-                db_pos.quantity = 0
-                db_pos.last_sell_at = now
-                synced_count += 1
-
-                # 선물: 청산된 포지션의 마진 + PnL을 내부 cash에 반환
-                # (거래소에서는 SL/TP/trailing 등으로 이미 정산 완료)
-                if is_futures and invested > 0:
-                    cash_returned = invested + pnl_amount
-                    # 강제청산 시 마진 전액 손실 가능 → 최소 0
-                    cash_returned = max(cash_returned, 0.0)
-                    self._cash_balance += cash_returned
-                    self._realized_pnl += pnl_amount
-                    logger.info(
-                        "futures_sync_cash_returned",
-                        symbol=db_sym,
-                        invested=round(invested, 2),
-                        pnl_amount=round(pnl_amount, 2),
-                        cash_returned=round(cash_returned, 2),
-                        cash_balance=round(self._cash_balance, 2),
+                    # 실제 청산 사유 판별
+                    strategy_name, reason = await self._determine_close_reason(
+                        db_sym, db_pos, current_price, pnl_pct, exchange_adapter,
                     )
 
-                self._cleared_positions.append({
-                    "symbol": db_sym,
-                    "quantity": 0,
-                    "entry_price": entry,
-                    "direction": direction,
-                    "leverage": leverage,
-                    "invested": invested,
-                    "reason": reason,
-                    "pnl_pct": round(pnl_pct, 2),
-                })
+                    # TOCTOU 재확인: await(get_current_price, _determine_close_reason) 이후
+                    # 엔진이 동시에 포지션을 닫아 이미 cash를 반환했을 수 있음 → 재확인
+                    # 이 시점은 session.add(order) 이전이므로 sync 자신의 Order가 없음
+                    #
+                    # 한계: 두 재확인 모두 READ COMMITTED 하에서 커밋된 변경만 감지함.
+                    # 엔진이 포지션을 닫는 트랜잭션이 미커밋 상태일 때는 레이스 윈도우가 남음.
+                    # SELECT … FOR UPDATE 없이는 완전한 보장 불가 — 빈도 감소 목적임.
+                    if is_futures and invested > 0:
+                        # 재확인 1: fresh_qty가 여전히 > 0인지 (await 사이 엔진 청산 감지)
+                        # ORM select 사용 — text() raw SQL 대신 identity map과 일관성 유지
+                        fresh_qty_recheck_result = await session.execute(
+                            select(Position.quantity).where(
+                                Position.exchange == self._exchange_name,
+                                Position.symbol == db_sym,
+                            )
+                        )
+                        fresh_qty_recheck_row = fresh_qty_recheck_result.first()
+                        if (
+                            fresh_qty_recheck_row is None
+                            or fresh_qty_recheck_row[0] is None
+                            or fresh_qty_recheck_row[0] <= 0
+                        ):
+                            logger.warning(
+                                "futures_sync_cash_skip_concurrent_close",
+                                symbol=db_sym,
+                                reason="position closed by engine during sync await points",
+                            )
+                            # 전체 이터레이션 스킵 (의도적): qty=0은 엔진이 이미 포지션을 닫고
+                            # 현금을 반환했음을 의미. Order 중복 생성·cash 이중 반환 모두 방지.
+                            continue
 
-        await session.flush()
+                        # 재확인 2: await 기간(processing_start 이후) 동안 엔진 SELL Order 생성 감지
+                        # - side == "sell" 만 체크: BUY Order는 cash 반환과 무관
+                        # - sync 자신의 Order는 아직 session.add() 전이므로 여기서 조회되지 않음
+                        # - Order.created_at은 Python-side _utcnow()이므로 동일 클럭 기준.
+                        #   50ms 마진: 동일 프로세스 내 서브밀리초 타임스탬프 순서 역전 방어
+                        recent_recheck_result = await session.execute(
+                            select(Order.id).where(
+                                Order.exchange == self._exchange_name,
+                                Order.symbol == db_sym,
+                                Order.strategy_name != "position_sync",
+                                Order.side == "sell",
+                                Order.created_at >= processing_start - timedelta(milliseconds=50),
+                            ).limit(1)
+                        )
+                        if recent_recheck_result.first() is not None:
+                            logger.warning(
+                                "futures_sync_cash_skip_recent_order",
+                                symbol=db_sym,
+                                reason="engine order created during sync await points",
+                            )
+                            # 전체 이터레이션 스킵 (의도적): 엔진 SELL Order는 cash가
+                            # 이미 반환됐음을 의미. Order 중복 생성·cash 이중 반환 방지.
+                            continue
 
-        # 현금 잔고 처리
-        old_cash = self._cash_balance
+                    old_qty = db_pos.quantity
+                    now = datetime.now(timezone.utc)
 
-        if is_futures:
-            # 선물: 내부 장부 + Income API가 권위적 → cash 덮어쓰기 안 함
-            # 감사 로그만 출력 (불일치 모니터링)
-            total_unrealized_exchange = sum(
-                float(fp.get("unrealizedPnl", 0) or 0)
-                for fp in futures_positions.values()
-            )
-            cash_total = cash_bal.total if cash_bal else 0
-            wallet_balance = cash_total - total_unrealized_exchange
-            exchange_cash = wallet_balance - total_invested
-            diff = abs(exchange_cash - self._cash_balance)
-            if diff > 1.0:
-                logger.info(
-                    "futures_cash_audit",
-                    exchange=self._exchange_name,
-                    internal_cash=round(self._cash_balance, 2),
-                    exchange_cash=round(exchange_cash, 2),
-                    diff=round(diff, 2),
+                    logger.warning(
+                        "position_cleared_not_on_exchange",
+                        symbol=db_sym, old_qty=old_qty,
+                        entry_price=entry, direction=direction,
+                        leverage=leverage, invested=round(invested, 2),
+                        reason=reason, strategy_name=strategy_name,
+                    )
+
+                    # 거래 이력에 기록 (Order 생성)
+                    pnl_amount = invested * pnl_pct / 100 if invested else 0
+                    close_side = "sell" if direction != "short" else "buy"
+                    order = Order(
+                        exchange=self._exchange_name,
+                        symbol=db_sym,
+                        side=close_side,
+                        order_type="market",
+                        status="filled",
+                        requested_price=current_price,
+                        executed_price=current_price,
+                        requested_quantity=old_qty,
+                        executed_quantity=old_qty,
+                        fee=0.0,
+                        fee_currency="USDT" if is_futures else cash_symbol,
+                        is_paper=db_pos.is_paper or False,
+                        direction=direction,
+                        leverage=leverage,
+                        margin_used=invested,
+                        entry_price=entry,
+                        realized_pnl=round(pnl_amount, 4),
+                        realized_pnl_pct=round(pnl_pct, 2),
+                        strategy_name=strategy_name,
+                        signal_confidence=0.0,
+                        signal_reason=reason,
+                        filled_at=now,
+                    )
+                    session.add(order)
+
+                    db_pos.quantity = 0
+                    db_pos.last_sell_at = now
+                    synced_count += 1
+
+                    # 선물: 청산된 포지션의 마진 + PnL을 내부 cash에 반환
+                    # (거래소에서는 SL/TP/trailing 등으로 이미 정산 완료)
+                    if is_futures and invested > 0:
+                        cash_returned = invested + pnl_amount
+                        # 강제청산 시 마진 전액 손실 가능 → 최소 0
+                        cash_returned = max(cash_returned, 0.0)
+                        self._cash_balance += cash_returned
+                        self._realized_pnl += pnl_amount
+                        logger.info(
+                            "futures_sync_cash_returned",
+                            symbol=db_sym,
+                            invested=round(invested, 2),
+                            pnl_amount=round(pnl_amount, 2),
+                            cash_returned=round(cash_returned, 2),
+                            cash_balance=round(self._cash_balance, 2),
+                        )
+
+                    self._cleared_positions.append({
+                        "symbol": db_sym,
+                        "quantity": 0,
+                        "entry_price": entry,
+                        "direction": direction,
+                        "leverage": leverage,
+                        "invested": invested,
+                        "reason": reason,
+                        "pnl_pct": round(pnl_pct, 2),
+                    })
+
+            await session.flush()
+
+            # 현금 잔고 처리
+            old_cash = self._cash_balance
+
+            if is_futures:
+                # 선물: 내부 장부 + Income API가 권위적 → cash 덮어쓰기 안 함
+                # 감사 로그만 출력 (불일치 모니터링)
+                total_unrealized_exchange = sum(
+                    float(fp.get("unrealizedPnl", 0) or 0)
+                    for fp in futures_positions.values()
                 )
-        else:
-            self._cash_balance = actual_cash
+                cash_total = cash_bal.total if cash_bal else 0
+                wallet_balance = cash_total - total_unrealized_exchange
+                exchange_cash = wallet_balance - total_invested
+                diff = abs(exchange_cash - self._cash_balance)
+                if diff > 1.0:
+                    logger.info(
+                        "futures_cash_audit",
+                        exchange=self._exchange_name,
+                        internal_cash=round(self._cash_balance, 2),
+                        exchange_cash=round(exchange_cash, 2),
+                        diff=round(diff, 2),
+                    )
+            else:
+                self._cash_balance = actual_cash
 
-        if synced_count > 0 or abs(old_cash - self._cash_balance) > 1.0:
-            logger.info(
-                "exchange_positions_synced",
-                exchange=self._exchange_name,
-                synced=synced_count,
-                cash_balance=round(self._cash_balance, 2),
-                initial_balance=round(self._initial_balance, 2),
-            )
+            if synced_count > 0 or abs(old_cash - self._cash_balance) > 1.0:
+                logger.info(
+                    "exchange_positions_synced",
+                    exchange=self._exchange_name,
+                    synced=synced_count,
+                    cash_balance=round(self._cash_balance, 2),
+                    initial_balance=round(self._initial_balance, 2),
+                )
 
     async def restore_state_from_db(self, session: AsyncSession) -> None:
         """서버 재시작 시 최신 스냅샷에서 peak_value, realized_pnl 복원."""
