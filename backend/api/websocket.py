@@ -4,6 +4,8 @@ import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from typing import Any
 
+from config import get_config
+
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
@@ -53,15 +55,29 @@ ws_manager = ConnectionManager()
 
 @router.websocket("/ws/dashboard")
 async def websocket_dashboard(websocket: WebSocket):
+    # get_config() creates a fresh AppConfig on each call (not lru_cache-decorated)
+    timeout = get_config().ws_idle_timeout_sec
     await ws_manager.connect(websocket)
     try:
         while True:
-            # Keep connection alive, receive client messages if needed
-            data = await websocket.receive_text()
+            try:
+                # Keep connection alive, receive client messages if needed
+                data = await asyncio.wait_for(
+                    websocket.receive_text(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                logger.info("ws_client_idle_timeout", timeout_sec=timeout)
+                try:
+                    await websocket.close(code=1000)
+                except Exception:
+                    logger.debug("ws_close_on_idle_failed", exc_info=True)
+                return
             # Client can send ping/pong or commands
             if data == "ping":
                 await websocket.send_text(json.dumps({"event": "pong"}))
     except WebSocketDisconnect:
-        await ws_manager.disconnect(websocket)
+        pass
     except Exception:
+        logger.exception("ws_unexpected_error")
+    finally:
         await ws_manager.disconnect(websocket)

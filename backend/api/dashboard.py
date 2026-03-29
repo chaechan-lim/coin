@@ -15,7 +15,7 @@ from core.schemas import (
     RotationStatusResponse,
     SurgeScoreItem,
 )
-from api.dependencies import engine_registry, validate_exchange
+from api.dependencies import engine_registry, validate_exchange, ExchangeNameType
 
 router = APIRouter(tags=["dashboard"])
 
@@ -42,7 +42,7 @@ async def list_exchanges():
 
 @router.get("/engine/status", response_model=EngineStatusResponse)
 async def get_engine_status(
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     eng = _get_engine(exchange)
@@ -95,7 +95,7 @@ async def get_engine_status(
 
 
 @router.post("/engine/start")
-async def start_engine(exchange: str = Query("bithumb")):
+async def start_engine(exchange: ExchangeNameType = Query("bithumb")):
     eng = _get_engine(exchange)
     if not eng:
         raise HTTPException(status_code=500, detail=f"Engine '{exchange}' not initialized")
@@ -108,7 +108,7 @@ async def start_engine(exchange: str = Query("bithumb")):
 
 @router.post("/engine/stop")
 async def stop_engine(
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     force: bool = Query(False),
 ):
     eng = _get_engine(exchange)
@@ -130,7 +130,7 @@ async def stop_engine(
 
 
 @router.get("/engine/rotation-status", response_model=RotationStatusResponse)
-async def get_rotation_status(exchange: str = Query("bithumb")):
+async def get_rotation_status(exchange: ExchangeNameType = Query("bithumb")):
     eng = _get_engine(exchange)
     if not eng:
         raise HTTPException(status_code=500, detail="Engine not initialized")
@@ -161,7 +161,7 @@ async def get_rotation_status(exchange: str = Query("bithumb")):
 
 
 @router.post("/engine/balance-guard/resume")
-async def resume_balance_guard(exchange: str = Query("binance_futures")):
+async def resume_balance_guard(exchange: ExchangeNameType = Query("binance_futures")):
     """BalanceGuard 수동 재개 — 관리자 확인 후 호출.
 
     잔고 괴리로 일시 정지된 엔진의 주문 차단을 해제한다.
@@ -182,7 +182,7 @@ async def resume_balance_guard(exchange: str = Query("binance_futures")):
 
 
 @router.get("/engine/balance-guard/status")
-async def get_balance_guard_status(exchange: str = Query("binance_futures")):
+async def get_balance_guard_status(exchange: ExchangeNameType = Query("binance_futures")):
     """BalanceGuard 상태 조회."""
     eng = _get_engine(exchange)
     if not eng:
@@ -250,7 +250,7 @@ _MARKET_ANALYSIS_DISABLED_REASON = "매매 미사용 — 엔진 자체 시장 �
 # -- Agent endpoints --
 @router.get("/agents/market-analysis/latest")
 async def get_latest_market_analysis(
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     from agents.coordinator import MARKET_ANALYSIS_ENABLED
@@ -304,7 +304,7 @@ async def get_latest_market_analysis(
 @router.get("/agents/market-analysis/history", response_model=list[AgentLogResponse])
 async def get_market_analysis_history(
     limit: int = Query(100, ge=1, le=500),
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     result = await session.execute(
@@ -325,7 +325,7 @@ async def get_market_analysis_history(
 
 @router.get("/agents/trade-review/latest")
 async def get_latest_trade_review(
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     coord = _get_coordinator(exchange)
@@ -367,7 +367,7 @@ async def get_latest_trade_review(
 
 
 @router.post("/agents/trade-review/run")
-async def trigger_trade_review(exchange: str = Query("bithumb")):
+async def trigger_trade_review(exchange: ExchangeNameType = Query("bithumb")):
     """수동으로 매매 회고 에이전트 실행."""
     coord = _get_coordinator(exchange)
     if not coord:
@@ -381,7 +381,7 @@ async def trigger_trade_review(exchange: str = Query("bithumb")):
 @router.get("/agents/trade-review/history", response_model=list[AgentLogResponse])
 async def get_trade_review_history(
     limit: int = Query(50, ge=1, le=500),
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     result = await session.execute(
@@ -401,7 +401,7 @@ async def get_trade_review_history(
 
 
 @router.get("/agents/risk/alerts")
-async def get_risk_alerts(exchange: str = Query("bithumb")):
+async def get_risk_alerts(exchange: ExchangeNameType = Query("bithumb")):
     coord = _get_coordinator(exchange)
     if coord:
         return [
@@ -420,7 +420,7 @@ async def get_risk_alerts(exchange: str = Query("bithumb")):
 @router.get("/agents/risk/history", response_model=list[AgentLogResponse])
 async def get_risk_history(
     limit: int = Query(100, ge=1, le=500),
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     result = await session.execute(
@@ -443,7 +443,7 @@ async def get_risk_history(
 
 @router.get("/agents/performance/latest")
 async def get_performance_latest(
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     coord = _get_coordinator(exchange)
@@ -473,7 +473,7 @@ async def get_performance_latest(
 
 
 @router.post("/agents/performance/run")
-async def trigger_performance_analysis(exchange: str = Query("bithumb")):
+async def trigger_performance_analysis(exchange: ExchangeNameType = Query("bithumb")):
     coord = _get_coordinator(exchange)
     if coord:
         report = await coord.run_performance_analysis()
@@ -492,7 +492,7 @@ async def trigger_performance_analysis(exchange: str = Query("bithumb")):
 
 @router.get("/agents/strategy-advice/latest")
 async def get_strategy_advice_latest(
-    exchange: str = Query("bithumb"),
+    exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     coord = _get_coordinator(exchange)
@@ -521,7 +521,7 @@ async def get_strategy_advice_latest(
 
 
 @router.post("/agents/strategy-advice/run")
-async def trigger_strategy_advice(exchange: str = Query("bithumb")):
+async def trigger_strategy_advice(exchange: ExchangeNameType = Query("bithumb")):
     coord = _get_coordinator(exchange)
     if coord:
         advice = await coord.run_strategy_advice()

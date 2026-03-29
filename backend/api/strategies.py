@@ -141,7 +141,7 @@ async def get_strategy_performance(
 
 @router.put("/{name}/params")
 async def update_strategy_params(
-    name: str, update: StrategyParamsUpdate, exchange: str = Query("bithumb")
+    name: str, update: StrategyParamsUpdate, exchange: ExchangeNameType = Query("bithumb")
 ):
     eng = _get_engine(exchange)
     if not eng or name not in eng.strategies:
@@ -157,7 +157,7 @@ async def update_strategy_params(
 
 @router.put("/{name}/weight")
 async def update_strategy_weight(
-    name: str, update: StrategyWeightUpdate, exchange: str = Query("bithumb")
+    name: str, update: StrategyWeightUpdate, exchange: ExchangeNameType = Query("bithumb")
 ):
     comb = _get_combiner(exchange)
     if not comb:
