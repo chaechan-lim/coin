@@ -59,7 +59,6 @@ class SurgePositionState:
     exit_cost_return: float = 0.0
     exit_net_pnl_pct: float = 0.0
     exit_pnl_usdt: float = 0.0
-    exit_hold_min: float = 0.0
 
 
 @dataclass
@@ -763,6 +762,11 @@ class SurgeEngine:
         now = datetime.now(timezone.utc)
 
         for sym, pos in list(self._positions.items()):
+            # COIN-58: Skip positions awaiting DB cleanup. The exchange-side close has
+            # already been placed; attempting another order would open an unintended
+            # opposing position in Binance one-way mode.
+            if pos.pending_exit:
+                continue
             if sym not in tickers:
                 continue
             price = tickers[sym]["last"]
@@ -949,6 +953,12 @@ class SurgeEngine:
             # COIN-58: Phase-1 failure (exchange order rejected or __aexit__ raised after
             # a successful commit — treated conservatively as a retry trigger).
             pos.exit_retry_count += 1
+            logger.error(
+                "surge_exit_exchange_failed",
+                symbol=symbol,
+                error=str(e),
+                retry_count=pos.exit_retry_count,
+            )
             if pos.exit_retry_count >= MAX_EXIT_RETRIES:
                 logger.error(
                     "surge_exit_exchange_max_retries",
@@ -956,12 +966,18 @@ class SurgeEngine:
                     retry_count=pos.exit_retry_count,
                     msg="Persistent exchange failure — manual intervention may be required",
                 )
-            logger.error(
-                "surge_exit_exchange_failed",
-                symbol=symbol,
-                error=str(e),
-                retry_count=pos.exit_retry_count,
-            )
+                # Escalate via event so Discord / monitoring fires
+                await emit_event(
+                    "error", "surge_trade",
+                    f"[Surge] EXIT STUCK: {symbol} — {pos.exit_retry_count} consecutive exchange failures",
+                    detail=f"Reason={reason} | Manual intervention may be required",
+                    metadata={
+                        "symbol": symbol,
+                        "retry_count": pos.exit_retry_count,
+                        "reason": reason,
+                        "stuck_exit": True,
+                    },
+                )
             return
 
         # ── Apply cash OUTSIDE async-with ─────────────────────────────
@@ -981,12 +997,16 @@ class SurgeEngine:
         net_pnl_pct: float,
         pnl_usdt: float,
         reason: str,
+        emit_close_event: bool = True,
     ) -> None:
         """Finalize in-memory cleanup after successful DB commit.
 
         hold_min is computed here from pos.entry_time so that retried exits (which may
         complete minutes after the initial exchange order) report the true position lifetime
         rather than the stale value captured at Phase-1 execution time.
+
+        emit_close_event=False suppresses the internal emit so callers (e.g. force-cleanup)
+        can emit a single, correctly-labelled event instead of two.
         """
         hold_min = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
         # Update counters
@@ -1029,19 +1049,20 @@ class SurgeEngine:
                     reason=reason, pnl_pct=round(net_pnl_pct, 2),
                     pnl_usdt=round(pnl_usdt, 2),
                     hold_min=round(hold_min, 1))
-        await emit_event(
-            "info", "surge_trade",
-            f"[Surge] CLOSED {symbol} | {net_pnl_pct:+.1f}% | {reason}",
-            detail=f"PnL={pnl_usdt:+.2f} USDT | Hold={hold_min:.0f}min",
-            metadata={
-                "symbol": symbol,
-                "direction": pos.direction,
-                "pnl_pct": net_pnl_pct,
-                "pnl_usdt": pnl_usdt,
-                "reason": reason,
-                "hold_min": hold_min,
-            },
-        )
+        if emit_close_event:
+            await emit_event(
+                "info", "surge_trade",
+                f"[Surge] CLOSED {symbol} | {net_pnl_pct:+.1f}% | {reason}",
+                detail=f"PnL={pnl_usdt:+.2f} USDT | Hold={hold_min:.0f}min",
+                metadata={
+                    "symbol": symbol,
+                    "direction": pos.direction,
+                    "pnl_pct": net_pnl_pct,
+                    "pnl_usdt": pnl_usdt,
+                    "reason": reason,
+                    "hold_min": hold_min,
+                },
+            )
 
     # ── COIN-58: Pending exit retry ──────────────────────────────
 
@@ -1088,10 +1109,13 @@ class SurgeEngine:
                     )
                     continue
 
+                # emit_close_event=False: suppress the normal "CLOSED" event so only
+                # the force-cleanup warning fires — prevents two events for one closure.
                 await self._finalize_exit_cleanup(
                     symbol, pos,
                     pos.exit_net_pnl_pct, pos.exit_pnl_usdt,
                     pos.exit_reason,
+                    emit_close_event=False,
                 )
                 await emit_event(
                     "warning", "surge_trade",
@@ -1159,9 +1183,11 @@ class SurgeEngine:
                 # ExchangePosition may be a ccxt unified object or a raw dict
                 if isinstance(ep, dict):
                     sym = ep.get("symbol", "")
-                    # "contracts" is the ccxt unified field; "positionAmt" is the raw
-                    # Binance REST API field (not present in unified objects) — included
-                    # as a fallback for adapters that return raw Binance dicts.
+                    # "contracts" is the ccxt unified field used by the project's
+                    # binance_usdm adapter.  "positionAmt" is a defensive fallback for
+                    # any non-ccxt adapter (e.g. a custom REST wrapper) that returns raw
+                    # Binance API dicts instead of ccxt unified objects.  It will never
+                    # fire with the current binance_usdm adapter.
                     qty = float(ep.get("contracts", 0) or ep.get("positionAmt", 0) or 0)
                 else:
                     sym = getattr(ep, "symbol", "")
@@ -1215,6 +1241,17 @@ class SurgeEngine:
                 # reconciliation (like initialize_cash_from_exchange) can be done.
                 # TODO: file a follow-up to reconcile cash_balance after zombie cleanup.
                 del self._positions[symbol]
+
+                # Update risk counters conservatively: treat every zombie as a loss.
+                # Loss amount is unknown (liquidation may have consumed the margin), but
+                # counting it keeps consecutive-loss pause and COIN-20 SL cooldown correct.
+                self._daily_losses += 1
+                self._consecutive_losses += 1
+                if self._consecutive_losses >= 3:
+                    self._pause_until = datetime.now(timezone.utc) + timedelta(minutes=30)
+                    logger.warning("surge_consecutive_loss_pause",
+                                   losses=self._consecutive_losses)
+
                 normal_cooldown_time = datetime.now(timezone.utc) + timedelta(seconds=self._cooldown_sec)
                 existing_cooldown = self._cooldowns.get(symbol)
                 if existing_cooldown is None or existing_cooldown < normal_cooldown_time:

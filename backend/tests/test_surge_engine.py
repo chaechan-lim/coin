@@ -1762,7 +1762,10 @@ class TestExitFailureHandling:
         assert pos.exit_exec_price == 15.3
         assert pos.exit_exec_qty == pos.quantity
         assert pos.exit_reason == "Trailing"
-        assert pos.exit_cost_return > 0  # margin + pnl
+        # long entry=15.0 → exec=15.3, leverage=3, margin=10.0
+        # raw_pnl_pct = (15.3-15.0)/15.0*100 = 2.0%; lev = 6.0%; fee_pct = 0.04%*3*2*100 = 0.24%
+        # net_pnl_pct = 5.76%; pnl_usdt = 10.0 * 5.76/100 = 0.576; cost_return = 10.576
+        assert abs(pos.exit_cost_return - 10.576) < 0.001
 
     @pytest.mark.asyncio
     async def test_successful_exit_removes_position_and_updates_cash(self, surge_engine, session):
@@ -1817,7 +1820,6 @@ class TestPendingExitRetry:
         pos.exit_cost_return = 10.5
         pos.exit_net_pnl_pct = 1.2
         pos.exit_pnl_usdt = 0.12
-        pos.exit_hold_min = 20.0
         pos.exit_retry_count = 1
         return pos
 
@@ -2264,7 +2266,6 @@ class TestCOIN58Constants:
         assert pos.exit_cost_return == 0.0
         assert pos.exit_net_pnl_pct == 0.0
         assert pos.exit_pnl_usdt == 0.0
-        assert pos.exit_hold_min == 0.0
 
     def test_engine_has_last_zombie_scan_attr(self, surge_engine):
         """SurgeEngine has _last_zombie_scan attribute."""
