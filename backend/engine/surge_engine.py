@@ -7,7 +7,6 @@ WebSocket 티커 스트림으로 실시간 서지 감지, 시장가 진입/청�
 DB 격리: exchange="binance_surge"
 """
 import asyncio
-import math
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -30,6 +29,10 @@ logger = structlog.get_logger(__name__)
 EXCHANGE_NAME = "binance_surge"
 FEE_PCT = 0.0004  # 0.04% per side
 
+# Pending exit retry limits
+MAX_EXIT_RETRIES = 5
+ZOMBIE_SCAN_INTERVAL_SEC = 300  # 5 minutes
+
 
 # ── Data structures ──────────────────────────────────────────────
 
@@ -46,6 +49,17 @@ class SurgePositionState:
     trough_price: float
     trailing_active: bool = False
     surge_score: float = 0.0
+    # COIN-58: pending exit state
+    pending_exit: bool = False
+    exit_retry_count: int = 0
+    exit_reason: str = ""
+    exit_exec_price: float = 0.0
+    exit_exec_qty: float = 0.0
+    exit_fee: float = 0.0
+    exit_cost_return: float = 0.0
+    exit_net_pnl_pct: float = 0.0
+    exit_pnl_usdt: float = 0.0
+    exit_hold_min: float = 0.0
 
 
 @dataclass
@@ -144,6 +158,9 @@ class SurgeEngine:
 
         # COIN-20: 심볼별 연속 SL 카운터 (장기 쿨다운용)
         self._consecutive_sl_count: dict[str, int] = {}  # symbol -> count
+
+        # COIN-58: zombie detection scan interval
+        self._last_zombie_scan: float = 0.0
 
         # Exchange name for DB isolation
         self._exchange_name = EXCHANGE_NAME
@@ -280,23 +297,31 @@ class SurgeEngine:
         for sym, ticker_data in tickers.items():
             self._update_symbol_state(sym, ticker_data, now)
 
-        # 3. Check exits for open positions
+        # 3. COIN-58: Retry any pending exits (exchange succeeded, DB failed)
+        await self._retry_pending_exits()
+
+        # 4. Check exits for open positions
         await self._check_all_exits(tickers)
 
-        # 4. Check if we are paused
+        # 5. COIN-58: Periodic zombie detection scan (every 5 minutes)
+        if now - self._last_zombie_scan >= ZOMBIE_SCAN_INTERVAL_SEC:
+            await self._detect_zombie_positions()
+            self._last_zombie_scan = now
+
+        # 6. Check if we are paused
         if self._pause_until and datetime.now(timezone.utc) < self._pause_until:
             return
 
-        # 5. Daily limit
+        # 7. Daily limit
         if self._daily_trades >= self._daily_trade_limit:
             return
 
-        # 6. 캔들 기반 거래량 데이터 갱신 (60초마다)
+        # 8. 캔들 기반 거래량 데이터 갱신 (60초마다)
         if now - self._last_candle_update >= self._CANDLE_UPDATE_INTERVAL:
             await self._update_candle_volume_data()
             self._last_candle_update = now
 
-        # 7. Scan for new entries
+        # 9. Scan for new entries (skip symbols with pending_exit)
         await self._scan_for_entries(tickers)
 
         self._last_scan_time = datetime.now(timezone.utc)
@@ -502,6 +527,11 @@ class SurgeEngine:
             if sym in self._positions:
                 continue
             if sym not in tickers:
+                continue
+
+            # COIN-58: Block symbols with pending exit (cleanup not yet confirmed)
+            pos = self._positions.get(sym)
+            if pos and pos.pending_exit:
                 continue
 
             # Cooldown check
@@ -812,7 +842,14 @@ class SurgeEngine:
     async def _exit_position(
         self, symbol: str, pos: SurgePositionState, price: float, reason: str,
     ) -> None:
-        """Execute position exit."""
+        """Execute position exit (two-phase: exchange order then DB/memory cleanup).
+
+        COIN-58: Prevents zombie positions when exchange succeeds but DB fails.
+        - Phase 1: Execute exchange order. If fails → increment retry count, leave in memory.
+        - Phase 2: DB cleanup + PM cash. If fails → mark pending_exit=True, store results.
+        - PM cash is adjusted AFTER successful commit to prevent cash corruption.
+        """
+        # ── Phase 1: Execute exchange order ───────────────────────────
         try:
             sf = get_session_factory()
             async with sf() as session:
@@ -850,90 +887,335 @@ class SurgeEngine:
                 fee_pct = FEE_PCT * self._leverage * 2 * 100
                 net_pnl_pct = lev_pnl_pct - fee_pct
                 pnl_usdt = pos.margin * net_pnl_pct / 100
-
                 cost_return = pos.margin + pnl_usdt
+                hold_min = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
 
-                # DB Position 직접 업데이트 (PM 거치지 않음)
-                pos_result = await session.execute(
-                    select(Position).where(
-                        Position.symbol == symbol,
-                        Position.exchange == EXCHANGE_NAME,
+                # ── Phase 2: DB cleanup ────────────────────────────────
+                try:
+                    # DB Position 직접 업데이트 (PM 거치지 않음)
+                    pos_result = await session.execute(
+                        select(Position).where(
+                            Position.symbol == symbol,
+                            Position.exchange == EXCHANGE_NAME,
+                        )
                     )
-                )
-                db_pos = pos_result.scalar_one_or_none()
-                now = datetime.now(timezone.utc)
-                if db_pos:
-                    db_pos.quantity = 0
-                    db_pos.average_buy_price = 0
-                    db_pos.total_invested = 0
-                    db_pos.is_surge = False
-                    db_pos.entered_at = None
-                    db_pos.last_trade_at = now
-                    db_pos.last_sell_at = now
+                    db_pos = pos_result.scalar_one_or_none()
+                    now = datetime.now(timezone.utc)
+                    if db_pos:
+                        db_pos.quantity = 0
+                        db_pos.average_buy_price = 0
+                        db_pos.total_invested = 0
+                        db_pos.is_surge = False
+                        db_pos.entered_at = None
+                        db_pos.last_trade_at = now
+                        db_pos.last_sell_at = now
 
-                # 선물 PM cash 조정 (commit 전에 반영)
-                self._futures_pm.cash_balance += cost_return
+                    await session.commit()
 
-                await session.commit()
+                    # COIN-58: PM cash adjusted AFTER successful commit (prevents corruption)
+                    self._futures_pm.cash_balance += cost_return
 
-            # Update counters
-            if net_pnl_pct < 0:
-                self._daily_losses += 1
-                self._consecutive_losses += 1
-                if self._consecutive_losses >= 3:
-                    self._pause_until = datetime.now(timezone.utc) + timedelta(minutes=30)
-                    logger.warning("surge_consecutive_loss_pause",
-                                   losses=self._consecutive_losses)
-
-                # COIN-20: 심볼별 연속 SL 추적 + 장기 쿨다운
-                if reason == "SL":
-                    sl_count = self._consecutive_sl_count.get(symbol, 0) + 1
-                    self._consecutive_sl_count[symbol] = sl_count
-                    if sl_count >= 2:
-                        # 2+ 연속 SL → 장기 쿨다운 (180분 기본)
-                        extended_cooldown = timedelta(seconds=self._consecutive_sl_cooldown_sec)
-                        self._cooldowns[symbol] = datetime.now(timezone.utc) + extended_cooldown
-                        logger.warning("surge_consecutive_sl_extended_cooldown",
-                                       symbol=symbol, sl_count=sl_count,
-                                       cooldown_min=self._consecutive_sl_cooldown_sec // 60)
-            else:
-                self._consecutive_losses = 0
-                # COIN-20: 수익 시 연속 SL 카운터 리셋
-                self._consecutive_sl_count.pop(symbol, None)
-
-            # Remove from memory
-            del self._positions[symbol]
-
-            # COIN-22: Set cooldown after exit (was missing — allowed immediate re-entry)
-            # Don't override longer extended cooldown (COIN-20 consecutive SL: 180min > 60min)
-            normal_cooldown_time = datetime.now(timezone.utc) + timedelta(seconds=self._cooldown_sec)
-            existing_cooldown = self._cooldowns.get(symbol)
-            if existing_cooldown is None or existing_cooldown < normal_cooldown_time:
-                self._cooldowns[symbol] = normal_cooldown_time
-
-            hold_min = (datetime.now(timezone.utc) - pos.entry_time).total_seconds() / 60
-
-            logger.info("surge_exit",
-                        symbol=symbol, direction=pos.direction,
-                        reason=reason, pnl_pct=round(net_pnl_pct, 2),
-                        pnl_usdt=round(pnl_usdt, 2),
-                        hold_min=round(hold_min, 1))
-            await emit_event(
-                "info", "surge_trade",
-                f"[Surge] CLOSED {symbol} | {net_pnl_pct:+.1f}% | {reason}",
-                detail=f"PnL={pnl_usdt:+.2f} USDT | Hold={hold_min:.0f}min",
-                metadata={
-                    "symbol": symbol,
-                    "direction": pos.direction,
-                    "pnl_pct": net_pnl_pct,
-                    "pnl_usdt": pnl_usdt,
-                    "reason": reason,
-                    "hold_min": hold_min,
-                },
-            )
+                except Exception as db_err:
+                    # COIN-58: Exchange order succeeded but DB failed → pending exit
+                    # Do NOT clean up in-memory state, mark as pending for retry
+                    pos.pending_exit = True
+                    pos.exit_reason = reason
+                    pos.exit_exec_price = exec_price
+                    pos.exit_exec_qty = exec_qty
+                    pos.exit_fee = fee
+                    pos.exit_cost_return = cost_return
+                    pos.exit_net_pnl_pct = net_pnl_pct
+                    pos.exit_pnl_usdt = pnl_usdt
+                    pos.exit_hold_min = hold_min
+                    logger.error(
+                        "surge_exit_db_failed_pending",
+                        symbol=symbol,
+                        error=str(db_err),
+                        retry_count=pos.exit_retry_count,
+                    )
+                    return
 
         except Exception as e:
-            logger.error("surge_exit_failed", symbol=symbol, error=str(e), exc_info=True)
+            # COIN-58: Exchange order failed — position stays open, will retry next cycle
+            pos.exit_retry_count += 1
+            logger.error(
+                "surge_exit_exchange_failed",
+                symbol=symbol,
+                error=str(e),
+                retry_count=pos.exit_retry_count,
+            )
+            return
+
+        # ── Cleanup: counters + memory (only on full success) ─────────
+        await self._finalize_exit_cleanup(symbol, pos, net_pnl_pct, pnl_usdt, reason, hold_min)
+
+    async def _finalize_exit_cleanup(
+        self,
+        symbol: str,
+        pos: SurgePositionState,
+        net_pnl_pct: float,
+        pnl_usdt: float,
+        reason: str,
+        hold_min: float,
+    ) -> None:
+        """Finalize in-memory cleanup after successful DB commit."""
+        # Update counters
+        if net_pnl_pct < 0:
+            self._daily_losses += 1
+            self._consecutive_losses += 1
+            if self._consecutive_losses >= 3:
+                self._pause_until = datetime.now(timezone.utc) + timedelta(minutes=30)
+                logger.warning("surge_consecutive_loss_pause",
+                               losses=self._consecutive_losses)
+
+            # COIN-20: 심볼별 연속 SL 추적 + 장기 쿨다운
+            if reason == "SL":
+                sl_count = self._consecutive_sl_count.get(symbol, 0) + 1
+                self._consecutive_sl_count[symbol] = sl_count
+                if sl_count >= 2:
+                    # 2+ 연속 SL → 장기 쿨다운 (180분 기본)
+                    extended_cooldown = timedelta(seconds=self._consecutive_sl_cooldown_sec)
+                    self._cooldowns[symbol] = datetime.now(timezone.utc) + extended_cooldown
+                    logger.warning("surge_consecutive_sl_extended_cooldown",
+                                   symbol=symbol, sl_count=sl_count,
+                                   cooldown_min=self._consecutive_sl_cooldown_sec // 60)
+        else:
+            self._consecutive_losses = 0
+            # COIN-20: 수익 시 연속 SL 카운터 리셋
+            self._consecutive_sl_count.pop(symbol, None)
+
+        # Remove from memory
+        del self._positions[symbol]
+
+        # COIN-22: Set cooldown after exit (was missing — allowed immediate re-entry)
+        # Don't override longer extended cooldown (COIN-20 consecutive SL: 180min > 60min)
+        normal_cooldown_time = datetime.now(timezone.utc) + timedelta(seconds=self._cooldown_sec)
+        existing_cooldown = self._cooldowns.get(symbol)
+        if existing_cooldown is None or existing_cooldown < normal_cooldown_time:
+            self._cooldowns[symbol] = normal_cooldown_time
+
+        logger.info("surge_exit",
+                    symbol=symbol, direction=pos.direction,
+                    reason=reason, pnl_pct=round(net_pnl_pct, 2),
+                    pnl_usdt=round(pnl_usdt, 2),
+                    hold_min=round(hold_min, 1))
+        await emit_event(
+            "info", "surge_trade",
+            f"[Surge] CLOSED {symbol} | {net_pnl_pct:+.1f}% | {reason}",
+            detail=f"PnL={pnl_usdt:+.2f} USDT | Hold={hold_min:.0f}min",
+            metadata={
+                "symbol": symbol,
+                "direction": pos.direction,
+                "pnl_pct": net_pnl_pct,
+                "pnl_usdt": pnl_usdt,
+                "reason": reason,
+                "hold_min": hold_min,
+            },
+        )
+
+    # ── COIN-58: Pending exit retry ──────────────────────────────
+
+    async def _retry_pending_exits(self) -> None:
+        """Retry DB cleanup for positions where exchange succeeded but DB failed.
+
+        Called at the start of each scan cycle.
+        After MAX_EXIT_RETRIES, force-cleans the position to prevent permanent zombies.
+        """
+        pending = [
+            (sym, pos)
+            for sym, pos in list(self._positions.items())
+            if pos.pending_exit
+        ]
+        for symbol, pos in pending:
+            pos.exit_retry_count += 1
+            if pos.exit_retry_count > MAX_EXIT_RETRIES:
+                # Force cleanup to prevent permanent zombie
+                logger.warning(
+                    "surge_pending_exit_force_cleanup",
+                    symbol=symbol,
+                    retry_count=pos.exit_retry_count,
+                    reason=pos.exit_reason,
+                )
+                try:
+                    sf = get_session_factory()
+                    async with sf() as session:
+                        pos_result = await session.execute(
+                            select(Position).where(
+                                Position.symbol == symbol,
+                                Position.exchange == EXCHANGE_NAME,
+                            )
+                        )
+                        db_pos = pos_result.scalar_one_or_none()
+                        now = datetime.now(timezone.utc)
+                        if db_pos:
+                            db_pos.quantity = 0
+                            db_pos.average_buy_price = 0
+                            db_pos.total_invested = 0
+                            db_pos.is_surge = False
+                            db_pos.entered_at = None
+                            db_pos.last_trade_at = now
+                            db_pos.last_sell_at = now
+                        await session.commit()
+                        self._futures_pm.cash_balance += pos.exit_cost_return
+                except Exception as force_err:
+                    logger.error(
+                        "surge_pending_exit_force_cleanup_failed",
+                        symbol=symbol,
+                        error=str(force_err),
+                    )
+                    continue
+
+                await self._finalize_exit_cleanup(
+                    symbol, pos,
+                    pos.exit_net_pnl_pct, pos.exit_pnl_usdt,
+                    pos.exit_reason, pos.exit_hold_min,
+                )
+                await emit_event(
+                    "warning", "surge_trade",
+                    f"[Surge] FORCE CLEANUP {symbol} (pending exit after {pos.exit_retry_count} retries)",
+                    detail=f"Reason={pos.exit_reason} | PnL={pos.exit_pnl_usdt:+.2f} USDT",
+                    metadata={"symbol": symbol, "force_cleanup": True},
+                )
+                continue
+
+            # Retry DB cleanup
+            try:
+                sf = get_session_factory()
+                async with sf() as session:
+                    pos_result = await session.execute(
+                        select(Position).where(
+                            Position.symbol == symbol,
+                            Position.exchange == EXCHANGE_NAME,
+                        )
+                    )
+                    db_pos = pos_result.scalar_one_or_none()
+                    now = datetime.now(timezone.utc)
+                    if db_pos:
+                        db_pos.quantity = 0
+                        db_pos.average_buy_price = 0
+                        db_pos.total_invested = 0
+                        db_pos.is_surge = False
+                        db_pos.entered_at = None
+                        db_pos.last_trade_at = now
+                        db_pos.last_sell_at = now
+                    await session.commit()
+
+                    # PM cash adjusted AFTER successful commit
+                    self._futures_pm.cash_balance += pos.exit_cost_return
+
+                logger.info(
+                    "surge_pending_exit_retry_success",
+                    symbol=symbol,
+                    retry_count=pos.exit_retry_count,
+                    reason=pos.exit_reason,
+                )
+                await self._finalize_exit_cleanup(
+                    symbol, pos,
+                    pos.exit_net_pnl_pct, pos.exit_pnl_usdt,
+                    pos.exit_reason, pos.exit_hold_min,
+                )
+
+            except Exception as retry_err:
+                logger.warning(
+                    "surge_pending_exit_retry_failed",
+                    symbol=symbol,
+                    retry_count=pos.exit_retry_count,
+                    error=str(retry_err),
+                )
+
+    # ── COIN-58: Zombie position detection ───────────────────────
+
+    async def _detect_zombie_positions(self) -> None:
+        """Detect and clean up zombie positions.
+
+        A zombie is an in-memory position whose exchange-side position no longer exists.
+        This can happen when DB cleanup fails repeatedly and force-cleanup also fails.
+        Runs every ZOMBIE_SCAN_INTERVAL_SEC (5 minutes).
+        """
+        if not self._positions:
+            return
+
+        try:
+            exchange_positions = await self._exchange.fetch_positions(
+                [s for s in self._positions]
+            )
+        except Exception as e:
+            logger.warning("surge_zombie_scan_fetch_failed", error=str(e))
+            return
+
+        # Build set of symbols that actually have a position on exchange
+        exchange_symbols: set[str] = set()
+        for ep in exchange_positions:
+            try:
+                # ExchangePosition may be a dict or object
+                if isinstance(ep, dict):
+                    sym = ep.get("symbol", "")
+                    qty = float(ep.get("contracts", 0) or ep.get("positionAmt", 0) or 0)
+                else:
+                    sym = getattr(ep, "symbol", "")
+                    qty = float(getattr(ep, "contracts", 0) or 0)
+                # Normalize: "BTC/USDT:USDT" → "BTC/USDT"
+                sym = sym.replace(":USDT", "")
+                if sym and abs(qty) > 0:
+                    exchange_symbols.add(sym)
+            except Exception:
+                continue
+
+        # Check each in-memory position
+        for symbol, pos in list(self._positions.items()):
+            if pos.pending_exit:
+                # Already being handled by _retry_pending_exits
+                continue
+            if symbol not in exchange_symbols:
+                # Position is in memory but NOT on exchange → zombie
+                logger.warning(
+                    "surge_zombie_detected",
+                    symbol=symbol,
+                    direction=pos.direction,
+                    entry_price=pos.entry_price,
+                    margin=pos.margin,
+                )
+                await emit_event(
+                    "warning", "surge_trade",
+                    f"[Surge] ZOMBIE detected: {symbol} (in-memory, not on exchange)",
+                    detail=f"Cleaning up zombie position | Margin={pos.margin:.2f} USDT",
+                    metadata={"symbol": symbol, "zombie": True},
+                )
+                # Force DB cleanup and remove from memory
+                try:
+                    sf = get_session_factory()
+                    async with sf() as session:
+                        pos_result = await session.execute(
+                            select(Position).where(
+                                Position.symbol == symbol,
+                                Position.exchange == EXCHANGE_NAME,
+                            )
+                        )
+                        db_pos = pos_result.scalar_one_or_none()
+                        now = datetime.now(timezone.utc)
+                        if db_pos and db_pos.quantity > 0:
+                            db_pos.quantity = 0
+                            db_pos.average_buy_price = 0
+                            db_pos.total_invested = 0
+                            db_pos.is_surge = False
+                            db_pos.entered_at = None
+                            db_pos.last_trade_at = now
+                            db_pos.last_sell_at = now
+                        await session.commit()
+                except Exception as cleanup_err:
+                    logger.error(
+                        "surge_zombie_cleanup_failed",
+                        symbol=symbol,
+                        error=str(cleanup_err),
+                    )
+                    continue
+
+                # Remove from memory without cash adjustment (position already gone on exchange)
+                del self._positions[symbol]
+                normal_cooldown_time = datetime.now(timezone.utc) + timedelta(seconds=self._cooldown_sec)
+                existing_cooldown = self._cooldowns.get(symbol)
+                if existing_cooldown is None or existing_cooldown < normal_cooldown_time:
+                    self._cooldowns[symbol] = normal_cooldown_time
 
     # ── Daily counter management ─────────────────────────────────
 
