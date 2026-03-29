@@ -256,10 +256,14 @@ class PositionStateTracker:
             pos.trailing_stop_pct = state.trailing_stop_atr
             pos.trailing_active = state.trailing_active
             # 방향별 extreme_price 저장: 롱 → highest_price, 숏 → lowest_price
-            if state.direction.value == "short":
+            # state.direction이 None인 구 포지션은 long으로 취급
+            direction_val = state.direction.value if state.direction else "long"
+            if direction_val == "short":
                 pos.lowest_price = state.extreme_price
+                pos.highest_price = None
             else:
                 pos.highest_price = state.extreme_price
+                pos.lowest_price = None
             pos.direction = state.direction.value
             pos.strategy_name = state.strategy_name
             updated += 1
