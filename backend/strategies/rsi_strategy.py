@@ -49,7 +49,7 @@ class RSIStrategy(BaseStrategy):
             df[rsi_col] = ta.rsi(df["close"], length=self._period)
 
         current_rsi = df[rsi_col].iloc[-1]
-        prev_rsi = df[rsi_col].iloc[-2]
+        prev_rsi = df[rsi_col].iloc[-2] if len(df) >= 2 else float("nan")
 
         if pd.isna(current_rsi):
             return Signal(
