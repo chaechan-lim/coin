@@ -1,11 +1,11 @@
 """
 Tests for PortfolioManager (engine/portfolio_manager.py).
 """
+import asyncio
 from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.models import Position, Order, PortfolioSnapshot, CapitalTransaction
 from engine.portfolio_manager import PortfolioManager
@@ -1894,8 +1894,8 @@ async def test_sell_records_both_timestamps(session):
 
 
 @pytest.mark.asyncio
-async def test_sync_guard_skips_during_eval(session):
-    """sync_guard=True → sync_exchange_positions는 아무것도 하지 않음."""
+async def test_sync_waits_for_lock_futures(session):
+    """sync_exchange_positions는 _sync_lock을 획득할 때까지 대기."""
     from exchange.base import Balance
 
     pm = PortfolioManager(
@@ -1909,13 +1909,32 @@ async def test_sync_guard_skips_during_eval(session):
     adapter.fetch_balance = AsyncMock(return_value={
         "USDT": Balance(currency="USDT", free=999, used=0, total=999),
     })
+    adapter._exchange = AsyncMock()
+    adapter._exchange.fetch_positions = AsyncMock(return_value=[])
 
-    # sync_lock이 잠겨 있으면 sync를 스킵해야 함
-    async with pm._sync_lock:
-        await pm.sync_exchange_positions(session, adapter, [])
-    # fetch_balance가 호출되지 않아야 함 (lock에서 return)
-    adapter.fetch_balance.assert_not_called()
-    assert pm.cash_balance == 260.0  # 불변
+    # Mock session flush
+    session.flush = AsyncMock()
+
+    sync_started = asyncio.Event()
+
+    async def hold_lock():
+        """Background task that holds the lock."""
+        async with pm._sync_lock:
+            sync_started.set()
+            await asyncio.sleep(0.05)
+
+    # Start background task to hold lock
+    lock_holder = asyncio.create_task(hold_lock())
+    await sync_started.wait()
+
+    # Now call sync - it should wait for lock, then acquire it and execute
+    await pm.sync_exchange_positions(session, adapter, [])
+
+    # fetch_balance should have been called after waiting for lock
+    adapter.fetch_balance.assert_called()
+
+    # Wait for lock holder to complete
+    await lock_holder
 
 
 @pytest.mark.asyncio

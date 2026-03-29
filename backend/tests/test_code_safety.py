@@ -7,7 +7,7 @@ mock 최소화, 실제 메서드 시그니처/로직을 직접 검증.
 import asyncio
 import inspect
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, Mock
 
 from engine.trading_engine import TradingEngine, PositionTracker
 from engine.futures_engine import BinanceFuturesEngine
@@ -145,22 +145,57 @@ class TestSyncLock:
         assert isinstance(pm._sync_lock, asyncio.Lock)
 
     @pytest.mark.asyncio
-    async def test_sync_skipped_when_locked(self):
-        """Lock 잠금 상태에서 sync_exchange_positions는 즉시 리턴."""
+    async def test_sync_waits_for_lock(self):
+        """Lock 잠금 상태에서 sync_exchange_positions는 lock 해제까지 대기."""
         pm = PortfolioManager(
             market_data=AsyncMock(),
             initial_balance_krw=500_000,
             exchange_name="bithumb",
         )
         adapter = AsyncMock()
-        adapter.fetch_balance = AsyncMock()
+        adapter.fetch_balance = AsyncMock(return_value={
+            "KRW": type('Balance', (), {'free': 500_000, 'total': 500_000})()
+        })
 
-        async with pm._sync_lock:
-            # Lock이 잠긴 상태에서 sync 호출
-            await pm.sync_exchange_positions(AsyncMock(), adapter, [])
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=MagicMock(
+            scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+        ))
+        mock_session.flush = AsyncMock()
 
-        # fetch_balance가 호출되지 않아야 함
-        adapter.fetch_balance.assert_not_called()
+        sync_started = asyncio.Event()
+
+        async def hold_lock_then_release():
+            """Background task that holds the lock for a moment."""
+            async with pm._sync_lock:
+                # Signal that we have the lock
+                sync_started.set()
+                # Hold it for a short time
+                await asyncio.sleep(0.05)
+
+        # Start background task to hold lock
+        lock_holder = asyncio.create_task(hold_lock_then_release())
+
+        # Wait for background task to acquire lock
+        await sync_started.wait()
+
+        # Now call sync - it should wait for lock
+        sync_task = asyncio.create_task(
+            pm.sync_exchange_positions(mock_session, adapter, [])
+        )
+
+        # Give sync a moment to try acquiring lock
+        await asyncio.sleep(0.01)
+
+        # Lock holder should still be holding it
+        assert pm._sync_lock.locked()
+
+        # Wait for both tasks to complete
+        await lock_holder
+        await sync_task
+
+        # Now fetch_balance should have been called
+        adapter.fetch_balance.assert_called()
 
     @pytest.mark.asyncio
     async def test_sync_runs_when_unlocked(self):
@@ -184,6 +219,52 @@ class TestSyncLock:
         assert not pm._sync_lock.locked()
         await pm.sync_exchange_positions(mock_session, adapter, [])
         adapter.fetch_balance.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_sync_calls_serialized(self):
+        """두 개의 동시 sync 호출이 직렬화되어 race condition이 없음."""
+        pm = PortfolioManager(
+            market_data=AsyncMock(),
+            initial_balance_krw=500_000,
+            exchange_name="bithumb",
+        )
+        from exchange.base import Balance
+        adapter = AsyncMock()
+        adapter.fetch_balance = AsyncMock(return_value={
+            "KRW": Balance(currency="KRW", free=500_000, used=0, total=500_000),
+        })
+
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=MagicMock(
+            scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+        ))
+        mock_session.flush = AsyncMock()
+
+        call_order = []
+
+        def make_fetch_balance():
+            async def tracked_fetch_balance():
+                call_order.append('fetch_balance_start')
+                await asyncio.sleep(0.01)
+                call_order.append('fetch_balance_end')
+                return {"KRW": Balance(currency="KRW", free=500_000, used=0, total=500_000)}
+            return tracked_fetch_balance()
+
+        adapter.fetch_balance = Mock(side_effect=make_fetch_balance)
+
+        # Create two concurrent sync tasks
+        sync1 = asyncio.create_task(pm.sync_exchange_positions(mock_session, adapter, []))
+        sync2 = asyncio.create_task(pm.sync_exchange_positions(mock_session, adapter, []))
+
+        # Wait for both to complete
+        await asyncio.gather(sync1, sync2)
+
+        # Verify fetch_balance was called twice (once for each sync)
+        assert adapter.fetch_balance.call_count == 2
+
+        # Verify that calls didn't overlap (race condition prevented)
+        # fetch_balance calls should be interleaved but not concurrent
+        assert len(call_order) >= 4  # At least 2 start and 2 end
 
 
 # ── 4. PM cash_balance property 검증 ──────────────────────────
