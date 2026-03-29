@@ -24,7 +24,7 @@ from strategies.base import Signal
 from strategies.combiner import SignalCombiner, CombinedDecision
 from engine.order_manager import OrderManager
 from engine.portfolio_manager import PortfolioManager
-from engine.trading_engine import TradingEngine, PositionTracker
+from engine.trading_engine import TradingEngine, PositionTracker, _effective_direction
 from core.event_bus import emit_event
 
 logger = structlog.get_logger(__name__)
@@ -838,10 +838,22 @@ class BinanceFuturesEngine(TradingEngine):
         tracker = self._position_trackers.get(symbol)
         if not tracker:
             if position.stop_loss_pct is not None:
-                # DB에 저장된 트래커 값으로 복원
+                # DB에 저장된 트래커 값으로 복원 (방향별 extreme_price 컬럼 분기)
+                direction = _effective_direction(position.direction)
+                if direction == "short":
+                    extreme = (
+                        position.lowest_price if position.lowest_price is not None
+                        else position.highest_price if position.highest_price is not None
+                        else position.average_buy_price
+                    )
+                else:
+                    extreme = (
+                        position.highest_price if position.highest_price is not None
+                        else position.average_buy_price
+                    )
                 tracker = PositionTracker(
                     entry_price=position.average_buy_price,
-                    extreme_price=position.highest_price or position.average_buy_price,
+                    extreme_price=extreme,
                     stop_loss_pct=position.stop_loss_pct,
                     take_profit_pct=position.take_profit_pct or 10.0,
                     trailing_activation_pct=position.trailing_activation_pct or 5.0,
@@ -887,7 +899,7 @@ class BinanceFuturesEngine(TradingEngine):
         except Exception:
             return False
 
-        direction = position.direction or "long"
+        direction = _effective_direction(position.direction)
         entry = tracker.entry_price
 
         # 1. 청산가 근접 체크 (2% 이내 → 긴급 청산)
@@ -1463,6 +1475,9 @@ class BinanceFuturesEngine(TradingEngine):
             pos.leverage = effective_lev
             pos.liquidation_price = price * (1 - 1 / effective_lev + self._futures_fee)
             pos.margin_used = margin
+            pos.highest_price = price   # initialise extreme_price for long
+            pos.lowest_price = None     # clear any prior short-session value
+            await session.flush()
 
         # SL/TP 트래커 — 레버리지 축소 + 동적 SL
         sqrt_lev = math.sqrt(effective_lev)
@@ -1635,6 +1650,9 @@ class BinanceFuturesEngine(TradingEngine):
             pos.leverage = effective_lev
             pos.liquidation_price = price * (1 + 1 / effective_lev - self._futures_fee)
             pos.margin_used = margin
+            pos.lowest_price = price   # initialise extreme_price for short (prevents stale long data)
+            pos.highest_price = None   # clear any prior long-session value
+            await session.flush()
 
         # 숏 트래커 — extreme_price = 최저가 추적 + 동적 SL
         sqrt_lev = math.sqrt(effective_lev)

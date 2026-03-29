@@ -36,6 +36,7 @@ POSITION_FUTURES_COLUMNS = {
     "liquidation_price": "REAL",
     "margin_used": "REAL NOT NULL DEFAULT 0.0",
     "last_sell_direction": "TEXT",  # COIN-41: v2 방향별 쿨다운 영속화
+    "lowest_price": "REAL",         # COIN-64: 숏 포지션 extreme_price (최저가)
 }
 
 

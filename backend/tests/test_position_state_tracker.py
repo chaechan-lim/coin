@@ -368,3 +368,104 @@ class TestDBPersist:
         assert db_pos.take_profit_pct == 4.0
         assert db_pos.highest_price == 85000.0
         assert db_pos.trailing_active is True
+
+    @pytest.mark.asyncio
+    async def test_persist_short_saves_lowest_price(self, session, tracker):
+        """숏 방향: extreme_price → pos.lowest_price에 저장, pos.highest_price는 None으로 클리어."""
+        pos = Position(
+            exchange="binance_futures",
+            symbol="BTC/USDT",
+            quantity=0.01,
+            average_buy_price=65000.0,
+            total_invested=100.0,
+            is_paper=False,
+            direction="short",
+            leverage=3,
+            entered_at=datetime.now(timezone.utc),
+            highest_price=70000.0,  # stale long-session value
+        )
+        session.add(pos)
+        await session.flush()
+
+        state = make_state(
+            symbol="BTC/USDT",
+            direction=Direction.SHORT,
+            entry_price=65000.0,
+            extreme_price=60000.0,  # 숏: 최저가
+        )
+        tracker.open_position(state)
+
+        count = await tracker.persist_to_db(session, "binance_futures")
+        assert count == 1
+
+        from sqlalchemy import select
+        result = await session.execute(select(Position).where(Position.symbol == "BTC/USDT"))
+        db_pos = result.scalar_one()
+        assert db_pos.lowest_price == pytest.approx(60000.0)
+        assert db_pos.highest_price is None   # stale value cleared
+        assert db_pos.direction == "short"
+
+    @pytest.mark.asyncio
+    async def test_persist_long_clears_stale_lowest_price(self, session, tracker):
+        """롱 방향: extreme_price → pos.highest_price에 저장, pos.lowest_price는 None으로 클리어."""
+        pos = Position(
+            exchange="binance_futures",
+            symbol="ETH/USDT",
+            quantity=0.05,
+            average_buy_price=3200.0,
+            total_invested=160.0,
+            is_paper=False,
+            direction="long",
+            leverage=3,
+            entered_at=datetime.now(timezone.utc),
+            lowest_price=2800.0,  # stale short-session value
+        )
+        session.add(pos)
+        await session.flush()
+
+        state = make_state(
+            symbol="ETH/USDT",
+            direction=Direction.LONG,
+            entry_price=3200.0,
+            extreme_price=3500.0,  # 롱: 최고가
+        )
+        tracker.open_position(state)
+
+        await tracker.persist_to_db(session, "binance_futures")
+
+        from sqlalchemy import select
+        result = await session.execute(select(Position).where(Position.symbol == "ETH/USDT"))
+        db_pos = result.scalar_one()
+        assert db_pos.highest_price == pytest.approx(3500.0)
+        assert db_pos.lowest_price is None   # stale value cleared
+        assert db_pos.direction == "long"
+
+    @pytest.mark.asyncio
+    async def test_persist_none_direction_treated_as_long(self, session, tracker):
+        """direction=None인 구 포지션은 long으로 취급해 highest_price에 저장하고 AttributeError를 일으키지 않는다."""
+        pos = Position(
+            exchange="binance_futures",
+            symbol="BNB/USDT",
+            quantity=0.1,
+            average_buy_price=400.0,
+            total_invested=40.0,
+            is_paper=False,
+            direction=None,  # pre-migration position
+            leverage=3,
+            entered_at=datetime.now(timezone.utc),
+        )
+        session.add(pos)
+        await session.flush()
+
+        state = make_state(symbol="BNB/USDT", extreme_price=450.0)
+        tracker.open_position(state)
+        state.direction = None  # simulate legacy in-memory state (direction lost after restart)
+
+        await tracker.persist_to_db(session, "binance_futures")
+
+        from sqlalchemy import select
+        result = await session.execute(select(Position).where(Position.symbol == "BNB/USDT"))
+        db_pos = result.scalar_one()
+        assert db_pos.highest_price == pytest.approx(450.0)
+        assert db_pos.lowest_price is None
+        assert db_pos.direction == "long"  # defaulted from None

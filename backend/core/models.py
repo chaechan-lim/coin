@@ -140,6 +140,7 @@ class Position(Base):
     trailing_stop_pct = Column(Float, nullable=True)
     trailing_active = Column(Boolean, default=False)
     highest_price = Column(Float, nullable=True)
+    lowest_price = Column(Float, nullable=True)   # 숏 포지션 extreme_price (최저가)
     max_hold_hours = Column(Float, nullable=True)
     # 진입 전략 (페어링 매도: 진입 전략의 SELL만 허용)
     strategy_name = Column(String(50), nullable=True)
