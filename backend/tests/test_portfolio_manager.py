@@ -3966,8 +3966,8 @@ async def test_is_surge_flag_resets_on_non_surge_buy(session):
 
 
 @pytest.mark.asyncio
-async def test_is_surge_flag_stays_true_on_surge_buy(session):
-    """COIN-65 Bug 2: 서지 포지션에 서지 매수 추가 시 is_surge=True 유지."""
+async def test_is_surge_flag_set_on_surge_buy_after_non_surge(session):
+    """COIN-65 Bug 2: 비서지 포지션에 서지 매수 추가 시 is_surge=True로 업그레이드."""
     pm = PortfolioManager(
         market_data=_make_market_data({}),
         initial_balance_krw=1_000_000,
@@ -3992,5 +3992,36 @@ async def test_is_surge_flag_stays_true_on_surge_buy(session):
     )
 
     await session.refresh(pos)
-    # is_surge는 True로 업데이트되어야 함
+    # is_surge는 True로 업데이트되어야 함 (비서지→서지 전환)
+    assert pos.is_surge is True
+
+
+@pytest.mark.asyncio
+async def test_is_surge_flag_stays_true_on_subsequent_surge_buy(session):
+    """COIN-65 Bug 2: 서지 포지션에 서지 매수 추가 시 is_surge=True 유지."""
+    pm = PortfolioManager(
+        market_data=_make_market_data({}),
+        initial_balance_krw=1_000_000,
+    )
+
+    # 첫 매수: is_surge=True (서지 매수)
+    await pm.update_position_on_buy(
+        session, "SOL/KRW",
+        quantity=1.0, price=100_000, cost=100_000, fee=300,
+        is_surge=True,
+    )
+
+    result = await session.execute(select(Position).where(Position.symbol == "SOL/KRW"))
+    pos = result.scalar_one()
+    assert pos.is_surge is True
+
+    # 두 번째 매수: 동일 서지 포지션에 서지 추가 (is_surge=True)
+    await pm.update_position_on_buy(
+        session, "SOL/KRW",
+        quantity=1.0, price=102_000, cost=102_000, fee=306,
+        is_surge=True,
+    )
+
+    await session.refresh(pos)
+    # is_surge는 True로 유지되어야 함 (서지→서지)
     assert pos.is_surge is True

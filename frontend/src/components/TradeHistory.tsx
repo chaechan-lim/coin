@@ -61,6 +61,8 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
   const dirColor = order.direction === 'short' ? 'text-sell' : 'text-buy'
   // 청산 주문: 롱→sell, 숏→buy(close). realized_pnl이 있으면 청산 주문
   const hasPnl = order.realized_pnl_pct != null
+  // realized_pnl_pct는 raw 가격변동% (DB 저장값). 레버리지 선물은 레버리지를 곱해 수익률로 표시.
+  const displayPnlPct = hasPnl ? order.realized_pnl_pct! * (order.leverage ?? 1) : null
 
   return (
     <div className="border-b border-gray-700/50">
@@ -85,7 +87,7 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400 font-semibold">{order.leverage}x</span>
             )}
             <StrategyBadge name={order.strategy_name} />
-            {hasPnl && <PnlBadge pnl_pct={order.realized_pnl_pct!} />}
+            {hasPnl && <PnlBadge pnl_pct={displayPnlPct!} />}
             {order.is_paper && (
               <span className="text-xs text-gray-500 border border-gray-600 px-1 rounded">페이퍼</span>
             )}
@@ -126,7 +128,7 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <StrategyBadge name={order.strategy_name} />
-              {hasPnl && <PnlBadge pnl_pct={order.realized_pnl_pct!} />}
+              {hasPnl && <PnlBadge pnl_pct={displayPnlPct!} />}
               {order.is_paper && (
                 <span className="text-xs text-gray-500 border border-gray-600 px-1 rounded">P</span>
               )}
@@ -148,7 +150,7 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
 
           {/* 손익 정보 (매도 주문) */}
           {hasPnl && (
-            <div className={`rounded-lg p-3 ${order.realized_pnl_pct! >= 0 ? 'bg-green-900/30 border border-green-800/50' : 'bg-red-900/30 border border-red-800/50'}`}>
+            <div className={`rounded-lg p-3 ${displayPnlPct! >= 0 ? 'bg-green-900/30 border border-green-800/50' : 'bg-red-900/30 border border-red-800/50'}`}>
               <div className="flex items-center justify-between">
                 <div>
                   <span className="text-gray-400 text-xs">진입가</span>
@@ -160,8 +162,8 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
                 </div>
                 <div className="text-right">
                   <span className="text-gray-400 text-xs">수익률</span>
-                  <div className={`font-bold text-lg ${order.realized_pnl_pct! >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                    {order.realized_pnl_pct! >= 0 ? '+' : ''}{order.realized_pnl_pct!.toFixed(2)}%
+                  <div className={`font-bold text-lg ${displayPnlPct! >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {displayPnlPct! >= 0 ? '+' : ''}{displayPnlPct!.toFixed(2)}%
                   </div>
                 </div>
                 {order.realized_pnl != null && (
