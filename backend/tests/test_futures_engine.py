@@ -5,8 +5,7 @@ BinanceFuturesEngine 단위 테스트
 import asyncio
 import math
 import pytest
-import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
 from core.models import Position
