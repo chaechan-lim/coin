@@ -110,16 +110,20 @@ class TestWeightNormalization:
         assert result.action == SignalType.BUY
 
     def test_sell_wins_with_higher_weighted_score(self):
+        # COIN-61 fix: normalization now uses direction-specific active weight
+        # Instead of dividing both by combined active_weight, each is normalized by its own.
+        # This test now verifies that SELL wins when it has HIGHER confidence in its signals.
         combiner = SignalCombiner(
             strategy_weights={"rsi": 0.05, "bollinger_rsi": 0.30},
             min_confidence=0.10,
         )
         signals = [
-            _signal("rsi", SignalType.BUY, 0.90),           # 0.05 * 0.90 = 0.045
-            _signal("bollinger_rsi", SignalType.SELL, 0.80),  # 0.30 * 0.80 = 0.240
+            _signal("rsi", SignalType.BUY, 0.70),           # 0.05 * 0.70 = 0.035, norm = 0.70
+            _signal("bollinger_rsi", SignalType.SELL, 0.90),  # 0.30 * 0.90 = 0.270, norm = 0.90
         ]
         result = combiner.combine(signals)
         assert result.action == SignalType.SELL
+        assert abs(result.combined_confidence - 0.90) < 0.01
 
 
 # ── MIN_ACTIVE_WEIGHT ─────────────────────────────────────────
@@ -188,6 +192,97 @@ class TestDefaultWeights:
         combiner = SignalCombiner()
         expected = {"ma_crossover", "rsi", "macd_crossover", "bollinger_rsi", "stochastic_rsi", "obv_divergence", "bb_squeeze"}
         assert set(combiner.weights.keys()) == expected
+
+
+# ── SPOT_WEIGHTS 검증 (COIN-61) ──────────────────────────────
+
+class TestSpotWeights:
+    """현물용 SPOT_WEIGHTS 검증 (COIN-61 L55-60 수정)."""
+
+    def test_spot_weights_sum_to_exactly_one(self):
+        """SPOT_WEIGHTS는 정확히 1.00으로 합산되어야 함."""
+        combiner = SignalCombiner()
+        total = sum(combiner.SPOT_WEIGHTS.values())
+        assert abs(total - 1.0) < 0.001, f"SPOT_WEIGHTS sum to {total}, expected exactly 1.0"
+
+    def test_spot_weights_has_four_strategies(self):
+        """SPOT_WEIGHTS는 4개 전략을 포함."""
+        combiner = SignalCombiner()
+        assert len(combiner.SPOT_WEIGHTS) == 4
+
+    def test_spot_weights_strategies(self):
+        """SPOT_WEIGHTS는 올바른 전략들을 포함."""
+        combiner = SignalCombiner()
+        expected = {"bnf_deviation", "cis_momentum", "larry_williams", "donchian_channel"}
+        assert set(combiner.SPOT_WEIGHTS.keys()) == expected
+
+
+# ── 정규화 버그 수정 검증 (COIN-61) ──────────────────────────
+
+class TestNormalizationFix:
+    """비방향 모드에서 방향별 active weight로 정규화 (COIN-61 L186-188)."""
+
+    def test_non_directional_buy_normalized_by_buy_active(self):
+        """
+        비방향 모드: BUY 신호는 buy_active로만 정규화.
+        RSI(w=0.21) BUY@0.80 + MACD(w=0.07) SELL@0.60
+        → buy_norm = 0.168 / 0.21 = 0.80 (이전 버그: 0.60)
+        """
+        combiner = SignalCombiner(
+            strategy_weights={"rsi": 0.21, "macd_crossover": 0.07},
+            min_confidence=0.10,
+            directional_weights=False,  # 비방향 모드
+        )
+        signals = [
+            _signal("rsi", SignalType.BUY, 0.80),
+            _signal("macd_crossover", SignalType.SELL, 0.60),
+        ]
+        result = combiner.combine(signals)
+        assert result.action == SignalType.BUY
+        # 예상: buy_norm = 0.168 / 0.21 = 0.80
+        assert abs(result.combined_confidence - 0.80) < 0.01, \
+            f"Expected buy_norm ~0.80, got {result.combined_confidence}"
+
+    def test_non_directional_sell_normalized_by_sell_active(self):
+        """
+        비방향 모드: SELL 신호는 sell_active로만 정규화.
+        RSI(w=0.21) BUY@0.50 + Bollinger(w=0.26) SELL@0.90
+        → sell_norm = 0.234 / 0.26 = 0.90 (이전 버그: 0.51)
+        """
+        combiner = SignalCombiner(
+            strategy_weights={"rsi": 0.21, "bollinger_rsi": 0.26},
+            min_confidence=0.10,
+            directional_weights=False,  # 비방향 모드
+        )
+        signals = [
+            _signal("rsi", SignalType.BUY, 0.50),
+            _signal("bollinger_rsi", SignalType.SELL, 0.90),
+        ]
+        result = combiner.combine(signals)
+        assert result.action == SignalType.SELL
+        # 예상: sell_norm = 0.234 / 0.26 = 0.90
+        assert abs(result.combined_confidence - 0.90) < 0.01, \
+            f"Expected sell_norm ~0.90, got {result.combined_confidence}"
+
+    def test_directional_mode_unchanged(self):
+        """
+        방향별 모드는 이미 올바르게 구현됨 (L184-185).
+        이 테스트는 회귀 방지용.
+        """
+        combiner = SignalCombiner(
+            strategy_weights={"rsi": 0.21, "macd_crossover": 0.07},
+            min_confidence=0.10,
+            directional_weights=True,  # 방향별 모드
+        )
+        signals = [
+            _signal("rsi", SignalType.BUY, 0.80),
+            _signal("macd_crossover", SignalType.SELL, 0.60),
+        ]
+        result = combiner.combine(signals)
+        assert result.action == SignalType.BUY
+        # 방향별 모드는 BUY_WEIGHTS, SELL_WEIGHTS 사용
+        # 정규화: buy_norm = (0.09*0.80 + ...) / buy_active
+        # (정확한 값은 BUY_WEIGHTS 의존)
 
 
 # ── symbol 파라미터 ─────────────────────────────────────────
@@ -274,8 +369,9 @@ class TestFrontendCombinedSignalContract:
         active_weight = buy_active + sell_active
         if active_weight < min_active_weight:
             return {"action": "HOLD", "confidence": 0.0}
-        buy_norm = buy_score / active_weight
-        sell_norm = sell_score / active_weight
+        # 정규화: 각 방향을 독립적으로 정규화 (방향별 참여 가중치로 나눔)
+        buy_norm = buy_score / buy_active if buy_active > 0 else 0.0
+        sell_norm = sell_score / sell_active if sell_active > 0 else 0.0
         is_long = buy_norm >= sell_norm
         winning_score = buy_norm if is_long else sell_norm
         if winning_score < min_confidence:

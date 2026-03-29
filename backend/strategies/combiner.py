@@ -56,7 +56,7 @@ class SignalCombiner:
         "bnf_deviation": 0.25,
         "cis_momentum": 0.42,
         "larry_williams": 0.10,
-        "donchian_channel": 0.24,
+        "donchian_channel": 0.23,
     }
 
     def __init__(
@@ -179,13 +179,15 @@ class SignalCombiner:
                 final_reason=f"Active weight {active_weight:.2f} below {effective_min} (all abstain)",
             )
 
-        # 정규화: 방향별 모드면 각 방향 독립, 아니면 공유 active_weight
+        # 정규화: 각 방향을 독립적으로 정규화 (방향별 참여 가중치로 나눔)
+        # directional_weights는 어느 weight dict을 사용할지만 결정하고,
+        # 정규화 로직은 동일: 각 방향의 실제 참여 가중치로 나눔
         if self.directional_weights:
             buy_norm = buy_score / buy_active if buy_active > 0 else 0.0
             sell_norm = sell_score / sell_active if sell_active > 0 else 0.0
         else:
-            buy_norm = buy_score / active_weight
-            sell_norm = sell_score / active_weight
+            buy_norm = buy_score / buy_active if buy_active > 0 else 0.0
+            sell_norm = sell_score / sell_active if sell_active > 0 else 0.0
 
         # 승리 타입 결정
         if buy_norm >= sell_norm:

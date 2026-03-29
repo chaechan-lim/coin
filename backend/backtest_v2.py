@@ -242,7 +242,7 @@ def create_spot_strategies() -> dict:
 SPOT_WEIGHTS: dict[str, float] = {
     "cis_momentum": 0.42,
     "bnf_deviation": 0.25,
-    "donchian_channel": 0.24,
+    "donchian_channel": 0.23,
     "larry_williams": 0.10,
 }
 
@@ -685,7 +685,7 @@ class V2Backtester:
         print(f"  최대 포지션: {self._max_position_pct*100:.0f}% | 리스크: {self._base_risk_pct*100:.0f}%")
         print(f"  쿨다운: {self._cooldown_candles}캔들 ({self._cooldown_candles*5}분) | 최소 신뢰도: {self._min_confidence}")
         if self._use_spot:
-            print("  현물 전략: cis_momentum(0.42), bnf_deviation(0.25), donchian_channel(0.24), larry_williams(0.10)")
+            print("  현물 전략: cis_momentum(0.42), bnf_deviation(0.25), donchian_channel(0.23), larry_williams(0.10)")
             print(f"  SL/TP: {SPOT_SL_ATR}/{SPOT_TP_ATR} ATR | Trail: {SPOT_TRAIL_ACTIVATION_ATR}/{SPOT_TRAIL_STOP_ATR} ATR")
         print(f"{'='*60}")
 

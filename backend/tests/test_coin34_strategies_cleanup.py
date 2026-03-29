@@ -48,7 +48,7 @@ def _mock_combiner(
     comb.weights = weights or {
         "cis_momentum": 0.42,
         "bnf_deviation": 0.25,
-        "donchian_channel": 0.24,
+        "donchian_channel": 0.23,
         "larry_williams": 0.10,
     }
     comb.min_confidence = min_confidence

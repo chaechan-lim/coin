@@ -129,7 +129,7 @@ WEIGHTS_4_SPOT = {
     "bnf_deviation":    0.25,
     "cis_momentum":     0.42,
     "larry_williams":   0.10,
-    "donchian_channel": 0.24,
+    "donchian_channel": 0.23,
 }
 
 # 5전략 가중치 (기존)
