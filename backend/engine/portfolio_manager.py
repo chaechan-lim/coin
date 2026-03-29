@@ -1121,12 +1121,12 @@ class PortfolioManager:
                 # SELECT … FOR UPDATE 없이는 완전한 보장 불가 — 빈도 감소 목적임.
                 if is_futures and invested > 0:
                     # 재확인 1: fresh_qty가 여전히 > 0인지 (await 사이 엔진 청산 감지)
+                    # ORM select 사용 — text() raw SQL 대신 identity map과 일관성 유지
                     fresh_qty_recheck_result = await session.execute(
-                        text(
-                            "SELECT quantity FROM positions "
-                            "WHERE exchange = :ex AND symbol = :sym"
-                        ),
-                        {"ex": self._exchange_name, "sym": db_sym},
+                        select(Position.quantity).where(
+                            Position.exchange == self._exchange_name,
+                            Position.symbol == db_sym,
+                        )
                     )
                     fresh_qty_recheck_row = fresh_qty_recheck_result.first()
                     if (
@@ -1139,18 +1139,22 @@ class PortfolioManager:
                             symbol=db_sym,
                             reason="position closed by engine during sync await points",
                         )
+                        # 전체 이터레이션 스킵 (의도적): qty=0은 엔진이 이미 포지션을 닫고
+                        # 현금을 반환했음을 의미. Order 중복 생성·cash 이중 반환 모두 방지.
                         continue
 
-                    # 재확인 2: await 기간(processing_start 이후) 동안 엔진 Order 생성 감지
-                    # sync 자신의 Order는 아직 session.add() 전이므로 여기서 조회되지 않음
-                    # Order.created_at은 Python-side _utcnow()이므로 동일 클럭 기준.
-                    # 1초 마진: 동일 클럭이라도 서브밀리초 순서 역전 가능성을 방어
+                    # 재확인 2: await 기간(processing_start 이후) 동안 엔진 SELL Order 생성 감지
+                    # - side == "sell" 만 체크: BUY Order는 cash 반환과 무관
+                    # - sync 자신의 Order는 아직 session.add() 전이므로 여기서 조회되지 않음
+                    # - Order.created_at은 Python-side _utcnow()이므로 동일 클럭 기준.
+                    #   50ms 마진: 동일 프로세스 내 서브밀리초 타임스탬프 순서 역전 방어
                     recent_recheck_result = await session.execute(
                         select(Order.id).where(
                             Order.exchange == self._exchange_name,
                             Order.symbol == db_sym,
                             Order.strategy_name != "position_sync",
-                            Order.created_at >= processing_start - timedelta(seconds=1),
+                            Order.side == "sell",
+                            Order.created_at >= processing_start - timedelta(milliseconds=50),
                         ).limit(1)
                     )
                     if recent_recheck_result.first() is not None:
@@ -1159,6 +1163,8 @@ class PortfolioManager:
                             symbol=db_sym,
                             reason="engine order created during sync await points",
                         )
+                        # 전체 이터레이션 스킵 (의도적): 엔진 SELL Order는 cash가
+                        # 이미 반환됐음을 의미. Order 중복 생성·cash 이중 반환 방지.
                         continue
 
                 old_qty = db_pos.quantity

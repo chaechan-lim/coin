@@ -3517,7 +3517,6 @@ async def test_futures_sync_no_cash_return_when_engine_order_created_during_awai
         if not engine_order_created:
             engine_order_created = True
             # 엔진이 현재 시각으로 Order 생성 (processing_start 이후임이 보장됨)
-            from datetime import datetime, timezone
             engine_order = Order(
                 exchange="binance_futures", symbol="DOT/USDT",
                 side="sell", order_type="market", status="filled",
@@ -3544,14 +3543,18 @@ async def test_futures_sync_no_cash_return_when_engine_order_created_during_awai
     adapter._exchange.fetch_positions = AsyncMock(return_value=[])
     adapter.fetch_income = AsyncMock(return_value=[])
 
+    from datetime import datetime, timezone
+    processing_start_approx = datetime.now(timezone.utc)
     cash_before = pm.cash_balance
     await pm.sync_exchange_positions(session, adapter, ["DOT/USDT"])
     await session.flush()
 
-    # 엔진 Order가 실제로 생성됐는지 확인 (가드가 동작할 전제 조건)
+    # 엔진 Order가 실제로 생성됐는지 + guard 전제 조건 검증
     assert captured_engine_order is not None, "Engine order was not created during simulate"
-    assert captured_engine_order.created_at is not None, (
-        "engine_order.created_at must be set — guard depends on it being > processing_start"
+    assert captured_engine_order.created_at >= processing_start_approx, (
+        f"engine_order.created_at ({captured_engine_order.created_at}) must be >= "
+        f"processing_start_approx ({processing_start_approx}) — "
+        "guard depends on order timestamp falling inside the recheck window"
     )
 
     # cash가 변하지 않아야 함 — 재확인에서 엔진 Order 감지, 이중 반환 방지
@@ -3591,6 +3594,13 @@ async def test_futures_sync_cash_returns_normally_when_toctou_checks_pass(sessio
     )
     session.add(pos)
     await session.flush()
+
+    # cash 반환 경로가 실행되도록 _determine_close_reason 모킹
+    # (실제 메서드가 (None, None)을 반환해 일찍 종료하면 cash 반환 경로를 검증 못함)
+    async def mock_close_reason(sym, db_pos, current_price, pnl_pct, adapter):
+        return "rsi", "tp_hit"
+
+    pm._determine_close_reason = mock_close_reason
 
     adapter = AsyncMock()
     adapter.fetch_balance = AsyncMock(return_value={
