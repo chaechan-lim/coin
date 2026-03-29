@@ -65,8 +65,7 @@ class PortfolioManager:
             position.quantity += quantity
             position.average_buy_price = total_cost / position.quantity if position.quantity > 0 else 0
             position.total_invested += cost + fee
-            if is_surge:
-                position.is_surge = True
+            position.is_surge = is_surge
             if strategy_name:
                 position.strategy_name = strategy_name
             if not position.entered_at:
