@@ -651,6 +651,8 @@ class SurgeEngine:
                 return
 
             margin = size_usdt
+            # Paranoid guard: with sane config (position_pct ≤ 1, scale_factor ≤ 1)
+            # margin ≤ cash is always true, but guard against misconfigured position_pct > 1.
             if margin > cash:
                 return
 
@@ -783,13 +785,15 @@ class SurgeEngine:
             )
 
         except Exception as e:
-            # Only refund cash when the order was never committed to the DB.
-            # Post-commit failures (e.g. emit_event) must not touch cash because
-            # the position record already exists; refunding would inflate
-            # cash_balance and cause over-allocation on subsequent entries.
+            logger.error("surge_entry_failed", symbol=symbol, error=str(e), exc_info=True)
+        finally:
+            # Refund pre-reserved cash for any pre-commit failure, including
+            # asyncio.CancelledError (which is BaseException in Python 3.12 and
+            # is not caught by `except Exception`).
+            # _order_committed guards against double-crediting: once the position
+            # is persisted in the DB, the cost is real and must not be refunded.
             if not _order_committed and _total_deducted > 0:
                 self._futures_pm.cash_balance += _total_deducted
-            logger.error("surge_entry_failed", symbol=symbol, error=str(e), exc_info=True)
 
     # ── Exit logic ───────────────────────────────────────────────
 
@@ -1010,7 +1014,8 @@ class SurgeEngine:
                 # mark pending_exit so _finalize_exit_cleanup handles memory/counters on
                 # the next _retry_pending_exits cycle.
                 if needs_cash_update:
-                    self._futures_pm.cash_balance += cost_return
+                    async with self._cash_lock:
+                        self._futures_pm.cash_balance += cost_return
                 pos.pending_exit = True
                 pos.exit_reason = reason
                 pos.exit_exec_price = exec_price
@@ -1067,7 +1072,8 @@ class SurgeEngine:
         # This prevents a double-credit if session.__aexit__ raised after a successful commit
         # and this code path is re-entered before the position is removed from _positions.
         if needs_cash_update:
-            self._futures_pm.cash_balance += cost_return
+            async with self._cash_lock:
+                self._futures_pm.cash_balance += cost_return
 
         # ── Cleanup: counters + memory (only on full success) ─────────
         await self._finalize_exit_cleanup(symbol, pos, net_pnl_pct, pnl_usdt, reason)
@@ -1205,7 +1211,8 @@ class SurgeEngine:
                         await session.commit()
                     # Apply cash OUTSIDE async-with (idempotent: only if row had qty > 0)
                     if needs_cash:
-                        self._futures_pm.cash_balance += pos.exit_cost_return
+                        async with self._cash_lock:
+                            self._futures_pm.cash_balance += pos.exit_cost_return
                 except Exception as force_err:
                     logger.error(
                         "surge_pending_exit_force_cleanup_failed",
@@ -1247,7 +1254,8 @@ class SurgeEngine:
                     await session.commit()
                 # Apply cash OUTSIDE async-with (idempotent: only if row had qty > 0)
                 if needs_cash:
-                    self._futures_pm.cash_balance += pos.exit_cost_return
+                    async with self._cash_lock:
+                        self._futures_pm.cash_balance += pos.exit_cost_return
 
                 logger.info(
                     "surge_pending_exit_retry_success",

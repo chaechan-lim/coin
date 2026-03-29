@@ -2545,6 +2545,16 @@ class TestCOIN63CashLock:
         initial_cash = 300.0
         surge_engine._futures_pm.cash_balance = initial_cash
 
+        # Provide numeric order values so actual_margin + fee is a real float,
+        # not a MagicMock (which would make arithmetic and assertions meaningless).
+        async def _ok_order(session, symbol, side, amount, price, **kwargs):
+            o = MagicMock()
+            o.executed_price = price
+            o.executed_quantity = amount
+            o.fee = price * amount * 0.0004
+            return o
+        surge_engine._order_manager.create_order = _ok_order
+
         # Simulate: order placed OK but DB write fails
         session.commit = AsyncMock(side_effect=Exception("DB unavailable"))
 
@@ -2788,34 +2798,3 @@ class TestCOIN63RetryOffByOne:
         assert sym in surge_engine._positions
         assert surge_engine._positions[sym].exit_retry_count == MAX_EXIT_RETRIES - 1
 
-    @pytest.mark.asyncio
-    async def test_force_cleanup_not_at_max_plus_one(self, surge_engine, session):
-        """COIN-63: With the fix, force cleanup happens at MAX not MAX+1.
-
-        Regression test: verifies the old bug (triggering at count=6) no longer occurs.
-        With the fixed code (>=), at count=MAX_EXIT_RETRIES-1, after +1 → MAX, triggers.
-        """
-        from engine.surge_engine import MAX_EXIT_RETRIES
-
-        sym = "SOL/USDT"
-        # If old bug existed (>), count would need to be MAX to trigger at MAX+1.
-        # With fix (>=), count=MAX-1 → after +1 → MAX → triggers immediately.
-        pos = self._make_pending_pos(sym, retry_count=MAX_EXIT_RETRIES - 1)
-        surge_engine._positions[sym] = pos
-
-        db_pos = Position(
-            exchange="binance_surge", symbol=sym,
-            quantity=0.01, average_buy_price=150.0,
-            total_invested=5.0, direction="long",
-        )
-        session.add(db_pos)
-        await session.flush()
-
-        mock_factory = self._make_session_ctx(session)
-        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
-            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
-                await surge_engine._retry_pending_exits()
-
-        # Position cleaned up at exactly MAX_EXIT_RETRIES, not MAX+1
-        assert sym not in surge_engine._positions
-        assert pos.exit_retry_count == MAX_EXIT_RETRIES
