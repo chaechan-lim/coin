@@ -23,6 +23,14 @@ from core.error_classifier import classify_error, ClassifiedError, ErrorCategory
 logger = structlog.get_logger(__name__)
 
 
+def _effective_direction(direction) -> str:
+    """Return 'short' or 'long', treating None and any non-short value as 'long'.
+
+    Accepts Direction enum instances (str-based), plain strings, or None.
+    """
+    return "short" if direction == "short" else "long"
+
+
 # ── 시장 상태별 동적 손절 프로필 (하이브리드) ────────────────────────
 # (atr_multiplier, floor_pct, cap_pct)
 _DYNAMIC_SL_PROFILES = {
@@ -374,7 +382,7 @@ class TradingEngine:
             pos.trailing_active = tracker.trailing_active
             # 방향별 extreme_price 저장: 롱 → highest_price, 숏 → lowest_price
             # 반대 컬럼을 None으로 클리어해 롱→숏(또는 숏→롱) 전환 시 스테일 값 방지
-            if (pos.direction or "long") == "short":
+            if _effective_direction(pos.direction) == "short":
                 pos.lowest_price = tracker.extreme_price
                 pos.highest_price = None
             else:

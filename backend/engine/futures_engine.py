@@ -24,7 +24,7 @@ from strategies.base import Signal
 from strategies.combiner import SignalCombiner, CombinedDecision
 from engine.order_manager import OrderManager
 from engine.portfolio_manager import PortfolioManager
-from engine.trading_engine import TradingEngine, PositionTracker
+from engine.trading_engine import TradingEngine, PositionTracker, _effective_direction
 from core.event_bus import emit_event
 
 logger = structlog.get_logger(__name__)
@@ -839,13 +839,18 @@ class BinanceFuturesEngine(TradingEngine):
         if not tracker:
             if position.stop_loss_pct is not None:
                 # DB에 저장된 트래커 값으로 복원 (방향별 extreme_price 컬럼 분기)
-                direction = position.direction or "long"
+                direction = _effective_direction(position.direction)
                 if direction == "short":
-                    extreme = (position.lowest_price
-                               or position.highest_price
-                               or position.average_buy_price)
+                    extreme = (
+                        position.lowest_price if position.lowest_price is not None
+                        else position.highest_price if position.highest_price is not None
+                        else position.average_buy_price
+                    )
                 else:
-                    extreme = position.highest_price or position.average_buy_price
+                    extreme = (
+                        position.highest_price if position.highest_price is not None
+                        else position.average_buy_price
+                    )
                 tracker = PositionTracker(
                     entry_price=position.average_buy_price,
                     extreme_price=extreme,
@@ -894,7 +899,7 @@ class BinanceFuturesEngine(TradingEngine):
         except Exception:
             return False
 
-        direction = position.direction or "long"
+        direction = _effective_direction(position.direction)
         entry = tracker.entry_price
 
         # 1. 청산가 근접 체크 (2% 이내 → 긴급 청산)

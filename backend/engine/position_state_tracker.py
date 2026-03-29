@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from core.models import Position
 from core.enums import Direction
+from engine.trading_engine import _effective_direction
 
 logger = structlog.get_logger(__name__)
 
@@ -213,9 +214,16 @@ class PositionStateTracker:
                 margin=pos.total_invested,
                 leverage=pos.leverage or 3,
                 extreme_price=(
-                    (pos.lowest_price or pos.highest_price or pos.average_buy_price)
+                    (
+                        pos.lowest_price if pos.lowest_price is not None
+                        else pos.highest_price if pos.highest_price is not None
+                        else pos.average_buy_price
+                    )
                     if pos.direction == "short"
-                    else (pos.highest_price or pos.average_buy_price)
+                    else (
+                        pos.highest_price if pos.highest_price is not None
+                        else pos.average_buy_price
+                    )
                 ),
                 stop_loss_atr=pos.stop_loss_pct or 1.5,
                 take_profit_atr=pos.take_profit_pct or 3.0,
@@ -256,8 +264,8 @@ class PositionStateTracker:
             pos.trailing_stop_pct = state.trailing_stop_atr
             pos.trailing_active = state.trailing_active
             # 방향별 extreme_price 저장: 롱 → highest_price, 숏 → lowest_price
-            # state.direction이 None인 구 포지션은 long으로 취급
-            direction_val = state.direction.value if state.direction else "long"
+            # state.direction이 None인 구 포지션은 long으로 취급 (Direction is str-enum so None is safe)
+            direction_val = _effective_direction(state.direction)
             if direction_val == "short":
                 pos.lowest_price = state.extreme_price
                 pos.highest_price = None

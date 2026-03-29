@@ -940,10 +940,19 @@ class TestFuturesMetadataFlush:
         meta_result = MagicMock()
         meta_result.scalar_one_or_none.return_value = mock_pos
 
+        # Use a callable side_effect so unexpected extra execute calls get a neutral
+        # fallback instead of raising StopAsyncIteration.
+        _neutral = MagicMock()
+        _neutral.scalar_one_or_none.return_value = None
+        _neutral.scalars.return_value.first.return_value = None
+        _expected = [meta_result]
+
+        def _execute_handler(stmt):
+            return _expected.pop(0) if _expected else _neutral
+
         session = AsyncMock()
         session.flush = track_flush
-        # _open_long makes exactly one session.execute call (metadata Position query)
-        session.execute = AsyncMock(side_effect=[meta_result])
+        session.execute = AsyncMock(side_effect=_execute_handler)
 
         filled_order = MagicMock(status="filled", exchange_order_id="o1", fee=1.0)
         futures_engine._order_manager.create_order = AsyncMock(return_value=filled_order)
@@ -978,15 +987,25 @@ class TestFuturesMetadataFlush:
         async def track_flush(*args, **kwargs):
             flush_calls.append(True)
 
-        # _open_short: execute call 1 = cross-position check, call 2 = metadata query
+        # _open_short execute calls: 1 = cross-position check, 2 = metadata query.
+        # Callable side_effect provides explicit results for known calls and a
+        # neutral fallback for unexpected extras to avoid StopAsyncIteration errors.
         cross_result = MagicMock()
         cross_result.scalars.return_value.first.return_value = None  # no cross position
         meta_result = MagicMock()
         meta_result.scalar_one_or_none.return_value = mock_pos
 
+        _neutral = MagicMock()
+        _neutral.scalar_one_or_none.return_value = None
+        _neutral.scalars.return_value.first.return_value = None
+        _expected = [cross_result, meta_result]
+
+        def _execute_handler(stmt):
+            return _expected.pop(0) if _expected else _neutral
+
         session = AsyncMock()
         session.flush = track_flush
-        session.execute = AsyncMock(side_effect=[cross_result, meta_result])
+        session.execute = AsyncMock(side_effect=_execute_handler)
 
         filled_order = MagicMock(status="filled", exchange_order_id="o2", fee=1.0)
         futures_engine._order_manager.create_order = AsyncMock(return_value=filled_order)
@@ -1047,7 +1066,8 @@ class TestShortTrackerExtremePriceRestore:
 
         position = self._make_short_position(lowest_price=60000.0, highest_price=65000.0)
 
-        session = AsyncMock()
+        from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
+        session = AsyncMock(spec=_AsyncSession)
 
         # tracker가 없으면 DB에서 복원
         assert "BTC/USDT" not in futures_engine._position_trackers
@@ -1073,7 +1093,8 @@ class TestShortTrackerExtremePriceRestore:
         # lowest_price=None, highest_price에 기존 값 존재 (backward compat)
         position = self._make_short_position(lowest_price=None, highest_price=62000.0)
 
-        session = AsyncMock()
+        from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
+        session = AsyncMock(spec=_AsyncSession)
 
         futures_engine._position_trackers.pop("BTC/USDT", None)
 
@@ -1096,7 +1117,8 @@ class TestShortTrackerExtremePriceRestore:
 
         position = self._make_short_position(lowest_price=None, highest_price=None)
 
-        session = AsyncMock()
+        from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
+        session = AsyncMock(spec=_AsyncSession)
 
         futures_engine._position_trackers.pop("BTC/USDT", None)
 
@@ -1137,7 +1159,8 @@ class TestShortTrackerExtremePriceRestore:
         position.highest_price = 3500.0
         position.lowest_price = None
 
-        session = AsyncMock()
+        from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
+        session = AsyncMock(spec=_AsyncSession)
 
         futures_engine._position_trackers.pop("ETH/USDT", None)
 
