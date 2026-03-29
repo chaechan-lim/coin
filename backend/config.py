@@ -129,6 +129,7 @@ class BinanceConfig(BaseSettings):
         "BNB/USDT",
     ]
     futures_fee: float = 0.0004  # 0.04% maker/taker
+    maintenance_margin_rate: float = 0.004  # 0.4% Tier 1 (Binance USDM < 50K notional)
 
     model_config = {"env_prefix": "BINANCE_"}
 

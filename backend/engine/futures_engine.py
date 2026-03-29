@@ -84,6 +84,7 @@ class BinanceFuturesEngine(TradingEngine):
         self._leverage = config.binance.default_leverage
         self._max_leverage = config.binance.max_leverage
         self._futures_fee = config.binance.futures_fee
+        self._maintenance_margin_rate = config.binance.maintenance_margin_rate
         self._funding_rates: dict[str, float] = {}
         self._last_funding_update: datetime | None = None
         # 동적 종목 선정 (비활성 — 추적 코인만 사용)
@@ -1461,7 +1462,8 @@ class BinanceFuturesEngine(TradingEngine):
         if pos:
             pos.direction = "long"
             pos.leverage = effective_lev
-            pos.liquidation_price = price * (1 - 1 / effective_lev + self._futures_fee)
+            # Liquidation estimate: entry * (1 - 1/lev + mmr). WS sync keeps this accurate.
+            pos.liquidation_price = price * (1 - 1 / effective_lev + self._maintenance_margin_rate)
             pos.margin_used = margin
 
         # SL/TP 트래커 — 레버리지 축소 + 동적 SL
@@ -1633,7 +1635,8 @@ class BinanceFuturesEngine(TradingEngine):
         if pos:
             pos.direction = "short"
             pos.leverage = effective_lev
-            pos.liquidation_price = price * (1 + 1 / effective_lev - self._futures_fee)
+            # Liquidation estimate: entry * (1 + 1/lev - mmr). WS sync keeps this accurate.
+            pos.liquidation_price = price * (1 + 1 / effective_lev - self._maintenance_margin_rate)
             pos.margin_used = margin
 
         # 숏 트래커 — extreme_price = 최저가 추적 + 동적 SL

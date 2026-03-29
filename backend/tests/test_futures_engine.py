@@ -118,12 +118,20 @@ class TestLeverageSizing:
         assert abs(expected_tp - 16.0 / sqrt_lev) < 0.01
 
     def test_liquidation_price_long(self, futures_engine):
-        """롱 청산가 = entry * (1 - 1/lev + fee)."""
+        """롱 청산가 = entry * (1 - 1/lev + mmr). mmr=0.4% (Binance Tier 1)."""
         entry = 65000.0
         lev = 5
-        fee = 0.0004
-        expected = entry * (1 - 1 / lev + fee)
-        assert abs(expected - entry * 0.8004) < 1.0
+        mmr = 0.004  # 0.4% maintenance margin rate
+        expected = entry * (1 - 1 / lev + mmr)
+        assert abs(expected - entry * 0.804) < 1.0
+
+    def test_liquidation_price_short(self, futures_engine):
+        """숏 청산가 = entry * (1 + 1/lev - mmr). mmr=0.4% (Binance Tier 1)."""
+        entry = 65000.0
+        lev = 5
+        mmr = 0.004  # 0.4% maintenance margin rate
+        expected = entry * (1 + 1 / lev - mmr)
+        assert abs(expected - entry * 1.196) < 1.0
 
 
 class TestShortTracking:
