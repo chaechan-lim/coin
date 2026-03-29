@@ -52,8 +52,8 @@ export function computeCombinedSignal(
     return { action: 'HOLD', confidence: 0 }
   }
 
-  const buyNorm = buyScore / activeWeight
-  const sellNorm = sellScore / activeWeight
+  const buyNorm = buyActive > 0 ? buyScore / buyActive : 0
+  const sellNorm = sellActive > 0 ? sellScore / sellActive : 0
   const isLong = buyNorm >= sellNorm
   const winningScore = isLong ? buyNorm : sellNorm
 
