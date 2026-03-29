@@ -789,6 +789,11 @@ class PortfolioManager:
         - 거래소에 보유 중이지만 DB에 없는 코인 → 포지션 생성
         - DB 포지션 수량 vs 거래소 실제 수량 불일치 → 거래소 기준으로 보정
         - 실제 현금 잔고로 cash_balance 갱신
+
+        **Lock behavior (COIN-60 fix):**
+        이 메서드는 _sync_lock을 획득하여 동기화를 직렬화함. 동시 호출은 대기함 (skip하지 않음).
+        No deadlock risk: _sync_lock을 이미 보유한 상태에서 이 메서드를 호출하는 경로가 없음.
+        호출자 5곳 (main.py, recovery.py, health_monitor.py) 모두 eval 루프 외부에서 호출.
         """
         async with self._sync_lock:
             try:

@@ -262,27 +262,38 @@ class TestSyncLock:
         # Verify fetch_balance was called twice (once for each sync)
         assert adapter.fetch_balance.call_count == 2
 
-        # Verify that calls didn't overlap (race condition prevented)
-        # Pattern should be: start1, end1, start2, end2 (serialized, no overlap)
-        assert len(call_order) >= 4  # At least 2 start and 2 end
+        # Verify that calls were properly serialized (not concurrent/overlapped)
+        # With async with lock, pattern must be: start1, end1, start2, end2
+        assert len(call_order) >= 4, f"Expected >= 4 events, got {len(call_order)}: {call_order}"
 
-        # Verify temporal ordering: each call sequence completes before the next one starts
-        # Find indices of each event
-        try:
-            start1_idx = call_order.index('fetch_balance_start')
-            end1_idx = call_order.index('fetch_balance_end')
-            start2_idx = call_order.index('fetch_balance_start', start1_idx + 1)
-            end2_idx = call_order.index('fetch_balance_end', end1_idx + 1)
+        # Verify event counts match expectations
+        assert call_order.count('fetch_balance_start') == 2, (
+            f"Expected 2 fetch_balance_start events, got {call_order.count('fetch_balance_start')}"
+        )
+        assert call_order.count('fetch_balance_end') == 2, (
+            f"Expected 2 fetch_balance_end events, got {call_order.count('fetch_balance_end')}"
+        )
 
-            # Verify ordering: first call must complete before second starts
-            assert end1_idx < start2_idx, (
-                f"fetch_balance calls overlapped: "
-                f"call1 start at {start1_idx}, end at {end1_idx}, "
-                f"call2 start at {start2_idx}, end at {end2_idx}"
-            )
-        except ValueError:
-            # If we can't find all events, just ensure we have >= 4 events (lenient check)
-            pass
+        # Verify temporal ordering: first call must complete before second starts
+        # This proves the lock prevents concurrent execution (race condition fixed)
+        start1_idx = call_order.index('fetch_balance_start')
+        end1_idx = call_order.index('fetch_balance_end')
+        # Second start must come after first end (serialization guarantee)
+        start2_idx = None
+        for i in range(end1_idx + 1, len(call_order)):
+            if call_order[i] == 'fetch_balance_start':
+                start2_idx = i
+                break
+
+        assert start2_idx is not None, (
+            f"Second fetch_balance_start not found after first end. "
+            f"Call order: {call_order}"
+        )
+        assert end1_idx < start2_idx, (
+            f"Race condition detected: first call didn't complete before second started. "
+            f"Indices: start1={start1_idx}, end1={end1_idx}, start2={start2_idx}. "
+            f"Call order: {call_order}"
+        )
 
 
 # ── 4. PM cash_balance property 검증 ──────────────────────────
