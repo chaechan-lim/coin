@@ -2148,6 +2148,50 @@ class TestPendingExitRetry:
         # Cooldown set
         assert sym in surge_engine._cooldowns
 
+    @pytest.mark.asyncio
+    async def test_phase1_force_cleanup_does_not_reset_consecutive_losses(self, surge_engine, session):
+        """COIN-58: Phase-1 max-retry force-cleanup (exit_exec_price==0) must NOT
+        reset _consecutive_losses to 0 via the profit-branch in _finalize_exit_cleanup.
+        Pre-existing losses must be preserved (and incremented by the unknown-loss helper).
+        """
+        from engine.surge_engine import MAX_EXIT_RETRIES
+
+        sym = "ETH/USDT"
+        pos = SurgePositionState(
+            symbol=sym, direction="long",
+            entry_price=3500.0, quantity=0.01,
+            margin=10.0,
+            entry_time=datetime.now(timezone.utc) - timedelta(minutes=20),
+            peak_price=3500.0, trough_price=3500.0,
+        )
+        pos.pending_exit = True
+        pos.exit_retry_count = MAX_EXIT_RETRIES  # incremented to MAX+1 → force-cleanup
+        pos.exit_exec_price = 0.0               # Phase-1: no confirmed exchange order
+        pos.exit_pnl_usdt = 0.0
+        pos.exit_net_pnl_pct = 0.0
+        pos.exit_reason = "SL"
+        surge_engine._positions[sym] = pos
+        surge_engine._consecutive_losses = 2    # pre-existing losses to preserve
+
+        # DB row already zeroed (or irrelevant — no cash should be credited anyway)
+        db_pos = Position(
+            exchange="binance_surge", symbol=sym,
+            quantity=0, average_buy_price=0.0,
+            total_invested=0.0, direction="long",
+        )
+        session.add(db_pos)
+        await session.flush()
+
+        mock_factory = self._make_session_ctx(session)
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._retry_pending_exits()
+
+        # Position removed from memory
+        assert sym not in surge_engine._positions
+        # consecutive_losses must be >= 2 — incremented, never reset to 0
+        assert surge_engine._consecutive_losses >= 2
+
 
 # ── COIN-58: Zombie detection tests ──────────────────────────────
 
@@ -2184,7 +2228,7 @@ class TestZombieDetection:
 
     @pytest.mark.asyncio
     async def test_zombie_detected_and_cleaned(self, surge_engine, session):
-        """COIN-58: In-memory position not on exchange → zombie cleaned up."""
+        """COIN-58: In-memory position not on exchange → zombie cleaned up with warning event."""
         sym = "BTC/USDT"
         pos = self._make_pos(sym)
         surge_engine._positions[sym] = pos
@@ -2201,12 +2245,18 @@ class TestZombieDetection:
         await session.flush()
 
         mock_factory = self._make_session_ctx(session)
+        emit_mock = AsyncMock()
         with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
-            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+            with patch("engine.surge_engine.emit_event", emit_mock):
                 await surge_engine._detect_zombie_positions()
 
         # Zombie removed from memory
         assert sym not in surge_engine._positions
+        # Warning event emitted with correct severity and ZOMBIE in message
+        emit_mock.assert_called()
+        first_call = emit_mock.call_args_list[0]
+        assert first_call[0][0] == "warning"
+        assert "ZOMBIE" in first_call[0][2].upper()
 
     @pytest.mark.asyncio
     async def test_normal_position_not_flagged(self, surge_engine, session):

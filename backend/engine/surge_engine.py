@@ -946,7 +946,7 @@ class SurgeEngine:
                     pos.exit_reason = reason
                     pos.exit_exec_price = exec_price
                     pos.exit_exec_qty = exec_qty
-                    pos.exit_fee = fee
+                    pos.exit_fee = fee  # informational; net_pnl_pct already uses FEE_PCT
                     pos.exit_cost_return = cost_return
                     pos.exit_net_pnl_pct = net_pnl_pct
                     pos.exit_pnl_usdt = pnl_usdt
@@ -971,7 +971,7 @@ class SurgeEngine:
                 pos.exit_reason = reason
                 pos.exit_exec_price = exec_price
                 pos.exit_exec_qty = exec_qty
-                pos.exit_fee = fee
+                pos.exit_fee = fee  # informational; net_pnl_pct already uses FEE_PCT
                 pos.exit_net_pnl_pct = net_pnl_pct
                 pos.exit_pnl_usdt = pnl_usdt
                 pos.exit_cost_return = 0.0  # cash already credited above
@@ -1102,13 +1102,36 @@ class SurgeEngine:
                 },
             )
 
+    # ── COIN-58: Unknown-loss helper ─────────────────────────────
+
+    def _record_unknown_loss_and_cooldown(self, symbol: str) -> None:
+        """Conservatively record a loss and set cooldown when PnL is unknown.
+
+        Used for zombie cleanup and Phase-1 max-retry force-cleanup where no
+        exchange order was confirmed.  Increments loss counters and applies the
+        normal cooldown without touching _consecutive_sl_count (no SL reason
+        confirmed) and without resetting consecutive_losses via the profit branch.
+        """
+        self._daily_losses += 1
+        self._consecutive_losses += 1
+        if self._consecutive_losses >= 3:
+            self._pause_until = datetime.now(timezone.utc) + timedelta(minutes=30)
+            logger.warning("surge_consecutive_loss_pause",
+                           losses=self._consecutive_losses)
+
+        normal_cooldown_time = datetime.now(timezone.utc) + timedelta(seconds=self._cooldown_sec)
+        existing_cooldown = self._cooldowns.get(symbol)
+        if existing_cooldown is None or existing_cooldown < normal_cooldown_time:
+            self._cooldowns[symbol] = normal_cooldown_time
+
     # ── COIN-58: Pending exit retry ──────────────────────────────
 
     async def _retry_pending_exits(self) -> None:
         """Retry DB cleanup for positions where exchange succeeded but DB failed.
 
         Called at the start of each scan cycle.
-        After MAX_EXIT_RETRIES, force-cleans the position to prevent permanent zombies.
+        After MAX_EXIT_RETRIES retry attempts (when exit_retry_count exceeds
+        MAX_EXIT_RETRIES), force-cleans the position to prevent permanent zombies.
 
         Cash is applied OUTSIDE each async-with block to prevent double-crediting if
         session.__aexit__ raises after a successful commit.  _zero_db_position() returns
@@ -1147,14 +1170,22 @@ class SurgeEngine:
                     )
                     continue
 
-                # emit_close_event=False: suppress the normal "CLOSED" event so only
-                # the force-cleanup warning fires — prevents two events for one closure.
-                await self._finalize_exit_cleanup(
-                    symbol, pos,
-                    pos.exit_net_pnl_pct, pos.exit_pnl_usdt,
-                    pos.exit_reason,
-                    emit_close_event=False,
-                )
+                if pos.exit_exec_price > 0:
+                    # DB-failure path: exchange order was confirmed, PnL is known.
+                    # emit_close_event=False: suppress normal "CLOSED" so only the
+                    # force-cleanup warning fires below — prevents two events for one closure.
+                    await self._finalize_exit_cleanup(
+                        symbol, pos,
+                        pos.exit_net_pnl_pct, pos.exit_pnl_usdt,
+                        pos.exit_reason,
+                        emit_close_event=False,
+                    )
+                else:
+                    # Phase-1 max-retry: no exchange order confirmed, PnL unknown.
+                    # Do NOT call _finalize_exit_cleanup(pnl=0.0) — the 0.0 would
+                    # incorrectly trigger the profit-branch and reset consecutive_losses.
+                    del self._positions[symbol]
+                    self._record_unknown_loss_and_cooldown(symbol)
                 await emit_event(
                     "warning", "surge_trade",
                     f"[Surge] FORCE CLEANUP {symbol} (pending exit after {pos.exit_retry_count} retries)",
@@ -1286,19 +1317,8 @@ class SurgeEngine:
                 del self._positions[symbol]
 
                 # Update risk counters conservatively: treat every zombie as a loss.
-                # Loss amount is unknown (liquidation may have consumed the margin), but
-                # counting it keeps consecutive-loss pause and COIN-20 SL cooldown correct.
-                self._daily_losses += 1
-                self._consecutive_losses += 1
-                if self._consecutive_losses >= 3:
-                    self._pause_until = datetime.now(timezone.utc) + timedelta(minutes=30)
-                    logger.warning("surge_consecutive_loss_pause",
-                                   losses=self._consecutive_losses)
-
-                normal_cooldown_time = datetime.now(timezone.utc) + timedelta(seconds=self._cooldown_sec)
-                existing_cooldown = self._cooldowns.get(symbol)
-                if existing_cooldown is None or existing_cooldown < normal_cooldown_time:
-                    self._cooldowns[symbol] = normal_cooldown_time
+                # Loss amount is unknown (liquidation may have consumed the margin).
+                self._record_unknown_loss_and_cooldown(symbol)
 
     # ── Daily counter management ─────────────────────────────────
 
@@ -1326,8 +1346,8 @@ class SurgeEngine:
         """Initialize engine state — restore open positions from DB."""
         # Defer the first zombie scan by the full interval so that we don't call
         # fetch_positions during engine boot before any positions are likely open.
-        # _last_zombie_scan=0.0 in __init__ would otherwise trigger on the very first tick
-        # (asyncio loop time is always > ZOMBIE_SCAN_INTERVAL_SEC at startup).
+        # _last_zombie_scan=0.0 in __init__ would otherwise trigger on the very first tick.
+        # Both initialize() and _scan_cycle use asyncio.get_event_loop().time() — same clock.
         self._last_zombie_scan = asyncio.get_event_loop().time()
 
         try:
