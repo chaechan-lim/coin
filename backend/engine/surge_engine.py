@@ -162,6 +162,9 @@ class SurgeEngine:
         # COIN-58: zombie detection scan interval
         self._last_zombie_scan: float = 0.0
 
+        # COIN-63: cash lock to prevent race condition on concurrent entries/exits
+        self._cash_lock = asyncio.Lock()
+
         # Exchange name for DB isolation
         self._exchange_name = EXCHANGE_NAME
 
@@ -615,23 +618,30 @@ class SurgeEngine:
     ) -> None:
         """Execute a surge entry."""
         price = ticker["last"]
-        cash = self._futures_pm.cash_balance
 
-        # Position sizing with surge strength scaling
-        size_usdt = cash * self._position_pct
-        if score >= 0.70:
-            size_usdt *= 1.0
-        elif score >= 0.55:
-            size_usdt *= 0.75
-        else:
-            size_usdt *= 0.50
+        # COIN-63: acquire cash lock to atomically check and reserve balance,
+        # preventing concurrent entries from overdrawing shared cash.
+        async with self._cash_lock:
+            cash = self._futures_pm.cash_balance
 
-        if size_usdt < 5:
-            return
+            # Position sizing with surge strength scaling
+            size_usdt = cash * self._position_pct
+            if score >= 0.70:
+                size_usdt *= 1.0
+            elif score >= 0.55:
+                size_usdt *= 0.75
+            else:
+                size_usdt *= 0.50
 
-        margin = size_usdt
-        if margin > cash:
-            return
+            if size_usdt < 5:
+                return
+
+            margin = size_usdt
+            if margin > cash:
+                return
+
+            # Reserve cash upfront (refunded on order failure)
+            self._futures_pm.cash_balance -= margin
 
         qty = size_usdt * self._leverage / price
         now = datetime.now(timezone.utc)
@@ -713,8 +723,10 @@ class SurgeEngine:
                 db_pos.highest_price = exec_price
                 db_pos.max_hold_hours = self._max_hold_minutes / 60.0
 
-                # 선물 PM cash 조정 (commit 전에 반영 — 예외 시 rollback과 함께 원복)
-                self._futures_pm.cash_balance -= (actual_margin + fee)
+                # 선물 PM cash 조정: margin은 이미 cash_lock에서 예약됨.
+                # actual_margin+fee 와의 차이만 추가 반영 (commit 전에 반영 — 예외 시 아래 except에서 원복)
+                adjustment = actual_margin + fee - margin
+                self._futures_pm.cash_balance -= adjustment
 
                 await session.commit()
 
@@ -753,6 +765,8 @@ class SurgeEngine:
             )
 
         except Exception as e:
+            # Refund the pre-reserved margin on any failure
+            self._futures_pm.cash_balance += margin
             logger.error("surge_entry_failed", symbol=symbol, error=str(e), exc_info=True)
 
     # ── Exit logic ───────────────────────────────────────────────
@@ -922,7 +936,15 @@ class SurgeEngine:
                 fee = order.fee or (exec_price * exec_qty * FEE_PCT)
 
                 # Calculate PnL
-                if pos.direction == "long":
+                # COIN-63: guard against ZeroDivisionError when entry_price is 0
+                if pos.entry_price <= 0:
+                    logger.warning(
+                        "surge_exit_zero_entry_price",
+                        symbol=symbol,
+                        entry_price=pos.entry_price,
+                    )
+                    raw_pnl_pct = 0.0
+                elif pos.direction == "long":
                     raw_pnl_pct = (exec_price - pos.entry_price) / pos.entry_price * 100
                 else:
                     raw_pnl_pct = (pos.entry_price - exec_price) / pos.entry_price * 100
@@ -1130,7 +1152,7 @@ class SurgeEngine:
         """Retry DB cleanup for positions where exchange succeeded but DB failed.
 
         Called at the start of each scan cycle.
-        After MAX_EXIT_RETRIES retry attempts (when exit_retry_count exceeds
+        After MAX_EXIT_RETRIES retry attempts (when exit_retry_count reaches
         MAX_EXIT_RETRIES), force-cleans the position to prevent permanent zombies.
 
         Cash is applied OUTSIDE each async-with block to prevent double-crediting if
@@ -1145,7 +1167,7 @@ class SurgeEngine:
         ]
         for symbol, pos in pending:
             pos.exit_retry_count += 1
-            if pos.exit_retry_count > MAX_EXIT_RETRIES:
+            if pos.exit_retry_count >= MAX_EXIT_RETRIES:  # COIN-63: >= to trigger at exactly MAX_EXIT_RETRIES
                 # Force cleanup to prevent permanent zombie
                 logger.warning(
                     "surge_pending_exit_force_cleanup",
