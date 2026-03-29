@@ -2,12 +2,9 @@
 SurgeEngine 단위 테스트
 =======================
 """
-import asyncio
 import pytest
-import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone, timedelta
-from collections import deque
 
 from core.models import Position
 from core.enums import SignalType
@@ -15,7 +12,6 @@ from engine.surge_engine import (
     SurgeEngine,
     SurgePositionState,
     SymbolState,
-    EXCHANGE_NAME,
     FEE_PCT,
 )
 from config import SurgeTradingConfig
