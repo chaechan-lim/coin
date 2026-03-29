@@ -2452,26 +2452,15 @@ class TestCOIN63CashLock:
 
     @pytest.mark.asyncio
     async def test_cash_lock_prevents_overdraw_on_concurrent_entries(self, surge_engine, session):
-        """COIN-63: Concurrent _enter_position calls cannot overdraw cash.
+        """COIN-63: Two concurrent _enter_position calls cannot jointly overdraw cash.
 
-        With the lock, the second call sees reduced cash after the first
-        pre-reserves its share and cannot enter if margin > remaining cash.
+        position_pct=0.08, score>=0.70 → each entry wants cash*0.08 USDT.
+        cash=70 → each wants 5.6 USDT; together that is 11.2 USDT which would
+        overdraw if both read cash=70 simultaneously.  With the lock the second
+        call sees pre-reduced cash after the first pre-reserves its share.
         """
-        # Set cash low enough that only one entry fits but two would overdraw
-        # position_pct=0.08, score>=0.70 → size = cash * 0.08 * 1.0
-        # Two entries at 0.08 each = 0.16 total, but only 0.09 available
-        surge_engine._futures_pm.cash_balance = 60.0  # allows one 0.08*60=4.8 margin ... use higher
-        surge_engine._futures_pm.cash_balance = 100.0
-        # At cash=100, size = 100*0.08 = 8 USDT each; two entries = 16, but after first entry
-        # pre-reserves 8, second sees cash=92 → still can enter.
-        # To test overdraw prevention, set cash so only one can enter: cash=10 → size=0.8 < 5 (rejected)
-        # Better: cash=70 → size=5.6 per entry → first pre-reserves 5.6, cash drops to 64.4
-        # → second entry also gets 64.4*0.08=5.15, still enters.
-        # To test the lock actually serializes the check-and-reserve, we verify:
-        # that after a successful entry, cash is lower (not negative) — verify atomicity via mock.
-
-        initial_cash = 100.0
-        surge_engine._futures_pm.cash_balance = initial_cash
+        import asyncio as _asyncio
+        surge_engine._futures_pm.cash_balance = 70.0
 
         mock_factory = MagicMock()
         mock_ctx = MagicMock()
@@ -2481,12 +2470,19 @@ class TestCOIN63CashLock:
 
         with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
             with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
-                await surge_engine._enter_position(
-                    "BTC/USDT", "long", 0.75,
-                    {"last": 65000.0, "bid": 64990.0, "ask": 65010.0},
+                await _asyncio.gather(
+                    surge_engine._enter_position(
+                        "BTC/USDT", "long", 0.75,
+                        {"last": 65000.0, "bid": 64990.0, "ask": 65010.0},
+                    ),
+                    surge_engine._enter_position(
+                        "ETH/USDT", "long", 0.75,
+                        {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
+                    ),
+                    return_exceptions=True,
                 )
 
-        # Cash must not go negative
+        # Cash must never go negative regardless of concurrent interleaving
         assert surge_engine._futures_pm.cash_balance >= 0
 
     @pytest.mark.asyncio
@@ -2514,6 +2510,36 @@ class TestCOIN63CashLock:
 
         # Cash must be restored to initial value after failure
         assert surge_engine._futures_pm.cash_balance == initial_cash
+
+    @pytest.mark.asyncio
+    async def test_cash_fully_refunded_on_db_commit_failure(self, surge_engine, session):
+        """COIN-63: Cash is fully restored even when DB commit fails after adjustment.
+
+        Order creation succeeds (so cash_balance -= adjustment has been applied),
+        but session.commit() then raises.  The except block must refund
+        actual_margin + fee, not just the pre-reserved margin.
+        """
+        import pytest as _pytest
+        initial_cash = 300.0
+        surge_engine._futures_pm.cash_balance = initial_cash
+
+        # Simulate: order placed OK but DB write fails
+        session.commit = AsyncMock(side_effect=Exception("DB unavailable"))
+
+        mock_factory = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_ctx
+
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            await surge_engine._enter_position(
+                "ETH/USDT", "long", 0.75,
+                {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
+            )
+
+        # Cash must be fully restored (not just margin, but margin + adjustment)
+        assert surge_engine._futures_pm.cash_balance == _pytest.approx(initial_cash, abs=0.01)
 
     @pytest.mark.asyncio
     async def test_cash_lock_is_released_after_check(self, surge_engine, session):

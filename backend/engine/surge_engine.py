@@ -618,9 +618,19 @@ class SurgeEngine:
     ) -> None:
         """Execute a surge entry."""
         price = ticker["last"]
+        # COIN-63: initialise to 0 so the except block is always safe even if
+        # an exception fires before the lock block assigns a real value.
+        margin = 0.0
+        # Tracks the total amount actually removed from cash_balance so the
+        # except block can refund exactly what was taken (covers both the
+        # pre-reservation inside the lock AND any post-order adjustment).
+        _total_deducted = 0.0
 
         # COIN-63: acquire cash lock to atomically check and reserve balance,
         # preventing concurrent entries from overdrawing shared cash.
+        # NOTE: this lock only guards intra-SurgeEngine races; BinanceFuturesEngine
+        # shares the same _futures_pm and may modify cash_balance concurrently
+        # without holding this lock (tracked as follow-up scope item).
         async with self._cash_lock:
             cash = self._futures_pm.cash_balance
 
@@ -642,6 +652,7 @@ class SurgeEngine:
 
             # Reserve cash upfront (refunded on order failure)
             self._futures_pm.cash_balance -= margin
+            _total_deducted = margin
 
         qty = size_usdt * self._leverage / price
         now = datetime.now(timezone.utc)
@@ -727,6 +738,7 @@ class SurgeEngine:
                 # actual_margin+fee 와의 차이만 추가 반영 (commit 전에 반영 — 예외 시 아래 except에서 원복)
                 adjustment = actual_margin + fee - margin
                 self._futures_pm.cash_balance -= adjustment
+                _total_deducted = actual_margin + fee  # full amount now deducted
 
                 await session.commit()
 
@@ -765,8 +777,11 @@ class SurgeEngine:
             )
 
         except Exception as e:
-            # Refund the pre-reserved margin on any failure
-            self._futures_pm.cash_balance += margin
+            # Refund exactly what was removed from cash — covers both the
+            # pre-reservation (margin) and any adjustment applied after order
+            # success but before DB commit (actual_margin + fee).
+            if _total_deducted > 0:
+                self._futures_pm.cash_balance += _total_deducted
             logger.error("surge_entry_failed", symbol=symbol, error=str(e), exc_info=True)
 
     # ── Exit logic ───────────────────────────────────────────────
