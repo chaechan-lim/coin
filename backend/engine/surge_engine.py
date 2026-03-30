@@ -956,6 +956,7 @@ class SurgeEngine:
                     order_type="market",
                     direction=pos.direction,
                     leverage=self._leverage,
+                    margin_used=pos.margin,
                     entry_price=pos.entry_price,
                 )
 

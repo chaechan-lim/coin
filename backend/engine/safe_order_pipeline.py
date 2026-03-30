@@ -389,7 +389,7 @@ class SafeOrderPipeline:
             is_paper=(self._pm._is_paper),
             direction=request.direction.value,
             leverage=request.leverage,
-            margin_used=request.margin if request.action == "open" else None,
+            margin_used=request.margin,
             entry_price=request.entry_price if request.action == "close" else None,
             realized_pnl=realized_pnl,
             realized_pnl_pct=realized_pnl_pct,
