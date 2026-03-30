@@ -795,7 +795,8 @@ class SurgeEngine:
             # _order_committed guards against double-crediting: once the position
             # is persisted in the DB, the cost is real and must not be refunded.
             if not _order_committed and _total_deducted > 0:
-                self._futures_pm.cash_balance += _total_deducted
+                async with self._cash_lock:
+                    self._futures_pm.cash_balance += _total_deducted
 
     # ── Exit logic ───────────────────────────────────────────────
 

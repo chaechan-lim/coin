@@ -632,6 +632,59 @@ class TestEntryExecution:
 
         assert surge_engine._futures_pm.cash_balance < initial_cash
 
+    @pytest.mark.asyncio
+    async def test_entry_failure_refunds_cash_in_finally_block(self, surge_engine, session):
+        """COIN-68: _enter_position finally block must refund cash under _cash_lock when entry fails before commit."""
+        initial_cash = surge_engine._futures_pm.cash_balance
+
+        # Create a session that will raise an exception during commit
+        mock_factory = MagicMock()
+        mock_session_ctx = MagicMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_session_ctx
+
+        # Make session.commit() fail to simulate pre-commit failure
+        session.commit = AsyncMock(side_effect=Exception("DB connection lost during commit"))
+
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._enter_position(
+                    "BTC/USDT", "long", 0.75,
+                    {"last": 65000.0, "bid": 64990.0, "ask": 65010.0},
+                )
+
+        # Cash must be refunded in finally block (since _order_committed was never set to True)
+        assert surge_engine._futures_pm.cash_balance == initial_cash, \
+            "Cash should be refunded to initial level when entry fails before commit"
+
+    @pytest.mark.asyncio
+    async def test_entry_order_failure_refunds_cash_in_finally_block(self, surge_engine, session):
+        """COIN-68: When create_order fails, finally block must refund the pre-reserved cash."""
+        initial_cash = surge_engine._futures_pm.cash_balance
+
+        mock_factory = MagicMock()
+        mock_session_ctx = MagicMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_session_ctx
+
+        # Make order creation fail
+        surge_engine._order_manager.create_order = AsyncMock(
+            side_effect=Exception("Exchange connection error")
+        )
+
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                await surge_engine._enter_position(
+                    "ETH/USDT", "long", 0.75,
+                    {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
+                )
+
+        # Cash must be refunded since order never succeeded
+        assert surge_engine._futures_pm.cash_balance == initial_cash, \
+            "Cash should be refunded when order creation fails"
+
 
 # ── Test: Cash integration (futures PM 통합) ─────────────────────
 
