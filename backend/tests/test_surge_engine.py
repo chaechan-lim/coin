@@ -2689,7 +2689,6 @@ class TestCOIN63CashLock:
     @pytest.mark.asyncio
     async def test_cash_lock_is_released_after_check(self, surge_engine, session):
         """COIN-63: Cash lock is released after the check, allowing subsequent entries."""
-        import asyncio
         surge_engine._futures_pm.cash_balance = 300.0
 
         mock_factory = MagicMock()
