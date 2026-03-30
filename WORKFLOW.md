@@ -70,13 +70,13 @@ project:
       - "**/.env.*"
       - "backend/migrations/"
   skills:
-    test: "cd backend && .venv/bin/python -m pytest tests/ -x -q"
-    lint: "cd backend && .venv/bin/ruff check ."
-    format: "cd backend && .venv/bin/ruff format ."
-    typecheck: "cd backend && .venv/bin/mypy ."
+    test: "cd backend && /home/chans/coin/backend/.venv/bin/python -m pytest tests/ -x -q"
+    lint: "cd backend && /home/chans/coin/backend/.venv/bin/ruff check ."
+    format: "cd backend && /home/chans/coin/backend/.venv/bin/ruff format ."
+    typecheck: "cd backend && /home/chans/coin/backend/.venv/bin/mypy ."
   skills_dir: ".symphony/skills"
   hooks:
-    post_success: "cd backend && .venv/bin/python -m pytest tests/ -x -q"
+    post_success: "cd backend && /home/chans/coin/backend/.venv/bin/python -m pytest tests/ -x -q"
 ---
 
 # {{ issue.key }}: {{ issue.title }}
@@ -136,7 +136,7 @@ This is an unattended orchestration session. Never ask a human to perform follow
 
 ## Mandatory Project Rules (from CLAUDE.md)
 
-1. **Testing**: ALL code changes require tests. Run `cd backend && .venv/bin/python -m pytest tests/ -x -q` — must pass.
+1. **Testing**: ALL code changes require tests. Run `cd backend && /home/chans/coin/backend/.venv/bin/python -m pytest tests/ -x -q` — must pass.
 2. **Backtest**: Strategy parameter changes require 540-day backtest validation.
 3. **Documentation**: Update PROGRESS.md with every code change.
 4. **Exchange config**: Use `engine._ec.*` (EngineConfig), never hardcode exchange strings.
@@ -187,8 +187,8 @@ Use this structure:
 - [ ] No unintended side effects
 
 ### Validation
-- [ ] Tests: `cd backend && .venv/bin/python -m pytest tests/ -x -q`
-- [ ] Lint: `cd backend && .venv/bin/ruff check .`
+- [ ] Tests: `cd backend && /home/chans/coin/backend/.venv/bin/python -m pytest tests/ -x -q`
+- [ ] Lint: `cd backend && /home/chans/coin/backend/.venv/bin/ruff check .`
 
 ### Notes
 - HH:MM — Started work on COIN-XX
@@ -238,10 +238,10 @@ Use this structure:
 
 ## Step 3: Validate
 
-1. **Run the full test suite**: `cd backend && .venv/bin/python -m pytest tests/ -x -q`
+1. **Run the full test suite**: `cd backend && /home/chans/coin/backend/.venv/bin/python -m pytest tests/ -x -q`
    - ALL tests must pass. Zero tolerance for regressions.
    - Test count must not decrease (currently 789+).
-2. **Run lint**: `cd backend && .venv/bin/ruff check .`
+2. **Run lint**: `cd backend && /home/chans/coin/backend/.venv/bin/ruff check .`
 3. **Verify the fix** — confirm your changes actually address the issue, not just compile.
 4. **Check for side effects** — review related code for unintended impacts.
 5. **Update PROGRESS.md** if the change is significant.
