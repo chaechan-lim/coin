@@ -649,6 +649,7 @@ class TestEntryExecution:
 
         with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
             with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                # Exception is caught internally and logged; method does not propagate it
                 await surge_engine._enter_position(
                     "BTC/USDT", "long", 0.75,
                     {"last": 65000.0, "bid": 64990.0, "ask": 65010.0},
@@ -676,6 +677,7 @@ class TestEntryExecution:
 
         with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
             with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                # Exception is caught internally and logged; method does not propagate it
                 await surge_engine._enter_position(
                     "ETH/USDT", "long", 0.75,
                     {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
@@ -684,6 +686,41 @@ class TestEntryExecution:
         # Cash must be refunded since order never succeeded
         assert surge_engine._futures_pm.cash_balance == initial_cash, \
             "Cash should be refunded when order creation fails"
+
+    @pytest.mark.asyncio
+    async def test_entry_failure_acquires_cash_lock_for_refund(self, surge_engine, session):
+        """COIN-68: Verify that _cash_lock is actually acquired during finally block refund.
+
+        This test ensures that the lock mechanism is present and being used.
+        If someone accidentally removes the 'async with self._cash_lock:' line,
+        this test will fail, catching the regression.
+        """
+        initial_cash = surge_engine._futures_pm.cash_balance
+
+        # Create a session that will raise an exception during commit
+        mock_factory = MagicMock()
+        mock_session_ctx = MagicMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_session_ctx
+        session.commit = AsyncMock(side_effect=Exception("DB failure"))
+
+        # Mock the _cash_lock to track if __aenter__/__aexit__ are called
+        with patch.object(surge_engine, '_cash_lock', wraps=surge_engine._cash_lock) as mock_lock:
+            with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+                with patch("engine.surge_engine.emit_event", new_callable=AsyncMock):
+                    await surge_engine._enter_position(
+                        "BTC/USDT", "long", 0.75,
+                        {"last": 65000.0, "bid": 64990.0, "ask": 65010.0},
+                    )
+
+            # Verify lock was acquired (finally block called async with self._cash_lock:)
+            # RLock.__aenter__ is called when entering the context
+            assert mock_lock.__aenter__.called or mock_lock.__aexit__.called, \
+                "Lock must be acquired in finally block for atomic cash refund"
+
+        # Verify cash was actually refunded
+        assert surge_engine._futures_pm.cash_balance == initial_cash
 
 
 # ── Test: Cash integration (futures PM 통합) ─────────────────────
