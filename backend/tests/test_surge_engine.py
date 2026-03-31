@@ -2744,6 +2744,88 @@ class TestCOIN63CashLock:
         # Lock must be released (not held) after method returns
         assert not surge_engine._cash_lock.locked()
 
+    @pytest.mark.asyncio
+    async def test_cash_refunded_on_cancelled_error_before_commit(self, surge_engine, session):
+        """COIN-69: CancelledError before commit refunds pre-reserved cash.
+
+        asyncio.CancelledError is BaseException in Python 3.12 and bypasses
+        ``except Exception``.  The finally block must still refund cash when
+        _order_committed is False.
+        """
+        import asyncio as _asyncio
+
+        initial_cash = 300.0
+        surge_engine._futures_pm.cash_balance = initial_cash
+
+        # CancelledError during order creation (before commit)
+        surge_engine._order_manager.create_order = AsyncMock(
+            side_effect=_asyncio.CancelledError()
+        )
+
+        mock_factory = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_ctx
+
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            # CancelledError propagates through finally block
+            with pytest.raises(_asyncio.CancelledError):
+                await surge_engine._enter_position(
+                    "ETH/USDT", "long", 0.75,
+                    {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
+                )
+
+        # Cash must be fully restored — finally block refunds because
+        # _order_committed is False.
+        assert surge_engine._futures_pm.cash_balance == initial_cash
+        # Lock must be released even after CancelledError
+        assert not surge_engine._cash_lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_cash_not_refunded_on_cancelled_error_after_commit(self, surge_engine, session):
+        """COIN-69: CancelledError after commit does NOT refund cash.
+
+        Once session.commit() succeeds and _order_committed is True, the
+        finally block must NOT refund cash — the position exists in DB
+        and the cost is real.  This validates the _order_committed sentinel
+        guards against asyncio.CancelledError (BaseException).
+        """
+        import asyncio as _asyncio
+
+        initial_cash = 300.0
+        surge_engine._futures_pm.cash_balance = initial_cash
+
+        async def _ok_order(session, symbol, side, amount, price, **kwargs):
+            o = MagicMock()
+            o.executed_price = price
+            o.executed_quantity = amount
+            o.fee = price * amount * 0.0004
+            return o
+        surge_engine._order_manager.create_order = _ok_order
+
+        mock_factory = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_factory.return_value = mock_ctx
+
+        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+            # emit_event is called after successful commit; raise CancelledError there
+            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock,
+                       side_effect=_asyncio.CancelledError()):
+                with pytest.raises(_asyncio.CancelledError):
+                    await surge_engine._enter_position(
+                        "ETH/USDT", "long", 0.75,
+                        {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
+                    )
+
+        # Cash must NOT be restored — commit succeeded, position is in DB.
+        assert isinstance(surge_engine._futures_pm.cash_balance, float)
+        assert surge_engine._futures_pm.cash_balance < initial_cash
+        # Lock must be released even after CancelledError
+        assert not surge_engine._cash_lock.locked()
+
 
 class TestCOIN63ZeroDivision:
     """COIN-63 Bug 2: ZeroDivisionError guard when entry_price=0."""
