@@ -162,7 +162,12 @@ class SurgeEngine:
         # COIN-58: zombie detection scan interval
         self._last_zombie_scan: float = 0.0
 
-        # COIN-63: cash lock to prevent race condition on concurrent entries/exits
+        # COIN-63 + COIN-68: cash lock to prevent race condition on concurrent entries/exits
+        # NOTE: Using asyncio.Lock (not reentrant). Deadlock safety ensured by audit:
+        # _enter_position is only called from line 595 (_check_surge_scores) without
+        # holding _cash_lock. The finally block's acquisition is safe because no
+        # reentrant call path exists. If code changes to call _enter_position while
+        # holding _cash_lock, asyncio.RLock would be needed (but it doesn't exist in asyncio).
         self._cash_lock = asyncio.Lock()
 
         # Exchange name for DB isolation
@@ -795,7 +800,8 @@ class SurgeEngine:
             # _order_committed guards against double-crediting: once the position
             # is persisted in the DB, the cost is real and must not be refunded.
             if not _order_committed and _total_deducted > 0:
-                self._futures_pm.cash_balance += _total_deducted
+                async with self._cash_lock:
+                    self._futures_pm.cash_balance += _total_deducted
 
     # ── Exit logic ───────────────────────────────────────────────
 
