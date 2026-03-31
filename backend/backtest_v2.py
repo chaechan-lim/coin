@@ -72,6 +72,13 @@ ATR_LEVERAGE_TIERS: list[tuple[float, int]] = [
     (3.0, 5),
     (0.0, 5),
 ]
+# 타이트 ATR 레버리지 (base 3x 기준: ATR>5%→2x, ATR>10%→1x)
+ATR_LEVERAGE_TIERS_TIGHT: list[tuple[float, int]] = [
+    (10.0, 1),
+    (5.0, 2),
+    (3.0, 3),
+    (0.0, 3),
+]
 SPOT_1H_LOOKBACK = 400    # 현물 4전략 모드: 1h→4h 리샘플링용 ((30+59)×4 ≈ 356, +여유)
 
 COINS_DEFAULT = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT"]
@@ -101,6 +108,21 @@ TIER2_RSI_OVERSOLD = 25.0
 TIER2_MIN_ATR_PCT = 0.5
 TIER2_EXHAUSTION_PCT = 8.0
 TIER2_CONSECUTIVE_SL_COOLDOWN_CANDLES = 36  # 180min / 5min
+
+# ── US 마켓 오픈 시간 필터 ──
+# KST 22:00-00:00 (ET 9:00-11:00) — 캐스케이드 청산 집중 시간대
+US_OPEN_BLOCK_HOURS_KST = {22, 23}  # KST 기준
+
+# ── 캐스케이드 역추세 상수 ──
+CASCADE_DROP_THRESHOLD = 2.0      # 1시간 내 2% 이상 하락 시 역추세 롱
+CASCADE_LOOKBACK_CANDLES = 12     # 1시간 (5m × 12)
+CASCADE_SL_PCT = 1.5              # 타이트 SL
+CASCADE_TP_PCT = 2.5              # 반등 목표
+CASCADE_TRAIL_ACT_PCT = 1.0       # 트레일링 활성화
+CASCADE_TRAIL_STOP_PCT = 0.6      # 트레일링 스탑
+CASCADE_MAX_HOLD_CANDLES = 36     # 최대 3시간 보유
+CASCADE_POSITION_PCT = 0.03       # 작은 포지션 (자본의 3%)
+CASCADE_COOLDOWN_CANDLES = 36     # 3시간 쿨다운 (5m × 36)
 
 # COIN-52: 지표 계산 → services.indicators 통합 모듈 사용
 from services.indicators import compute_indicators, _RENAME_MAP  # noqa: F401 (테스트 호환)
@@ -699,6 +721,11 @@ class V2Backtester:
         self._use_tier2 = False
         self._tier2_coins: list[str] = []
         self._tier1_disabled = False
+        self._us_open_filter: str = "off"  # "off", "no_long", "no_entry", "half_size"
+        self._tight_leverage: bool = False  # 타이트 ATR 레버리지 스케일링
+        self._divergence_filter: bool = False  # 히든 다이버전스 진입 필터
+        self._divergence_lookback: int = 20   # 다이버전스 룩백 캔들 수
+        self._cascade_contrarian: bool = False  # 캐스케이드 역추세 진입
 
         # 레짐 감지 파라미터 저장 (_precompute_regimes에서도 사용)
         self._regime_confirm = regime_confirm
@@ -843,6 +870,9 @@ class V2Backtester:
         tier2_daily_trades = 0
         tier2_consecutive_sl: dict[str, int] = {}  # symbol → 연속 SL 횟수
         tier2_long_cooldowns: dict[str, int] = {}   # 연속 SL 장기 쿨다운 만료 idx
+
+        # 캐스케이드 역추세 상태
+        cascade_cooldowns: dict[str, int] = {}  # symbol → 쿨다운 만료 candle_idx
         last_reset_day = None
 
         print("  시뮬레이션 진행 중...")
@@ -918,7 +948,12 @@ class V2Backtester:
                 # ─── SL/TP/트레일링 체크 ───
                 if has_position:
                     pos = positions[sym]
-                    exit_reason = self._check_stops(pos, price)
+                    # 캐스케이드 포지션 max hold 체크
+                    exit_reason = None
+                    if pos.tier == "cascade" and candle_idx - pos.entered_idx >= CASCADE_MAX_HOLD_CANDLES:
+                        exit_reason = "cascade_max_hold"
+                    else:
+                        exit_reason = self._check_stops(pos, price)
                     if exit_reason:
                         pnl, fee = self._close_position(pos, price)
                         cash += pos.margin + pnl - fee
@@ -926,6 +961,8 @@ class V2Backtester:
                         trade = self._record_trade(pos, price, ts, exit_reason, pnl, regime)
                         trades.append(trade)
                         self._update_coin_stats(coin_stats, trade)
+                        if pos.tier == "cascade":
+                            cascade_cooldowns[sym] = candle_idx + CASCADE_COOLDOWN_CANDLES
                         del positions[sym]
                         last_exit_idx[sym] = candle_idx
                         has_position = False
@@ -1006,6 +1043,20 @@ class V2Backtester:
                     if decision.confidence < self._min_confidence:
                         continue
 
+                    # US 마켓 오픈 시간 필터
+                    if self._us_open_filter != "off":
+                        kst_hour = (ts + pd.Timedelta(hours=9)).hour
+                        if kst_hour in US_OPEN_BLOCK_HOURS_KST:
+                            if self._us_open_filter == "no_entry":
+                                continue
+                            elif self._us_open_filter == "no_long" and decision.direction == Direction.LONG:
+                                continue
+
+                    # 히든 다이버전스 필터
+                    if self._divergence_filter:
+                        if not self._detect_hidden_divergence(window_5m, decision.direction, self._divergence_lookback):
+                            continue
+
                     # SAR: 현재 포지션과 다른 방향 → 청산 후 신규 진입
                     if sym in positions and positions[sym].direction != decision.direction:
                         pos = positions[sym]
@@ -1036,11 +1087,16 @@ class V2Backtester:
                     # 레짐별 사이징 팩터 + ATR 레버리지 스케일링 (라이브 일치)
                     effective_leverage = self._leverage
                     if not self._use_spot:
-                        effective_leverage = self._calc_atr_leverage(atr, price, self._leverage)
+                        effective_leverage = self._calc_atr_leverage(atr, price, self._leverage, self._tight_leverage)
                     margin = self._calc_margin(
                         decision, cash, price, atr,
                         regime=coin_regime.regime if not self._use_spot else None,
                     )
+                    # US 오픈 half_size: 포지션 50% 축소
+                    if self._us_open_filter == "half_size":
+                        kst_hour = (ts + pd.Timedelta(hours=9)).hour
+                        if kst_hour in US_OPEN_BLOCK_HOURS_KST:
+                            margin *= 0.5
                     if margin < MIN_MARGIN_USDT:
                         continue
 
@@ -1084,6 +1140,81 @@ class V2Backtester:
                         entered_idx=candle_idx,
                         strategy_name=decision.strategy_name,
                     )
+
+            # ─── 캐스케이드 역추세 (US 오픈 급락 시 롱 진입) ───
+            if self._cascade_contrarian and candle_idx >= CASCADE_LOOKBACK_CANDLES:
+                kst_hour = (ts + pd.Timedelta(hours=9)).hour
+                if kst_hour in US_OPEN_BLOCK_HOURS_KST:
+                    for sym in tier1_coins:
+                        if sym in positions:
+                            continue
+                        # 캐스케이드 쿨다운
+                        if candle_idx < cascade_cooldowns.get(sym, 0):
+                            continue
+                        if sym not in all_data:
+                            continue
+                        df5m_c, _ = all_data[sym]
+                        if ts not in df5m_c.index:
+                            continue
+                        idx_loc_c = df5m_c.index.get_loc(ts)
+                        if isinstance(idx_loc_c, slice):
+                            idx_loc_c = idx_loc_c.start
+                        if idx_loc_c < CASCADE_LOOKBACK_CANDLES:
+                            continue
+                        # 1시간 전 대비 하락률 체크
+                        price_now = float(df5m_c.iloc[idx_loc_c]["close"])
+                        price_1h_ago = float(df5m_c.iloc[idx_loc_c - CASCADE_LOOKBACK_CANDLES]["close"])
+                        if price_1h_ago <= 0:
+                            continue
+                        drop_pct = (price_1h_ago - price_now) / price_1h_ago * 100
+                        if drop_pct < CASCADE_DROP_THRESHOLD:
+                            continue
+                        # RSI 과매도 근처인지 확인 (추가 필터)
+                        rsi_col = "rsi_14" if "rsi_14" in df5m_c.columns else None
+                        if rsi_col:
+                            rsi_val = float(df5m_c.iloc[idx_loc_c][rsi_col])
+                            if rsi_val > 45:  # RSI 45 이하에서만 역추세
+                                continue
+                        # 역추세 롱 진입
+                        c_margin = cash * CASCADE_POSITION_PCT
+                        if c_margin < MIN_MARGIN_USDT:
+                            continue
+                        c_quantity = (c_margin * self._leverage) / price_now
+                        c_fee = c_quantity * price_now * FUTURES_FEE
+                        cash -= c_margin + c_fee
+                        total_fees += c_fee
+                        # %-기반 SL/TP (레버리지 반영)
+                        sl_raw = CASCADE_SL_PCT / self._leverage / 100
+                        tp_raw = CASCADE_TP_PCT / self._leverage / 100
+                        trail_act_raw = CASCADE_TRAIL_ACT_PCT / self._leverage / 100
+                        trail_stop_dist = price_now * (CASCADE_TRAIL_STOP_PCT / self._leverage / 100)
+                        c_sl = price_now * (1 - sl_raw)
+                        c_tp = price_now * (1 + tp_raw)
+                        c_trail_act = price_now * (1 + trail_act_raw)
+                        positions[sym] = V2Position(
+                            symbol=sym,
+                            direction=Direction.LONG,
+                            quantity=c_quantity,
+                            entry_price=price_now,
+                            margin=c_margin,
+                            leverage=self._leverage,
+                            sl_price=c_sl,
+                            tp_price=c_tp,
+                            trail_activation_price=c_trail_act,
+                            trail_stop_atr=trail_stop_dist,
+                            extreme_price=price_now,
+                            atr_at_entry=1.0,
+                            entered_idx=candle_idx,
+                            strategy_name="cascade_contrarian",
+                            tier="cascade",
+                            entry_ts=ts,
+                        )
+                        if sym not in coin_stats:
+                            coin_stats[sym] = {
+                                "trades": 0, "wins": 0, "losses": 0, "pnl": 0.0,
+                                "long_wins": 0, "long_losses": 0,
+                                "short_wins": 0, "short_losses": 0,
+                            }
 
             # ─── Tier 2 서지 스캔 ───
             if self._use_tier2 and candle_idx >= TIER2_VOL_LOOKBACK:
@@ -1390,15 +1521,71 @@ class V2Backtester:
         return max(floor, min(adjusted, cap))
 
     @staticmethod
-    def _calc_atr_leverage(atr: float, close: float, max_leverage: int) -> int:
+    def _calc_atr_leverage(atr: float, close: float, max_leverage: int, tight: bool = False) -> int:
         """ATR% 기반 레버리지 스케일링 (라이브 tier1_manager와 동일)."""
         if close <= 0:
             return 1
         atr_pct = (atr / close) * 100
-        for threshold, lev in ATR_LEVERAGE_TIERS:
+        tiers = ATR_LEVERAGE_TIERS_TIGHT if tight else ATR_LEVERAGE_TIERS
+        for threshold, lev in tiers:
             if atr_pct > threshold:
                 return min(lev, max_leverage)
         return max_leverage
+
+    @staticmethod
+    def _detect_hidden_divergence(
+        df: pd.DataFrame, direction: Direction, lookback: int = 20, pivot_window: int = 5
+    ) -> bool:
+        """히든 다이버전스 감지.
+
+        Bullish hidden: 가격 higher low + RSI lower low → 상승 추세 지속
+        Bearish hidden: 가격 lower high + RSI higher high → 하락 추세 지속
+        """
+        if len(df) < lookback + pivot_window:
+            return False
+
+        closes = df["close"].iloc[-(lookback + pivot_window):].values
+        rsi_col = "rsi_14" if "rsi_14" in df.columns else "RSI_14"
+        if rsi_col not in df.columns:
+            return False
+        rsis = df[rsi_col].iloc[-(lookback + pivot_window):].values
+
+        # 피벗 포인트 (로컬 극값) 찾기
+        def find_swing_lows(arr, window=3):
+            lows = []
+            for i in range(window, len(arr) - window):
+                if arr[i] == min(arr[i - window:i + window + 1]):
+                    lows.append((i, arr[i]))
+            return lows
+
+        def find_swing_highs(arr, window=3):
+            highs = []
+            for i in range(window, len(arr) - window):
+                if arr[i] == max(arr[i - window:i + window + 1]):
+                    highs.append((i, arr[i]))
+            return highs
+
+        if direction == Direction.LONG:
+            # Bullish hidden: price higher low, RSI lower low
+            price_lows = find_swing_lows(closes)
+            rsi_lows = find_swing_lows(rsis)
+            if len(price_lows) >= 2 and len(rsi_lows) >= 2:
+                # 최근 2개 스윙 로우 비교
+                p_prev, p_last = price_lows[-2][1], price_lows[-1][1]
+                r_prev, r_last = rsi_lows[-2][1], rsi_lows[-1][1]
+                if p_last > p_prev and r_last < r_prev:
+                    return True
+        else:
+            # Bearish hidden: price lower high, RSI higher high
+            price_highs = find_swing_highs(closes)
+            rsi_highs = find_swing_highs(rsis)
+            if len(price_highs) >= 2 and len(rsi_highs) >= 2:
+                p_prev, p_last = price_highs[-2][1], price_highs[-1][1]
+                r_prev, r_last = rsi_highs[-2][1], rsi_highs[-1][1]
+                if p_last < p_prev and r_last > r_prev:
+                    return True
+
+        return False
 
     def _calc_sl_tp(
         self,
@@ -1930,6 +2117,18 @@ def parse_args():
                         help="Tier 2 스캔 코인 수 (기본 30)")
     parser.add_argument("--tier2-only", action="store_true",
                         help="Tier 1 비활성화, Tier 2만 실행")
+    # 시간대 필터
+    parser.add_argument("--us-open-filter", type=str, default="off",
+                        choices=["off", "no_long", "no_entry", "half_size"],
+                        help="US 마켓 오픈 시간(KST 22-23) 필터: no_long=롱차단, no_entry=전체차단, half_size=50%%축소")
+    parser.add_argument("--tight-leverage", action="store_true",
+                        help="타이트 ATR 레버리지 스케일링 (ATR>5%%→2x, ATR>10%%→1x)")
+    parser.add_argument("--divergence-filter", action="store_true",
+                        help="히든 다이버전스 진입 필터 (방향 확인)")
+    parser.add_argument("--divergence-lookback", type=int, default=20,
+                        help="다이버전스 감지 룩백 캔들 수 (기본 20, 5m×20=100분)")
+    parser.add_argument("--cascade-contrarian", action="store_true",
+                        help="US 오픈(KST 22-23) 급락 시 역추세 롱 진입")
     return parser.parse_args()
 
 
@@ -1963,6 +2162,23 @@ async def main():
         regime_adx_enter=args.regime_adx_enter,
         regime_adx_exit=args.regime_adx_exit,
     )
+
+    if args.us_open_filter != "off":
+        bt._us_open_filter = args.us_open_filter
+        print(f"  US 마켓 오픈 시간 필터: {args.us_open_filter} (KST 22-23)")
+
+    if args.tight_leverage:
+        bt._tight_leverage = True
+        print("  타이트 ATR 레버리지 스케일링: ATR>5%→2x, ATR>10%→1x")
+
+    if args.divergence_filter:
+        bt._divergence_filter = True
+        bt._divergence_lookback = args.divergence_lookback
+        print(f"  히든 다이버전스 진입 필터 활성화 (룩백 {args.divergence_lookback}캔들)")
+
+    if args.cascade_contrarian:
+        bt._cascade_contrarian = True
+        print("  캐스케이드 역추세 활성화 (US 오픈 1%+ 급락 시 롱)")
 
     if args.spot_strategies and args.v1_strategies:
         print("오류: --spot-strategies와 --v1-strategies는 동시 사용 불가")
