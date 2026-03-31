@@ -2751,16 +2751,24 @@ class TestCOIN63CashLock:
         asyncio.CancelledError is BaseException in Python 3.12 and bypasses
         ``except Exception``.  The finally block must still refund cash when
         _order_committed is False.
+
+        This test validates the precondition (cash was deducted inside the lock)
+        by checking cash balance at order-creation time.
         """
         import asyncio as _asyncio
 
         initial_cash = 300.0
         surge_engine._futures_pm.cash_balance = initial_cash
 
-        # CancelledError during order creation (before commit)
-        surge_engine._order_manager.create_order = AsyncMock(
-            side_effect=_asyncio.CancelledError()
-        )
+        # CancelledError during order creation, but verify cash was deducted first
+        async def _create_order_with_check(session, symbol, side, amount, price, **kwargs):
+            # At this point, cash_lock has released and cash should be deducted
+            current_cash = surge_engine._futures_pm.cash_balance
+            assert current_cash < initial_cash, \
+                "Precondition: cash must be deducted inside lock before order creation"
+            raise _asyncio.CancelledError()
+
+        surge_engine._order_manager.create_order = _create_order_with_check
 
         mock_factory = MagicMock()
         mock_ctx = MagicMock()
@@ -2777,7 +2785,8 @@ class TestCOIN63CashLock:
                 )
 
         # Cash must be fully restored — finally block refunds because
-        # _order_committed is False.
+        # _order_committed is False. This proves the refund mechanism works
+        # by verifying the final state matches initial (full restoration).
         assert surge_engine._futures_pm.cash_balance == initial_cash
         # Lock must be released even after CancelledError
         assert not surge_engine._cash_lock.locked()
@@ -2821,8 +2830,19 @@ class TestCOIN63CashLock:
                     )
 
         # Cash must NOT be restored — commit succeeded, position is in DB.
-        assert isinstance(surge_engine._futures_pm.cash_balance, float)
-        assert surge_engine._futures_pm.cash_balance < initial_cash
+        # Verify the exact amount: size_usdt * (1 + leverage * FEE_PCT)
+        position_pct = 0.08  # SurgeTradingConfig default
+        score = 0.75
+        scale = 1.0 if score >= 0.70 else (0.75 if score >= 0.55 else 0.50)
+        leverage = 3
+        price = 3500.0
+        size_usdt = initial_cash * position_pct * scale
+        qty = size_usdt * leverage / price
+        fee = price * qty * 0.0004
+        expected_total_cost = size_usdt + fee
+        expected_cash = initial_cash - expected_total_cost
+        assert surge_engine._futures_pm.cash_balance == pytest.approx(expected_cash, abs=0.01), \
+            f"Expected {expected_cash}, got {surge_engine._futures_pm.cash_balance}"
         # Lock must be released even after CancelledError
         assert not surge_engine._cash_lock.locked()
 
