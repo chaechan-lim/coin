@@ -2,9 +2,9 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: coin_trading
-      POSTGRES_USER: coin
-      POSTGRES_PASSWORD: coin
+      POSTGRES_DB: ${POSTGRES_DB:-coin_trading}
+      POSTGRES_USER: ${POSTGRES_USER:-coin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     command: >
       postgres
       -c shared_buffers=128MB
@@ -22,7 +22,7 @@ services:
         reservations:
           memory: 256M
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U coin -d coin_trading"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-coin} -d $${POSTGRES_DB:-coin_trading}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -49,7 +49,7 @@ services:
     env_file:
       - .env
     environment:
-      DB_URL: postgresql+asyncpg://coin:coin@postgres:5432/coin_trading
+      DB_URL: postgresql+asyncpg://${POSTGRES_USER:-coin}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-coin_trading}
       REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
