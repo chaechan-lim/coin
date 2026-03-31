@@ -23,7 +23,7 @@ agent:
     review: opus
     high: opus
     medium: sonnet
-    low: haiku
+    low: sonnet
   model_labels:
     complexity:high: opus
     complexity:medium: sonnet
