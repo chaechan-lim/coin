@@ -31,6 +31,7 @@ class PortfolioManager:
         self._realized_pnl = 0.0
         self._peak_already_adjusted = False
         self._sync_lock = asyncio.Lock()  # eval 중 sync 차단
+        self._cash_lock = asyncio.Lock()  # COIN-70: 교차 엔진 cash 레이스 방지
         self._last_total_value: float | None = None  # 스파이크 감지용
         self._snapshot_skip_count = 0  # 연속 스킵 → 실제 변화 강제 기록
         self._last_income_time_ms: int = 0  # Income API 페이지네이션 마커
@@ -43,6 +44,30 @@ class PortfolioManager:
     @cash_balance.setter
     def cash_balance(self, value: float) -> None:
         self._cash_balance = value
+
+    @property
+    def cash_lock(self) -> asyncio.Lock:
+        """COIN-70: 교차 엔진 공유 잠금 — 모든 cash_balance 변경은 이 잠금 하에 수행."""
+        return self._cash_lock
+
+    async def adjust_cash(self, delta: float, reason: str = "") -> float:
+        """cash_balance를 delta만큼 원자적으로 조정하고 새 잔고를 반환한다.
+
+        COIN-70: SurgeEngine과 BinanceFuturesEngine이 동일 PM 인스턴스를 공유하므로
+        모든 직접 cash_balance 증감은 이 메서드 또는 cash_lock을 명시적으로 획득해
+        수행해야 한다.
+        """
+        async with self._cash_lock:
+            self._cash_balance += delta
+            if reason:
+                logger.debug(
+                    "cash_adjusted",
+                    exchange=self._exchange_name,
+                    delta=round(delta, 4),
+                    cash_after=round(self._cash_balance, 2),
+                    reason=reason,
+                )
+            return self._cash_balance
 
     async def update_position_on_buy(
         self, session: AsyncSession, symbol: str, quantity: float, price: float, cost: float, fee: float,
@@ -93,7 +118,8 @@ class PortfolioManager:
             )
             session.add(position)
 
-        self._cash_balance -= (cost + fee)
+        async with self._cash_lock:
+            self._cash_balance -= (cost + fee)
         await session.flush()
 
         logger.info(
@@ -164,7 +190,8 @@ class PortfolioManager:
         position.last_trade_at = now
         position.last_sell_at = now
 
-        self._cash_balance += cash_returned
+        async with self._cash_lock:
+            self._cash_balance += cash_returned
         await session.flush()
 
         logger.info(
@@ -603,7 +630,8 @@ class PortfolioManager:
                     self._last_income_time_ms = rec_time
 
             if abs(total_applied) > 0.001:
-                self._cash_balance += total_applied
+                async with self._cash_lock:
+                    self._cash_balance += total_applied
                 logger.info(
                     "income_applied",
                     exchange=self._exchange_name,
@@ -1277,7 +1305,8 @@ class PortfolioManager:
                         cash_returned = invested + pnl_amount
                         # 강제청산 시 마진 전액 손실 가능 → 최소 0
                         cash_returned = max(cash_returned, 0.0)
-                        self._cash_balance += cash_returned
+                        async with self._cash_lock:
+                            self._cash_balance += cash_returned
                         self._realized_pnl += pnl_amount
                         logger.info(
                             "futures_sync_cash_returned",

@@ -332,7 +332,8 @@ class FuturesEngineV2:
     async def _resync_cash(self, new_cash: float) -> None:
         """BalanceGuard가 호출하는 내부 장부 재동기화 콜백."""
         old_cash = self._pm.cash_balance
-        self._pm._cash_balance = new_cash
+        async with self._pm.cash_lock:
+            self._pm.cash_balance = new_cash
         logger.warning(
             "v2_cash_resynced",
             old_cash=round(old_cash, 4),
@@ -910,10 +911,11 @@ class FuturesEngineV2:
             )
             session.add(order)
 
-            # 내부 cash에 마진+PnL 반환 — PM setter 사용 (private 직접 접근 대신)
+            # 내부 cash에 마진+PnL 반환 — COIN-70: PM 공유 cash_lock 하에 원자적으로 반환
             if invested > 0:
                 cash_returned = max(invested + pnl_amount, 0.0)
-                self._pm.cash_balance = self._pm.cash_balance + cash_returned
+                async with self._pm.cash_lock:
+                    self._pm.cash_balance += cash_returned
                 self._pm._realized_pnl += pnl_amount
                 logger.info(
                     "v2_external_close_cash_returned",

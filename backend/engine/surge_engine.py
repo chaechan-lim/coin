@@ -162,13 +162,11 @@ class SurgeEngine:
         # COIN-58: zombie detection scan interval
         self._last_zombie_scan: float = 0.0
 
-        # COIN-63 + COIN-68: cash lock to prevent race condition on concurrent entries/exits
-        # NOTE: Using asyncio.Lock (not reentrant). Deadlock safety ensured by audit:
-        # _enter_position is only called from line 595 (_check_surge_scores) without
-        # holding _cash_lock. The finally block's acquisition is safe because no
-        # reentrant call path exists. If code changes to call _enter_position while
-        # holding _cash_lock, asyncio.RLock would be needed (but it doesn't exist in asyncio).
-        self._cash_lock = asyncio.Lock()
+        # COIN-63 + COIN-68 + COIN-70: Use the PM's shared cash_lock so that SurgeEngine
+        # and BinanceFuturesEngine are serialised on the same lock when mutating
+        # the shared _futures_pm.cash_balance.  Deadlock safety: no reentrant call
+        # path exists (direct mutations only, no PM method calls inside the lock).
+        self._cash_lock = self._futures_pm.cash_lock
 
         # Exchange name for DB isolation
         self._exchange_name = EXCHANGE_NAME
@@ -635,11 +633,9 @@ class SurgeEngine:
         # emit_event) must NOT refund cash — the order is real.
         _order_committed = False
 
-        # COIN-63: acquire cash lock to atomically check and reserve balance,
-        # preventing concurrent entries from overdrawing shared cash.
-        # NOTE: this lock only guards intra-SurgeEngine races; BinanceFuturesEngine
-        # shares the same _futures_pm and may modify cash_balance concurrently
-        # without holding this lock (tracked as follow-up scope item).
+        # COIN-63 + COIN-70: acquire PM's shared cash_lock to atomically check and
+        # reserve balance.  BinanceFuturesEngine now also holds this same lock for
+        # every cash_balance mutation, so cross-engine races are eliminated.
         async with self._cash_lock:
             cash = self._futures_pm.cash_balance
 
@@ -747,8 +743,11 @@ class SurgeEngine:
 
                 # 선물 PM cash 조정: margin은 이미 cash_lock에서 예약됨.
                 # actual_margin+fee 와의 차이만 추가 반영 (commit 전에 반영 — 예외 시 아래 except에서 원복)
+                # COIN-70: lock required — this adjustment is outside the initial
+                # reservation block and must be protected against cross-engine races.
                 adjustment = actual_margin + fee - margin
-                self._futures_pm.cash_balance -= adjustment
+                async with self._cash_lock:
+                    self._futures_pm.cash_balance -= adjustment
                 _total_deducted = actual_margin + fee  # full amount now deducted
 
                 await session.commit()

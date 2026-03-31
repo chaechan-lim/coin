@@ -2,6 +2,7 @@
 SurgeEngine 단위 테스트
 =======================
 """
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone, timedelta
@@ -43,9 +44,15 @@ def mock_exchange():
 
 @pytest.fixture
 def mock_portfolio():
-    """Mock futures PM (shared cash)."""
+    """Mock futures PM (shared cash).
+
+    COIN-70: cash_lock must be a real asyncio.Lock so that SurgeEngine can use it
+    as self._cash_lock.  Tests that check .locked() or async-with behaviour depend
+    on a real lock, not a MagicMock attribute.
+    """
     pm = MagicMock()
     pm.cash_balance = 300.0  # 선물 전체 잔고
+    pm.cash_lock = asyncio.Lock()
     return pm
 
 
@@ -2545,10 +2552,12 @@ class TestCOIN63CashLock:
     """COIN-63 Bug 1: Cash lock prevents negative balance on concurrent entries."""
 
     def test_engine_has_cash_lock_attribute(self, surge_engine):
-        """SurgeEngine has _cash_lock (asyncio.Lock) attribute."""
-        import asyncio
+        """COIN-70: SurgeEngine._cash_lock is the PM's shared cash_lock (same object)."""
         assert hasattr(surge_engine, "_cash_lock")
         assert isinstance(surge_engine._cash_lock, asyncio.Lock)
+        # Must be the *same* lock instance as the futures PM so cross-engine
+        # mutations are serialised on a single lock.
+        assert surge_engine._cash_lock is surge_engine._futures_pm.cash_lock
 
     @pytest.mark.asyncio
     async def test_cash_lock_prevents_overdraw_on_concurrent_entries(self, surge_engine, session):
