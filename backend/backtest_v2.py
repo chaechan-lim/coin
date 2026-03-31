@@ -76,6 +76,32 @@ SPOT_1H_LOOKBACK = 400    # 현물 4전략 모드: 1h→4h 리샘플링용 ((30+
 
 COINS_DEFAULT = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT"]
 
+# ── Tier 2 상수 (config.py FuturesV2Config / tier2_scanner.py 라이브 기본값) ──
+TIER2_COINS_DEFAULT = [
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT",
+    "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
+    "NEAR/USDT", "SUI/USDT", "1000PEPE/USDT", "WIF/USDT", "ATOM/USDT",
+    "FIL/USDT", "ARB/USDT", "OP/USDT", "TRX/USDT", "AAVE/USDT",
+    "ETC/USDT", "APT/USDT", "IMX/USDT", "INJ/USDT", "SEI/USDT",
+    "FET/USDT", "RENDER/USDT", "TIA/USDT", "JUP/USDT", "PENDLE/USDT",
+]
+TIER2_SL_PCT = 3.5
+TIER2_TP_PCT = 4.5
+TIER2_TRAIL_ACTIVATION_PCT = 1.5
+TIER2_TRAIL_STOP_PCT = 1.0
+TIER2_MAX_CONCURRENT = 3
+TIER2_MAX_HOLD_CANDLES = 24    # 120min / 5min
+TIER2_COOLDOWN_CANDLES = 12    # 60min / 5min
+TIER2_DAILY_TRADE_LIMIT = 20
+TIER2_POSITION_PCT = 0.05
+TIER2_MIN_SCORE = 0.55
+TIER2_VOL_LOOKBACK = 60        # 5h of 5m candles (스캔 기준)
+TIER2_RSI_OVERBOUGHT = 75.0
+TIER2_RSI_OVERSOLD = 25.0
+TIER2_MIN_ATR_PCT = 0.5
+TIER2_EXHAUSTION_PCT = 8.0
+TIER2_CONSECUTIVE_SL_COOLDOWN_CANDLES = 36  # 180min / 5min
+
 # COIN-52: 지표 계산 → services.indicators 통합 모듈 사용
 from services.indicators import compute_indicators, _RENAME_MAP  # noqa: F401 (테스트 호환)
 
@@ -575,6 +601,19 @@ class V2Position:
     strategy_name: str
     trailing_active: bool = False
     trail_stop_price: float | None = None
+    tier: str = "tier1"
+    entry_ts: datetime | None = None
+
+
+@dataclass
+class Tier2Signal:
+    """Tier2 스캔 결과."""
+    symbol: str
+    score: float
+    direction: Direction
+    vol_ratio: float
+    price_chg_pct: float
+    rsi: float
 
 
 @dataclass
@@ -657,6 +696,9 @@ class V2Backtester:
         self._v1_adapter: V1StrategyAdapter | None = None
         self._use_spot = False
         self._spot_adapter: SpotStrategyAdapter | None = None
+        self._use_tier2 = False
+        self._tier2_coins: list[str] = []
+        self._tier1_disabled = False
 
         # 레짐 감지 파라미터 저장 (_precompute_regimes에서도 사용)
         self._regime_confirm = regime_confirm
@@ -684,6 +726,11 @@ class V2Backtester:
         self._spot_adapter = SpotStrategyAdapter(strategies, SPOT_WEIGHTS)
         self._use_spot = True
 
+    def enable_tier2(self, tier2_coins: list[str] | None = None) -> None:
+        """Tier 2 서지 스캔 활성화."""
+        self._use_tier2 = True
+        self._tier2_coins = tier2_coins or TIER2_COINS_DEFAULT
+
     async def prefetch(self, days: int) -> dict[str, tuple[pd.DataFrame, pd.DataFrame]]:
         """모든 코인의 5m + 1h 데이터 프리페치."""
         result = {}
@@ -700,6 +747,20 @@ class V2Backtester:
                 result[symbol] = (df_5m, df_1h)
             except Exception as e:
                 print(f"    {symbol} 실패: {e}")
+
+        # Tier2 전용 코인: 5m만 (1h 불필요)
+        if self._use_tier2:
+            tier2_only = [c for c in self._tier2_coins if c not in result]
+            if tier2_only:
+                print(f"\n  Tier2 전용 코인 ({len(tier2_only)}개) 로딩...")
+            for symbol in tier2_only:
+                try:
+                    df_5m_raw = await fetch_ohlcv_cached(self._exchange, symbol, "5m", days)
+                    df_5m = compute_v2_indicators(df_5m_raw)
+                    print(f"    {symbol} 5m: {len(df_5m):,}캔들")
+                    result[symbol] = (df_5m, pd.DataFrame())
+                except Exception as e:
+                    print(f"    {symbol} 실패: {e}")
         return result
 
     async def run(self, days: int) -> V2BacktestResult:
@@ -714,6 +775,10 @@ class V2Backtester:
         if self._use_spot:
             print("  현물 전략: cis_momentum(0.42), bnf_deviation(0.25), donchian_channel(0.23), larry_williams(0.10)")
             print(f"  SL/TP: {SPOT_SL_ATR}/{SPOT_TP_ATR} ATR | Trail: {SPOT_TRAIL_ACTIVATION_ATR}/{SPOT_TRAIL_STOP_ATR} ATR")
+        if self._use_tier2:
+            print(f"  Tier2: {len(self._tier2_coins)}코인 | SL{TIER2_SL_PCT}%/TP{TIER2_TP_PCT}% | "
+                  f"Trail {TIER2_TRAIL_ACTIVATION_PCT}%/{TIER2_TRAIL_STOP_PCT}% | "
+                  f"Max{TIER2_MAX_CONCURRENT}동시 | CD{TIER2_COOLDOWN_CANDLES*5}분")
         print(f"{'='*60}")
 
         all_data = await self.prefetch(days)
@@ -737,10 +802,11 @@ class V2Backtester:
 
         print(f"\n  타임라인: {len(all_ts):,}개 5m 캔들 ({all_ts[0].date()} ~ {all_ts[-1].date()})")
 
-        # 1h 레짐 사전 계산 (코인별)
+        # 1h 레짐 사전 계산 (코인별, Tier2 전용 코인은 1h 없으므로 건너뜀)
         regimes_per_coin: dict[str, list[tuple[datetime, RegimeState]]] = {}
         for sym, (_, df_1h) in all_data.items():
-            regimes_per_coin[sym] = self._precompute_regimes(df_1h)
+            if len(df_1h) > 0:
+                regimes_per_coin[sym] = self._precompute_regimes(df_1h)
         # BTC 기준 글로벌 레짐 (에쿼티 보고용)
         btc_key = "BTC/USDT" if "BTC/USDT" in all_data else list(all_data.keys())[0]
         regimes_by_hour = regimes_per_coin[btc_key]
@@ -771,6 +837,13 @@ class V2Backtester:
         last_prices: dict[str, float] = {}
 
         candles_per_8h = 8 * 12  # 5m 캔들 96개 = 8h
+
+        # Tier 2 상태
+        tier2_cooldowns: dict[str, int] = {}  # symbol → 쿨다운 만료 candle_idx
+        tier2_daily_trades = 0
+        tier2_consecutive_sl: dict[str, int] = {}  # symbol → 연속 SL 횟수
+        tier2_long_cooldowns: dict[str, int] = {}   # 연속 SL 장기 쿨다운 만료 idx
+        last_reset_day = None
 
         print("  시뮬레이션 진행 중...")
 
@@ -817,8 +890,18 @@ class V2Backtester:
                             cash -= funding
                             total_funding += funding
 
-            # ─── 코인별 평가 ───
-            for sym in all_data:
+            # ─── 일일 Tier2 카운터 리셋 ───
+            if self._use_tier2:
+                day = ts.date() if hasattr(ts, 'date') else None
+                if day and day != last_reset_day:
+                    tier2_daily_trades = 0
+                    last_reset_day = day
+
+            # ─── Tier1 코인별 평가 ───
+            tier1_coins = [] if self._tier1_disabled else self._coins
+            for sym in tier1_coins:
+                if sym not in all_data:
+                    continue
                 df5m, df1h = all_data[sym]
                 if ts not in df5m.index:
                     continue
@@ -1001,6 +1084,136 @@ class V2Backtester:
                         entered_idx=candle_idx,
                         strategy_name=decision.strategy_name,
                     )
+
+            # ─── Tier 2 서지 스캔 ───
+            if self._use_tier2 and candle_idx >= TIER2_VOL_LOOKBACK:
+                # 1. Exit 체크 — 모든 Tier2 포지션
+                for sym in list(positions.keys()):
+                    pos = positions[sym]
+                    if pos.tier != "tier2":
+                        continue
+                    if sym not in all_data:
+                        continue
+                    df5m_t2, _ = all_data[sym]
+                    if ts not in df5m_t2.index:
+                        continue
+                    t2_price = float(df5m_t2.loc[ts, "close"])
+
+                    # Max hold time
+                    exit_reason_t2 = None
+                    if candle_idx - pos.entered_idx >= TIER2_MAX_HOLD_CANDLES:
+                        exit_reason_t2 = "t2_max_hold"
+                    else:
+                        exit_reason_t2 = self._check_tier2_stops(pos, t2_price)
+
+                    if exit_reason_t2:
+                        pnl, fee = self._close_position(pos, t2_price)
+                        cash += pos.margin + pnl - fee
+                        total_fees += fee
+                        trade = self._record_trade(pos, t2_price, ts, exit_reason_t2, pnl, regime)
+                        trades.append(trade)
+                        self._update_coin_stats(coin_stats, trade)
+                        del positions[sym]
+                        tier2_cooldowns[sym] = candle_idx + TIER2_COOLDOWN_CANDLES
+                        # 연속 SL 쿨다운
+                        if exit_reason_t2 == "t2_stop_loss":
+                            cnt = tier2_consecutive_sl.get(sym, 0) + 1
+                            tier2_consecutive_sl[sym] = cnt
+                            if cnt >= 2:
+                                tier2_long_cooldowns[sym] = candle_idx + TIER2_CONSECUTIVE_SL_COOLDOWN_CANDLES
+                        else:
+                            tier2_consecutive_sl.pop(sym, None)
+                    else:
+                        self._update_tier2_trailing(pos, t2_price)
+
+                # 2. 진입 — RANGING 차단
+                regime_blocks_tier2 = regime and regime.regime == Regime.RANGING
+                tier2_count = sum(1 for p in positions.values() if p.tier == "tier2")
+                if (not regime_blocks_tier2
+                        and tier2_count < TIER2_MAX_CONCURRENT
+                        and tier2_daily_trades < TIER2_DAILY_TRADE_LIMIT):
+                    candidates: list[Tier2Signal] = []
+                    for sym in self._tier2_coins:
+                        if sym not in all_data:
+                            continue
+                        if sym in positions:
+                            continue
+                        # 쿨다운 체크 (일반 + 장기)
+                        if candle_idx < tier2_cooldowns.get(sym, 0):
+                            continue
+                        if candle_idx < tier2_long_cooldowns.get(sym, 0):
+                            continue
+                        df5m_t2, _ = all_data[sym]
+                        if ts not in df5m_t2.index:
+                            continue
+                        idx_loc = df5m_t2.index.get_loc(ts)
+                        if isinstance(idx_loc, slice):
+                            idx_loc = idx_loc.start
+                        if idx_loc < TIER2_VOL_LOOKBACK:
+                            continue
+                        signal = self._tier2_scan(df5m_t2, idx_loc)
+                        if signal:
+                            signal.symbol = sym
+                            candidates.append(signal)
+
+                    candidates.sort(key=lambda s: s.score, reverse=True)
+                    slots = TIER2_MAX_CONCURRENT - tier2_count
+                    for sig in candidates[:slots]:
+                        if tier2_daily_trades >= TIER2_DAILY_TRADE_LIMIT:
+                            break
+                        t2_sym = sig.symbol
+                        df5m_t2, _ = all_data[t2_sym]
+                        t2_price = float(df5m_t2.loc[ts, "close"])
+                        if t2_price <= 0:
+                            continue
+
+                        t2_margin = cash * TIER2_POSITION_PCT
+                        if t2_margin < MIN_MARGIN_USDT:
+                            continue
+                        t2_quantity = (t2_margin * self._leverage) / t2_price
+                        t2_fee = t2_quantity * t2_price * FUTURES_FEE
+                        cash -= t2_margin + t2_fee
+                        total_fees += t2_fee
+
+                        # %-기반 SL/TP → 절대 가격 (레버리지 반영)
+                        sl_raw = TIER2_SL_PCT / self._leverage / 100
+                        tp_raw = TIER2_TP_PCT / self._leverage / 100
+                        trail_act_raw = TIER2_TRAIL_ACTIVATION_PCT / self._leverage / 100
+                        trail_stop_dist = t2_price * (TIER2_TRAIL_STOP_PCT / self._leverage / 100)
+                        if sig.direction == Direction.LONG:
+                            t2_sl = t2_price * (1 - sl_raw)
+                            t2_tp = t2_price * (1 + tp_raw)
+                            t2_trail_act = t2_price * (1 + trail_act_raw)
+                        else:
+                            t2_sl = t2_price * (1 + sl_raw)
+                            t2_tp = t2_price * (1 - tp_raw)
+                            t2_trail_act = t2_price * (1 - trail_act_raw)
+
+                        positions[t2_sym] = V2Position(
+                            symbol=t2_sym,
+                            direction=sig.direction,
+                            quantity=t2_quantity,
+                            entry_price=t2_price,
+                            margin=t2_margin,
+                            leverage=self._leverage,
+                            sl_price=t2_sl,
+                            tp_price=t2_tp,
+                            trail_activation_price=t2_trail_act,
+                            trail_stop_atr=trail_stop_dist,  # 절대 거리 (Tier2)
+                            extreme_price=t2_price,
+                            atr_at_entry=1.0,  # Tier2는 %-기반, atr_at_entry 미사용
+                            entered_idx=candle_idx,
+                            strategy_name="tier2_surge",
+                            tier="tier2",
+                            entry_ts=ts,
+                        )
+                        tier2_daily_trades += 1
+                        if t2_sym not in coin_stats:
+                            coin_stats[t2_sym] = {
+                                "trades": 0, "wins": 0, "losses": 0, "pnl": 0.0,
+                                "long_wins": 0, "long_losses": 0,
+                                "short_wins": 0, "short_losses": 0,
+                            }
 
             # 10% 진행 출력
             if candle_idx > 0 and candle_idx % (len(all_ts) // 10 + 1) == 0:
@@ -1278,7 +1491,7 @@ class V2Backtester:
             margin=pos.margin,
             pnl=pnl,
             pnl_pct=pnl_pct,
-            entry_time=exit_time,  # 근사치 (실제 entry_time 추적하려면 추가 필드 필요)
+            entry_time=pos.entry_ts if pos.entry_ts else exit_time,
             exit_time=exit_time,
             exit_reason=exit_reason,
             strategy_name=pos.strategy_name,
@@ -1304,6 +1517,149 @@ class V2Backtester:
                 s["long_losses"] += 1
             else:
                 s["short_losses"] += 1
+
+    # ── Tier 2 서지 스캔 헬퍼 ──────────────────────────────────
+
+    @staticmethod
+    def _tier2_calc_rsi(closes: list[float], period: int = 14) -> float:
+        """간단 RSI 계산 (tier2_scanner와 동일)."""
+        if len(closes) < period + 1:
+            return 50.0
+        deltas = [closes[i] - closes[i - 1] for i in range(len(closes) - period, len(closes))]
+        gains = sum(d for d in deltas if d > 0) / period
+        losses = sum(-d for d in deltas if d < 0) / period
+        if losses == 0:
+            return 100.0
+        rs = gains / losses
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    @staticmethod
+    def _tier2_calc_atr_pct(highs: list[float], lows: list[float], closes: list[float],
+                            period: int = 14) -> float:
+        """ATR% 계산 (DataFrame 기반)."""
+        n = len(closes)
+        if n < period + 1:
+            return 0.0
+        tr_sum = 0.0
+        for i in range(n - period, n):
+            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+            tr_sum += tr
+        atr = tr_sum / period
+        return (atr / closes[-1] * 100) if closes[-1] > 0 else 0.0
+
+    def _tier2_scan(self, df5m: pd.DataFrame, idx: int) -> Tier2Signal | None:
+        """5m 캔들 데이터에서 서지 시그널 스캔 (tier2_scanner._scan_symbol 로직)."""
+        start = max(0, idx - TIER2_VOL_LOOKBACK + 1)
+        window = df5m.iloc[start:idx + 1]
+        if len(window) < 20:
+            return None
+
+        volumes = window["volume"].tolist()
+        closes = window["close"].tolist()
+        highs = window["high"].tolist()
+        lows = window["low"].tolist()
+
+        # 거래량 비율
+        vol_avg = sum(volumes[:-1]) / max(len(volumes) - 1, 1)
+        vol_last = volumes[-1]
+        vol_ratio = vol_last / vol_avg if vol_avg > 0 else 0.0
+
+        # 가격 변동 (12캔들 = 60분)
+        lookback = min(12, len(closes) - 1)
+        price_first = closes[-(lookback + 1)]
+        price_last = closes[-1]
+        price_chg = (price_last - price_first) / price_first * 100 if price_first > 0 else 0.0
+
+        # ATR% 필터
+        atr_pct = self._tier2_calc_atr_pct(highs, lows, closes)
+        if 0 < atr_pct < TIER2_MIN_ATR_PCT:
+            return None
+
+        # 소진(exhaustion) 필터: 30분(6캔들) 변동
+        lookback_30m = min(6, len(closes) - 1)
+        if lookback_30m > 0:
+            price_30m_ago = closes[-(lookback_30m + 1)]
+            chg_30m = (price_last - price_30m_ago) / price_30m_ago * 100 if price_30m_ago > 0 else 0.0
+            if abs(chg_30m) > TIER2_EXHAUSTION_PCT:
+                return None
+
+        # RSI
+        rsi = self._tier2_calc_rsi(closes)
+
+        # 가속도
+        accel = 0.0
+        if len(volumes) >= 3 and vol_avg > 0:
+            ratio_now = volumes[-1] / vol_avg
+            ratio_prev = volumes[-3] / vol_avg
+            accel = ratio_now - ratio_prev
+
+        # 정규화 점수
+        vol_signal = min(vol_ratio / 10.0, 1.0)
+        price_signal = min(abs(price_chg) / 5.0, 1.0)
+        accel_signal = max(0, min(accel / 3.0, 1.0))
+        score = 0.40 * vol_signal + 0.35 * price_signal + 0.25 * accel_signal
+
+        if score < TIER2_MIN_SCORE:
+            return None
+
+        direction = Direction.LONG if price_chg > 0 else Direction.SHORT
+
+        # RSI 필터
+        if direction == Direction.LONG and rsi > TIER2_RSI_OVERBOUGHT:
+            return None
+        if direction == Direction.SHORT and rsi < TIER2_RSI_OVERSOLD:
+            return None
+
+        return Tier2Signal(
+            symbol="",  # 호출자에서 설정
+            score=score,
+            direction=direction,
+            vol_ratio=vol_ratio,
+            price_chg_pct=price_chg,
+            rsi=rsi,
+        )
+
+    def _check_tier2_stops(self, pos: V2Position, price: float) -> str | None:
+        """Tier2 %-기반 SL/TP 체크 (라이브 tier2_scanner._check_exits와 동일)."""
+        entry = pos.entry_price
+        if entry <= 0:
+            return None
+        if pos.direction == Direction.LONG:
+            pnl_pct = (price - entry) / entry * 100
+        else:
+            pnl_pct = (entry - price) / entry * 100
+        pnl_pct *= pos.leverage
+
+        if pnl_pct <= -TIER2_SL_PCT:
+            return "t2_stop_loss"
+        if pnl_pct >= TIER2_TP_PCT:
+            return "t2_take_profit"
+        # 트레일링
+        if pos.trailing_active and pos.trail_stop_price is not None:
+            if pos.direction == Direction.LONG and price <= pos.trail_stop_price:
+                return "t2_trailing_stop"
+            if pos.direction == Direction.SHORT and price >= pos.trail_stop_price:
+                return "t2_trailing_stop"
+        return None
+
+    @staticmethod
+    def _update_tier2_trailing(pos: V2Position, price: float) -> None:
+        """Tier2 트레일링 스탑 업데이트 (%-기반)."""
+        if pos.direction == Direction.LONG:
+            if price > pos.extreme_price:
+                pos.extreme_price = price
+            if not pos.trailing_active and price >= pos.trail_activation_price:
+                pos.trailing_active = True
+            if pos.trailing_active:
+                # trail_stop_atr에는 절대 거리가 저장됨 (Tier2)
+                pos.trail_stop_price = pos.extreme_price - pos.trail_stop_atr
+        else:
+            if price < pos.extreme_price:
+                pos.extreme_price = price
+            if not pos.trailing_active and price <= pos.trail_activation_price:
+                pos.trailing_active = True
+            if pos.trailing_active:
+                pos.trail_stop_price = pos.extreme_price + pos.trail_stop_atr
 
     # ── Walk-Forward ──────────────────────────────────────────
 
@@ -1567,6 +1923,13 @@ def parse_args():
                         help="추세 진입 ADX 임계값 (기본 27)")
     parser.add_argument("--regime-adx-exit", type=float, default=23.0,
                         help="추세 이탈 ADX 임계값 (기본 23)")
+    # Tier 2 서지
+    parser.add_argument("--tier2", action="store_true",
+                        help="Tier 2 서지 스캔 활성화 (30코인 볼륨 급등 감지)")
+    parser.add_argument("--tier2-coins", type=int, default=30,
+                        help="Tier 2 스캔 코인 수 (기본 30)")
+    parser.add_argument("--tier2-only", action="store_true",
+                        help="Tier 1 비활성화, Tier 2만 실행")
     return parser.parse_args()
 
 
@@ -1612,6 +1975,13 @@ async def main():
     if args.spot_strategies:
         bt.enable_spot_strategies()
         print("  현물 4전략 SignalCombiner 가중 투표 모드 활성화")
+
+    if args.tier2 or args.tier2_only:
+        tier2_symbols = TIER2_COINS_DEFAULT[:args.tier2_coins]
+        bt.enable_tier2(tier2_coins=tier2_symbols)
+        if args.tier2_only:
+            bt._tier1_disabled = True
+        print(f"  Tier 2 서지 스캔 활성화 ({len(tier2_symbols)}코인)")
 
     try:
         if args.walk_forward:

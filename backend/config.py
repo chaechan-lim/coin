@@ -263,7 +263,7 @@ class FuturesV2Config(BaseSettings):
     tier1_max_position_pct: float = 0.15
     tier1_eval_interval_sec: int = 60
     tier1_base_risk_pct: float = 0.02
-    tier1_min_confidence: float = 0.4
+    tier1_min_confidence: float = 0.5
     tier1_cooldown_seconds: int = 93600  # 26h (백테스트 최적)
 
     # Regime evaluator 파라미터 — backtest_v2 최적 (COIN-46)
@@ -298,7 +298,7 @@ class FuturesV2Config(BaseSettings):
     min_sell_active_weight: float = 0.20          # 숏 진입 시 최소 참여 가중치 (2전략 합의)
 
     # Tier 2 (COIN-23: 필터 추가 + 파라미터 조정)
-    tier2_enabled: bool = True
+    tier2_enabled: bool = False
     tier2_max_concurrent: int = 3          # 5 → 3 (노이즈 거래 제거)
     tier2_max_position_pct: float = 0.05
     tier2_max_hold_minutes: int = 120
