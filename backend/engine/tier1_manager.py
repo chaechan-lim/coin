@@ -599,6 +599,26 @@ class Tier1Manager:
                 was_executed=False,
             )
 
+        # US 마켓 오픈 시간 필터 (KST 22-23, no_entry)
+        now_utc = datetime.now(timezone.utc)
+        kst_hour = (now_utc.hour + 9) % 24
+        if kst_hour in (22, 23):
+            self._log_direction_decision(
+                session,
+                symbol,
+                decision,
+                regime=regime,
+                was_executed=False,
+            )
+            logger.info(
+                "us_open_no_entry",
+                symbol=symbol,
+                kst_hour=kst_hour,
+                direction=decision.direction.value if decision.direction else None,
+                confidence=decision.confidence,
+            )
+            return "us_open_blocked"
+
         # 최소 신뢰도 필터
         if decision.confidence < self._min_confidence:
             self._log_direction_decision(
