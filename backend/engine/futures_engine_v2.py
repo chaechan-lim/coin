@@ -200,6 +200,8 @@ class FuturesEngineV2:
             cross_exchange_checker=self._check_cross_exchange_position,
             # COIN-48: WS/eval 동시 청산 방지 뮤텍스 공유
             close_lock=self._close_lock,
+            # 전략 평가 쓰로틀: 백테스트 최적값과 일치 (COIN-50 보완)
+            strategy_eval_interval_sec=v2_cfg.tier1_regime_eval_interval_sec,
         )
 
         self._tier2 = Tier2Scanner(
@@ -1243,6 +1245,8 @@ class FuturesEngineV2:
         """RegimeDetector 레짐 전환 확정 시 Tier1 즉시 재평가 트리거 (COIN-50)."""
         logger.info("v2_regime_change_trigger_eval", prev=str(prev), new=str(new))
         self._regime_changed_event.set()
+        # 레짐 변경 시 전략 평가 쓰로틀 리셋 → 즉시 재평가
+        self._tier1.reset_eval_throttle()
 
     # ── 루프들 ──────────────────────────────────
 

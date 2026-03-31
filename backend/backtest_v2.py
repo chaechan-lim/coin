@@ -45,6 +45,33 @@ SLIPPAGE = 0.0002         # 0.02% 슬리피지
 MIN_MARGIN_USDT = 5.0     # 최소 마진
 BASE_RISK_PCT = 0.02      # 기본 리스크: 자본의 2%
 LOOKBACK_WINDOW = 60      # 전략 평가용 슬라이스 크기
+
+# ── 동적 SL/사이징 프로필 (라이브 tier1_manager와 동일) ─────────
+# (multiplier, floor_atr_mult, cap_atr_mult)
+DYNAMIC_SL_PROFILES: dict[Regime, tuple[float, float, float]] = {
+    Regime.TRENDING_UP: (1.0, 1.0, 8.0),
+    Regime.TRENDING_DOWN: (0.6, 0.8, 4.0),
+    Regime.RANGING: (0.8, 1.0, 6.0),
+    Regime.VOLATILE: (0.7, 0.8, 5.0),
+}
+DEFAULT_SL_PROFILE = (0.8, 1.0, 6.0)
+
+REGIME_SIZING_FACTORS: dict[Regime, float] = {
+    Regime.TRENDING_UP: 1.0,
+    Regime.TRENDING_DOWN: 0.5,
+    Regime.RANGING: 0.8,
+    Regime.VOLATILE: 0.6,
+}
+
+# ATR% 기반 레버리지 스케일링 (라이브 tier1_manager와 동일)
+ATR_LEVERAGE_TIERS: list[tuple[float, int]] = [
+    (20.0, 1),
+    (10.0, 2),
+    (7.0, 3),
+    (5.0, 4),
+    (3.0, 5),
+    (0.0, 5),
+]
 SPOT_1H_LOOKBACK = 400    # 현물 4전략 모드: 1h→4h 리샘플링용 ((30+59)×4 ≈ 356, +여유)
 
 COINS_DEFAULT = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT"]
@@ -923,28 +950,38 @@ class V2Backtester:
                     if atr <= 0:
                         continue
 
+                    # 레짐별 사이징 팩터 + ATR 레버리지 스케일링 (라이브 일치)
+                    effective_leverage = self._leverage
+                    if not self._use_spot:
+                        effective_leverage = self._calc_atr_leverage(atr, price, self._leverage)
                     margin = self._calc_margin(
                         decision, cash, price, atr,
+                        regime=coin_regime.regime if not self._use_spot else None,
                     )
                     if margin < MIN_MARGIN_USDT:
                         continue
 
-                    quantity = margin * self._leverage / price
+                    quantity = margin * effective_leverage / price
                     fee = quantity * price * FUTURES_FEE
                     cash -= margin + fee
                     total_fees += fee
 
+                    # 동적 SL 적용 (라이브 tier1_manager와 동일)
+                    effective_sl = self._apply_dynamic_sl(
+                        decision.stop_loss_atr,
+                        coin_regime.regime if not self._use_spot else None,
+                    )
                     sl_price, tp_price = self._calc_sl_tp(
                         decision.direction, price, atr,
-                        decision.stop_loss_atr, decision.take_profit_atr,
+                        effective_sl, decision.take_profit_atr,
                     )
-                    # 현물 전략은 고유 트레일링 ATR 사용
+                    # 트레일링: 라이브 기본값과 동일 (TP×0.5, SL×0.7)
                     if self._use_spot:
                         trail_act_mult = SPOT_TRAIL_ACTIVATION_ATR
                         trail_stop_mult = SPOT_TRAIL_STOP_ATR
                     else:
-                        trail_act_mult = 2.0
-                        trail_stop_mult = 1.0
+                        trail_act_mult = decision.take_profit_atr * 0.5  # 라이브: TP×0.5
+                        trail_stop_mult = decision.stop_loss_atr * 0.7  # 라이브: SL×0.7
                     trail_act = price * (1 + trail_act_mult * atr / price) if decision.direction == Direction.LONG \
                         else price * (1 - trail_act_mult * atr / price)
 
@@ -1105,17 +1142,22 @@ class V2Backtester:
         cash: float,
         price: float,
         atr: float,
+        regime: Regime | None = None,
     ) -> float:
-        """ATR 기반 마진 계산."""
+        """ATR 기반 마진 계산. 레짐별 사이징 팩터 적용 (라이브 일치)."""
         if cash <= 0 or atr <= 0 or price <= 0:
             return 0.0
 
-        risk_per_unit = decision.stop_loss_atr * atr / price
+        risk_per_unit = max(decision.stop_loss_atr, 0.5) * atr / price
         if risk_per_unit <= 0:
             return 0.0
 
         margin = (cash * self._base_risk_pct) / risk_per_unit
         margin *= decision.sizing_factor * decision.confidence
+
+        # 레짐별 포지션 사이징 팩터 (라이브 tier1_manager와 동일)
+        if regime is not None:
+            margin *= REGIME_SIZING_FACTORS.get(regime, 0.8)
 
         # 최대 비율 제한
         max_margin = cash * self._max_position_pct
@@ -1124,6 +1166,26 @@ class V2Backtester:
         if margin < MIN_MARGIN_USDT:
             return 0.0
         return margin
+
+    @staticmethod
+    def _apply_dynamic_sl(base_sl_atr: float, regime: Regime | None) -> float:
+        """레짐별 동적 SL ATR mult 계산 (라이브 tier1_manager와 동일)."""
+        if regime is None:
+            return base_sl_atr
+        mult, floor, cap = DYNAMIC_SL_PROFILES.get(regime, DEFAULT_SL_PROFILE)
+        adjusted = base_sl_atr * mult
+        return max(floor, min(adjusted, cap))
+
+    @staticmethod
+    def _calc_atr_leverage(atr: float, close: float, max_leverage: int) -> int:
+        """ATR% 기반 레버리지 스케일링 (라이브 tier1_manager와 동일)."""
+        if close <= 0:
+            return 1
+        atr_pct = (atr / close) * 100
+        for threshold, lev in ATR_LEVERAGE_TIERS:
+            if atr_pct > threshold:
+                return min(lev, max_leverage)
+        return max_leverage
 
     def _calc_sl_tp(
         self,

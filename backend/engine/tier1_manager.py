@@ -124,6 +124,8 @@ class Tier1Manager:
         ) = None,
         # COIN-48: WS/eval 동시 청산 방지 (FuturesEngineV2와 공유)
         close_lock: asyncio.Lock | None = None,
+        # 전략 평가 쓰로틀: 신규 진입 전략 평가 최소 간격 (0=비활성)
+        strategy_eval_interval_sec: int = 0,
     ):
         self._coins = coins
         self._safe_order = safe_order
@@ -179,11 +181,20 @@ class Tier1Manager:
         # COIN-43: 교차 거래소 포지션 충돌 체크 콜백
         self._cross_exchange_checker = cross_exchange_checker
 
+        # 전략 평가 쓰로틀링 (COIN-50 보완)
+        # SL/TP는 매 사이클(60s)마다 체크, 신규 진입 전략 평가만 쓰로틀링
+        self._eval_interval_sec = strategy_eval_interval_sec
+        self._last_strategy_eval_time: dict[str, float] = {}  # symbol → monotonic timestamp
+
         # 관측용 상태 (COIN-17)
         self._cycle_count: int = 0
         self._last_cycle_at: datetime | None = None
         self._last_action_at: datetime | None = None
         self._last_decisions: dict[str, str] = {}  # symbol → 최근 결정
+
+    def reset_eval_throttle(self) -> None:
+        """전략 평가 쓰로틀 리셋 (레짐 변경 시 즉시 재평가용)."""
+        self._last_strategy_eval_time.clear()
 
     @property
     def coins(self) -> list[str]:
@@ -346,7 +357,17 @@ class Tier1Manager:
             if await self._check_sl_tp(session, symbol, pos_state, price, atr):
                 return "sl_tp"
 
-        # 2. 포지션 방향에 따라 해당 이밸류에이터의 청산 시그널 체크
+        # 2. 전략 평가 쓰로틀링 (신규 진입 전용, 포지션 보유 시 항상 평가)
+        #    eval_interval_sec(4h) 주기로 평가하여 백테스트 조건과 일치시킴
+        #    SL/TP는 위에서 매 사이클 체크되므로 안전.
+        if not pos_state and self._eval_interval_sec > 0:
+            now_mono = time.monotonic()
+            last_eval = self._last_strategy_eval_time.get(symbol, 0.0)
+            if now_mono - last_eval < self._eval_interval_sec:
+                return "hold"
+            self._last_strategy_eval_time[symbol] = now_mono
+
+        # 3. 포지션 방향에 따라 해당 이밸류에이터의 청산 시그널 체크
         #    (COIN-43 paired exit: 진입 방향 evaluator만 청산 평가)
         if current_dir == Direction.LONG:
             long_decision = await self._long_evaluator.evaluate(
