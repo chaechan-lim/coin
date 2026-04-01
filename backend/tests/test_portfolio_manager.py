@@ -4025,3 +4025,83 @@ async def test_is_surge_flag_stays_true_on_subsequent_surge_buy(session):
     await session.refresh(pos)
     # is_surge는 True로 유지되어야 함 (서지→서지)
     assert pos.is_surge is True
+
+# ── COIN-70: cash_lock / adjust_cash tests ────────────────────────────────────
+
+def test_pm_has_cash_lock_property():
+    """COIN-70: PortfolioManager exposes cash_lock as asyncio.Lock property."""
+    pm = PortfolioManager(market_data=_make_market_data({}), initial_balance_krw=1_000_000)
+    assert hasattr(pm, "cash_lock")
+    assert isinstance(pm.cash_lock, asyncio.Lock)
+    # cash_lock must be the *same* object as the internal _cash_lock
+    assert pm.cash_lock is pm._cash_lock
+
+
+@pytest.mark.asyncio
+async def test_adjust_cash_increases_balance():
+    """COIN-70: adjust_cash(+delta) atomically adds to cash_balance."""
+    pm = PortfolioManager(market_data=_make_market_data({}), initial_balance_krw=1_000.0)
+    result = await pm.adjust_cash(250.0, reason="test_add")
+    assert pm.cash_balance == 1_250.0
+    assert result == 1_250.0
+
+
+@pytest.mark.asyncio
+async def test_adjust_cash_decreases_balance():
+    """COIN-70: adjust_cash(-delta) atomically subtracts from cash_balance."""
+    pm = PortfolioManager(market_data=_make_market_data({}), initial_balance_krw=1_000.0)
+    result = await pm.adjust_cash(-300.0, reason="test_sub")
+    assert pm.cash_balance == 700.0
+    assert result == 700.0
+
+
+@pytest.mark.asyncio
+async def test_adjust_cash_releases_lock():
+    """COIN-70: cash_lock is released after adjust_cash completes."""
+    pm = PortfolioManager(market_data=_make_market_data({}), initial_balance_krw=1_000.0)
+    await pm.adjust_cash(100.0)
+    assert not pm.cash_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_adjust_cash_concurrent_serialisation():
+    """COIN-70: Concurrent adjust_cash calls are serialised — no lost updates."""
+    pm = PortfolioManager(market_data=_make_market_data({}), initial_balance_krw=0.0)
+
+    async def add_one():
+        await pm.adjust_cash(1.0)
+
+    # Fire 50 concurrent additions; each +1 must land atomically.
+    await asyncio.gather(*[add_one() for _ in range(50)])
+    assert pm.cash_balance == 50.0
+
+
+@pytest.mark.asyncio
+async def test_update_position_on_buy_acquires_cash_lock(session):
+    """COIN-70: update_position_on_buy cash deduction is protected by cash_lock."""
+    pm = PortfolioManager(market_data=_make_market_data({}), initial_balance_krw=1_000_000)
+    await pm.update_position_on_buy(
+        session, "BTC/KRW", quantity=0.01, price=50_000_000, cost=500_000, fee=1_250
+    )
+    # Lock must be released after the call
+    assert not pm.cash_lock.locked()
+    assert pm.cash_balance == 1_000_000 - 500_000 - 1_250
+
+
+@pytest.mark.asyncio
+async def test_update_position_on_sell_acquires_cash_lock(session):
+    """COIN-70: update_position_on_sell cash credit is protected by cash_lock."""
+    pm = PortfolioManager(market_data=_make_market_data({}), initial_balance_krw=1_000_000)
+    # Buy first
+    await pm.update_position_on_buy(
+        session, "ETH/KRW", quantity=1.0, price=3_000_000, cost=3_000_000, fee=7_500
+    )
+    initial_after_buy = pm.cash_balance
+
+    # Sell
+    await pm.update_position_on_sell(
+        session, "ETH/KRW", quantity=1.0, price=3_100_000, cost=3_100_000, fee=7_750
+    )
+    assert not pm.cash_lock.locked()
+    # Proceeds (cost - fee) should be credited back
+    assert pm.cash_balance == pytest.approx(initial_after_buy + 3_100_000 - 7_750, abs=1)

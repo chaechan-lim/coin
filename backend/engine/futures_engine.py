@@ -193,7 +193,8 @@ class BinanceFuturesEngine(TradingEngine):
             margin = pos.total_invested or pos.margin_used or 0
             fee = (exec_price * (order.executed_quantity or 0)) * 0.0004
             cost_return = margin * (1 + pnl_pct / 100) - fee
-            self._portfolio_manager.cash_balance += cost_return
+            async with self._portfolio_manager.cash_lock:
+                self._portfolio_manager.cash_balance += cost_return
             pos.total_invested = 0
             pos.margin_used = 0
 
