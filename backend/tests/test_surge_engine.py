@@ -2728,9 +2728,19 @@ class TestCOIN63CashLock:
                 )
 
         # Cash must NOT be restored — the position is in the DB and cost real margin.
-        # Verify cash_balance is a real float (not a MagicMock) before comparing.
-        assert isinstance(surge_engine._futures_pm.cash_balance, float)
-        assert surge_engine._futures_pm.cash_balance < initial_cash
+        # Verify the exact amount deducted: size_usdt + fee
+        position_pct = 0.08  # SurgeTradingConfig default
+        score = 0.75
+        scale = 1.0 if score >= 0.70 else (0.75 if score >= 0.55 else 0.50)
+        leverage = 3
+        price = 3500.0
+        size_usdt = initial_cash * position_pct * scale
+        qty = size_usdt * leverage / price
+        fee = price * qty * 0.0004
+        expected_total_cost = size_usdt + fee
+        expected_cash = initial_cash - expected_total_cost
+        assert surge_engine._futures_pm.cash_balance == pytest.approx(expected_cash, abs=0.01), \
+            f"Expected {expected_cash}, got {surge_engine._futures_pm.cash_balance}"
 
     @pytest.mark.asyncio
     async def test_cash_lock_is_released_after_check(self, surge_engine, session):
