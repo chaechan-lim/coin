@@ -264,6 +264,7 @@ class TradingEngine:
         self._market_state: str = MarketState.SIDEWAYS.value
         self._market_confidence: float = 0.5
         self._market_state_updated: datetime | None = None
+        self._bearish_clear_time: datetime | None = None  # 히스테리시스: bearish 해제 시점
 
         # 거래량 급등 로테이션 상태
         self._last_rotation_time: datetime | None = None
@@ -931,6 +932,13 @@ class TradingEngine:
                     },
                 )
                 self._combiner.apply_market_state(new_state)
+
+                # 히스테리시스: bearish → non-bearish 전환 시 타이머 시작
+                if (old_state in ("crash", "downtrend")
+                        and new_state not in ("crash", "downtrend")):
+                    self._bearish_clear_time = now
+                    logger.info("bearish_clear_hysteresis_start",
+                                old=old_state, new=new_state)
 
                 # 에이전트 분석 결과도 즉시 동기화 (프론트엔드 불일치 방지)
                 if (self._agent_coordinator
@@ -1970,6 +1978,14 @@ class TradingEngine:
                     logger.info("asymmetric_buy_blocked",
                                 symbol=symbol, market_state=self._market_state)
                     return
+                # 히스테리시스: bearish 해제 후 36h 매수 금지
+                if self._bearish_clear_time:
+                    elapsed = (datetime.now(timezone.utc) - self._bearish_clear_time).total_seconds()
+                    if elapsed < 36 * 3600:
+                        logger.info("hysteresis_buy_blocked", symbol=symbol,
+                                    hours_since_bearish=round(elapsed / 3600, 1),
+                                    market_state=self._market_state)
+                        return
                 # 시장 상태별 신뢰도 임계값
                 base_conf = self._ec.min_combined_confidence
                 _asym_conf = {

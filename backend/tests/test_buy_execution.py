@@ -848,6 +848,141 @@ class TestAsymmetricMode:
         # 비대칭 OFF + crash → 매수 허용 (25% 축소)
         mock_order_mgr.create_order.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_hysteresis_blocks_buy_after_bearish_clear(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """bearish 해제 후 36h 이내 매수 차단."""
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        engine._market_state = "sideways"
+        # bearish 해제 10시간 전
+        engine._bearish_clear_time = datetime.now(timezone.utc) - timedelta(hours=10)
+        decision = _make_buy_decision(confidence=0.65)
+        session = _make_session_no_position()
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._process_decision(session, "ETH/KRW", decision)
+
+        mock_order_mgr.create_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_hysteresis_allows_buy_after_36h(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """bearish 해제 후 36h 이상 경과 → 매수 허용."""
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        engine._market_state = "uptrend"
+        # bearish 해제 40시간 전
+        engine._bearish_clear_time = datetime.now(timezone.utc) - timedelta(hours=40)
+        decision = _make_buy_decision(confidence=0.65)
+        session = _make_session_no_position()
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._process_decision(session, "ETH/KRW", decision)
+
+        mock_order_mgr.create_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_hysteresis_no_clear_time_allows_buy(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """_bearish_clear_time=None (한번도 bearish 전환 없음) → 매수 허용."""
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        engine._market_state = "uptrend"
+        engine._bearish_clear_time = None
+        decision = _make_buy_decision(confidence=0.65)
+        session = _make_session_no_position()
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._process_decision(session, "ETH/KRW", decision)
+
+        mock_order_mgr.create_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_hysteresis_sell_not_blocked(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """히스테리시스 중에도 매도는 차단하지 않음."""
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        engine._market_state = "sideways"
+        engine._bearish_clear_time = datetime.now(timezone.utc) - timedelta(hours=5)
+
+        # 포지션이 있는 session mock
+        pos = MagicMock()
+        pos.quantity = 1.0
+        pos.average_buy_price = 50000
+        pos.strategy_name = None
+        session = AsyncMock()
+
+        call_count = 0
+        def _execute_side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            result = MagicMock()
+            if call_count == 1:
+                result.scalar_one_or_none = MagicMock(return_value=pos)
+            else:
+                result.scalar_one_or_none = MagicMock(return_value=None)
+            result.scalars = MagicMock(return_value=MagicMock(
+                first=MagicMock(return_value=None),
+                all=MagicMock(return_value=[]),
+            ))
+            return result
+
+        session.execute = AsyncMock(side_effect=_execute_side_effect)
+        session.commit = AsyncMock()
+        session.flush = AsyncMock()
+        session.rollback = AsyncMock()
+
+        decision = _make_sell_decision(confidence=0.65)
+
+        with patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._process_decision(session, "ETH/KRW", decision)
+
+        # 매도는 히스테리시스와 무관하게 실행됨
+        mock_order_mgr.create_order.assert_called_once()
+
+
+# ── 테스트: 시장 상태 변경 시 히스테리시스 타이머 ──────────────
+
+class TestBearishClearHysteresis:
+    """_maybe_update_market_state에서 bearish → non-bearish 전환 시 타이머 기록."""
+
+    @pytest.mark.asyncio
+    async def test_bearish_to_sideways_sets_clear_time(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """crash → sideways 전환 시 _bearish_clear_time 설정."""
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        engine._market_state = "crash"
+        engine._market_state_updated = None
+        engine._bearish_clear_time = None
+
+        with patch.object(engine, "_detect_market_state", return_value=("sideways", 0.6)), \
+             patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._maybe_update_market_state()
+
+        assert engine._bearish_clear_time is not None
+        assert engine._market_state == "sideways"
+
+    @pytest.mark.asyncio
+    async def test_sideways_to_uptrend_no_clear_time(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """sideways → uptrend 전환 시 _bearish_clear_time 업데이트 안 함."""
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        engine._market_state = "sideways"
+        engine._market_state_updated = None
+        engine._bearish_clear_time = None
+
+        with patch.object(engine, "_detect_market_state", return_value=("uptrend", 0.7)), \
+             patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._maybe_update_market_state()
+
+        assert engine._bearish_clear_time is None
+
+    @pytest.mark.asyncio
+    async def test_downtrend_to_uptrend_sets_clear_time(self, config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner):
+        """downtrend → uptrend 전환 시 _bearish_clear_time 설정."""
+        engine = _make_engine(config, mock_exchange, mock_market_data, mock_order_mgr, mock_pm, mock_combiner)
+        engine._market_state = "downtrend"
+        engine._market_state_updated = None
+        engine._bearish_clear_time = None
+
+        with patch.object(engine, "_detect_market_state", return_value=("uptrend", 0.7)), \
+             patch("engine.trading_engine.emit_event", new_callable=AsyncMock):
+            await engine._maybe_update_market_state()
+
+        assert engine._bearish_clear_time is not None
+
 
 # ── 테스트: evaluate_coin 전체 흐름 ──────────────────────────
 
