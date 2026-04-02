@@ -328,6 +328,105 @@ SPOT_TRAIL_ACTIVATION_ATR = 3.0
 SPOT_TRAIL_STOP_ATR = 1.5
 SPOT_MIN_CONFIDENCE = 0.50
 
+# ── 현물 시장 상태 감지 (라이브 _detect_market_state 포트) ──
+SPOT_MARKET_STATES = ("strong_uptrend", "uptrend", "sideways", "downtrend", "crash")
+
+
+def _detect_market_state_bt(df: pd.DataFrame) -> tuple[str, float]:
+    """5요소 시장 상태 감지 (라이브 trading_engine._detect_market_state 포트).
+
+    4h BTC 캔들 기반. 백테스트용 uppercase 컬럼 지원.
+    """
+    if df is None or len(df) < 60:
+        return "sideways", 0.3
+
+    scores = {"strong_uptrend": 0.0, "uptrend": 0.0, "sideways": 0.0, "downtrend": 0.0}
+    row = df.iloc[-1]
+    price = float(row["close"])
+
+    # 1. Price vs SMA20
+    sma20_col = "SMA_20" if "SMA_20" in df.columns else "sma_20"
+    sma20 = row.get(sma20_col)
+    if sma20 is not None and not pd.isna(sma20):
+        sma20 = float(sma20)
+        if sma20 > 0:
+            dist = (price - sma20) / sma20
+            if dist > 0.05:
+                scores["strong_uptrend"] += 2
+            elif dist > 0.01:
+                scores["uptrend"] += 1.5
+            elif dist < -0.05:
+                scores["downtrend"] += 2
+            elif dist < -0.01:
+                scores["downtrend"] += 1.5
+            else:
+                scores["sideways"] += 1
+
+    # 2. SMA20 vs SMA50
+    sma50_col = "SMA_50" if "SMA_50" in df.columns else "sma_50"
+    sma50 = row.get(sma50_col)
+    if sma20 is not None and sma50 is not None and not pd.isna(sma20) and not pd.isna(sma50):
+        if float(sma20) > float(sma50):
+            scores["uptrend"] += 1
+            scores["strong_uptrend"] += 0.5
+        else:
+            scores["downtrend"] += 1
+
+    # 3. RSI
+    rsi_col = "RSI_14" if "RSI_14" in df.columns else "rsi_14"
+    rsi = row.get(rsi_col)
+    if rsi is not None and not pd.isna(rsi):
+        rsi = float(rsi)
+        if rsi > 70:
+            scores["strong_uptrend"] += 1
+        elif rsi > 55:
+            scores["uptrend"] += 1
+        elif rsi < 30:
+            scores["downtrend"] += 1.5
+        elif rsi < 45:
+            scores["downtrend"] += 1
+        else:
+            scores["sideways"] += 1.5
+
+    # 4. 7일 변동 (4h=42캔들)
+    lookback_idx = max(0, len(df) - 1 - 42)
+    week_ago = float(df.iloc[lookback_idx]["close"])
+    if week_ago > 0:
+        chg = (price - week_ago) / week_ago * 100
+        if chg > 10:
+            scores["strong_uptrend"] += 2
+        elif chg > 3:
+            scores["uptrend"] += 1.5
+        elif chg < -10:
+            scores["downtrend"] += 2
+        elif chg < -3:
+            scores["downtrend"] += 1.5
+        else:
+            scores["sideways"] += 2
+
+    # 5. 거래량
+    vol_sma_col = "VOLUME_SMA_20" if "VOLUME_SMA_20" in df.columns else "volume_sma_20"
+    vol_sma = row.get(vol_sma_col)
+    vol = row.get("volume")
+    if vol_sma is not None and vol is not None and not pd.isna(vol_sma) and not pd.isna(vol):
+        if float(vol_sma) > 0:
+            vr = float(vol) / float(vol_sma)
+            if vr > 2.0:
+                o = row.get("open")
+                if o is not None and float(o) > 0:
+                    if price >= float(o):
+                        scores["strong_uptrend"] += 0.5
+                    else:
+                        scores["downtrend"] += 0.5
+
+    best = max(scores, key=scores.get)
+    total = sum(scores.values())
+    conf = scores[best] / total if total > 0 else 0.3
+
+    if best == "downtrend" and conf >= 0.55 and scores["downtrend"] >= 5.0:
+        return "crash", round(conf, 2)
+    return best, round(conf, 2)
+
 
 class SpotStrategyAdapter(RegimeStrategy):
     """현물 4전략 → v2 RegimeStrategy 인터페이스 어댑터.
@@ -726,6 +825,9 @@ class V2Backtester:
         self._divergence_filter: bool = False  # 히든 다이버전스 진입 필터
         self._divergence_lookback: int = 20   # 다이버전스 룩백 캔들 수
         self._cascade_contrarian: bool = False  # 캐스케이드 역추세 진입
+        # 현물 비대칭 모드 (시장 상태 기반 매수 차단)
+        self._spot_asymmetric: bool = False
+        self._spot_hysteresis_candles: int = 0  # 히스테리시스: bearish→non-bearish 후 N캔들 매수 금지
 
         # 레짐 감지 파라미터 저장 (_precompute_regimes에서도 사용)
         self._regime_confirm = regime_confirm
@@ -838,6 +940,22 @@ class V2Backtester:
         btc_key = "BTC/USDT" if "BTC/USDT" in all_data else list(all_data.keys())[0]
         regimes_by_hour = regimes_per_coin[btc_key]
 
+        # 현물 비대칭: BTC 1h → 4h 리샘플링 + 지표 계산 (사전 준비)
+        btc_4h_for_state: pd.DataFrame | None = None
+        if self._spot_asymmetric and self._use_spot and "BTC/USDT" in all_data:
+            _, btc_1h = all_data["BTC/USDT"]
+            if len(btc_1h) > 0:
+                import pandas_ta as pta
+                btc_4h_for_state = btc_1h.resample("4h").agg({
+                    "open": "first", "high": "max", "low": "min",
+                    "close": "last", "volume": "sum",
+                }).dropna(subset=["close"])
+                btc_4h_for_state["SMA_20"] = pta.sma(btc_4h_for_state["close"], length=20)
+                btc_4h_for_state["SMA_50"] = pta.sma(btc_4h_for_state["close"], length=50)
+                btc_4h_for_state["RSI_14"] = pta.rsi(btc_4h_for_state["close"], length=14)
+                btc_4h_for_state["VOLUME_SMA_20"] = pta.sma(btc_4h_for_state["volume"], length=20)
+                print(f"  현물 비대칭: BTC 4h 캔들 {len(btc_4h_for_state)}개 준비")
+
         # 초기 상태
         cash = self._initial_balance
         positions: dict[str, V2Position] = {}
@@ -858,6 +976,11 @@ class V2Backtester:
 
         # 쿨다운 추적 (코인별 마지막 청산 캔들 인덱스)
         last_exit_idx: dict[str, int] = {}
+
+        # 현물 비대칭 모드: 시장 상태 추적
+        spot_market_state = "sideways"
+        spot_bearish_clear_idx = -99999  # 마지막으로 bearish→non-bearish 된 캔들 idx
+        spot_state_eval_interval = 6     # 30분(5m×6)마다 시장 상태 갱신
 
         # 진입 가격 기록 (B&H 비교용)
         first_prices: dict[str, float] = {}
@@ -898,6 +1021,16 @@ class V2Backtester:
             # 워밍업 (60캔들 = 5시간)
             if candle_idx < LOOKBACK_WINDOW:
                 continue
+
+            # ─── 현물 시장 상태 갱신 (30분 주기, 4h BTC 리샘플 데이터 사용) ───
+            if self._spot_asymmetric and self._use_spot and btc_4h_for_state is not None and candle_idx % spot_state_eval_interval == 0:
+                h4_idx = btc_4h_for_state.index.searchsorted(ts, side="right")
+                if h4_idx > 60:
+                    btc_4h_window = btc_4h_for_state.iloc[max(0, h4_idx - 100):h4_idx]
+                    old_state = spot_market_state
+                    spot_market_state, _ = _detect_market_state_bt(btc_4h_window)
+                    if old_state in ("crash", "downtrend") and spot_market_state not in ("crash", "downtrend"):
+                        spot_bearish_clear_idx = candle_idx
 
             # ─── 레짐 조회 ───
             regime = self._get_regime_at(regimes_by_hour, ts)
@@ -1056,6 +1189,19 @@ class V2Backtester:
                     if self._divergence_filter:
                         if not self._detect_hidden_divergence(window_5m, decision.direction, self._divergence_lookback):
                             continue
+
+                    # 현물 비대칭 모드: 하락장 매수 차단
+                    if self._spot_asymmetric and self._use_spot and decision.direction == Direction.LONG:
+                        if spot_market_state in ("crash", "downtrend"):
+                            continue
+                        # 히스테리시스: bearish 해제 후 N캔들 매수 금지
+                        if self._spot_hysteresis_candles > 0:
+                            if candle_idx < spot_bearish_clear_idx + self._spot_hysteresis_candles:
+                                continue
+                        # sideways 신뢰도 상향
+                        if spot_market_state == "sideways":
+                            if decision.confidence < self._min_confidence + 0.05:
+                                continue
 
                     # SAR: 현재 포지션과 다른 방향 → 청산 후 신규 진입
                     if sym in positions and positions[sym].direction != decision.direction:
@@ -2129,6 +2275,10 @@ def parse_args():
                         help="다이버전스 감지 룩백 캔들 수 (기본 20, 5m×20=100분)")
     parser.add_argument("--cascade-contrarian", action="store_true",
                         help="US 오픈(KST 22-23) 급락 시 역추세 롱 진입")
+    parser.add_argument("--spot-asymmetric", action="store_true",
+                        help="현물 비대칭 모드: 하락장/crash 시 매수 차단")
+    parser.add_argument("--spot-hysteresis", type=int, default=0,
+                        help="현물 비대칭 히스테리시스: bearish 해제 후 매수 금지 캔들 수 (5m 단위)")
     return parser.parse_args()
 
 
@@ -2179,6 +2329,12 @@ async def main():
     if args.cascade_contrarian:
         bt._cascade_contrarian = True
         print("  캐스케이드 역추세 활성화 (US 오픈 1%+ 급락 시 롱)")
+
+    if args.spot_asymmetric:
+        bt._spot_asymmetric = True
+        bt._spot_hysteresis_candles = args.spot_hysteresis
+        hyst_str = f", 히스테리시스 {args.spot_hysteresis}캔들 ({args.spot_hysteresis*5}분)" if args.spot_hysteresis > 0 else ""
+        print(f"  현물 비대칭 모드 활성화 (crash/downtrend 매수 차단{hyst_str})")
 
     if args.spot_strategies and args.v1_strategies:
         print("오류: --spot-strategies와 --v1-strategies는 동시 사용 불가")
