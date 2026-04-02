@@ -2729,14 +2729,13 @@ class TestCOIN63CashLock:
 
         # Cash must NOT be restored — the position is in the DB and cost real margin.
         # Verify the exact amount deducted: size_usdt + fee
-        position_pct = 0.08  # SurgeTradingConfig default
-        score = 0.75
-        scale = 1.0 if score >= 0.70 else (0.75 if score >= 0.55 else 0.50)
-        leverage = 3
+        position_pct = surge_engine._position_pct  # read from engine, not hardcoded
+        scale = 1.0  # score 0.75 >= 0.70 threshold → full-size position
+        leverage = surge_engine._leverage
         price = 3500.0
         size_usdt = initial_cash * position_pct * scale
         qty = size_usdt * leverage / price
-        fee = price * qty * 0.0004
+        fee = price * qty * FEE_PCT
         expected_total_cost = size_usdt + fee
         expected_cash = initial_cash - expected_total_cost
         assert surge_engine._futures_pm.cash_balance == pytest.approx(expected_cash, abs=0.01), \
@@ -2849,15 +2848,14 @@ class TestCOIN63CashLock:
                     )
 
         # Cash must NOT be restored — commit succeeded, position is in DB.
-        # Verify the exact amount: size_usdt * (1 + leverage * FEE_PCT)
-        position_pct = 0.08  # SurgeTradingConfig default
-        score = 0.75
-        scale = 1.0 if score >= 0.70 else (0.75 if score >= 0.55 else 0.50)
-        leverage = 3
+        # Verify the exact amount: size_usdt + fee
+        position_pct = surge_engine._position_pct  # read from engine, not hardcoded
+        scale = 1.0  # score 0.75 >= 0.70 threshold → full-size position
+        leverage = surge_engine._leverage
         price = 3500.0
         size_usdt = initial_cash * position_pct * scale
         qty = size_usdt * leverage / price
-        fee = price * qty * 0.0004
+        fee = price * qty * FEE_PCT
         expected_total_cost = size_usdt + fee
         expected_cash = initial_cash - expected_total_cost
         assert surge_engine._futures_pm.cash_balance == pytest.approx(expected_cash, abs=0.01), \
