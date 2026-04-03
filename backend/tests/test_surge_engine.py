@@ -2548,6 +2548,27 @@ def _coin63_session_ctx(session):
     return mock_factory
 
 
+def _surge_scale_factor(score: float) -> float:
+    """Mirror the size-scaling logic from SurgeEngine._enter_position.
+
+    Centralises the score→scale mapping so that tests derive the expected
+    scale factor from the same formula rather than hard-coding magic numbers.
+    If the thresholds in ``_enter_position`` change, only this helper needs
+    updating.
+
+    Args:
+        score: Surge signal score (0.0–1.0).
+
+    Returns:
+        Multiplicative scale factor applied to ``size_usdt``.
+    """
+    if score >= 0.70:
+        return 1.0
+    elif score >= 0.55:
+        return 0.75
+    return 0.50
+
+
 class TestCOIN63CashLock:
     """COIN-63 Bug 1: Cash lock prevents negative balance on concurrent entries."""
 
@@ -2711,26 +2732,27 @@ class TestCOIN63CashLock:
             o.executed_quantity = amount
             o.fee = price * amount * 0.0004
             return o
-        surge_engine._order_manager.create_order = _ok_order
 
         # Order and DB commit succeed, but notification fails
-        with patch("engine.surge_engine.get_session_factory", return_value=MagicMock(
-            return_value=MagicMock(
-                __aenter__=AsyncMock(return_value=session),
-                __aexit__=AsyncMock(return_value=False),
-            )
-        )):
-            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock,
-                       side_effect=Exception("Notification failed")):
-                await surge_engine._enter_position(
-                    "ETH/USDT", "long", 0.75,
-                    {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
+        with patch.object(surge_engine._order_manager, "create_order",
+                          new_callable=AsyncMock, side_effect=_ok_order):
+            with patch("engine.surge_engine.get_session_factory", return_value=MagicMock(
+                return_value=MagicMock(
+                    __aenter__=AsyncMock(return_value=session),
+                    __aexit__=AsyncMock(return_value=False),
                 )
+            )):
+                with patch("engine.surge_engine.emit_event", new_callable=AsyncMock,
+                           side_effect=Exception("Notification failed")):
+                    await surge_engine._enter_position(
+                        "ETH/USDT", "long", 0.75,
+                        {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
+                    )
 
         # Cash must NOT be restored — the position is in the DB and cost real margin.
         # Verify the exact amount deducted: size_usdt + fee
         position_pct = surge_engine._position_pct  # read from engine, not hardcoded
-        scale = 1.0  # score 0.75 >= 0.70 threshold → full-size position
+        scale = _surge_scale_factor(0.75)  # score passed to _enter_position above
         leverage = surge_engine._leverage
         price = 3500.0
         size_usdt = initial_cash * position_pct * scale
@@ -2786,21 +2808,21 @@ class TestCOIN63CashLock:
                 "Precondition: cash must be deducted inside lock before order creation"
             raise _asyncio.CancelledError()
 
-        surge_engine._order_manager.create_order = _create_order_with_check
-
         mock_factory = MagicMock()
         mock_ctx = MagicMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
         mock_factory.return_value = mock_ctx
 
-        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
-            # CancelledError propagates through finally block
-            with pytest.raises(_asyncio.CancelledError):
-                await surge_engine._enter_position(
-                    "ETH/USDT", "long", 0.75,
-                    {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
-                )
+        with patch.object(surge_engine._order_manager, "create_order",
+                          new_callable=AsyncMock, side_effect=_create_order_with_check):
+            with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+                # CancelledError propagates through finally block
+                with pytest.raises(_asyncio.CancelledError):
+                    await surge_engine._enter_position(
+                        "ETH/USDT", "long", 0.75,
+                        {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
+                    )
 
         # Cash must be fully restored — finally block refunds because
         # _order_committed is False. This proves the refund mechanism works
@@ -2829,7 +2851,6 @@ class TestCOIN63CashLock:
             o.executed_quantity = amount
             o.fee = price * amount * 0.0004
             return o
-        surge_engine._order_manager.create_order = _ok_order
 
         mock_factory = MagicMock()
         mock_ctx = MagicMock()
@@ -2837,20 +2858,22 @@ class TestCOIN63CashLock:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
         mock_factory.return_value = mock_ctx
 
-        with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
-            # emit_event is called after successful commit; raise CancelledError there
-            with patch("engine.surge_engine.emit_event", new_callable=AsyncMock,
-                       side_effect=_asyncio.CancelledError()):
-                with pytest.raises(_asyncio.CancelledError):
-                    await surge_engine._enter_position(
-                        "ETH/USDT", "long", 0.75,
-                        {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
-                    )
+        with patch.object(surge_engine._order_manager, "create_order",
+                          new_callable=AsyncMock, side_effect=_ok_order):
+            with patch("engine.surge_engine.get_session_factory", return_value=mock_factory):
+                # emit_event is called after successful commit; raise CancelledError there
+                with patch("engine.surge_engine.emit_event", new_callable=AsyncMock,
+                           side_effect=_asyncio.CancelledError()):
+                    with pytest.raises(_asyncio.CancelledError):
+                        await surge_engine._enter_position(
+                            "ETH/USDT", "long", 0.75,
+                            {"last": 3500.0, "bid": 3499.0, "ask": 3501.0},
+                        )
 
         # Cash must NOT be restored — commit succeeded, position is in DB.
         # Verify the exact amount: size_usdt + fee
         position_pct = surge_engine._position_pct  # read from engine, not hardcoded
-        scale = 1.0  # score 0.75 >= 0.70 threshold → full-size position
+        scale = _surge_scale_factor(0.75)  # score passed to _enter_position above
         leverage = surge_engine._leverage
         price = 3500.0
         size_usdt = initial_cash * position_pct * scale
