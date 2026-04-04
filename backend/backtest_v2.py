@@ -2384,6 +2384,7 @@ def parse_args():
     parser.add_argument("--leverage", type=int, default=3, help="레버리지 배수")
     parser.add_argument("--balance", type=float, default=1000.0, help="초기 잔고 (USDT)")
     parser.add_argument("--max-position-pct", type=float, default=0.15, help="최대 포지션 비율")
+    parser.add_argument("--base-risk-pct", type=float, default=0.02, help="기본 리스크 비율 (기본 0.02=2%%)")
     parser.add_argument("--cooldown", type=int, default=36, help="쿨다운 캔들 수 (5m 기준, 기본 36=3시간)")
     parser.add_argument("--min-confidence", type=float, default=0.5, help="최소 신뢰도 (0.0-1.0)")
     parser.add_argument("--trending-only", action="store_true", help="추세 레짐에서만 거래")
@@ -2448,6 +2449,9 @@ def parse_args():
                         help="연속 N패 시 사이즈 축소 (0=비활성)")
     parser.add_argument("--consecutive-loss-reduce-pct", type=float, default=0.5,
                         help="연속 손실 축소 비율 (기본 0.5=50%%)")
+    # 멀티 타임프레임 (COIN-82)
+    parser.add_argument("--trend-1h-confirm", action="store_true",
+                        help="TrendFollower에 1h EMA/RSI 하락추세 확인 추가")
     return parser.parse_args()
 
 
@@ -2472,6 +2476,7 @@ async def main():
         leverage=args.leverage,
         initial_balance=args.balance,
         max_position_pct=args.max_position_pct,
+        base_risk_pct=args.base_risk_pct,
         cooldown_candles=args.cooldown,
         min_confidence=args.min_confidence,
         trending_only=args.trending_only,
@@ -2525,6 +2530,13 @@ async def main():
         bt._consecutive_loss_size_reduce = args.consecutive_loss_reduce
         bt._consecutive_loss_reduce_pct = args.consecutive_loss_reduce_pct
         print(f"  연속 {args.consecutive_loss_reduce}패 시 사이즈 {args.consecutive_loss_reduce_pct*100:.0f}%로 축소")
+
+    if args.trend_1h_confirm:
+        from strategies.trend_follower import TrendFollowerStrategy
+        for strat in bt._strategy_selector.all_strategies.values():
+            if isinstance(strat, TrendFollowerStrategy):
+                strat.use_1h_confirmation = True
+        print("  TrendFollower 1h 멀티타임프레임 확인 활성화")
 
     if args.spot_strategies and args.v1_strategies:
         print("오류: --spot-strategies와 --v1-strategies는 동시 사용 불가")
