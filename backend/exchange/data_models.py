@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
 
 
 @dataclass
@@ -62,10 +61,44 @@ class OrderBook:
 @dataclass
 class FuturesPosition:
     symbol: str
-    side: str           # "long" / "short"
-    amount: float       # 포지션 수량
+    side: str  # "long" / "short"
+    amount: float  # 포지션 수량
     entry_price: float
     leverage: int
     liquidation_price: float
     unrealized_pnl: float
     margin: float
+
+
+@dataclass
+class OpenInterest:
+    """미결제약정 (Open Interest) 데이터."""
+
+    symbol: str
+    open_interest_value: float  # OI value in quote currency (USDT)
+    timestamp: datetime
+
+
+@dataclass
+class MarkPriceInfo:
+    """마크 프라이스 + 프리미엄 정보."""
+
+    symbol: str
+    mark_price: float
+    index_price: float
+    last_funding_rate: float
+    next_funding_time: datetime
+    premium_pct: float  # (mark - index) / index * 100
+    timestamp: datetime
+
+
+@dataclass
+class LongShortRatio:
+    """롱숏 비율 데이터."""
+
+    symbol: str
+    long_account_ratio: float
+    short_account_ratio: float
+    long_position_ratio: float
+    short_position_ratio: float
+    timestamp: datetime
