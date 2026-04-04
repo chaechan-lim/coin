@@ -3,15 +3,23 @@ RegimeDetector — 1h 캔들 기반 시장 레짐 감지.
 
 ADX + BB Width + ATR% + Volume Ratio + EMA slope로 레짐을 분류한다.
 히스테리시스 + 연속 확인 + 최소 유지 시간으로 whipsaw를 방지.
+파생 데이터(OI, Premium, L/S Ratio) 선택적 주입으로 보조 시그널 제공 (COIN-79).
 """
+
+from __future__ import annotations
+
 import structlog
 import pandas as pd
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from core.enums import Regime
 from core.event_bus import emit_event
+
+if TYPE_CHECKING:
+    from services.derivatives_data import DerivativesDataService
 
 logger = structlog.get_logger(__name__)
 
@@ -19,14 +27,17 @@ logger = structlog.get_logger(__name__)
 @dataclass(frozen=True)
 class RegimeState:
     """불변 레짐 상태."""
+
     regime: Regime
-    confidence: float       # 0.0-1.0
+    confidence: float  # 0.0-1.0
     adx: float
     bb_width: float
     atr_pct: float
     volume_ratio: float
-    trend_direction: int    # +1, 0, -1
+    trend_direction: int  # +1, 0, -1
     timestamp: datetime
+    # 파생 데이터 (선택적, COIN-79)
+    derivatives_snapshot: dict | None = None
 
 
 class RegimeDetector:
@@ -48,6 +59,7 @@ class RegimeDetector:
         confirm_count: int = 2,
         min_duration_h: int = 3,
         on_regime_change: Callable[["Regime", "Regime"], None] | None = None,
+        derivatives_data: DerivativesDataService | None = None,
     ):
         self._adx_enter = adx_enter
         self._adx_exit = adx_exit
@@ -56,6 +68,7 @@ class RegimeDetector:
         self._confirm_count = confirm_count
         self._min_duration_h = min_duration_h
         self._on_regime_change = on_regime_change
+        self._derivatives_data = derivatives_data
 
         self._current: RegimeState | None = None
         self._pending_regime: Regime | None = None
@@ -71,11 +84,15 @@ class RegimeDetector:
     def per_coin(self) -> dict[str, RegimeState]:
         return self._per_coin
 
-    def detect(self, df: pd.DataFrame) -> RegimeState:
+    def detect(self, df: pd.DataFrame, symbol: str = "BTC/USDT") -> RegimeState:
         """DataFrame(1h 캔들)에서 레짐을 감지한다.
 
         필수 컬럼: close, volume, adx_14, atr_14, ema_20, ema_50,
                    bb_upper_20, bb_lower_20, bb_mid_20
+
+        Args:
+            df: 1h OHLCV + 지표 DataFrame.
+            symbol: 파생 데이터 조회용 심볼 (COIN-79).
         """
         if len(df) < 50:
             return self._fallback_state()
@@ -113,8 +130,15 @@ class RegimeDetector:
 
         # 레짐 분류
         regime, confidence = self._classify(
-            adx, bb_width, atr_pct, ema_slope, ema_cross,
+            adx,
+            bb_width,
+            atr_pct,
+            ema_slope,
+            ema_cross,
         )
+
+        # 파생 데이터 스냅샷 (COIN-79)
+        deriv_snapshot = self._build_derivatives_snapshot(symbol)
 
         return RegimeState(
             regime=regime,
@@ -125,6 +149,7 @@ class RegimeDetector:
             volume_ratio=vol_ratio,
             trend_direction=ema_cross,
             timestamp=datetime.now(timezone.utc),
+            derivatives_snapshot=deriv_snapshot,
         )
 
     async def update(self, df: pd.DataFrame, symbol: str = "BTC/USDT") -> RegimeState:
@@ -133,7 +158,7 @@ class RegimeDetector:
         Returns:
             확정된 현재 RegimeState (pending 아닌 confirmed).
         """
-        raw = self.detect(df)
+        raw = self.detect(df, symbol=symbol)
 
         # 코인별 레짐 저장
         self._per_coin[symbol] = raw
@@ -144,7 +169,8 @@ class RegimeDetector:
 
         if prev_regime is not None and confirmed.regime != prev_regime:
             await emit_event(
-                "info", "strategy",
+                "info",
+                "strategy",
                 f"레짐 변경: {prev_regime.value} → {confirmed.regime.value}",
                 detail=f"신뢰도={confirmed.confidence:.0%}, ADX={confirmed.adx:.1f}",
                 metadata={
@@ -168,9 +194,9 @@ class RegimeDetector:
     ) -> tuple[Regime, float]:
         """원시 지표에서 레짐 + 신뢰도를 계산."""
         # 현재 추세 상태에 따라 히스테리시스 임계값 선택
-        in_trend = (
-            self._current is not None
-            and self._current.regime in (Regime.TRENDING_UP, Regime.TRENDING_DOWN)
+        in_trend = self._current is not None and self._current.regime in (
+            Regime.TRENDING_UP,
+            Regime.TRENDING_DOWN,
         )
         adx_threshold = self._adx_exit if in_trend else self._adx_enter
 
@@ -201,7 +227,9 @@ class RegimeDetector:
             # 첫 감지: 즉시 확정
             self._current = raw
             self._last_transition = now
-            logger.info("regime_initial", regime=raw.regime.value, confidence=raw.confidence)
+            logger.info(
+                "regime_initial", regime=raw.regime.value, confidence=raw.confidence
+            )
             return raw
 
         # 같은 레짐이면 pending 리셋
@@ -218,6 +246,7 @@ class RegimeDetector:
                 volume_ratio=raw.volume_ratio,
                 trend_direction=raw.trend_direction,
                 timestamp=now,
+                derivatives_snapshot=raw.derivatives_snapshot,
             )
             return self._current
 
@@ -256,6 +285,43 @@ class RegimeDetector:
 
         # 아직 확인 중 — 기존 레짐 유지
         return self._current
+
+    def _build_derivatives_snapshot(self, symbol: str) -> dict | None:
+        """파생 데이터 서비스에서 보조 시그널을 가져온다 (COIN-79).
+
+        Returns:
+            dict with oi_value, premium_pct, long_short_ratio, etc.
+            None if derivatives_data not available or all fetches fail.
+        """
+        if self._derivatives_data is None:
+            return None
+
+        snap = self._derivatives_data.get_snapshot(symbol)
+        if snap is None:
+            return None
+
+        result: dict = {}
+
+        if snap.open_interest is not None:
+            result["oi_value"] = snap.open_interest.open_interest_value
+            result["oi_contracts"] = snap.open_interest.open_interest
+
+        if snap.mark_price is not None:
+            result["mark_price"] = snap.mark_price.mark_price
+            result["index_price"] = snap.mark_price.index_price
+            result["premium_pct"] = snap.mark_price.premium_pct
+            result["funding_rate"] = snap.mark_price.last_funding_rate
+
+        if snap.long_short_ratio is not None:
+            result["long_short_ratio"] = snap.long_short_ratio.long_short_ratio
+            result["long_account"] = snap.long_short_ratio.long_account
+            result["short_account"] = snap.long_short_ratio.short_account
+
+        result["is_stale"] = self._derivatives_data.is_stale(symbol)
+
+        return (
+            result if len(result) > 1 else None
+        )  # >1 because is_stale is always present
 
     def _fallback_state(self) -> RegimeState:
         """데이터 부족 시 기본 레짐."""

@@ -35,6 +35,7 @@ from engine.position_state_tracker import PositionState, PositionStateTracker
 from engine.order_manager import OrderManager
 from engine.portfolio_manager import PortfolioManager
 from exchange.base import ExchangeAdapter
+from services.derivatives_data import DerivativesDataService
 from services.market_data import MarketDataService
 from strategies.combiner import SignalCombiner
 from strategies.cis_momentum import CISMomentumStrategy
@@ -74,6 +75,14 @@ class FuturesEngineV2:
         # 레짐 변경 시 Tier1 즉시 재평가 트리거 이벤트 (COIN-50)
         self._regime_changed_event: asyncio.Event = asyncio.Event()
 
+        # 파생 데이터 서비스 (COIN-79: OI, Mark Price, Premium, L/S Ratio)
+        self._derivatives = DerivativesDataService(
+            exchange=exchange,
+            ttl_sec=300,
+            history_hours=24,
+            collect_interval=300,
+        )
+
         # 핵심 컴포넌트
         self._regime = RegimeDetector(
             adx_enter=v2_cfg.regime_adx_enter,
@@ -81,6 +90,7 @@ class FuturesEngineV2:
             confirm_count=v2_cfg.regime_confirm_count,
             min_duration_h=v2_cfg.regime_min_duration_h,
             on_regime_change=self._on_regime_change,
+            derivatives_data=self._derivatives,
         )
         self._strategies = StrategySelector()
         self._positions = PositionStateTracker()
@@ -285,6 +295,11 @@ class FuturesEngineV2:
         return self.EXCHANGE_NAME
 
     @property
+    def derivatives_data(self) -> DerivativesDataService:
+        """파생 데이터 서비스 접근 (COIN-79)."""
+        return self._derivatives
+
+    @property
     def _eval_error_counts(self) -> dict[str, int]:
         """health_monitor 호환: Tier1Manager의 실제 에러 카운터 참조."""
         return self._tier1._eval_error_counts
@@ -452,6 +467,9 @@ class FuturesEngineV2:
         self._is_running = True
         await emit_event("info", "engine", "선물 엔진 v2 시작")
 
+        # COIN-79: 파생 데이터 수집 시작
+        await self._derivatives.start(self.tracked_coins)
+
         # COIN-41: 다운타임 중 SL/TP 초과 포지션 즉시 체크
         await self._check_downtime_stops()
 
@@ -501,6 +519,9 @@ class FuturesEngineV2:
 
     async def stop(self) -> None:
         self._is_running = False
+
+        # COIN-79: 파생 데이터 수집 중지
+        await self._derivatives.stop()
 
         # 셧다운 포지션 경고: 보유 중인 포지션 PnL 로깅 + 이벤트 (COIN-43)
         await self._log_shutdown_positions()
@@ -1495,4 +1516,6 @@ class FuturesEngineV2:
             "fast_sl_fallback": fast_sl_active,
             "daily_buy_count": self._tier1._daily_buy_count,
             "eval_error_counts": dict(self._tier1._eval_error_counts),
+            "derivatives_collecting": self._derivatives._is_running,
+            "derivatives_symbols": len(self._derivatives._symbols),
         }
