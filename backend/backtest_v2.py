@@ -780,6 +780,11 @@ class V2BacktestResult:
     equity_curve: list[tuple] = field(default_factory=list)
     regime_distribution: dict[str, int] = field(default_factory=dict)
     coin_stats: dict[str, dict] = field(default_factory=dict)
+    # 회피 모드 (D) + 과열 필터 (C) 통계
+    avoidance_daily_pauses: int = 0
+    avoidance_consec_pauses: int = 0
+    funding_blocks: int = 0
+    funding_size_reductions: int = 0
 
 
 # ── 백테스터 ─────────────────────────────────────────────────
@@ -828,6 +833,23 @@ class V2Backtester:
         # 현물 비대칭 모드 (시장 상태 기반 매수 차단)
         self._spot_asymmetric: bool = False
         self._spot_hysteresis_candles: int = 0  # 히스테리시스: bearish→non-bearish 후 N캔들 매수 금지
+
+        # 회피 모드 (D) — 일일 손실 한도 + 연속 손실 정지
+        self._daily_loss_limit_pct: float = 0.0   # 0 = 비활성, e.g. 0.02 = 2%
+        self._consecutive_loss_pause: int = 0     # 0 = 비활성, e.g. 3 = 3연패 시 정지
+        self._consecutive_loss_pause_candles: int = 12  # 정지 기간 (5m, 12=1h)
+
+        # 과열 필터 (C) — 펀딩비 극단 시 진입 차단/축소
+        self._funding_filter: bool = False
+        self._funding_extreme_threshold: float = 0.001  # 0.1% — 진입 완전 차단
+        self._funding_high_threshold: float = 0.0005    # 0.05% — 사이즈 50% 축소
+        self._funding_rsi_block: float = 80.0            # RSI > 이 값이면 롱 차단
+        self._funding_rsi_reduce: float = 70.0           # RSI > 이 값이면 롱 축소
+        self._funding_filter_regimes: set | None = None  # None=전체, set=해당 레짐에서만 적용
+
+        # 연속 손실 사이즈 축소 (정지 대신)
+        self._consecutive_loss_size_reduce: int = 0   # 0=비활성, e.g. 3 = 3연패 시 사이즈 50%
+        self._consecutive_loss_reduce_pct: float = 0.5  # 축소 비율
 
         # 레짐 감지 파라미터 저장 (_precompute_regimes에서도 사용)
         self._regime_confirm = regime_confirm
@@ -998,6 +1020,18 @@ class V2Backtester:
         cascade_cooldowns: dict[str, int] = {}  # symbol → 쿨다운 만료 candle_idx
         last_reset_day = None
 
+        # 회피 모드 (D) 상태
+        daily_realized_pnl = 0.0           # 당일 실현 PnL
+        daily_loss_paused = False          # 일일 손실 한도 초과 플래그
+        consecutive_losses = 0             # 연속 손실 횟수
+        consecutive_loss_resume_idx = 0    # 연속 손실 정지 해제 캔들 idx
+        avoidance_daily_pauses = 0         # 통계: 일일 손실 한도 발동 횟수
+        avoidance_consec_pauses = 0        # 통계: 연속 손실 정지 발동 횟수
+
+        # 과열 필터 (C) 상태
+        funding_blocks = 0                 # 통계: 펀딩 과열 차단 횟수
+        funding_size_reductions = 0        # 통계: 펀딩 사이즈 축소 횟수
+
         print("  시뮬레이션 진행 중...")
 
         for candle_idx, ts in enumerate(all_ts):
@@ -1053,12 +1087,16 @@ class V2Backtester:
                             cash -= funding
                             total_funding += funding
 
-            # ─── 일일 Tier2 카운터 리셋 ───
-            if self._use_tier2:
-                day = ts.date() if hasattr(ts, 'date') else None
-                if day and day != last_reset_day:
+            # ─── 일일 카운터 리셋 ───
+            day = ts.date() if hasattr(ts, 'date') else None
+            if day and day != last_reset_day:
+                if self._use_tier2:
                     tier2_daily_trades = 0
-                    last_reset_day = day
+                # 회피 모드: 일일 PnL 리셋
+                if self._daily_loss_limit_pct > 0:
+                    daily_realized_pnl = 0.0
+                    daily_loss_paused = False
+                last_reset_day = day
 
             # ─── Tier1 코인별 평가 ───
             tier1_coins = [] if self._tier1_disabled else self._coins
@@ -1094,6 +1132,20 @@ class V2Backtester:
                         trade = self._record_trade(pos, price, ts, exit_reason, pnl, regime)
                         trades.append(trade)
                         self._update_coin_stats(coin_stats, trade)
+                        # 회피 모드 (D) PnL 추적
+                        net_pnl = pnl - fee
+                        daily_realized_pnl += net_pnl
+                        if net_pnl < 0:
+                            consecutive_losses += 1
+                            if self._consecutive_loss_pause > 0 and consecutive_losses >= self._consecutive_loss_pause:
+                                consecutive_loss_resume_idx = candle_idx + self._consecutive_loss_pause_candles
+                                avoidance_consec_pauses += 1
+                        else:
+                            consecutive_losses = 0
+                        if self._daily_loss_limit_pct > 0 and not daily_loss_paused:
+                            if daily_realized_pnl < -(self._initial_balance * self._daily_loss_limit_pct):
+                                daily_loss_paused = True
+                                avoidance_daily_pauses += 1
                         if pos.tier == "cascade":
                             cascade_cooldowns[sym] = candle_idx + CASCADE_COOLDOWN_CANDLES
                         del positions[sym]
@@ -1124,6 +1176,19 @@ class V2Backtester:
                         trade = self._record_trade(pos, price, ts, "regime_exit", pnl, coin_regime)
                         trades.append(trade)
                         self._update_coin_stats(coin_stats, trade)
+                        net_pnl = pnl - fee
+                        daily_realized_pnl += net_pnl
+                        if net_pnl < 0:
+                            consecutive_losses += 1
+                            if self._consecutive_loss_pause > 0 and consecutive_losses >= self._consecutive_loss_pause:
+                                consecutive_loss_resume_idx = candle_idx + self._consecutive_loss_pause_candles
+                                avoidance_consec_pauses += 1
+                        else:
+                            consecutive_losses = 0
+                        if self._daily_loss_limit_pct > 0 and not daily_loss_paused:
+                            if daily_realized_pnl < -(self._initial_balance * self._daily_loss_limit_pct):
+                                daily_loss_paused = True
+                                avoidance_daily_pauses += 1
                         del positions[sym]
                         last_exit_idx[sym] = candle_idx
                     continue
@@ -1167,6 +1232,19 @@ class V2Backtester:
                     trade = self._record_trade(pos, price, ts, "strategy_exit", pnl, coin_regime)
                     trades.append(trade)
                     self._update_coin_stats(coin_stats, trade)
+                    net_pnl = pnl - fee
+                    daily_realized_pnl += net_pnl
+                    if net_pnl < 0:
+                        consecutive_losses += 1
+                        if self._consecutive_loss_pause > 0 and consecutive_losses >= self._consecutive_loss_pause:
+                            consecutive_loss_resume_idx = candle_idx + self._consecutive_loss_pause_candles
+                            avoidance_consec_pauses += 1
+                    else:
+                        consecutive_losses = 0
+                    if self._daily_loss_limit_pct > 0 and not daily_loss_paused:
+                        if daily_realized_pnl < -(self._initial_balance * self._daily_loss_limit_pct):
+                            daily_loss_paused = True
+                            avoidance_daily_pauses += 1
                     del positions[sym]
                     last_exit_idx[sym] = candle_idx
                     continue
@@ -1175,6 +1253,30 @@ class V2Backtester:
                     # 최소 신뢰도 필터
                     if decision.confidence < self._min_confidence:
                         continue
+
+                    # ─── 회피 모드 (D) 게이트 ───
+                    if self._daily_loss_limit_pct > 0 and daily_loss_paused:
+                        continue
+                    if self._consecutive_loss_pause > 0 and candle_idx < consecutive_loss_resume_idx:
+                        continue
+
+                    # ─── 과열 필터 (C) — RSI 기반 펀딩 과열 프록시 ───
+                    if self._funding_filter and "rsi_14" in window_5m.columns:
+                        # 레짐 필터: 특정 레짐에서만 적용
+                        apply_funding = True
+                        if self._funding_filter_regimes is not None and coin_regime:
+                            if coin_regime.regime.value not in self._funding_filter_regimes:
+                                apply_funding = False
+                        if apply_funding:
+                            rsi_val = float(window_5m["rsi_14"].iloc[-1])
+                            rsi_block = self._funding_rsi_block
+                            rsi_reduce = self._funding_rsi_reduce
+                            if decision.direction == Direction.LONG and rsi_val > rsi_block:
+                                funding_blocks += 1
+                                continue
+                            if decision.direction == Direction.SHORT and rsi_val < (100 - rsi_block):
+                                funding_blocks += 1
+                                continue
 
                     # US 마켓 오픈 시간 필터
                     if self._us_open_filter != "off":
@@ -1212,6 +1314,19 @@ class V2Backtester:
                         trade = self._record_trade(pos, price, ts, "SAR", pnl, coin_regime)
                         trades.append(trade)
                         self._update_coin_stats(coin_stats, trade)
+                        net_pnl = pnl - fee
+                        daily_realized_pnl += net_pnl
+                        if net_pnl < 0:
+                            consecutive_losses += 1
+                            if self._consecutive_loss_pause > 0 and consecutive_losses >= self._consecutive_loss_pause:
+                                consecutive_loss_resume_idx = candle_idx + self._consecutive_loss_pause_candles
+                                avoidance_consec_pauses += 1
+                        else:
+                            consecutive_losses = 0
+                        if self._daily_loss_limit_pct > 0 and not daily_loss_paused:
+                            if daily_realized_pnl < -(self._initial_balance * self._daily_loss_limit_pct):
+                                daily_loss_paused = True
+                                avoidance_daily_pauses += 1
                         del positions[sym]
                         last_exit_idx[sym] = candle_idx
                     elif sym not in positions:
@@ -1243,6 +1358,23 @@ class V2Backtester:
                         kst_hour = (ts + pd.Timedelta(hours=9)).hour
                         if kst_hour in US_OPEN_BLOCK_HOURS_KST:
                             margin *= 0.5
+                    # 과열 필터 (C): 준과열 구간 사이즈 50% 축소
+                    if self._funding_filter and "rsi_14" in window_5m.columns:
+                        apply_reduce = True
+                        if self._funding_filter_regimes is not None and coin_regime:
+                            if coin_regime.regime.value not in self._funding_filter_regimes:
+                                apply_reduce = False
+                        if apply_reduce:
+                            rsi_val = float(window_5m["rsi_14"].iloc[-1])
+                            rsi_block = self._funding_rsi_block
+                            rsi_reduce = self._funding_rsi_reduce
+                            if (decision.direction == Direction.LONG and rsi_reduce < rsi_val <= rsi_block) or \
+                               (decision.direction == Direction.SHORT and (100 - rsi_block) <= rsi_val < (100 - rsi_reduce)):
+                                margin *= 0.5
+                                funding_size_reductions += 1
+                    # 연속 손실 사이즈 축소
+                    if self._consecutive_loss_size_reduce > 0 and consecutive_losses >= self._consecutive_loss_size_reduce:
+                        margin *= self._consecutive_loss_reduce_pct
                     if margin < MIN_MARGIN_USDT:
                         continue
 
@@ -1587,6 +1719,10 @@ class V2Backtester:
             equity_curve=equity_curve,
             regime_distribution=regime_counts,
             coin_stats=coin_stats,
+            avoidance_daily_pauses=avoidance_daily_pauses,
+            avoidance_consec_pauses=avoidance_consec_pauses,
+            funding_blocks=funding_blocks,
+            funding_size_reductions=funding_size_reductions,
         )
 
     # ── 내부 헬퍼 ─────────────────────────────────────────────
@@ -2102,6 +2238,18 @@ def print_results(r: V2BacktestResult) -> None:
     print(f"  총 수수료:     {r.total_fees:>12,.2f} USDT")
     print(f"  총 펀딩비:     {r.total_funding:>12,.2f} USDT")
 
+    # 회피 모드 (D) + 과열 필터 (C) 통계
+    if r.avoidance_daily_pauses or r.avoidance_consec_pauses or r.funding_blocks or r.funding_size_reductions:
+        print()
+        if r.avoidance_daily_pauses:
+            print(f"  일일 손실 한도 발동:  {r.avoidance_daily_pauses:>5d}회")
+        if r.avoidance_consec_pauses:
+            print(f"  연속 손실 정지:       {r.avoidance_consec_pauses:>5d}회")
+        if r.funding_blocks:
+            print(f"  과열 진입 차단:       {r.funding_blocks:>5d}회")
+        if r.funding_size_reductions:
+            print(f"  과열 사이즈 축소:     {r.funding_size_reductions:>5d}회")
+
     if r.regime_distribution:
         print(f"\n  레짐 분포:")
         total = sum(r.regime_distribution.values())
@@ -2279,6 +2427,27 @@ def parse_args():
                         help="현물 비대칭 모드: 하락장/crash 시 매수 차단")
     parser.add_argument("--spot-hysteresis", type=int, default=0,
                         help="현물 비대칭 히스테리시스: bearish 해제 후 매수 금지 캔들 수 (5m 단위)")
+    # 회피 모드 (D)
+    parser.add_argument("--daily-loss-limit", type=float, default=0.0,
+                        help="일일 손실 한도 (비율, e.g. 0.02=2%%). 0=비활성")
+    parser.add_argument("--consecutive-loss-pause", type=int, default=0,
+                        help="연속 N패 시 진입 정지. 0=비활성")
+    parser.add_argument("--consecutive-loss-pause-duration", type=int, default=12,
+                        help="연속 손실 정지 기간 (5m 캔들, 12=1시간)")
+    # 과열 필터 (C)
+    parser.add_argument("--funding-filter", action="store_true",
+                        help="과열 필터: RSI 극단 시 진입 차단/사이즈 축소")
+    parser.add_argument("--funding-rsi-block", type=float, default=80.0,
+                        help="과열 RSI 차단 임계값 (기본 80)")
+    parser.add_argument("--funding-rsi-reduce", type=float, default=70.0,
+                        help="과열 RSI 축소 임계값 (기본 70)")
+    parser.add_argument("--funding-regimes", type=str, default=None,
+                        help="과열 필터 적용 레짐 (쉼표 구분, e.g. 'volatile,ranging')")
+    # 연속 손실 사이즈 축소
+    parser.add_argument("--consecutive-loss-reduce", type=int, default=0,
+                        help="연속 N패 시 사이즈 축소 (0=비활성)")
+    parser.add_argument("--consecutive-loss-reduce-pct", type=float, default=0.5,
+                        help="연속 손실 축소 비율 (기본 0.5=50%%)")
     return parser.parse_args()
 
 
@@ -2335,6 +2504,27 @@ async def main():
         bt._spot_hysteresis_candles = args.spot_hysteresis
         hyst_str = f", 히스테리시스 {args.spot_hysteresis}캔들 ({args.spot_hysteresis*5}분)" if args.spot_hysteresis > 0 else ""
         print(f"  현물 비대칭 모드 활성화 (crash/downtrend 매수 차단{hyst_str})")
+
+    if args.daily_loss_limit > 0:
+        bt._daily_loss_limit_pct = args.daily_loss_limit
+        print(f"  회피 모드 (D): 일일 손실 한도 {args.daily_loss_limit*100:.1f}%")
+    if args.consecutive_loss_pause > 0:
+        bt._consecutive_loss_pause = args.consecutive_loss_pause
+        bt._consecutive_loss_pause_candles = args.consecutive_loss_pause_duration
+        print(f"  회피 모드 (D): 연속 {args.consecutive_loss_pause}패 시 {args.consecutive_loss_pause_duration*5}분 정지")
+    if args.funding_filter:
+        bt._funding_filter = True
+        bt._funding_rsi_block = args.funding_rsi_block
+        bt._funding_rsi_reduce = args.funding_rsi_reduce
+        if args.funding_regimes:
+            bt._funding_filter_regimes = set(args.funding_regimes.split(","))
+            print(f"  과열 필터 (C): RSI {args.funding_rsi_reduce}/{args.funding_rsi_block} | 레짐: {args.funding_regimes}")
+        else:
+            print(f"  과열 필터 (C): RSI {args.funding_rsi_reduce}/{args.funding_rsi_block} | 전체 레짐")
+    if args.consecutive_loss_reduce > 0:
+        bt._consecutive_loss_size_reduce = args.consecutive_loss_reduce
+        bt._consecutive_loss_reduce_pct = args.consecutive_loss_reduce_pct
+        print(f"  연속 {args.consecutive_loss_reduce}패 시 사이즈 {args.consecutive_loss_reduce_pct*100:.0f}%로 축소")
 
     if args.spot_strategies and args.v1_strategies:
         print("오류: --spot-strategies와 --v1-strategies는 동시 사용 불가")
