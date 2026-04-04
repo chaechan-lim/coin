@@ -300,6 +300,42 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         )
         return float(data.get("fundingRate", 0) or 0)
 
+    async def fetch_leverage_brackets(self, symbol: str) -> list[dict]:
+        """심볼별 노셔널 브라켓 + maintMarginRatio 조회.
+
+        Returns:
+            List of bracket dicts: [{notionalFloor, notionalCap,
+            maintMarginRatio, maxLeverage, cum}]
+        """
+        base_symbol = symbol.replace("/", "")
+        data = await self._call(
+            self._exchange.fapiPrivateGetLeverageBracket, {"symbol": base_symbol}
+        )
+        if not isinstance(data, list) or not data:
+            return []
+        # Response: [{"symbol": "BTCUSDT", "brackets": [...]}]
+        for item in data:
+            if isinstance(item, dict) and item.get("symbol", "") == base_symbol:
+                return item.get("brackets", [])
+        return []
+
+    async def fetch_position_risk(self, symbol: str | None = None) -> list[dict]:
+        """포지션 리스크 데이터 조회 (markPrice, marginRatio 등).
+
+        Args:
+            symbol: 심볼 필터 (None=전체).
+
+        Returns:
+            List of position risk dicts.
+        """
+        params: dict = {}
+        if symbol:
+            params["symbol"] = symbol.replace("/", "")
+        data = await self._call(
+            self._exchange.fapiPrivateV2GetPositionRisk, params
+        )
+        return data if isinstance(data, list) else []
+
     async def fetch_income(
         self,
         income_type: str | None = None,

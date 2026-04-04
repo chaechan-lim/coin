@@ -126,6 +126,8 @@ class Tier1Manager:
         close_lock: asyncio.Lock | None = None,
         # 전략 평가 쓰로틀: 신규 진입 전략 평가 최소 간격 (0=비활성)
         strategy_eval_interval_sec: int = 0,
+        # COIN-76: 청산 거리 검증 가드 (None=비활성)
+        liquidation_guard=None,
     ):
         self._coins = coins
         self._safe_order = safe_order
@@ -185,6 +187,9 @@ class Tier1Manager:
         # SL/TP는 매 사이클(60s)마다 체크, 신규 진입 전략 평가만 쓰로틀링
         self._eval_interval_sec = strategy_eval_interval_sec
         self._last_strategy_eval_time: dict[str, float] = {}  # symbol → monotonic timestamp
+
+        # COIN-76: 청산 거리 검증 가드 (None=비활성)
+        self._liquidation_guard = liquidation_guard
 
         # 관측용 상태 (COIN-17)
         self._cycle_count: int = 0
@@ -860,6 +865,29 @@ class Tier1Manager:
         effective_leverage = self._leverage
         if self._atr_leverage_scaling and close > 0:
             effective_leverage = self._calc_atr_leverage(atr, close)
+
+        # COIN-76: 청산 거리 검증 (leverageBracket + positionRisk 사전 검증)
+        if self._liquidation_guard is not None:
+            direction_str = decision.direction.value if decision.direction else "long"
+            liq_check = await self._liquidation_guard.check_entry(
+                symbol=symbol,
+                direction=direction_str,
+                entry_price=close,
+                sl_atr_mult=decision.stop_loss_atr,
+                atr=atr,
+                leverage=effective_leverage,
+            )
+            if not liq_check.safe:
+                logger.warning(
+                    "liq_guard_blocked_entry",
+                    symbol=symbol,
+                    direction=direction_str,
+                    buffer_ratio=round(liq_check.buffer_ratio, 3),
+                    reason=liq_check.reason,
+                )
+                return False
+            if liq_check.suggested_leverage is not None:
+                effective_leverage = liq_check.suggested_leverage
 
         margin = self._calc_margin(decision, close, atr)
         if margin <= 0:

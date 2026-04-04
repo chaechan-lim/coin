@@ -3133,3 +3133,176 @@ class TestUSOpenNoEntry:
 
         # SL/TP는 US 오픈 필터보다 먼저 체크되므로 청산됨
         assert result == "sl_tp"
+
+
+# ── COIN-76: LiquidationGuard 통합 테스트 ────────────────────────
+
+class TestLiquidationGuardIntegration:
+    """Tier1Manager + LiquidationGuard 통합 테스트."""
+
+    def _make_guard(self, safe=True, suggested_leverage=None, reason="ok"):
+        """테스트용 mock LiquidationGuard."""
+        from engine.liquidation_guard import LiquidationCheckResult
+        guard = MagicMock()
+        guard.check_entry = AsyncMock(
+            return_value=LiquidationCheckResult(
+                safe=safe,
+                buffer_ratio=3.0 if safe else 0.5,
+                suggested_leverage=suggested_leverage,
+                reason=reason,
+            )
+        )
+        return guard
+
+    def _make_tier1_with_guard(self, mock_deps, guard):
+        """liquidation_guard를 주입한 Tier1Manager 생성."""
+        return Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=mock_deps["safe_order"],
+            position_tracker=mock_deps["tracker"],
+            regime_detector=mock_deps["regime"],
+            portfolio_manager=mock_deps["pm"],
+            market_data=mock_deps["market_data"],
+            long_evaluator=mock_deps["long_eval"],
+            short_evaluator=mock_deps["short_eval"],
+            leverage=3,
+            max_position_pct=0.15,
+            liquidation_guard=guard,
+        )
+
+    def test_liquidation_guard_stored(self, mock_deps):
+        """liquidation_guard가 __init__에서 저장됨."""
+        guard = self._make_guard()
+        mgr = self._make_tier1_with_guard(mock_deps, guard)
+        assert mgr._liquidation_guard is guard
+
+    def test_no_guard_default(self, tier1):
+        """기본 Tier1Manager에는 liquidation_guard=None."""
+        assert tier1._liquidation_guard is None
+
+    @pytest.mark.asyncio
+    async def test_guard_called_on_entry(self, mock_deps, session):
+        """진입 시 guard.check_entry() 호출됨."""
+        guard = self._make_guard(safe=True)
+        mgr = self._make_tier1_with_guard(mock_deps, guard)
+        mock_deps["long_eval"].set_decision(
+            "BTC/USDT",
+            _long_open_decision(
+                indicators={"close": 80000.0, "atr": 1000.0}
+            ),
+        )
+        await mgr.evaluation_cycle(session)
+        guard.check_entry.assert_called_once()
+        call_kwargs = guard.check_entry.call_args
+        assert call_kwargs.kwargs["symbol"] == "BTC/USDT"
+        assert call_kwargs.kwargs["direction"] == "long"
+        assert call_kwargs.kwargs["entry_price"] == 80000.0
+
+    @pytest.mark.asyncio
+    async def test_guard_safe_allows_entry(self, mock_deps, session):
+        """guard.safe=True → 진입 허용 (execute_order 호출됨)."""
+        guard = self._make_guard(safe=True)
+        mgr = self._make_tier1_with_guard(mock_deps, guard)
+        mock_deps["long_eval"].set_decision(
+            "BTC/USDT",
+            _long_open_decision(
+                indicators={"close": 80000.0, "atr": 1000.0}
+            ),
+        )
+        await mgr.evaluation_cycle(session)
+        mock_deps["safe_order"].execute_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_guard_unsafe_blocks_entry(self, mock_deps, session):
+        """guard.safe=False → 진입 차단 (execute_order 호출 안 됨)."""
+        guard = self._make_guard(safe=False, reason="liq_too_close")
+        mgr = self._make_tier1_with_guard(mock_deps, guard)
+        mock_deps["long_eval"].set_decision(
+            "BTC/USDT",
+            _long_open_decision(
+                indicators={"close": 80000.0, "atr": 1000.0}
+            ),
+        )
+        await mgr.evaluation_cycle(session)
+        mock_deps["safe_order"].execute_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_guard_suggested_leverage_used(self, mock_deps, session):
+        """suggested_leverage가 있으면 주문에 해당 레버리지 사용됨."""
+        guard = self._make_guard(safe=True, suggested_leverage=2, reason="reduced_to_2x")
+        mgr = self._make_tier1_with_guard(mock_deps, guard)
+        mock_deps["long_eval"].set_decision(
+            "BTC/USDT",
+            _long_open_decision(
+                indicators={"close": 80000.0, "atr": 1000.0}
+            ),
+        )
+        await mgr.evaluation_cycle(session)
+        mock_deps["safe_order"].execute_order.assert_called_once()
+        # 주문 요청에 suggested_leverage(2) 사용
+        call_args = mock_deps["safe_order"].execute_order.call_args
+        order_request = call_args.args[1]
+        assert order_request.leverage == 2
+
+    @pytest.mark.asyncio
+    async def test_no_guard_allows_entry(self, mock_deps, session):
+        """guard=None → 기존 동작 그대로 (진입 허용)."""
+        # tier1은 guard=None (기본값)
+        mgr = Tier1Manager(
+            coins=["BTC/USDT"],
+            safe_order=mock_deps["safe_order"],
+            position_tracker=mock_deps["tracker"],
+            regime_detector=mock_deps["regime"],
+            portfolio_manager=mock_deps["pm"],
+            market_data=mock_deps["market_data"],
+            long_evaluator=mock_deps["long_eval"],
+            short_evaluator=mock_deps["short_eval"],
+            leverage=3,
+            max_position_pct=0.15,
+        )
+        mock_deps["long_eval"].set_decision(
+            "BTC/USDT",
+            _long_open_decision(
+                indicators={"close": 80000.0, "atr": 1000.0}
+            ),
+        )
+        await mgr.evaluation_cycle(session)
+        mock_deps["safe_order"].execute_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_guard_not_called_for_close_action(self, mock_deps, session):
+        """청산(close) 액션에서는 guard 호출 안 됨."""
+        guard = self._make_guard(safe=True)
+        mgr = self._make_tier1_with_guard(mock_deps, guard)
+
+        # 포지션 보유 상태로 설정
+        from engine.position_state_tracker import PositionState
+        mock_deps["tracker"].open_position(
+            PositionState(
+                symbol="BTC/USDT",
+                direction=Direction.LONG,
+                entry_price=80000.0,
+                quantity=0.01,
+                margin=50.0,
+                leverage=3,
+                extreme_price=80000.0,
+                stop_loss_atr=1.5,
+                take_profit_atr=3.0,
+                trailing_activation_atr=2.0,
+                trailing_stop_atr=1.0,
+                strategy_name="test",
+                confidence=0.7,
+                tier="tier1",
+            )
+        )
+        mock_deps["long_eval"].set_decision(
+            "BTC/USDT",
+            _close_decision("long_eval"),
+        )
+        mock_deps["short_eval"].set_decision(
+            "BTC/USDT",
+            _hold_decision("short_eval"),
+        )
+        await mgr.evaluation_cycle(session)
+        # 청산 액션에서는 guard 호출 안 됨
+        guard.check_entry.assert_not_called()

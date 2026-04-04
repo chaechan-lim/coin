@@ -118,3 +118,11 @@ class ExchangeAdapter(ABC):
     async def fetch_funding_rate(self, symbol: str) -> float:
         """Fetch current funding rate for a symbol."""
         raise NotImplementedError("Futures not supported")
+
+    async def fetch_leverage_brackets(self, symbol: str) -> list[dict]:
+        """Fetch leverage brackets (notional tiers + maintMarginRatio) for a symbol."""
+        raise NotImplementedError("Futures not supported")
+
+    async def fetch_position_risk(self, symbol: str | None = None) -> list[dict]:
+        """Fetch position risk data (markPrice, marginRatio, etc.)."""
+        raise NotImplementedError("Futures not supported")
