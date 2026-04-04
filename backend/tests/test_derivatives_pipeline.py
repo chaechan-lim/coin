@@ -442,7 +442,7 @@ class TestDerivativesDataServiceCollection:
 
     @pytest.mark.asyncio
     async def test_collect_all_failures(self):
-        """All metrics fail gracefully."""
+        """All metrics fail: updated_at NOT refreshed (staleness preserved)."""
         exchange = AsyncMock()
         exchange.fetch_open_interest = AsyncMock(side_effect=Exception("fail"))
         exchange.fetch_mark_price = AsyncMock(side_effect=Exception("fail"))
@@ -459,7 +459,38 @@ class TestDerivativesDataServiceCollection:
         assert snap.open_interest is None
         assert snap.mark_price is None
         assert snap.long_short_ratio is None
-        assert snap.updated_at > 0  # Still updated
+        assert snap.updated_at == 0.0  # NOT refreshed when all fail
+
+    @pytest.mark.asyncio
+    async def test_collect_all_failures_preserves_staleness(self):
+        """Existing stale data stays stale when all fetches fail."""
+        exchange = AsyncMock()
+        exchange.fetch_open_interest = AsyncMock(side_effect=Exception("fail"))
+        exchange.fetch_mark_price = AsyncMock(side_effect=Exception("fail"))
+        exchange.fetch_long_short_ratio = AsyncMock(side_effect=Exception("fail"))
+        svc = DerivativesDataService(
+            exchange=exchange, collect_interval=999, ttl_sec=60
+        )
+        svc._symbols = ["BTC/USDT"]
+        svc._oi_history["BTC/USDT"] = __import__("collections").deque(maxlen=100)
+        svc._mark_history["BTC/USDT"] = __import__("collections").deque(maxlen=100)
+        # Pre-populate with old data
+        old_updated = time.monotonic() - 120  # 2min old, past TTL
+        svc._snapshots["BTC/USDT"] = DerivativesSnapshot(
+            open_interest=OpenInterest(
+                symbol="BTC/USDT",
+                open_interest=100,
+                open_interest_value=1000,
+                timestamp=datetime.now(timezone.utc),
+            ),
+            updated_at=old_updated,
+        )
+
+        await svc._collect_all()
+
+        snap = svc.get_snapshot("BTC/USDT")
+        assert snap.updated_at == old_updated  # Not refreshed
+        assert svc.is_stale("BTC/USDT") is True  # Correctly stale
 
     @pytest.mark.asyncio
     async def test_oi_history_accumulates(self):
@@ -883,8 +914,9 @@ class TestFuturesEngineV2Derivatives:
 
         engine = _create_engine(mock_config, exchange, md, om, pm)
         status = engine.get_status()
-        assert "derivatives_collecting" in status
-        assert "derivatives_symbols" in status
+        assert "derivatives" in status
+        assert "is_running" in status["derivatives"]
+        assert "symbols" in status["derivatives"]
 
     def test_derivatives_property(self, mock_config):
         exchange = AsyncMock()
@@ -961,3 +993,135 @@ class TestBaseAdapterFuturesMethods:
         adapter = BinanceSpotAdapter()
         with pytest.raises(NotImplementedError):
             await adapter.fetch_open_interest_history("BTC/USDT")
+
+
+# ═══════════════════════════════════════════════════════════
+# 7. Rework #1 추가 테스트
+# ═══════════════════════════════════════════════════════════
+
+
+class TestDerivativesDataServiceStatus:
+    def test_status_default(self):
+        svc = DerivativesDataService(exchange=MagicMock())
+        status = svc.status()
+        assert status["is_running"] is False
+        assert status["symbols"] == 0
+        assert status["cached_symbols"] == 0
+
+    @pytest.mark.asyncio
+    async def test_status_after_start(self):
+        exchange = _make_mock_exchange()
+        svc = DerivativesDataService(exchange=exchange, collect_interval=999)
+        await svc.start(["BTC/USDT", "ETH/USDT"])
+        await asyncio.sleep(0.1)
+        status = svc.status()
+        assert status["is_running"] is True
+        assert status["symbols"] == 2
+        assert status["cached_symbols"] >= 1
+        await svc.stop()
+
+
+class TestAdapterNullTimestampGuard:
+    @pytest.mark.asyncio
+    async def test_long_short_ratio_null_timestamp(self):
+        """Null timestamp value should not crash."""
+        adapter = BinanceUSDMAdapter()
+        adapter._exchange = MagicMock()
+        adapter._exchange.fapiPublicGetTopLongShortAccountRatio = AsyncMock(
+            return_value=[
+                {
+                    "longAccount": "0.60",
+                    "shortAccount": "0.40",
+                    "longShortRatio": "1.50",
+                    "timestamp": None,  # null value
+                }
+            ]
+        )
+        adapter._semaphore = asyncio.Semaphore(10)
+
+        result = await adapter.fetch_long_short_ratio("BTC/USDT")
+        assert result.long_short_ratio == 1.5
+        assert result.timestamp is not None  # Falls back to now()
+
+    @pytest.mark.asyncio
+    async def test_oi_history_null_timestamp(self):
+        """Null timestamp value in OI history should not crash."""
+        adapter = BinanceUSDMAdapter()
+        adapter._exchange = MagicMock()
+        adapter._exchange.fapiPublicGetOpenInterestHist = AsyncMock(
+            return_value=[
+                {
+                    "sumOpenInterest": "500",
+                    "sumOpenInterestValue": "40000000",
+                    "timestamp": None,  # null value
+                }
+            ]
+        )
+        adapter._semaphore = asyncio.Semaphore(10)
+
+        result = await adapter.fetch_open_interest_history("BTC/USDT")
+        assert len(result) == 1
+        assert result[0].open_interest == 500.0
+        assert result[0].timestamp is not None  # Falls back to now()
+
+
+class TestCollectAllParallelization:
+    @pytest.mark.asyncio
+    async def test_gather_collects_all_symbols(self):
+        """asyncio.gather parallelizes across symbols."""
+        exchange = AsyncMock()
+        call_order = []
+
+        async def mock_oi(s):
+            call_order.append(("oi", s))
+            return OpenInterest(
+                symbol=s,
+                open_interest=100,
+                open_interest_value=1000,
+                timestamp=datetime.now(timezone.utc),
+            )
+
+        async def mock_mp(s):
+            call_order.append(("mp", s))
+            return MarkPriceInfo(
+                symbol=s,
+                mark_price=100,
+                index_price=100,
+                last_funding_rate=0,
+                next_funding_time=None,
+                premium_pct=0,
+                timestamp=datetime.now(timezone.utc),
+            )
+
+        async def mock_ls(s, **kw):
+            call_order.append(("ls", s))
+            return LongShortRatio(
+                symbol=s,
+                long_account=0.5,
+                short_account=0.5,
+                long_short_ratio=1.0,
+                timestamp=datetime.now(timezone.utc),
+            )
+
+        exchange.fetch_open_interest = mock_oi
+        exchange.fetch_mark_price = mock_mp
+        exchange.fetch_long_short_ratio = mock_ls
+
+        svc = DerivativesDataService(exchange=exchange, collect_interval=999)
+        symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+        svc._symbols = symbols
+        for s in symbols:
+            svc._oi_history[s] = __import__("collections").deque(maxlen=100)
+            svc._mark_history[s] = __import__("collections").deque(maxlen=100)
+
+        await svc._collect_all()
+
+        # All 3 symbols should have snapshots
+        for s in symbols:
+            snap = svc.get_snapshot(s)
+            assert snap is not None
+            assert snap.open_interest is not None
+            assert snap.mark_price is not None
+            assert snap.long_short_ratio is not None
+        # 9 total calls (3 per symbol)
+        assert len(call_order) == 9

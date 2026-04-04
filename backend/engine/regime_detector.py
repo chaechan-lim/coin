@@ -13,13 +13,29 @@ import pandas as pd
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from core.enums import Regime
 from core.event_bus import emit_event
 
 if TYPE_CHECKING:
     from services.derivatives_data import DerivativesDataService
+
+
+class DerivativesSnapshotDict(TypedDict, total=False):
+    """RegimeState.derivatives_snapshot의 타입 정의 (COIN-79)."""
+
+    oi_value: float
+    oi_contracts: float
+    mark_price: float
+    index_price: float
+    premium_pct: float
+    funding_rate: float
+    long_short_ratio: float
+    long_account: float
+    short_account: float
+    is_stale: bool
+
 
 logger = structlog.get_logger(__name__)
 
@@ -37,7 +53,7 @@ class RegimeState:
     trend_direction: int  # +1, 0, -1
     timestamp: datetime
     # 파생 데이터 (선택적, COIN-79)
-    derivatives_snapshot: dict | None = None
+    derivatives_snapshot: DerivativesSnapshotDict | None = None
 
 
 class RegimeDetector:
@@ -286,11 +302,13 @@ class RegimeDetector:
         # 아직 확인 중 — 기존 레짐 유지
         return self._current
 
-    def _build_derivatives_snapshot(self, symbol: str) -> dict | None:
+    def _build_derivatives_snapshot(
+        self, symbol: str
+    ) -> DerivativesSnapshotDict | None:
         """파생 데이터 서비스에서 보조 시그널을 가져온다 (COIN-79).
 
         Returns:
-            dict with oi_value, premium_pct, long_short_ratio, etc.
+            DerivativesSnapshotDict with oi_value, premium_pct, etc.
             None if derivatives_data not available or all fetches fail.
         """
         if self._derivatives_data is None:
@@ -300,7 +318,7 @@ class RegimeDetector:
         if snap is None:
             return None
 
-        result: dict = {}
+        result: DerivativesSnapshotDict = {}
 
         if snap.open_interest is not None:
             result["oi_value"] = snap.open_interest.open_interest_value

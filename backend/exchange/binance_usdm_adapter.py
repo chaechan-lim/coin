@@ -400,7 +400,7 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             return []
         result: list[OpenInterest] = []
         for row in data:
-            ts_ms = int(row.get("timestamp", 0))
+            ts_ms = int(row.get("timestamp", 0) or 0)
             result.append(
                 OpenInterest(
                     symbol=symbol,
@@ -476,10 +476,10 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             short_account=float(row.get("shortAccount", 0.5) or 0.5),
             long_short_ratio=float(row.get("longShortRatio", 1.0) or 1.0),
             timestamp=datetime.fromtimestamp(
-                int(row.get("timestamp", 0)) / 1000,
+                int(row.get("timestamp", 0) or 0) / 1000,
                 tz=timezone.utc,
             )
-            if int(row.get("timestamp", 0)) > 0
+            if int(row.get("timestamp", 0) or 0) > 0
             else datetime.now(timezone.utc),
         )
 

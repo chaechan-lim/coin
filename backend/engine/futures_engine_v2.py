@@ -1516,6 +1516,5 @@ class FuturesEngineV2:
             "fast_sl_fallback": fast_sl_active,
             "daily_buy_count": self._tier1._daily_buy_count,
             "eval_error_counts": dict(self._tier1._eval_error_counts),
-            "derivatives_collecting": self._derivatives._is_running,
-            "derivatives_symbols": len(self._derivatives._symbols),
+            "derivatives": self._derivatives.status(),
         }

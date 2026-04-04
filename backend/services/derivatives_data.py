@@ -113,6 +113,14 @@ class DerivativesDataService:
             return True
         return (time.monotonic() - snap.updated_at) > self._ttl_sec
 
+    def status(self) -> dict:
+        """서비스 상태 정보 반환 (API/엔진 상태용)."""
+        return {
+            "is_running": self._is_running,
+            "symbols": len(self._symbols),
+            "cached_symbols": len(self._snapshots),
+        }
+
     # ── 수집 루프 (async) ──────────────────────────────
 
     async def start(self, symbols: list[str]) -> None:
@@ -168,46 +176,14 @@ class DerivativesDataService:
                 await asyncio.sleep(30)  # 에러 시 30초 대기 후 재시도
 
     async def _collect_all(self) -> None:
-        """모든 심볼의 파생 데이터 수집. 개별 실패는 다른 메트릭에 영향 없음."""
+        """모든 심볼의 파생 데이터 수집. 심볼 간 병렬 처리."""
         t0 = time.monotonic()
-        collected = 0
-        errors = 0
-
-        for symbol in self._symbols:
-            snap = self._snapshots.get(symbol) or DerivativesSnapshot()
-
-            # OI 수집
-            try:
-                oi = await self._exchange.fetch_open_interest(symbol)
-                snap.open_interest = oi
-                self._oi_history[symbol].append(oi)
-                collected += 1
-            except Exception as e:
-                errors += 1
-                logger.debug("derivatives_oi_error", symbol=symbol, error=str(e))
-
-            # Mark Price 수집
-            try:
-                mp = await self._exchange.fetch_mark_price(symbol)
-                snap.mark_price = mp
-                self._mark_history[symbol].append(mp)
-                collected += 1
-            except Exception as e:
-                errors += 1
-                logger.debug("derivatives_mark_error", symbol=symbol, error=str(e))
-
-            # Long/Short Ratio 수집
-            try:
-                ls = await self._exchange.fetch_long_short_ratio(symbol)
-                snap.long_short_ratio = ls
-                collected += 1
-            except Exception as e:
-                errors += 1
-                logger.debug("derivatives_ls_ratio_error", symbol=symbol, error=str(e))
-
-            snap.updated_at = time.monotonic()
-            self._snapshots[symbol] = snap
-
+        results = await asyncio.gather(
+            *(self._collect_symbol(s) for s in self._symbols),
+            return_exceptions=True,
+        )
+        collected = sum(r[0] for r in results if isinstance(r, tuple))
+        errors = sum(r[1] for r in results if isinstance(r, tuple))
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(
             "derivatives_collected",
@@ -216,3 +192,47 @@ class DerivativesDataService:
             errors=errors,
             elapsed_ms=round(elapsed_ms, 1),
         )
+
+    async def _collect_symbol(self, symbol: str) -> tuple[int, int]:
+        """단일 심볼의 파생 데이터 수집. Returns (collected, errors)."""
+        snap = self._snapshots.get(symbol) or DerivativesSnapshot()
+        collected = 0
+        errors = 0
+        symbol_ok = False
+
+        # OI 수집
+        try:
+            oi = await self._exchange.fetch_open_interest(symbol)
+            snap.open_interest = oi
+            self._oi_history[symbol].append(oi)
+            collected += 1
+            symbol_ok = True
+        except Exception as e:
+            errors += 1
+            logger.debug("derivatives_oi_error", symbol=symbol, error=str(e))
+
+        # Mark Price 수집
+        try:
+            mp = await self._exchange.fetch_mark_price(symbol)
+            snap.mark_price = mp
+            self._mark_history[symbol].append(mp)
+            collected += 1
+            symbol_ok = True
+        except Exception as e:
+            errors += 1
+            logger.debug("derivatives_mark_error", symbol=symbol, error=str(e))
+
+        # Long/Short Ratio 수집
+        try:
+            ls = await self._exchange.fetch_long_short_ratio(symbol)
+            snap.long_short_ratio = ls
+            collected += 1
+            symbol_ok = True
+        except Exception as e:
+            errors += 1
+            logger.debug("derivatives_ls_ratio_error", symbol=symbol, error=str(e))
+
+        if symbol_ok:
+            snap.updated_at = time.monotonic()
+        self._snapshots[symbol] = snap
+        return collected, errors
