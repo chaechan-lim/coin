@@ -62,10 +62,44 @@ class OrderBook:
 @dataclass
 class FuturesPosition:
     symbol: str
-    side: str           # "long" / "short"
-    amount: float       # 포지션 수량
+    side: str  # "long" / "short"
+    amount: float  # 포지션 수량
     entry_price: float
     leverage: int
     liquidation_price: float
     unrealized_pnl: float
     margin: float
+
+
+@dataclass
+class OpenInterest:
+    """미결제약정(OI) 데이터."""
+
+    symbol: str
+    open_interest: float  # OI 수량 (contracts)
+    open_interest_value: float  # OI 금액 (USDT)
+    timestamp: datetime
+
+
+@dataclass
+class MarkPriceInfo:
+    """마크 프라이스 + 프리미엄 지수 데이터."""
+
+    symbol: str
+    mark_price: float
+    index_price: float
+    last_funding_rate: float
+    next_funding_time: Optional[datetime]
+    premium_pct: float  # (markPrice - indexPrice) / indexPrice * 100
+    timestamp: datetime
+
+
+@dataclass
+class LongShortRatio:
+    """Top Trader 롱/숏 비율 데이터."""
+
+    symbol: str
+    long_account: float  # 롱 계좌 비율
+    short_account: float  # 숏 계좌 비율
+    long_short_ratio: float  # 롱/숏 비율
+    timestamp: datetime

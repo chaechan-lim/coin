@@ -14,7 +14,15 @@ import ccxt.pro as ccxtpro
 
 from exchange.base import ExchangeAdapter
 from exchange.data_models import (
-    Candle, Ticker, OrderResult, Balance, OrderBook, FuturesPosition,
+    Candle,
+    Ticker,
+    OrderResult,
+    Balance,
+    OrderBook,
+    FuturesPosition,
+    OpenInterest,
+    MarkPriceInfo,
+    LongShortRatio,
 )
 from core.exceptions import (
     ExchangeConnectionError,
@@ -78,13 +86,13 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             logger.info("binance_usdm_disconnected")
 
     # Circuit breaker settings
-    _CB_THRESHOLD = 5       # consecutive failures to trip
-    _CB_RESET_SEC = 60      # seconds before retry after trip
-    _API_TIMEOUT = 30       # seconds per API call
+    _CB_THRESHOLD = 5  # consecutive failures to trip
+    _CB_RESET_SEC = 60  # seconds before retry after trip
+    _API_TIMEOUT = 30  # seconds per API call
 
     def __init_cb(self):
         """Lazy init circuit breaker state (called in _call)."""
-        if not hasattr(self, '_cb_failures'):
+        if not hasattr(self, "_cb_failures"):
             self._cb_failures = 0
             self._cb_open_until = 0.0
 
@@ -92,6 +100,7 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         """Rate-limited API call with timeout and circuit breaker."""
         self.__init_cb()
         import time as _time
+
         now = _time.monotonic()
         if self._cb_failures >= self._CB_THRESHOLD:
             if now < self._cb_open_until:
@@ -143,18 +152,22 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             high=float(data["high"] or 0),
             low=float(data["low"] or 0),
             volume=float(data["baseVolume"] or 0),
-            timestamp=datetime.fromtimestamp(
-                data["timestamp"] / 1000, tz=timezone.utc
-            ),
+            timestamp=datetime.fromtimestamp(data["timestamp"] / 1000, tz=timezone.utc),
         )
 
     async def fetch_ohlcv(
-        self, symbol: str, timeframe: str = "1h", limit: int = 100,
+        self,
+        symbol: str,
+        timeframe: str = "1h",
+        limit: int = 100,
         since: int | None = None,
     ) -> list[Candle]:
         data = await self._call(
-            self._exchange.fetch_ohlcv, symbol, timeframe,
-            since=since, limit=limit,
+            self._exchange.fetch_ohlcv,
+            symbol,
+            timeframe,
+            since=since,
+            limit=limit,
         )
         return [
             Candle(
@@ -214,9 +227,7 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             cost=cost,
             fee=fee,
             fee_currency=(data.get("fee") or {}).get("currency", "USDT"),
-            timestamp=datetime.fromtimestamp(
-                data["timestamp"] / 1000, tz=timezone.utc
-            ),
+            timestamp=datetime.fromtimestamp(data["timestamp"] / 1000, tz=timezone.utc),
             info=data.get("info", {}),
         )
 
@@ -239,16 +250,12 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         return self._parse_order(data)
 
     async def create_market_buy(self, symbol: str, amount: float) -> OrderResult:
-        data = await self._call(
-            self._exchange.create_market_buy_order, symbol, amount
-        )
+        data = await self._call(self._exchange.create_market_buy_order, symbol, amount)
         logger.info("futures_market_buy", symbol=symbol, amount=amount)
         return self._parse_order(data)
 
     async def create_market_sell(self, symbol: str, amount: float) -> OrderResult:
-        data = await self._call(
-            self._exchange.create_market_sell_order, symbol, amount
-        )
+        data = await self._call(self._exchange.create_market_sell_order, symbol, amount)
         logger.info("futures_market_sell", symbol=symbol, amount=amount)
         return self._parse_order(data)
 
@@ -265,17 +272,13 @@ class BinanceUSDMAdapter(ExchangeAdapter):
 
     async def set_leverage(self, symbol: str, leverage: int) -> dict:
         """심볼의 레버리지를 설정한다."""
-        result = await self._call(
-            self._exchange.set_leverage, leverage, symbol
-        )
+        result = await self._call(self._exchange.set_leverage, leverage, symbol)
         logger.info("leverage_set", symbol=symbol, leverage=leverage)
         return result
 
     async def fetch_futures_position(self, symbol: str) -> FuturesPosition | None:
         """현재 선물 포지션 조회."""
-        positions = await self._call(
-            self._exchange.fetch_positions, [symbol]
-        )
+        positions = await self._call(self._exchange.fetch_positions, [symbol])
         for pos in positions:
             contracts = float(pos.get("contracts", 0) or 0)
             if contracts == 0:
@@ -295,9 +298,7 @@ class BinanceUSDMAdapter(ExchangeAdapter):
 
     async def fetch_funding_rate(self, symbol: str) -> float:
         """현재 펀딩비율 조회."""
-        data = await self._call(
-            self._exchange.fetch_funding_rate, symbol
-        )
+        data = await self._call(self._exchange.fetch_funding_rate, symbol)
         return float(data.get("fundingRate", 0) or 0)
 
     async def fetch_leverage_brackets(self, symbol: str) -> list[dict]:
@@ -331,9 +332,7 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         params: dict = {}
         if symbol:
             params["symbol"] = symbol.replace("/", "")
-        data = await self._call(
-            self._exchange.fapiPrivateV2GetPositionRisk, params
-        )
+        data = await self._call(self._exchange.fapiPrivateV2GetPositionRisk, params)
         return data if isinstance(data, list) else []
 
     async def fetch_income(
@@ -355,9 +354,7 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         if start_time:
             params["startTime"] = start_time
 
-        data = await self._call(
-            self._exchange.fapiPrivateGetIncome, params
-        )
+        data = await self._call(self._exchange.fapiPrivateGetIncome, params)
         return [
             {
                 "income_type": r.get("incomeType", ""),
@@ -368,6 +365,123 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             }
             for r in data
         ]
+
+    # ── 선물 파생 데이터 (OI, Mark Price, Long/Short Ratio) ──────
+
+    async def fetch_open_interest(self, symbol: str) -> OpenInterest:
+        """현재 미결제약정(OI) 조회. CCXT fetchOpenInterest() 사용."""
+        data = await self._call(self._exchange.fetch_open_interest, symbol)
+        return OpenInterest(
+            symbol=symbol,
+            open_interest=float(data.get("openInterestAmount", 0) or 0),
+            open_interest_value=float(data.get("openInterestValue", 0) or 0),
+            timestamp=datetime.now(timezone.utc),
+        )
+
+    async def fetch_open_interest_history(
+        self,
+        symbol: str,
+        period: str = "1h",
+        limit: int = 30,
+    ) -> list[OpenInterest]:
+        """OI 시계열 조회. fapiPublic API 사용.
+
+        Args:
+            symbol: 'BTC/USDT' 형식.
+            period: '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d'.
+            limit: 최대 레코드 수 (기본 30, 최대 500).
+        """
+        base_symbol = symbol.replace("/", "")
+        data = await self._call(
+            self._exchange.fapiPublicGetOpenInterestHist,
+            {"symbol": base_symbol, "period": period, "limit": limit},
+        )
+        if not isinstance(data, list):
+            return []
+        result: list[OpenInterest] = []
+        for row in data:
+            ts_ms = int(row.get("timestamp", 0))
+            result.append(
+                OpenInterest(
+                    symbol=symbol,
+                    open_interest=float(row.get("sumOpenInterest", 0) or 0),
+                    open_interest_value=float(row.get("sumOpenInterestValue", 0) or 0),
+                    timestamp=datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+                    if ts_ms
+                    else datetime.now(timezone.utc),
+                )
+            )
+        return result
+
+    async def fetch_mark_price(self, symbol: str) -> MarkPriceInfo:
+        """마크 프라이스 + 프리미엄 인덱스 조회. fapiPublicGetPremiumIndex 사용."""
+        base_symbol = symbol.replace("/", "")
+        data = await self._call(
+            self._exchange.fapiPublicGetPremiumIndex,
+            {"symbol": base_symbol},
+        )
+        # 단일 심볼 요청 시 dict 또는 list[dict] 반환
+        if isinstance(data, list):
+            data = data[0] if data else {}
+
+        mark = float(data.get("markPrice", 0) or 0)
+        index = float(data.get("indexPrice", 0) or 0)
+        premium_pct = ((mark - index) / index * 100) if index > 0 else 0.0
+
+        next_funding_ms = int(data.get("nextFundingTime", 0) or 0)
+        next_funding = (
+            datetime.fromtimestamp(next_funding_ms / 1000, tz=timezone.utc)
+            if next_funding_ms > 0
+            else None
+        )
+
+        return MarkPriceInfo(
+            symbol=symbol,
+            mark_price=mark,
+            index_price=index,
+            last_funding_rate=float(data.get("lastFundingRate", 0) or 0),
+            next_funding_time=next_funding,
+            premium_pct=premium_pct,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+    async def fetch_long_short_ratio(
+        self,
+        symbol: str,
+        period: str = "1h",
+    ) -> LongShortRatio:
+        """Top Trader 롱/숏 비율 조회. fapiPublic API 사용.
+
+        Args:
+            symbol: 'BTC/USDT' 형식.
+            period: '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d'.
+        """
+        base_symbol = symbol.replace("/", "")
+        data = await self._call(
+            self._exchange.fapiPublicGetTopLongShortAccountRatio,
+            {"symbol": base_symbol, "period": period, "limit": 1},
+        )
+        if not isinstance(data, list) or not data:
+            return LongShortRatio(
+                symbol=symbol,
+                long_account=0.5,
+                short_account=0.5,
+                long_short_ratio=1.0,
+                timestamp=datetime.now(timezone.utc),
+            )
+        row = data[0]
+        return LongShortRatio(
+            symbol=symbol,
+            long_account=float(row.get("longAccount", 0.5) or 0.5),
+            short_account=float(row.get("shortAccount", 0.5) or 0.5),
+            long_short_ratio=float(row.get("longShortRatio", 1.0) or 1.0),
+            timestamp=datetime.fromtimestamp(
+                int(row.get("timestamp", 0)) / 1000,
+                tz=timezone.utc,
+            )
+            if int(row.get("timestamp", 0)) > 0
+            else datetime.now(timezone.utc),
+        )
 
     # ── WebSocket (ccxt.pro) ──────────────────────────────────────
 
@@ -389,7 +503,9 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             self._ws_exchange.markets = self._exchange.markets
             self._ws_exchange.symbols = self._exchange.symbols
             self._ws_exchange.currencies = self._exchange.currencies
-            self._ws_exchange.markets_by_id = getattr(self._exchange, 'markets_by_id', {})
+            self._ws_exchange.markets_by_id = getattr(
+                self._exchange, "markets_by_id", {}
+            )
         logger.info("binance_ws_exchange_created", testnet=self._testnet)
 
     _WS_TIMEOUT = 60  # WebSocket 수신 타임아웃 (초)
