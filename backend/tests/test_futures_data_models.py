@@ -100,18 +100,18 @@ class TestMarkPriceInfo:
         )
         assert mp.premium_pct == 0.0
 
-    def test_explicit_premium_pct_overridden(self):
-        """Any explicitly passed premium_pct is overwritten by __post_init__."""
-        mp = MarkPriceInfo(
-            symbol="BTC/USDT",
-            mark_price=65100.0,
-            index_price=65000.0,
-            last_funding_rate=0.0,
-            next_funding_time=datetime.now(timezone.utc),
-            timestamp=datetime.now(timezone.utc),
-            premium_pct=999.0,  # should be overwritten
-        )
-        assert mp.premium_pct == pytest.approx(0.15384615, rel=1e-5)
+    def test_premium_pct_excluded_from_init(self):
+        """premium_pct uses field(init=False) — passing it as a kwarg raises TypeError."""
+        with pytest.raises(TypeError, match="premium_pct"):
+            MarkPriceInfo(  # type: ignore[call-arg]
+                symbol="BTC/USDT",
+                mark_price=65100.0,
+                index_price=65000.0,
+                last_funding_rate=0.0,
+                next_funding_time=datetime.now(timezone.utc),
+                timestamp=datetime.now(timezone.utc),
+                premium_pct=999.0,
+            )
 
 
 # ── LongShortRatio ────────────────────────────────────────────────

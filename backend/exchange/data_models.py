@@ -81,7 +81,11 @@ class OpenInterest:
 
 @dataclass
 class MarkPriceInfo:
-    """마크 프라이스 + 프리미엄 정보."""
+    """마크 프라이스 + 프리미엄 정보.
+
+    `premium_pct` is excluded from `__init__` (field(init=False)) and is
+    auto-computed by `__post_init__` as (mark_price - index_price) / index_price * 100.
+    """
 
     symbol: str
     mark_price: float
@@ -89,10 +93,10 @@ class MarkPriceInfo:
     last_funding_rate: float
     next_funding_time: datetime
     timestamp: datetime
-    premium_pct: float = 0.0  # (mark - index) / index * 100, auto-computed
+    premium_pct: float = field(init=False, default=0.0)
 
     def __post_init__(self) -> None:
-        if self.index_price != 0:
+        if self.index_price != 0.0:
             self.premium_pct = (self.mark_price - self.index_price) / self.index_price * 100
         else:
             self.premium_pct = 0.0

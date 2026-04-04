@@ -430,8 +430,6 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         funding = float(data.get("lastFundingRate", 0) or 0)
         next_funding_ts = int(data.get("nextFundingTime", 0) or 0)
 
-        premium_pct = ((mark - index) / index * 100) if index else 0.0
-
         return MarkPriceInfo(
             symbol=symbol,
             mark_price=mark,
@@ -442,7 +440,6 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             )
             if next_funding_ts
             else datetime.now(timezone.utc),
-            premium_pct=premium_pct,
             timestamp=datetime.now(timezone.utc),
         )
 
