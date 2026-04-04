@@ -88,8 +88,14 @@ class MarkPriceInfo:
     index_price: float
     last_funding_rate: float
     next_funding_time: datetime
-    premium_pct: float  # (mark - index) / index * 100
     timestamp: datetime
+    premium_pct: float = 0.0  # (mark - index) / index * 100, auto-computed
+
+    def __post_init__(self) -> None:
+        if self.index_price != 0:
+            self.premium_pct = (self.mark_price - self.index_price) / self.index_price * 100
+        else:
+            self.premium_pct = 0.0
 
 
 @dataclass
