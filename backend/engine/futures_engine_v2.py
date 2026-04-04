@@ -27,6 +27,7 @@ from engine.regime_evaluators import RegimeLongEvaluator, RegimeShortEvaluator
 from engine.strategy_selector import StrategySelector
 from engine.spot_evaluator import SpotEvaluator
 from engine.tier1_manager import Tier1Manager
+from engine.liquidation_guard import LiquidationGuard
 from engine.tier2_scanner import Tier2Scanner
 from engine.safe_order_pipeline import SafeOrderPipeline, OrderRequest
 from engine.balance_guard import BalanceGuard
@@ -170,6 +171,9 @@ class FuturesEngineV2:
         # COIN-48: WS/eval 동시 청산 방지 뮤텍스 (Tier1Manager와 공유)
         self._close_lock = asyncio.Lock()
 
+        # COIN-76: 청산 거리 검증 가드
+        self._liquidation_guard = LiquidationGuard(exchange)
+
         self._tier1 = Tier1Manager(
             coins=list(v2_cfg.tier1_coins),
             safe_order=self._safe_order,
@@ -202,6 +206,8 @@ class FuturesEngineV2:
             close_lock=self._close_lock,
             # 전략 평가 쓰로틀: 백테스트 최적값과 일치 (COIN-50 보완)
             strategy_eval_interval_sec=v2_cfg.tier1_regime_eval_interval_sec,
+            # COIN-76: 청산 거리 검증 가드
+            liquidation_guard=self._liquidation_guard,
         )
 
         self._tier2 = Tier2Scanner(
