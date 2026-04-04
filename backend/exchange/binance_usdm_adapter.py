@@ -311,11 +311,11 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         data = await self._call(
             self._exchange.fapiPrivateGetLeverageBracket, {"symbol": base_symbol}
         )
-        if not data:
+        if not isinstance(data, list) or not data:
             return []
         # Response: [{"symbol": "BTCUSDT", "brackets": [...]}]
         for item in data:
-            if item.get("symbol", "") == base_symbol:
+            if isinstance(item, dict) and item.get("symbol", "") == base_symbol:
                 return item.get("brackets", [])
         return []
 

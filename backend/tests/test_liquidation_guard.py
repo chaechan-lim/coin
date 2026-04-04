@@ -398,6 +398,24 @@ class TestGracefulDegradation:
         result = await guard.check_entry("BTC/USDT", "long", 80000.0, 1.5, 1000.0, 0)
         assert result.safe is True
 
+    @pytest.mark.asyncio
+    async def test_zero_sl_atr_mult_returns_safe(self):
+        """sl_atr_mult=0 → safe=True (invalid_params, not rejected as liq_too_close)."""
+        exchange = _make_exchange()
+        guard = LiquidationGuard(exchange)
+        result = await guard.check_entry("BTC/USDT", "long", 80000.0, 0.0, 1000.0, 3)
+        assert result.safe is True
+        assert result.reason == "invalid_params"
+
+    @pytest.mark.asyncio
+    async def test_negative_sl_atr_mult_returns_safe(self):
+        """sl_atr_mult<0 → safe=True (invalid_params)."""
+        exchange = _make_exchange()
+        guard = LiquidationGuard(exchange)
+        result = await guard.check_entry("BTC/USDT", "long", 80000.0, -1.0, 1000.0, 3)
+        assert result.safe is True
+        assert result.reason == "invalid_params"
+
 
 # ── check_margin_ratio 테스트 ─────────────────────────────────────
 
@@ -509,3 +527,154 @@ class TestLiquidationCheckResult:
         assert r.safe is False
         assert r.buffer_ratio == 0.8
         assert r.reason == "liq_too_close"
+
+
+# ── Direction 대소문자 무관 테스트 ────────────────────────────────
+
+class TestDirectionCaseInsensitive:
+    """direction 파라미터 대소문자 무관 처리 테스트."""
+
+    def test_calc_long_uppercase(self):
+        """'LONG' (대문자) — 'long'과 동일한 청산가 계산."""
+        lower = LiquidationGuard.calc_liquidation_price("long", 80000.0, 3, 0.01)
+        upper = LiquidationGuard.calc_liquidation_price("LONG", 80000.0, 3, 0.01)
+        assert lower == upper
+
+    def test_calc_short_uppercase(self):
+        """'SHORT' (대문자) — 'short'와 동일한 청산가 계산."""
+        lower = LiquidationGuard.calc_liquidation_price("short", 80000.0, 3, 0.01)
+        upper = LiquidationGuard.calc_liquidation_price("SHORT", 80000.0, 3, 0.01)
+        assert lower == upper
+
+    def test_calc_long_not_equal_short(self):
+        """'long' 청산가 ≠ 'short' 청산가."""
+        long_liq = LiquidationGuard.calc_liquidation_price("long", 80000.0, 3, 0.01)
+        short_liq = LiquidationGuard.calc_liquidation_price("short", 80000.0, 3, 0.01)
+        assert long_liq != short_liq
+
+    @pytest.mark.asyncio
+    async def test_check_entry_uppercase_direction(self):
+        """check_entry에 'LONG' 전달 시 정상 동작."""
+        exchange = _make_exchange()
+        guard = LiquidationGuard(exchange)
+        result_lower = await guard.check_entry("BTC/USDT", "long", 80000.0, 1.5, 1000.0, 3)
+        result_upper = await guard.check_entry("BTC/USDT", "LONG", 80000.0, 1.5, 1000.0, 3)
+        assert result_lower.safe == result_upper.safe
+        assert pytest.approx(result_lower.liquidation_price) == result_upper.liquidation_price
+        assert pytest.approx(result_lower.sl_price) == result_upper.sl_price
+
+    @pytest.mark.asyncio
+    async def test_check_entry_mixed_case_direction(self):
+        """check_entry에 'Long' 전달 시 정상 동작."""
+        exchange = _make_exchange()
+        guard = LiquidationGuard(exchange)
+        result = await guard.check_entry("BTC/USDT", "Long", 80000.0, 1.5, 1000.0, 3)
+        assert result.safe is True
+
+
+# ── 마진비율 초과 시 진입 차단 테스트 ────────────────────────────
+
+class TestMarginRatioIntegration:
+    """check_entry에서 마진비율 확인 후 차단하는 통합 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_high_margin_ratio_blocks_entry(self):
+        """마진비율 80% 이상 시 진입 차단 (safe=False)."""
+        exchange = _make_exchange(position_risk=[
+            {"symbol": "BTCUSDT", "marginRatio": "0.85"}
+        ])
+        guard = LiquidationGuard(exchange)
+        result = await guard.check_entry("BTC/USDT", "long", 80000.0, 1.5, 1000.0, 3)
+        assert result.safe is False
+        assert "margin_ratio_too_high" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_margin_ratio_exactly_at_threshold_blocked(self):
+        """마진비율 == 0.80 → 차단 (>= 비교)."""
+        exchange = _make_exchange(position_risk=[
+            {"symbol": "BTCUSDT", "marginRatio": "0.80"}
+        ])
+        guard = LiquidationGuard(exchange)
+        result = await guard.check_entry("BTC/USDT", "long", 80000.0, 1.5, 1000.0, 3)
+        assert result.safe is False
+
+    @pytest.mark.asyncio
+    async def test_safe_margin_ratio_allows_entry(self):
+        """마진비율 80% 미만 → 청산 거리 체크로 진행."""
+        exchange = _make_exchange(position_risk=[
+            {"symbol": "BTCUSDT", "marginRatio": "0.15"}
+        ])
+        guard = LiquidationGuard(exchange)
+        result = await guard.check_entry("BTC/USDT", "long", 80000.0, 1.5, 1000.0, 3)
+        # marginRatio OK → 청산 거리 체크로 진입
+        assert result.safe is True
+
+    @pytest.mark.asyncio
+    async def test_position_risk_api_failure_does_not_block(self):
+        """positionRisk API 실패 시 마진비율 0.0으로 처리 → 진입 허용."""
+        exchange = MagicMock()
+        exchange.fetch_position_risk = AsyncMock(side_effect=Exception("API Error"))
+        exchange.fetch_leverage_brackets = AsyncMock(return_value=SAMPLE_BRACKETS)
+        guard = LiquidationGuard(exchange)
+        # API 오류 → check_margin_ratio returns 0.0 → 차단 안 됨
+        result = await guard.check_entry("BTC/USDT", "long", 80000.0, 1.5, 1000.0, 3)
+        assert result.safe is True
+
+    @pytest.mark.asyncio
+    async def test_margin_ratio_reason_contains_value(self):
+        """차단 시 reason에 실제 마진비율 값 포함."""
+        exchange = _make_exchange(position_risk=[
+            {"symbol": "BTCUSDT", "marginRatio": "0.92"}
+        ])
+        guard = LiquidationGuard(exchange)
+        result = await guard.check_entry("BTC/USDT", "long", 80000.0, 1.5, 1000.0, 3)
+        assert "0.920" in result.reason
+
+
+# ── fetch_leverage_brackets 타입 가드 테스트 ─────────────────────
+
+class TestFetchLeverageBracketsTypeGuard:
+    """fetch_leverage_brackets에서 비list 응답 처리 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_error_dict_response_returns_empty(self):
+        """API가 에러 dict 반환 시 빈 리스트 반환 (AttributeError 없음)."""
+        from exchange.binance_usdm_adapter import BinanceUSDMAdapter
+        adapter = BinanceUSDMAdapter.__new__(BinanceUSDMAdapter)
+        adapter._exchange = MagicMock()
+        adapter._call = AsyncMock(return_value={"code": -1000, "msg": "Invalid symbol"})
+        result = await adapter.fetch_leverage_brackets("BTC/USDT")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_none_response_returns_empty(self):
+        """API가 None 반환 시 빈 리스트 반환."""
+        from exchange.binance_usdm_adapter import BinanceUSDMAdapter
+        adapter = BinanceUSDMAdapter.__new__(BinanceUSDMAdapter)
+        adapter._exchange = MagicMock()
+        adapter._call = AsyncMock(return_value=None)
+        result = await adapter.fetch_leverage_brackets("BTC/USDT")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_list_with_dict_items_parsed_correctly(self):
+        """정상 list 응답은 올바르게 파싱됨."""
+        from exchange.binance_usdm_adapter import BinanceUSDMAdapter
+        adapter = BinanceUSDMAdapter.__new__(BinanceUSDMAdapter)
+        adapter._exchange = MagicMock()
+        adapter._call = AsyncMock(return_value=[
+            {"symbol": "BTCUSDT", "brackets": SAMPLE_BRACKETS}
+        ])
+        result = await adapter.fetch_leverage_brackets("BTC/USDT")
+        assert result == SAMPLE_BRACKETS
+
+    @pytest.mark.asyncio
+    async def test_list_with_non_dict_items_skipped(self):
+        """list 아이템이 str인 경우(비정상 응답) — AttributeError 없이 빈 리스트 반환."""
+        from exchange.binance_usdm_adapter import BinanceUSDMAdapter
+        adapter = BinanceUSDMAdapter.__new__(BinanceUSDMAdapter)
+        adapter._exchange = MagicMock()
+        # "BTCUSDT" 같은 문자열이 list 아이템으로 오는 경우
+        adapter._call = AsyncMock(return_value=["BTCUSDT", "ETHUSDT"])
+        result = await adapter.fetch_leverage_brackets("BTC/USDT")
+        assert result == []
