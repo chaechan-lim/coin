@@ -191,6 +191,13 @@ def _make_position_state(
     )
 
 
+@pytest.fixture(autouse=True)
+def _pin_kst_hour():
+    """Force _kst_hour() to return 19 (safe from the KST 22-23 US-open filter)."""
+    with patch.object(Tier1Manager, "_kst_hour", return_value=19):
+        yield
+
+
 @pytest.fixture
 def mock_deps():
     regime = RegimeDetector()
