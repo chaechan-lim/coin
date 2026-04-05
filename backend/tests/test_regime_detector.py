@@ -1,12 +1,14 @@
 """RegimeDetector 테스트."""
 import pytest
-import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from engine.regime_detector import RegimeDetector, RegimeState
+from engine.futures_engine_v2 import FuturesEngineV2
 from core.enums import Regime
+from config import AppConfig
+from exchange.data_models import Balance
 
 
 def _make_df(
@@ -327,3 +329,420 @@ class TestRegimeChangeEmit:
             assert "confidence" in meta
             assert "adx" in meta
             assert meta["symbol"] == "ETH/USDT"
+
+
+# ── COIN-99: Derivatives data injection 테스트 ─────────────────────
+
+def _make_derivatives_mock(snapshot: dict | None) -> MagicMock:
+    """get_snapshot()이 고정값을 반환하는 DerivativesDataService mock."""
+    mock = MagicMock()
+    mock.get_snapshot.return_value = snapshot
+    return mock
+
+
+class TestDerivativesDataNone:
+    """derivatives_data=None → 기존 동작 완전 동일 (회귀 방지)."""
+
+    def test_detect_no_snapshot_field(self):
+        """derivatives_data=None이면 detect() 반환 RegimeState.derivatives_snapshot=None."""
+        detector = RegimeDetector()
+        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        state = detector.detect(df)
+        assert state.derivatives_snapshot is None
+
+    @pytest.mark.asyncio
+    async def test_update_returns_no_snapshot(self):
+        """derivatives_data=None이면 update() 반환 상태에 snapshot 없음."""
+        detector = RegimeDetector()
+        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        state = await detector.update(df, "BTC/USDT")
+        assert state.derivatives_snapshot is None
+
+    @pytest.mark.asyncio
+    async def test_confidence_unchanged_without_derivatives(self):
+        """derivatives_data=None이면 신뢰도 조정 없음."""
+        detector_plain = RegimeDetector()
+        detector_with_none = RegimeDetector(derivatives_data=None)
+        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        state_plain = detector_plain.detect(df)
+        state_with_none = detector_with_none.detect(df)
+        assert state_plain.confidence == state_with_none.confidence
+
+
+class TestDerivativesSnapshotAttached:
+    """mock derivatives_data 주입 → snapshot이 반환 RegimeState에 첨부됨."""
+
+    @pytest.mark.asyncio
+    async def test_snapshot_attached_when_data_available(self):
+        """derivatives_data.get_snapshot() 반환값이 derivatives_snapshot에 들어감."""
+        snap = {
+            "symbol": "BTC/USDT",
+            "open_interest_value": 1000.0,
+            "premium_pct": 0.1,
+            "last_funding_rate": 0.0001,
+            "long_account_ratio": 0.55,
+            "short_account_ratio": 0.45,
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        state = await detector.update(df, "BTC/USDT")
+        assert state.derivatives_snapshot is not None
+        assert "signals" in state.derivatives_snapshot
+        assert "oi_change_rate" in state.derivatives_snapshot
+        assert "premium_pct" in state.derivatives_snapshot
+
+    @pytest.mark.asyncio
+    async def test_snapshot_none_when_no_data(self):
+        """get_snapshot()이 None 반환 → derivatives_snapshot=None."""
+        mock_deriv = _make_derivatives_mock(None)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        state = await detector.update(df, "BTC/USDT")
+        assert state.derivatives_snapshot is None
+
+    @pytest.mark.asyncio
+    async def test_regime_not_changed_by_derivatives(self):
+        """파생상품 신호는 레짐 자체를 변경하지 않음."""
+        # 강한 변동성 신호들을 모두 주입
+        snap = {
+            "open_interest_value": 1100.0,  # 높은 OI
+            "premium_pct": 1.5,             # 극단 프리미엄
+            "last_funding_rate": 0.005,     # 극단 펀딩
+            "long_account_ratio": 0.90,
+            "short_account_ratio": 0.10,
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        # TRENDING_UP 조건
+        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        state = await detector.update(df, "BTC/USDT")
+        # 파생상품 신호가 있어도 레짐은 TRENDING_UP 유지
+        assert state.regime == Regime.TRENDING_UP
+
+
+class TestPremiumExtreme:
+    """premium_pct 극단 → VOLATILE 신뢰도 상승."""
+
+    @pytest.mark.asyncio
+    async def test_premium_extreme_high_boosts_volatile_confidence(self):
+        """premium_pct > 0.5% → VOLATILE 레짐에서 신뢰도 상승."""
+        snap = {
+            "premium_pct": 0.8,  # > 0.5% 임계값
+            "last_funding_rate": 0.0,
+            "long_account_ratio": 0.5,
+            "short_account_ratio": 0.5,
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector_plain = RegimeDetector()
+        detector_with = RegimeDetector(derivatives_data=mock_deriv)
+
+        # VOLATILE 조건: BB width ≈ 6.25% → confidence = 0.625 (1.0 미만)
+        df = _make_df(adx=18, bb_upper=82500, bb_lower=77500, bb_mid=80000)
+
+        plain_state = await detector_plain.update(df, "BTC/USDT")
+        with_state = await detector_with.update(df, "BTC/USDT")
+
+        assert plain_state.regime == Regime.VOLATILE
+        assert with_state.regime == Regime.VOLATILE
+        assert with_state.confidence > plain_state.confidence
+        assert with_state.derivatives_snapshot is not None
+        assert "premium_extreme" in with_state.derivatives_snapshot["signals"]
+
+    @pytest.mark.asyncio
+    async def test_premium_extreme_low_boosts_volatile_confidence(self):
+        """premium_pct < -0.5% → VOLATILE 레짐에서 신뢰도 상승."""
+        snap = {
+            "premium_pct": -0.8,  # < -0.5% 임계값
+            "last_funding_rate": 0.0,
+            "long_account_ratio": 0.5,
+            "short_account_ratio": 0.5,
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector_plain = RegimeDetector()
+        detector_with = RegimeDetector(derivatives_data=mock_deriv)
+
+        # VOLATILE 조건: BB width ≈ 6.25% → confidence = 0.625 (1.0 미만)
+        df = _make_df(adx=18, bb_upper=82500, bb_lower=77500, bb_mid=80000)
+
+        plain_state = await detector_plain.update(df, "BTC/USDT")
+        with_state = await detector_with.update(df, "BTC/USDT")
+
+        assert with_state.regime == Regime.VOLATILE
+        assert with_state.confidence > plain_state.confidence
+        assert "premium_extreme" in with_state.derivatives_snapshot["signals"]
+
+    @pytest.mark.asyncio
+    async def test_premium_within_normal_range_no_signal(self):
+        """premium_pct가 ±0.5% 이내 → premium_extreme 신호 없음."""
+        snap = {
+            "premium_pct": 0.2,
+            "last_funding_rate": 0.0,
+            "long_account_ratio": 0.5,
+            "short_account_ratio": 0.5,
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=18, bb_upper=90000, bb_lower=70000, bb_mid=80000)
+        state = await detector.update(df, "BTC/USDT")
+        assert "premium_extreme" not in state.derivatives_snapshot["signals"]
+
+
+class TestOIDivergence:
+    """OI 급증 → oi_divergence 신호."""
+
+    @pytest.mark.asyncio
+    async def test_oi_divergence_detected_on_rapid_increase(self):
+        """OI가 5% 이상 급증 → oi_divergence 신호 감지."""
+        mock_deriv = MagicMock()
+        # 첫 번째 호출: OI = 1000 (기준값 축적)
+        mock_deriv.get_snapshot.return_value = {
+            "open_interest_value": 1000.0,
+            "premium_pct": 0.0,
+            "last_funding_rate": 0.0,
+            "long_account_ratio": 0.5,
+            "short_account_ratio": 0.5,
+        }
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=18, bb_upper=90000, bb_lower=70000, bb_mid=80000)
+
+        # OI 이력 축적 (maxlen=6, 기준값 채우기)
+        for oi_val in [1000.0, 1010.0, 1020.0, 1030.0, 1040.0]:
+            mock_deriv.get_snapshot.return_value = {
+                "open_interest_value": oi_val,
+                "premium_pct": 0.0,
+                "last_funding_rate": 0.0,
+                "long_account_ratio": 0.5,
+                "short_account_ratio": 0.5,
+            }
+            await detector.update(df, "BTC/USDT")
+
+        # OI 급증: 1000 → 1080 (+8%)
+        mock_deriv.get_snapshot.return_value = {
+            "open_interest_value": 1080.0,
+            "premium_pct": 0.0,
+            "last_funding_rate": 0.0,
+            "long_account_ratio": 0.5,
+            "short_account_ratio": 0.5,
+        }
+        state = await detector.update(df, "BTC/USDT")
+        assert state.derivatives_snapshot is not None
+        assert "oi_divergence" in state.derivatives_snapshot["signals"]
+        assert state.derivatives_snapshot["oi_change_rate"] > 0.05
+
+    @pytest.mark.asyncio
+    async def test_oi_change_rate_zero_on_first_call(self):
+        """OI 이력 1개일 때 변화율은 0."""
+        snap = {
+            "open_interest_value": 1000.0,
+            "premium_pct": 0.0,
+            "last_funding_rate": 0.0,
+            "long_account_ratio": 0.5,
+            "short_account_ratio": 0.5,
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=18, bb_upper=90000, bb_lower=70000, bb_mid=80000)
+        state = await detector.update(df, "BTC/USDT")
+        # 이력이 1개 → 변화율 0, oi_divergence 없음
+        assert state.derivatives_snapshot["oi_change_rate"] == 0.0
+        assert "oi_divergence" not in state.derivatives_snapshot["signals"]
+
+
+class TestLongShortRatioExtreme:
+    """롱/숏 비율 극단 → ls_ratio_extreme 신호."""
+
+    @pytest.mark.asyncio
+    async def test_long_heavy_ratio_detected(self):
+        """long/short > 3.0 → ls_ratio_extreme 신호."""
+        snap = {
+            "open_interest_value": 1000.0,
+            "premium_pct": 0.0,
+            "last_funding_rate": 0.0,
+            "long_account_ratio": 0.76,
+            "short_account_ratio": 0.24,  # ratio = 0.76/0.24 ≈ 3.17 > 3.0
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=18, bb_upper=90000, bb_lower=70000, bb_mid=80000)
+        state = await detector.update(df, "BTC/USDT")
+        assert "ls_ratio_extreme" in state.derivatives_snapshot["signals"]
+
+    @pytest.mark.asyncio
+    async def test_short_heavy_ratio_detected(self):
+        """long/short < 0.33 → ls_ratio_extreme 신호."""
+        snap = {
+            "open_interest_value": 1000.0,
+            "premium_pct": 0.0,
+            "last_funding_rate": 0.0,
+            "long_account_ratio": 0.24,
+            "short_account_ratio": 0.76,  # ratio = 0.24/0.76 ≈ 0.316 < 0.33
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=18, bb_upper=90000, bb_lower=70000, bb_mid=80000)
+        state = await detector.update(df, "BTC/USDT")
+        assert "ls_ratio_extreme" in state.derivatives_snapshot["signals"]
+
+    @pytest.mark.asyncio
+    async def test_balanced_ratio_no_signal(self):
+        """균형 잡힌 롱/숏 비율 → ls_ratio_extreme 없음."""
+        snap = {
+            "open_interest_value": 1000.0,
+            "premium_pct": 0.0,
+            "last_funding_rate": 0.0,
+            "long_account_ratio": 0.52,
+            "short_account_ratio": 0.48,  # ratio ≈ 1.08
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=18, bb_upper=90000, bb_lower=70000, bb_mid=80000)
+        state = await detector.update(df, "BTC/USDT")
+        assert "ls_ratio_extreme" not in state.derivatives_snapshot["signals"]
+
+
+class TestFundingRateExtreme:
+    """펀딩 비율 극단 → funding_rate_extreme 신호."""
+
+    @pytest.mark.asyncio
+    async def test_high_positive_funding_rate(self):
+        """|funding_rate| > 0.1% (0.001) → funding_rate_extreme 신호."""
+        snap = {
+            "open_interest_value": 1000.0,
+            "premium_pct": 0.0,
+            "last_funding_rate": 0.0015,  # 0.15% > 0.1%
+            "long_account_ratio": 0.5,
+            "short_account_ratio": 0.5,
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=18, bb_upper=90000, bb_lower=70000, bb_mid=80000)
+        state = await detector.update(df, "BTC/USDT")
+        assert "funding_rate_extreme" in state.derivatives_snapshot["signals"]
+        assert state.derivatives_snapshot["funding_rate"] == pytest.approx(0.0015)
+
+    @pytest.mark.asyncio
+    async def test_high_negative_funding_rate(self):
+        """음수 극단 펀딩 비율도 감지."""
+        snap = {
+            "open_interest_value": 1000.0,
+            "premium_pct": 0.0,
+            "last_funding_rate": -0.002,  # -0.2%
+            "long_account_ratio": 0.5,
+            "short_account_ratio": 0.5,
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=18, bb_upper=90000, bb_lower=70000, bb_mid=80000)
+        state = await detector.update(df, "BTC/USDT")
+        assert "funding_rate_extreme" in state.derivatives_snapshot["signals"]
+
+    @pytest.mark.asyncio
+    async def test_normal_funding_rate_no_signal(self):
+        """|funding_rate| <= 0.1% → funding_rate_extreme 없음."""
+        snap = {
+            "open_interest_value": 1000.0,
+            "premium_pct": 0.0,
+            "last_funding_rate": 0.0005,  # 0.05% < 0.1%
+            "long_account_ratio": 0.5,
+            "short_account_ratio": 0.5,
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=18, bb_upper=90000, bb_lower=70000, bb_mid=80000)
+        state = await detector.update(df, "BTC/USDT")
+        assert "funding_rate_extreme" not in state.derivatives_snapshot["signals"]
+
+
+class TestRegimeStateSerialization:
+    """RegimeState frozen dataclass 직렬화 및 derivatives_snapshot 필드 테스트."""
+
+    def test_regime_state_with_derivatives_snapshot(self):
+        """derivatives_snapshot을 직접 지정한 RegimeState 생성 가능."""
+        snap = {"oi_change_rate": 0.08, "premium_pct": 0.6, "signals": ["oi_divergence"]}
+        state = RegimeState(
+            regime=Regime.VOLATILE,
+            confidence=0.75,
+            adx=20.0,
+            bb_width=12.0,
+            atr_pct=5.0,
+            volume_ratio=1.5,
+            trend_direction=0,
+            timestamp=datetime.now(timezone.utc),
+            derivatives_snapshot=snap,
+        )
+        assert state.derivatives_snapshot is snap
+        assert state.derivatives_snapshot["signals"] == ["oi_divergence"]
+
+    def test_regime_state_default_no_snapshot(self):
+        """derivatives_snapshot 미지정 시 None 기본값."""
+        state = RegimeState(
+            regime=Regime.RANGING,
+            confidence=0.6,
+            adx=15.0,
+            bb_width=3.0,
+            atr_pct=1.0,
+            volume_ratio=1.0,
+            trend_direction=0,
+            timestamp=datetime.now(timezone.utc),
+        )
+        assert state.derivatives_snapshot is None
+
+    def test_regime_state_frozen_cannot_mutate_snapshot(self):
+        """frozen dataclass: derivatives_snapshot 필드 직접 변경 불가."""
+        state = RegimeState(
+            regime=Regime.RANGING,
+            confidence=0.6,
+            adx=15.0,
+            bb_width=3.0,
+            atr_pct=1.0,
+            volume_ratio=1.0,
+            trend_direction=0,
+            timestamp=datetime.now(timezone.utc),
+        )
+        with pytest.raises((AttributeError, TypeError)):
+            state.derivatives_snapshot = {"signals": []}  # type: ignore[misc]
+
+
+class TestFuturesEngineV2DerivativesWiring:
+    """FuturesEngineV2가 derivatives_data를 RegimeDetector에 전달함을 검증."""
+
+    def _make_engine(self, derivatives_data=None):
+        exchange = AsyncMock()
+        exchange.set_leverage = AsyncMock()
+        exchange.fetch_balance = AsyncMock(return_value={
+            "USDT": Balance(currency="USDT", free=500.0, used=0.0, total=500.0),
+        })
+        exchange.close_ws = AsyncMock()
+
+        md = AsyncMock()
+        md.get_current_price = AsyncMock(return_value=80000.0)
+        md.get_ohlcv_df = AsyncMock(return_value=None)
+
+        pm = MagicMock()
+        pm.cash_balance = 500.0
+        pm._is_paper = False
+        pm._exchange_name = "binance_futures"
+        pm.apply_income = AsyncMock()
+
+        om = MagicMock()
+
+        return FuturesEngineV2(
+            config=AppConfig(),
+            exchange=exchange,
+            market_data=md,
+            order_manager=om,
+            portfolio_manager=pm,
+            derivatives_data=derivatives_data,
+        )
+
+    def test_derivatives_data_passed_to_regime_detector(self):
+        """FuturesEngineV2에 전달한 derivatives_data가 RegimeDetector에 주입됨."""
+        mock_deriv = MagicMock()
+        engine = self._make_engine(derivatives_data=mock_deriv)
+        assert engine._regime._derivatives_data is mock_deriv
+
+    def test_no_derivatives_data_defaults_to_none(self):
+        """derivatives_data 미전달 시 RegimeDetector._derivatives_data=None."""
+        engine = self._make_engine(derivatives_data=None)
+        assert engine._regime._derivatives_data is None

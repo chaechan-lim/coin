@@ -85,6 +85,7 @@ class FuturesEngineV2:
             confirm_count=v2_cfg.regime_confirm_count,
             min_duration_h=v2_cfg.regime_min_duration_h,
             on_regime_change=self._on_regime_change,
+            derivatives_data=self._derivatives_data,
         )
         self._strategies = StrategySelector()
         self._positions = PositionStateTracker()
