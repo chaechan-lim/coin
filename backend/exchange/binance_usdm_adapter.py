@@ -536,6 +536,40 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             self._ws_exchange.watch_positions(), timeout=self._WS_TIMEOUT
         )
 
+    async def watch_mark_prices(self, symbols: list[str]) -> dict:
+        """실시간 마크 프라이스 수신 (blocking — 새 데이터 올 때마다 반환).
+
+        ccxt.pro binanceusdm의 watch_mark_prices()를 사용. 미지원 시
+        watch_tickers()로 폴백하여 마크 프라이스 필드만 추출.
+
+        Returns:
+            dict: {symbol: {markPrice, indexPrice, fundingRate, nextFundingTime}}
+        """
+        if not self._ws_exchange:
+            raise ExchangeConnectionError("WebSocket exchange not initialized")
+
+        ws_method = getattr(self._ws_exchange, "watch_mark_prices", None)
+        if ws_method is not None:
+            return await asyncio.wait_for(
+                ws_method(symbols), timeout=self._WS_TIMEOUT
+            )
+
+        # Fallback: ccxt.pro version does not expose watch_mark_prices —
+        # use watch_tickers and extract mark-price relevant fields.
+        logger.warning("watch_mark_prices_fallback_to_tickers", symbols=symbols)
+        raw = await asyncio.wait_for(
+            self._ws_exchange.watch_tickers(symbols), timeout=self._WS_TIMEOUT
+        )
+        return {
+            symbol: {
+                "markPrice": data.get("last"),
+                "indexPrice": data.get("index"),
+                "fundingRate": (data.get("info") or {}).get("fundingRate"),
+                "nextFundingTime": (data.get("info") or {}).get("nextFundingTime"),
+            }
+            for symbol, data in raw.items()
+        }
+
     async def close_ws(self) -> None:
         """WebSocket 연결 정리."""
         if self._ws_exchange:
