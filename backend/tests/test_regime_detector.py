@@ -746,3 +746,83 @@ class TestFuturesEngineV2DerivativesWiring:
         """derivatives_data 미전달 시 RegimeDetector._derivatives_data=None."""
         engine = self._make_engine(derivatives_data=None)
         assert engine._regime._derivatives_data is None
+
+
+class TestDerivativesRobustness:
+    """파생상품 보조 시그널 내결함성 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_ls_ratio_included_in_snapshot(self):
+        """ls_ratio가 derivatives_snapshot에 사전 계산된 값으로 포함됨."""
+        snap = {
+            "open_interest_value": 1000.0,
+            "premium_pct": 0.0,
+            "last_funding_rate": 0.0,
+            "long_account_ratio": 0.76,
+            "short_account_ratio": 0.24,
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=18, bb_upper=90000, bb_lower=70000, bb_mid=80000)
+        state = await detector.update(df, "BTC/USDT")
+        assert state.derivatives_snapshot is not None
+        assert "ls_ratio" in state.derivatives_snapshot
+        ls = state.derivatives_snapshot["ls_ratio"]
+        assert ls is not None
+        assert ls == pytest.approx(0.76 / 0.24, rel=1e-3)
+
+    @pytest.mark.asyncio
+    async def test_ls_ratio_none_when_short_ratio_zero(self):
+        """short_ratio=0일 때 ls_ratio=None으로 0 나누기 방지."""
+        snap = {
+            "open_interest_value": 1000.0,
+            "premium_pct": 0.0,
+            "last_funding_rate": 0.0,
+            "long_account_ratio": 1.0,
+            "short_account_ratio": 0.0,  # short_ratio = 0
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=18, bb_upper=90000, bb_lower=70000, bb_mid=80000)
+        state = await detector.update(df, "BTC/USDT")
+        assert state.derivatives_snapshot["ls_ratio"] is None
+
+    @pytest.mark.asyncio
+    async def test_malformed_snapshot_value_falls_back_gracefully(self):
+        """snapshot 값이 비수치형(문자열 등)이어도 에러 없이 default 0.0 사용."""
+        snap = {
+            "open_interest_value": 1000.0,
+            "premium_pct": "N/A",       # 비수치형 문자열
+            "last_funding_rate": None,
+            "long_account_ratio": {},   # dict (malformed)
+            "short_account_ratio": 0.5,
+        }
+        mock_deriv = _make_derivatives_mock(snap)
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=18, bb_upper=90000, bb_lower=70000, bb_mid=80000)
+        # 예외 없이 처리되어야 함
+        state = await detector.update(df, "BTC/USDT")
+        assert state.derivatives_snapshot is not None
+        assert state.derivatives_snapshot["premium_pct"] == 0.0
+        assert state.derivatives_snapshot["funding_rate"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_derivatives_error_does_not_abort_regime_detection(self):
+        """_apply_derivatives 내부 예외가 발생해도 regime 감지는 계속 동작."""
+        mock_deriv = MagicMock()
+        mock_deriv.get_snapshot.side_effect = RuntimeError("network timeout")
+        detector = RegimeDetector(derivatives_data=mock_deriv)
+        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        # 예외 없이 정상 RegimeState 반환 (derivatives_snapshot=None)
+        state = await detector.update(df, "BTC/USDT")
+        assert state.regime == Regime.TRENDING_UP
+        assert state.derivatives_snapshot is None
+
+    def test_safe_float_handles_non_numeric_types(self):
+        """_safe_float이 비수치형 값을 default로 폴백."""
+        assert RegimeDetector._safe_float("N/A") == 0.0
+        assert RegimeDetector._safe_float({}) == 0.0
+        assert RegimeDetector._safe_float([1, 2]) == 0.0
+        assert RegimeDetector._safe_float(None) == 0.0
+        assert RegimeDetector._safe_float(None, default=99.0) == 99.0
+        assert RegimeDetector._safe_float(1.5) == pytest.approx(1.5)

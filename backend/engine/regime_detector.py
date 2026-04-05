@@ -10,6 +10,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from core.enums import Regime
 from core.event_bus import emit_event
@@ -23,14 +24,14 @@ class RegimeState:
     """불변 레짐 상태."""
 
     regime: Regime
-    confidence: float       # 0.0-1.0
+    confidence: float           # 0.0-1.0
     adx: float
     bb_width: float
     atr_pct: float
     volume_ratio: float
-    trend_direction: int    # +1, 0, -1
+    trend_direction: int        # +1, 0, -1
     timestamp: datetime
-    derivatives_snapshot: dict | None = field(default=None)  # 선택적 파생상품 컨텍스트
+    derivatives_snapshot: dict[str, Any] | None = field(default=None)  # 선택적 파생상품 컨텍스트
 
 
 class RegimeDetector:
@@ -152,8 +153,17 @@ class RegimeDetector:
         raw = self.detect(df)
 
         # 파생상품 보조 시그널 적용 (derivatives_data=None이면 기존 동작과 동일)
+        # 보조 시그널은 에러 시 로그만 남기고 무시 — 핵심 레짐 감지에 영향 없어야 함
         if self._derivatives_data is not None:
-            raw = self._apply_derivatives(raw, symbol)
+            try:
+                raw = self._apply_derivatives(raw, symbol)
+            except Exception:
+                logger.warning(
+                    "derivatives_apply_failed",
+                    symbol=symbol,
+                    exc_info=True,
+                )
+                # raw 변경 없이 진행 — 레짐 감지는 파생상품 없이 계속
 
         # 코인별 레짐 저장
         self._per_coin[symbol] = raw
@@ -199,7 +209,8 @@ class RegimeDetector:
         레짐 자체는 절대 변경하지 않음. 신뢰도만 ±0.05-0.15 범위에서 조정.
         derivatives_snapshot dict를 반환 RegimeState에 첨부.
         """
-        assert self._derivatives_data is not None  # 호출 전 반드시 확인
+        if self._derivatives_data is None:  # pragma: no cover
+            raise RuntimeError("_apply_derivatives called without derivatives_data")
         snap = self._derivatives_data.get_snapshot(symbol)
         if snap is None:
             return raw
@@ -208,13 +219,14 @@ class RegimeDetector:
         volatile_signal_strength: float = 0.0
 
         # --- OI 이력 추적 및 변화율 계산 ---
-        oi_value = snap.get("open_interest_value")
+        oi_raw = snap.get("open_interest_value")
         oi_change_rate = 0.0
-        if oi_value is not None:
+        if oi_raw is not None:
+            oi_value = self._safe_float(oi_raw)
             hist = self._oi_history.setdefault(symbol, deque(maxlen=6))
-            hist.append(float(oi_value))
+            hist.append(oi_value)
             if len(hist) >= 2 and hist[0] > 0:
-                oi_change_rate = (float(oi_value) - hist[0]) / hist[0]
+                oi_change_rate = (oi_value - hist[0]) / hist[0]
 
         # OI 급증 → 청산 캐스케이드 위험 → VOLATILE 신뢰도 상승
         if oi_change_rate > 0.05:
@@ -222,33 +234,33 @@ class RegimeDetector:
             volatile_signal_strength += 0.10
 
         # 프리미엄 극단 → 롱/숏 과열 신호
-        premium_pct = float(snap.get("premium_pct") or 0.0)
+        premium_pct = self._safe_float(snap.get("premium_pct"))
         if abs(premium_pct) > 0.5:
             signals.append("premium_extreme")
             volatile_signal_strength += 0.05
 
         # 롱/숏 비율 극단 → 쏠림 신호
-        long_ratio = float(snap.get("long_account_ratio") or 0.0)
-        short_ratio = float(snap.get("short_account_ratio") or 0.0)
-        if short_ratio > 0:
-            ls_ratio = long_ratio / short_ratio
-            if ls_ratio > 3.0 or ls_ratio < 0.33:
-                signals.append("ls_ratio_extreme")
-                volatile_signal_strength += 0.05
+        long_ratio = self._safe_float(snap.get("long_account_ratio"))
+        short_ratio = self._safe_float(snap.get("short_account_ratio"))
+        ls_ratio: float | None = (long_ratio / short_ratio) if short_ratio > 0 else None
+        if ls_ratio is not None and (ls_ratio > 3.0 or ls_ratio < 0.33):
+            signals.append("ls_ratio_extreme")
+            volatile_signal_strength += 0.05
 
         # 펀딩 비율 극단 → 쏠림 확인
-        funding_rate = float(snap.get("last_funding_rate") or 0.0)
+        funding_rate = self._safe_float(snap.get("last_funding_rate"))
         if abs(funding_rate) > 0.001:  # 0.1% 초과
             signals.append("funding_rate_extreme")
             volatile_signal_strength += 0.05
 
-        # 파생상품 스냅샷 dict 구성
-        derivatives_snapshot: dict = {
+        # 파생상품 스냅샷 dict 구성 (ls_ratio 사전 계산값 포함 — 호출자의 0 나누기 방지)
+        derivatives_snapshot: dict[str, Any] = {
             "oi_change_rate": oi_change_rate,
             "premium_pct": premium_pct,
             "funding_rate": funding_rate,
             "long_ratio": long_ratio,
             "short_ratio": short_ratio,
+            "ls_ratio": ls_ratio,   # None when short_ratio == 0
             "signals": signals,
         }
 
@@ -410,3 +422,14 @@ class RegimeDetector:
         if pd.isna(val):
             return 0.0
         return float(val)
+
+    @staticmethod
+    def _safe_float(value: object, default: float = 0.0) -> float:
+        """외부 API 값을 안전하게 float으로 변환한다.
+
+        None, 빈 값, 문자열, 비수치형 타입 모두 default로 폴백.
+        """
+        try:
+            return float(value) if value is not None else default  # type: ignore[arg-type]
+        except (ValueError, TypeError):
+            return default
