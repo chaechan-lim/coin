@@ -87,6 +87,7 @@ coin/
 | 교차 거래소 포지션 전환 | 높은 신뢰도(>=0.65) 반대 신호 시 기존 포지션 청산 후 새 방향 진입 |
 | 선물 총 자산 과소계상 버그 수정 | `_merge_surge_positions`: `total_value_krw += unrealized` → `+= current_value` (surge 마진이 총 자산에서 누락되던 문제) |
 | MIN_SELL_ACTIVE_WEIGHT | 단일 전략 숏 진입 방지 옵션 (기본 0.0=비활성, backtest --min-sell-weight) |
+| DerivativesDataService WS 통합 (COIN-98) | `FuturesEngineV2`에 `derivatives_data` 선택적 파라미터 추가. `_ws_mark_price_loop` (WS 마크 프라이스 수신 → TTL 캐시 업데이트), `_derivatives_rest_loop` (60초 OI/롱숏비율 REST 수집), `get_status()` `ws_mark_price` 필드 추가. `main.py`에서 `DerivativesDataService` 인스턴스 생성 후 엔진에 주입. 26개 테스트 추가. |
 | 선물 트레일링 스탑 알림 스팸 수정 | `_check_futures_stop_conditions`에 5분 per-symbol 쿨다운 추가 (`_last_stop_event_time` 재사용). 청산 완료 시 쿨다운 해제. (COIN-6) |
 | 선물 구조 최적화 (v0.37→v0.38) | 3x 레버리지, 쿨다운 cd6(24h), 7전략(bb_squeeze 추가), ML Signal Filter |
 | 선물 쿨다운 구현 | futures_engine에 쿨다운 체크 추가, last_sell_at DB 기록 |

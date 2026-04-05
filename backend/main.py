@@ -362,9 +362,12 @@ async def lifespan(app: FastAPI):
             if config.futures_v2.enabled:
                 # ── v2 레짐 적응형 엔진 ──
                 from engine.futures_engine_v2 import FuturesEngineV2
+                from services.derivatives_data import DerivativesDataService
 
                 v2_mode = config.futures_v2.mode
                 logger.info("futures_v2_mode", mode=v2_mode)
+
+                binance_derivatives = DerivativesDataService()
 
                 binance_engine = FuturesEngineV2(
                     config=config,
@@ -372,6 +375,7 @@ async def lifespan(app: FastAPI):
                     market_data=binance_market_data,
                     order_manager=binance_order_mgr,
                     portfolio_manager=binance_portfolio_mgr,
+                    derivatives_data=binance_derivatives,
                 )
                 await binance_engine.initialize()
                 binance_engine.set_broadcast_callback(ws_manager.broadcast)

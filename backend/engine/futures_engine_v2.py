@@ -35,6 +35,8 @@ from engine.position_state_tracker import PositionState, PositionStateTracker
 from engine.order_manager import OrderManager
 from engine.portfolio_manager import PortfolioManager
 from exchange.base import ExchangeAdapter
+from exchange.data_models import MarkPriceInfo
+from services.derivatives_data import DerivativesDataService
 from services.market_data import MarketDataService
 from strategies.combiner import SignalCombiner
 from strategies.cis_momentum import CISMomentumStrategy
@@ -64,10 +66,12 @@ class FuturesEngineV2:
         market_data: MarketDataService,
         order_manager: OrderManager,
         portfolio_manager: PortfolioManager,
+        derivatives_data: DerivativesDataService | None = None,
     ):
         self._config = config
         self._exchange = exchange
         self._market_data = market_data
+        self._derivatives_data = derivatives_data
 
         v2_cfg = config.futures_v2
 
@@ -257,6 +261,7 @@ class FuturesEngineV2:
         self._ws_balance_task: asyncio.Task | None = None  # _ws_balance_loop
         self._ws_pos_task: asyncio.Task | None = None  # _ws_position_loop
         self._fast_sl_task: asyncio.Task | None = None
+        self._ws_mark_price_task: asyncio.Task | None = None  # _ws_mark_price_loop
         self._ws_enabled = True  # WS 활성화 플래그
 
         # health_monitor 호환 속성: Tier1Manager의 실제 에러 카운터를 참조
@@ -474,6 +479,11 @@ class FuturesEngineV2:
             except Exception as e:
                 logger.warning("v2_ws_init_failed", error=str(e))
 
+        if self._derivatives_data and ws_started:
+            self._ws_mark_price_task = asyncio.create_task(
+                self._ws_mark_price_loop(), name="v2_ws_mark_price"
+            )
+
         # WS 실패 시 폴백 시작
         if not ws_started:
             self._fast_sl_task = asyncio.create_task(
@@ -489,12 +499,19 @@ class FuturesEngineV2:
             asyncio.create_task(self._income_loop(), name="v2_income"),
             asyncio.create_task(self._persist_loop(), name="v2_persist"),
         ]
+        if self._derivatives_data is not None:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._derivatives_rest_loop(), name="v2_derivatives_rest"
+                )
+            )
         # WS 태스크도 관리 목록에 추가
         for t in (
             self._ws_monitor_task,
             self._ws_balance_task,
             self._ws_pos_task,
             self._fast_sl_task,
+            self._ws_mark_price_task,
         ):
             if t is not None:
                 self._tasks.append(t)
@@ -517,6 +534,7 @@ class FuturesEngineV2:
         self._ws_balance_task = None
         self._ws_pos_task = None
         self._fast_sl_task = None
+        self._ws_mark_price_task = None
 
         # WS 연결 해제
         try:
@@ -700,6 +718,86 @@ class FuturesEngineV2:
                         consecutive_errors = 0
                 else:
                     await asyncio.sleep(5)
+
+    async def _ws_mark_price_loop(self) -> None:
+        """WS 실시간 마크 프라이스 수신 → DerivativesDataService 캐시 업데이트.
+
+        3회 연속 에러 시 경고 로그 + 재연결 시도.
+        폴백 루프 없음 (마크 프라이스는 보조 데이터 — 거래 중단 없음).
+        """
+        backoff = self._WS_RECONNECT_MIN
+        consecutive_errors = 0
+
+        while self._is_running:
+            try:
+                coins = self.tracked_coins
+                if not coins:
+                    await asyncio.sleep(5)
+                    continue
+
+                raw = await self._exchange.watch_mark_prices(coins)
+                consecutive_errors = 0
+                backoff = self._WS_RECONNECT_MIN
+
+                for symbol, data in raw.items():
+                    info = self._parse_mark_price_data(symbol, data)
+                    if info is not None:
+                        self._derivatives_data.update_mark_price(symbol, info)  # type: ignore[union-attr]
+
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                consecutive_errors += 1
+                logger.warning(
+                    "v2_ws_mark_price_error",
+                    error=str(e),
+                    consecutive=consecutive_errors,
+                )
+
+                if consecutive_errors >= self._WS_MAX_ERRORS:
+                    logger.warning(
+                        "v2_ws_mark_price_max_errors",
+                        consecutive=consecutive_errors,
+                    )
+                    backoff = await self._ws_reconnect(backoff)
+                    if backoff == self._WS_RECONNECT_MIN:
+                        consecutive_errors = 0
+                else:
+                    await asyncio.sleep(5)
+
+    @staticmethod
+    def _parse_mark_price_data(symbol: str, data: dict) -> MarkPriceInfo | None:
+        """마크 프라이스 딕셔너리 → MarkPriceInfo 변환.
+
+        ccxt.pro native watch_mark_prices 및 watch_tickers 폴백 양쪽 포맷 지원.
+        필드: markPrice, indexPrice, fundingRate, nextFundingTime / nextFundingTimestamp.
+        """
+        try:
+            mark_price = float(data.get("markPrice") or 0)
+            if mark_price <= 0:
+                return None
+            index_price = float(data.get("indexPrice") or 0)
+            funding_rate = float(data.get("fundingRate") or 0)
+            # ccxt native: nextFundingTimestamp, adapter fallback: nextFundingTime
+            next_ts = data.get("nextFundingTime") or data.get("nextFundingTimestamp")
+            if next_ts:
+                next_funding_time = datetime.fromtimestamp(
+                    int(next_ts) / 1000, tz=timezone.utc
+                )
+            else:
+                next_funding_time = datetime.now(timezone.utc)
+            return MarkPriceInfo(
+                symbol=symbol,
+                mark_price=mark_price,
+                index_price=index_price,
+                last_funding_rate=funding_rate,
+                next_funding_time=next_funding_time,
+                timestamp=datetime.now(timezone.utc),
+            )
+        except Exception:
+            return None
 
     async def _realtime_stop_check(self, symbol: str, price: float) -> None:
         """WS 가격으로 SL/TP/trailing 즉시 체크 — 경량 2단계 필터링.
@@ -1285,6 +1383,42 @@ class FuturesEngineV2:
                 logger.error("v2_regime_error", error=str(e))
             await asyncio.sleep(3600)
 
+    async def _derivatives_rest_loop(self) -> None:
+        """60초 주기 REST 파생 데이터 수집 (OI, 롱숏비율).
+
+        WS 마크 프라이스를 보완하는 REST-only 데이터 수집.
+        에러 시 경고 로그 후 계속 (비중요 보조 데이터).
+        """
+        _REST_INTERVAL = 60
+
+        while self._is_running:
+            if self._derivatives_data is None:
+                await asyncio.sleep(_REST_INTERVAL)
+                continue
+
+            for symbol in self.tracked_coins:
+                try:
+                    oi = await self._exchange.fetch_open_interest(symbol)
+                    self._derivatives_data.update_open_interest(symbol, oi)
+                except Exception as e:
+                    logger.warning(
+                        "v2_derivatives_oi_error",
+                        symbol=symbol,
+                        error=str(e),
+                    )
+
+                try:
+                    ls = await self._exchange.fetch_long_short_ratio(symbol)
+                    self._derivatives_data.update_long_short_ratio(symbol, ls)
+                except Exception as e:
+                    logger.warning(
+                        "v2_derivatives_ls_error",
+                        symbol=symbol,
+                        error=str(e),
+                    )
+
+            await asyncio.sleep(_REST_INTERVAL)
+
     async def _tier1_loop(self) -> None:
         """Tier 1 코인 평가 루프.
 
@@ -1477,6 +1611,10 @@ class FuturesEngineV2:
         fast_sl_active = (
             self._fast_sl_task is not None and not self._fast_sl_task.done()
         )
+        ws_mark_price_ok = (
+            self._ws_mark_price_task is not None
+            and not self._ws_mark_price_task.done()
+        )
         return {
             "engine": "futures_v2",
             "is_running": self._is_running,
@@ -1493,6 +1631,7 @@ class FuturesEngineV2:
             "ws_balance_audit": ws_balance_ok,
             "ws_position_sync": ws_position_ok,
             "fast_sl_fallback": fast_sl_active,
+            "ws_mark_price": ws_mark_price_ok,
             "daily_buy_count": self._tier1._daily_buy_count,
             "eval_error_counts": dict(self._tier1._eval_error_counts),
         }
