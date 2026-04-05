@@ -30,7 +30,6 @@ def _make_mark_price(
         index_price=mark * 0.999,
         last_funding_rate=0.0001,
         next_funding_time=ts,
-        premium_pct=0.1,
         timestamp=ts,
     )
 
