@@ -9,6 +9,7 @@ import time
 import structlog
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import Any
 
 from exchange.data_models import LongShortRatio, MarkPriceInfo, OpenInterest
 
@@ -25,7 +26,7 @@ _MAX_SYMBOLS = 100  # 최대 추적 심볼 수
 class _CacheEntry:
     """타임스탬프 포함 캐시 엔트리."""
 
-    value: object
+    value: Any  # MarkPriceInfo | OpenInterest | LongShortRatio
     stored_at: float  # time.monotonic()
 
 
@@ -134,7 +135,7 @@ class DerivativesDataService:
 
     def _get(
         self, store: OrderedDict[str, _CacheEntry], key: str, ttl: float
-    ) -> object | None:
+    ) -> Any | None:
         """TTL 기반 캐시 조회."""
         entry = store.get(key)
         if entry is None:
@@ -144,7 +145,7 @@ class DerivativesDataService:
             return None
         return entry.value
 
-    def _put(self, store: OrderedDict[str, _CacheEntry], key: str, value: object) -> None:
+    def _put(self, store: OrderedDict[str, _CacheEntry], key: str, value: Any) -> None:
         """캐시에 저장 (LRU 방식 eviction)."""
         store[key] = _CacheEntry(value=value, stored_at=time.monotonic())
         store.move_to_end(key)

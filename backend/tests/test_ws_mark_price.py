@@ -302,6 +302,75 @@ class TestMarkPriceLoop:
         # CancelledError로 루프 종료 — 예외 없이 반환
         await engine._ws_mark_price_loop()
 
+    @pytest.mark.asyncio
+    async def test_empty_result_triggers_error(
+        self, app_config, mock_exchange, mock_market_data, mock_om, mock_pm, derivatives_data
+    ):
+        """모든 심볼 수집 실패(빈 결과) 시 consecutive_errors 증가."""
+        engine = FuturesEngineV2(
+            config=app_config,
+            exchange=mock_exchange,
+            market_data=mock_market_data,
+            order_manager=mock_om,
+            portfolio_manager=mock_pm,
+            derivatives_data=derivatives_data,
+        )
+        engine._is_running = True
+
+        call_count = 0
+
+        async def _watch_empty_then_stop(symbols):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 1:
+                return {}  # 전체 실패 → RuntimeError 발생
+            engine._is_running = False
+            return {"BTC/USDT": _make_mark_price()}
+
+        mock_exchange.watch_mark_prices = AsyncMock(side_effect=_watch_empty_then_stop)
+
+        with patch("engine.futures_engine_v2.asyncio.sleep", new_callable=AsyncMock):
+            await engine._ws_mark_price_loop()
+
+        # 빈 결과 에러 후 복구
+        assert derivatives_data.get_mark_price("BTC/USDT") is not None
+
+    @pytest.mark.asyncio
+    async def test_no_ws_reconnect_on_rest_failure(
+        self, app_config, mock_exchange, mock_market_data, mock_om, mock_pm, derivatives_data
+    ):
+        """REST 실패 시 WS 재연결(_ws_reconnect) 호출하지 않음."""
+        engine = FuturesEngineV2(
+            config=app_config,
+            exchange=mock_exchange,
+            market_data=mock_market_data,
+            order_manager=mock_om,
+            portfolio_manager=mock_pm,
+            derivatives_data=derivatives_data,
+        )
+        engine._is_running = True
+
+        call_count = 0
+
+        async def _watch_errors(symbols):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 4:  # 4회 에러 (>= _WS_MAX_ERRORS=3)
+                raise ConnectionError("rest failure")
+            engine._is_running = False
+            return {"BTC/USDT": _make_mark_price()}
+
+        mock_exchange.watch_mark_prices = AsyncMock(side_effect=_watch_errors)
+
+        with patch("engine.futures_engine_v2.asyncio.sleep", new_callable=AsyncMock):
+            with patch.object(engine, "_ws_reconnect", new_callable=AsyncMock) as mock_reconnect:
+                await engine._ws_mark_price_loop()
+
+        # WS 재연결은 호출되지 않아야 함
+        mock_reconnect.assert_not_called()
+        # close_ws도 호출되지 않아야 함
+        mock_exchange.close_ws.assert_not_called()
+
 
 class TestEngineLifecycle:
     """start/stop에서 mark_price 태스크 관리."""

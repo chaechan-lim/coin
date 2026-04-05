@@ -214,6 +214,9 @@ class RegimeDetector:
                     confidence_adj -= self._CONFIDENCE_BUMP
 
         # 2. 펀딩비율 극단 감지 (과열 확인)
+        # 의도적 비대칭: 펀딩 극단은 변동성을 확인하지만, 비VOLATILE 레짐을 반증하지 않음.
+        # 프리미엄/LS비율과 달리, 높은 펀딩비는 추세가 과열되었다는 신호이지
+        # 추세 자체가 없다는 의미가 아니므로 VOLATILE에서만 부스트.
         funding_rate = snapshot.get("funding_rate")
         if funding_rate is not None:
             if abs(funding_rate) > self._FUNDING_EXTREME:
@@ -233,22 +236,36 @@ class RegimeDetector:
                 else:
                     confidence_adj -= self._CONFIDENCE_BUMP
 
+        # 시그널 없으면 스냅샷만 첨부, 새 객체 할당 회피
+        if not signals:
+            enriched_snapshot = dict(snapshot)
+            enriched_snapshot["signals"] = []
+            return RegimeState(
+                regime=raw.regime,
+                confidence=raw.confidence,
+                adx=raw.adx,
+                bb_width=raw.bb_width,
+                atr_pct=raw.atr_pct,
+                volume_ratio=raw.volume_ratio,
+                trend_direction=raw.trend_direction,
+                timestamp=raw.timestamp,
+                derivatives_snapshot=enriched_snapshot,
+            )
+
         # 클램핑: 최대 조정폭 제한
         confidence_adj = max(-self._MAX_CONFIDENCE_BUMP, min(self._MAX_CONFIDENCE_BUMP, confidence_adj))
         new_confidence = max(0.0, min(1.0, raw.confidence + confidence_adj))
 
-        # 스냅샷에 감지된 시그널 추가
         enriched_snapshot = dict(snapshot)
         enriched_snapshot["signals"] = signals
 
-        if signals:
-            logger.debug(
-                "regime_derivatives_signals",
-                symbol=symbol,
-                signals=signals,
-                confidence_adj=round(confidence_adj, 3),
-                regime=raw.regime.value,
-            )
+        logger.debug(
+            "regime_derivatives_signals",
+            symbol=symbol,
+            signals=signals,
+            confidence_adj=round(confidence_adj, 3),
+            regime=raw.regime.value,
+        )
 
         return RegimeState(
             regime=raw.regime,

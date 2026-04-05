@@ -536,28 +536,34 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             self._ws_exchange.watch_positions(), timeout=self._WS_TIMEOUT
         )
 
+    _MARK_PRICE_CONCURRENCY = 5  # 마크프라이스 병렬 수집 동시 제한
+
     async def watch_mark_prices(self, symbols: list[str]) -> dict[str, MarkPriceInfo]:
-        """실시간 마크프라이스 수신 (REST 폴링 기반).
+        """마크프라이스 병렬 수집 (REST 기반, 동시 5개 제한).
 
         ccxt.pro에는 watch_mark_price가 네이티브로 없으므로
-        fetch_mark_price() REST 호출로 구현한다.
-        WS 루프에서 반복 호출되므로 매 호출 시 최신 데이터를 반환.
+        fetch_mark_price() REST 호출을 asyncio.gather로 병렬 수행한다.
         """
         if not self._exchange:
             raise ExchangeConnectionError("Exchange not initialized")
 
+        sem = asyncio.Semaphore(self._MARK_PRICE_CONCURRENCY)
         result: dict[str, MarkPriceInfo] = {}
-        for symbol in symbols:
-            try:
-                info = await asyncio.wait_for(
-                    self.fetch_mark_price(symbol),
-                    timeout=self._WS_TIMEOUT,
-                )
-                result[symbol] = info
-            except asyncio.TimeoutError:
-                logger.debug("watch_mark_price_timeout", symbol=symbol)
-            except Exception as e:
-                logger.debug("watch_mark_price_error", symbol=symbol, error=str(e))
+
+        async def _fetch_one(symbol: str) -> None:
+            async with sem:
+                try:
+                    info = await asyncio.wait_for(
+                        self.fetch_mark_price(symbol),
+                        timeout=self._WS_TIMEOUT,
+                    )
+                    result[symbol] = info
+                except asyncio.TimeoutError:
+                    logger.debug("watch_mark_price_timeout", symbol=symbol)
+                except Exception as e:
+                    logger.debug("watch_mark_price_error", symbol=symbol, error=str(e))
+
+        await asyncio.gather(*[_fetch_one(s) for s in symbols])
         return result
 
     async def close_ws(self) -> None:

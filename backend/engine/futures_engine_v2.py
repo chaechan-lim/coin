@@ -730,7 +730,7 @@ class FuturesEngineV2:
         """마크프라이스 수집 루프 — DerivativesDataService 캐시 업데이트.
 
         보조 데이터이므로 폴백 활성화 없이 에러 시 경고만 로깅.
-        3회 연속 에러 시 재연결 시도, 재연결 후 리셋.
+        REST 기반이므로 WS 재연결 없이 독립 백오프만 적용.
         """
         backoff = self._WS_RECONNECT_MIN
         consecutive_errors = 0
@@ -745,6 +745,11 @@ class FuturesEngineV2:
 
                 # 마크프라이스 수집
                 mark_prices = await self._exchange.watch_mark_prices(symbols)
+
+                # 전체 실패 감지: 심볼이 있는데 결과가 비면 에러로 간주
+                if not mark_prices and symbols:
+                    raise RuntimeError(f"All {len(symbols)} mark price fetches failed")
+
                 consecutive_errors = 0
                 backoff = self._WS_RECONNECT_MIN
 
@@ -764,30 +769,37 @@ class FuturesEngineV2:
             except Exception as e:
                 consecutive_errors += 1
                 logger.warning(
-                    "v2_ws_mark_price_error",
+                    "v2_mark_price_error",
                     error=str(e),
                     consecutive=consecutive_errors,
                 )
                 if consecutive_errors >= self._WS_MAX_ERRORS:
-                    backoff = await self._ws_reconnect(backoff)
-                    if backoff == self._WS_RECONNECT_MIN:
-                        consecutive_errors = 0
+                    # REST 기반이므로 WS 재연결 불필요 — 백오프만 적용
+                    wait = min(backoff, self._WS_RECONNECT_MAX)
+                    logger.warning(
+                        "v2_mark_price_backoff",
+                        wait_sec=wait,
+                        consecutive=consecutive_errors,
+                    )
+                    await asyncio.sleep(wait)
+                    backoff = min(backoff * self._WS_RECONNECT_FACTOR, self._WS_RECONNECT_MAX)
+                    consecutive_errors = 0
                 else:
                     await asyncio.sleep(10)
 
     async def _fetch_derivatives_rest(self, symbols: list[str]) -> None:
-        """REST로 OI + LS ratio 수집 (보조, 에러 무시)."""
+        """REST로 OI + LS ratio 수집 (보조, 에러 시 debug 로깅)."""
         for symbol in symbols:
             try:
                 oi = await self._exchange.fetch_open_interest(symbol)
                 self._derivatives_data.update_open_interest(symbol, oi)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("fetch_oi_failed", symbol=symbol, error=str(e))
             try:
                 ls = await self._exchange.fetch_long_short_ratio(symbol)
                 self._derivatives_data.update_long_short_ratio(symbol, ls)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("fetch_ls_ratio_failed", symbol=symbol, error=str(e))
 
     async def _realtime_stop_check(self, symbol: str, price: float) -> None:
         """WS 가격으로 SL/TP/trailing 즉시 체크 — 경량 2단계 필터링.
