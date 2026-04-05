@@ -169,3 +169,11 @@ class ExchangeAdapter(ABC):
             period: Kline interval — 5m/15m/30m/1h/2h/4h/6h/12h/1d.
         """
         raise NotImplementedError("Futures not supported")
+
+    async def watch_mark_prices(self, symbols: list[str]) -> dict[str, MarkPriceInfo]:
+        """실시간 마크프라이스 수신 (WS blocking — 새 데이터 시 반환).
+
+        Returns:
+            {symbol: MarkPriceInfo} dict for each symbol with updated data.
+        """
+        raise NotImplementedError("Futures WS not supported")

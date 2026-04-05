@@ -536,6 +536,30 @@ class BinanceUSDMAdapter(ExchangeAdapter):
             self._ws_exchange.watch_positions(), timeout=self._WS_TIMEOUT
         )
 
+    async def watch_mark_prices(self, symbols: list[str]) -> dict[str, MarkPriceInfo]:
+        """실시간 마크프라이스 수신 (REST 폴링 기반).
+
+        ccxt.pro에는 watch_mark_price가 네이티브로 없으므로
+        fetch_mark_price() REST 호출로 구현한다.
+        WS 루프에서 반복 호출되므로 매 호출 시 최신 데이터를 반환.
+        """
+        if not self._exchange:
+            raise ExchangeConnectionError("Exchange not initialized")
+
+        result: dict[str, MarkPriceInfo] = {}
+        for symbol in symbols:
+            try:
+                info = await asyncio.wait_for(
+                    self.fetch_mark_price(symbol),
+                    timeout=self._WS_TIMEOUT,
+                )
+                result[symbol] = info
+            except asyncio.TimeoutError:
+                logger.debug("watch_mark_price_timeout", symbol=symbol)
+            except Exception as e:
+                logger.debug("watch_mark_price_error", symbol=symbol, error=str(e))
+        return result
+
     async def close_ws(self) -> None:
         """WebSocket 연결 정리."""
         if self._ws_exchange:
