@@ -143,6 +143,8 @@ coin/
 | 지표 계산 파이프라인 통합 (COIN-52) | 백테스트(backtest.py, backtest_v2.py)와 라이브(MarketDataService)가 각각 독립적으로 지표를 계산하던 구조를 단일 `services/indicators.py` 모듈로 통합. `compute_indicators()` 함수가 모든 SMA/EMA/RSI/MACD/BB/ATR/ADX/Volume SMA를 계산하고 lowercase 정규화. `REQUIRED_COLUMNS` 상수 + 누락 경고 로그. `_RENAME_MAP` 단일 진입점. Volume_SMA_20→volume_sma_20 대소문자 불일치 해결. 테스트 26개 추가(1885 total). |
 | 선물 청산 버퍼 검증 (COIN-76) | 진입 전 청산가까지 거리가 SL 거리의 2배 이상인지 검증하는 `LiquidationGuard` 추가. **어댑터**: `BinanceUSDMAdapter.fetch_leverage_brackets()` (GET /fapi/v1/leverageBracket), `fetch_position_risk()` (GET /fapi/v2/positionRisk). **LiquidationGuard**: Binance USDM isolated margin 청산가 계산(LONG: liq=entry*(1-1/L+MMR), SHORT: liq=entry*(1+1/L-MMR)), 청산거리 < SL거리×2 시 레버리지 자동 하향(L→1), 모두 실패 시 진입 거부. 5분 TTL 브라켓 캐시. Graceful degradation: API 실패 → 기본 MMR(2.5%) 사용. **Tier1Manager**: `liquidation_guard=None` 파라미터 추가, ATR 레버리지 스케일링 후 체크, `suggested_leverage` 적용. **FuturesEngineV2**: `LiquidationGuard(exchange)` 생성 후 Tier1Manager에 주입. 테스트 58개 추가(2100 total). |
 
+| WS markPrice + 파생상품 데이터 파이프라인 (COIN-88) | **DerivativesDataService**: MarkPriceInfo/OI/LongShortRatio 인메모리 TTL 캐시 (mark_price 2분, OI/LS 5분, LRU eviction). **어댑터**: `watch_mark_prices(symbols)` REST 기반 마크프라이스 수집 + `ExchangeAdapter` 추상 메서드 추가. **FuturesEngineV2**: `_ws_mark_price_loop()` 30초 주기 마크프라이스 수집 + 60초 주기 OI/LS ratio REST 수집, 3회 연속 에러 시 재연결 (보조 데이터이므로 폴백 미활성). start/stop 라이프사이클에 태스크 관리 통합. **RegimeDetector**: `derivatives_data` 옵션 파라미터로 보조 시그널 주입 - premium_extreme(0.5%), funding_extreme(0.1%), ls_ratio_extreme(>3.0/<0.33) 감지 후 신뢰도 조정(최대 0.15). RegimeState에 `derivatives_snapshot` 필드 추가. 기존 레짐 로직 변경 없음(보조 신뢰도 조정만). main.py 배선 완료. 테스트 42개 추가(2199 total). |
+
 ### 낮은 우선순위
 
 | 항목 | 상세 |
