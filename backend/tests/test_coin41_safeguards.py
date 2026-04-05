@@ -25,6 +25,28 @@ from engine.position_state_tracker import PositionStateTracker, PositionState
 from engine.portfolio_manager import PortfolioManager
 
 
+# ── Fixtures ─────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _safe_time():
+    """Patch datetime.now in tier1_manager to dodge the US-open filter (KST 22-23).
+
+    Uses the real time but shifts the hour if it falls in the danger zone
+    (UTC 13-14 → KST 22-23), preserving date and relative time for cooldown tests.
+    """
+    def _safe_now(*args, **kwargs):
+        real = _original_now(*args, **kwargs) if args else _original_now(timezone.utc)
+        if real.hour in (13, 14):
+            return real.replace(hour=15)
+        return real
+
+    _original_now = datetime.now
+    with patch("engine.tier1_manager.datetime", wraps=datetime) as mock_dt:
+        mock_dt.now.side_effect = _safe_now
+        yield mock_dt
+
+
 # ── Helpers ──────────────────────────────────────
 
 
