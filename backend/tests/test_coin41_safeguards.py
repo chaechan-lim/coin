@@ -106,6 +106,17 @@ class MockEvaluator:
         self._decisions[symbol] = decision
 
 
+@pytest.fixture(autouse=True)
+def _pin_kst_hour():
+    """Force _kst_hour() to return 19 (KST, safe from the 22-23 US-open filter).
+
+    Avoids time-of-day test flakes when tests run during KST 22-23.
+    Tests that explicitly test US-open behaviour override _kst_hour locally.
+    """
+    with patch.object(Tier1Manager, "_kst_hour", return_value=19):
+        yield
+
+
 @pytest.fixture
 def mock_deps():
     regime = RegimeDetector()

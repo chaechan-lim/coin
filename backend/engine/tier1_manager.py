@@ -605,8 +605,7 @@ class Tier1Manager:
             )
 
         # US 마켓 오픈 시간 필터 (KST 22-23, no_entry)
-        now_utc = datetime.now(timezone.utc)
-        kst_hour = (now_utc.hour + 9) % 24
+        kst_hour = self._kst_hour()
         if kst_hour in (22, 23):
             self._log_direction_decision(
                 session,
@@ -1134,6 +1133,10 @@ class Tier1Manager:
         """SL/TP/trailing 후 방향별 쿨다운 설정 (COIN-27)."""
         self._last_exit_time[symbol] = time.time()
         self._last_exit_direction[symbol] = direction
+
+    def _kst_hour(self) -> int:
+        """Return the current KST hour (0-23). Extracted for testability."""
+        return (datetime.now(timezone.utc).hour + 9) % 24
 
     # ── COIN-41: 일일 매수 한도 ──────────────────────
 

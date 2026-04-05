@@ -154,6 +154,17 @@ class MockShortEvaluator:
         self._decisions[symbol] = decision
 
 
+@pytest.fixture(autouse=True)
+def _pin_kst_hour():
+    """Force _kst_hour() to return 19 (KST, safe from the 22-23 US-open filter).
+
+    Avoids time-of-day test flakes when tests run during KST 22-23.
+    Tests that explicitly test US-open behaviour override _kst_hour locally.
+    """
+    with patch.object(Tier1Manager, "_kst_hour", return_value=19):
+        yield
+
+
 @pytest.fixture
 def mock_deps():
     regime = RegimeDetector()
@@ -3055,14 +3066,10 @@ class TestUSOpenNoEntry:
 
     @pytest.mark.asyncio
     async def test_entry_blocked_during_us_open_kst22(self, tier1, mock_deps, session):
-        """KST 22시(UTC 13시)에 신규 진입 차단."""
+        """KST 22시에 신규 진입 차단."""
         mock_deps["long_eval"].set_decision("BTC/USDT", _long_open_decision())
 
-        # UTC 13:30 → KST 22:30
-        fake_utc = datetime(2026, 4, 1, 13, 30, tzinfo=timezone.utc)
-        with patch("engine.tier1_manager.datetime") as mock_dt:
-            mock_dt.now.return_value = fake_utc
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        with patch.object(tier1, "_kst_hour", return_value=22):
             result = await tier1._evaluate_coin(session, "BTC/USDT", _regime_state())
 
         assert result == "us_open_blocked"
@@ -3070,14 +3077,10 @@ class TestUSOpenNoEntry:
 
     @pytest.mark.asyncio
     async def test_entry_blocked_during_us_open_kst23(self, tier1, mock_deps, session):
-        """KST 23시(UTC 14시)에 신규 진입 차단."""
+        """KST 23시에 신규 진입 차단."""
         mock_deps["long_eval"].set_decision("BTC/USDT", _long_open_decision())
 
-        # UTC 14:00 → KST 23:00
-        fake_utc = datetime(2026, 4, 1, 14, 0, tzinfo=timezone.utc)
-        with patch("engine.tier1_manager.datetime") as mock_dt:
-            mock_dt.now.return_value = fake_utc
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        with patch.object(tier1, "_kst_hour", return_value=23):
             result = await tier1._evaluate_coin(session, "BTC/USDT", _regime_state())
 
         assert result == "us_open_blocked"
@@ -3085,14 +3088,10 @@ class TestUSOpenNoEntry:
 
     @pytest.mark.asyncio
     async def test_entry_allowed_outside_us_open(self, tier1, mock_deps, session):
-        """KST 21시(UTC 12시)에는 정상 진입."""
+        """KST 21시에는 정상 진입."""
         mock_deps["long_eval"].set_decision("BTC/USDT", _long_open_decision())
 
-        # UTC 12:00 → KST 21:00
-        fake_utc = datetime(2026, 4, 1, 12, 0, tzinfo=timezone.utc)
-        with patch("engine.tier1_manager.datetime") as mock_dt:
-            mock_dt.now.return_value = fake_utc
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        with patch.object(tier1, "_kst_hour", return_value=21):
             result = await tier1._evaluate_coin(session, "BTC/USDT", _regime_state())
 
         assert result == "opened"
@@ -3124,11 +3123,8 @@ class TestUSOpenNoEntry:
         # SL 히트 가격 설정 (78500 < 80000 - 1.5*1000 = 78500)
         mock_deps["market_data"].get_ohlcv_df = AsyncMock(return_value=_make_df(close=78000.0))
 
-        # UTC 13:30 → KST 22:30 (US 오픈 시간)
-        fake_utc = datetime(2026, 4, 1, 13, 30, tzinfo=timezone.utc)
-        with patch("engine.tier1_manager.datetime") as mock_dt:
-            mock_dt.now.return_value = fake_utc
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        # KST 22 (US 오픈 시간)
+        with patch.object(tier1, "_kst_hour", return_value=22):
             result = await tier1._evaluate_coin(session, "BTC/USDT", _regime_state())
 
         # SL/TP는 US 오픈 필터보다 먼저 체크되므로 청산됨
