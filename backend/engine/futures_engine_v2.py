@@ -9,11 +9,13 @@ FuturesEngineV2 — 레짐 적응형 선물 엔진.
 TradingEngine을 상속하지 않음 (완전 독립).
 SurgeEngine을 대체 (Tier 2로 통합).
 """
+from __future__ import annotations
 
 import asyncio
 import time
 import structlog
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from sqlalchemy import or_, select
 
@@ -36,6 +38,8 @@ from engine.order_manager import OrderManager
 from engine.portfolio_manager import PortfolioManager
 from exchange.base import ExchangeAdapter
 from services.market_data import MarketDataService
+if TYPE_CHECKING:
+    from services.derivatives_data import DerivativesDataService
 from strategies.combiner import SignalCombiner
 from strategies.cis_momentum import CISMomentumStrategy
 from strategies.bnf_deviation import BNFDeviationStrategy
@@ -64,6 +68,7 @@ class FuturesEngineV2:
         market_data: MarketDataService,
         order_manager: OrderManager,
         portfolio_manager: PortfolioManager,
+        derivatives_data: "DerivativesDataService | None" = None,
     ):
         self._config = config
         self._exchange = exchange
@@ -81,6 +86,7 @@ class FuturesEngineV2:
             confirm_count=v2_cfg.regime_confirm_count,
             min_duration_h=v2_cfg.regime_min_duration_h,
             on_regime_change=self._on_regime_change,
+            derivatives_data=derivatives_data,
         )
         self._strategies = StrategySelector()
         self._positions = PositionStateTracker()
@@ -240,6 +246,7 @@ class FuturesEngineV2:
 
         self._pm = portfolio_manager
         self._om = order_manager
+        self._derivatives_data = derivatives_data
         self._is_running = False
         self._tasks: list[asyncio.Task] = []
         self._engine_registry = None
@@ -257,6 +264,7 @@ class FuturesEngineV2:
         self._ws_balance_task: asyncio.Task | None = None  # _ws_balance_loop
         self._ws_pos_task: asyncio.Task | None = None  # _ws_position_loop
         self._fast_sl_task: asyncio.Task | None = None
+        self._ws_mark_price_task: asyncio.Task | None = None  # 마크프라이스 수집
         self._ws_enabled = True  # WS 활성화 플래그
 
         # health_monitor 호환 속성: Tier1Manager의 실제 에러 카운터를 참조
@@ -469,10 +477,22 @@ class FuturesEngineV2:
                 self._ws_pos_task = asyncio.create_task(
                     self._ws_position_loop(), name="v2_ws_position"
                 )
+                # 마크프라이스 수집 (파생상품 데이터 서비스 활성 시)
+                if self._derivatives_data is not None:
+                    self._ws_mark_price_task = asyncio.create_task(
+                        self._ws_mark_price_loop(), name="v2_ws_mark_price"
+                    )
+
                 ws_started = True
                 logger.info("v2_ws_started")
             except Exception as e:
                 logger.warning("v2_ws_init_failed", error=str(e))
+
+        # WS 실패 시에도 마크프라이스 수집 시도 (REST 기반이므로 WS 불필요)
+        if not ws_started and self._derivatives_data is not None:
+            self._ws_mark_price_task = asyncio.create_task(
+                self._ws_mark_price_loop(), name="v2_ws_mark_price"
+            )
 
         # WS 실패 시 폴백 시작
         if not ws_started:
@@ -495,6 +515,7 @@ class FuturesEngineV2:
             self._ws_balance_task,
             self._ws_pos_task,
             self._fast_sl_task,
+            self._ws_mark_price_task,
         ):
             if t is not None:
                 self._tasks.append(t)
@@ -517,6 +538,7 @@ class FuturesEngineV2:
         self._ws_balance_task = None
         self._ws_pos_task = None
         self._fast_sl_task = None
+        self._ws_mark_price_task = None
 
         # WS 연결 해제
         try:
@@ -700,6 +722,72 @@ class FuturesEngineV2:
                         consecutive_errors = 0
                 else:
                     await asyncio.sleep(5)
+
+    _MARK_PRICE_INTERVAL = 30  # 마크프라이스 폴링 주기 (초)
+    _DERIVATIVES_REST_INTERVAL = 60  # OI/LS ratio REST 수집 주기 (초)
+
+    async def _ws_mark_price_loop(self) -> None:
+        """마크프라이스 수집 루프 — DerivativesDataService 캐시 업데이트.
+
+        보조 데이터이므로 폴백 활성화 없이 에러 시 경고만 로깅.
+        3회 연속 에러 시 재연결 시도, 재연결 후 리셋.
+        """
+        backoff = self._WS_RECONNECT_MIN
+        consecutive_errors = 0
+        last_rest_fetch: float = 0.0
+
+        while self._is_running:
+            try:
+                symbols = list(self.tracked_coins)
+                if not symbols:
+                    await asyncio.sleep(10)
+                    continue
+
+                # 마크프라이스 수집
+                mark_prices = await self._exchange.watch_mark_prices(symbols)
+                consecutive_errors = 0
+                backoff = self._WS_RECONNECT_MIN
+
+                for symbol, info in mark_prices.items():
+                    self._derivatives_data.update_mark_price(symbol, info)
+
+                # 주기적 REST 수집: OI + LS ratio (보조 데이터)
+                now = time.monotonic()
+                if (now - last_rest_fetch) >= self._DERIVATIVES_REST_INTERVAL:
+                    last_rest_fetch = now
+                    await self._fetch_derivatives_rest(symbols)
+
+                await asyncio.sleep(self._MARK_PRICE_INTERVAL)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                consecutive_errors += 1
+                logger.warning(
+                    "v2_ws_mark_price_error",
+                    error=str(e),
+                    consecutive=consecutive_errors,
+                )
+                if consecutive_errors >= self._WS_MAX_ERRORS:
+                    backoff = await self._ws_reconnect(backoff)
+                    if backoff == self._WS_RECONNECT_MIN:
+                        consecutive_errors = 0
+                else:
+                    await asyncio.sleep(10)
+
+    async def _fetch_derivatives_rest(self, symbols: list[str]) -> None:
+        """REST로 OI + LS ratio 수집 (보조, 에러 무시)."""
+        for symbol in symbols:
+            try:
+                oi = await self._exchange.fetch_open_interest(symbol)
+                self._derivatives_data.update_open_interest(symbol, oi)
+            except Exception:
+                pass
+            try:
+                ls = await self._exchange.fetch_long_short_ratio(symbol)
+                self._derivatives_data.update_long_short_ratio(symbol, ls)
+            except Exception:
+                pass
 
     async def _realtime_stop_check(self, symbol: str, price: float) -> None:
         """WS 가격으로 SL/TP/trailing 즉시 체크 — 경량 2단계 필터링.

@@ -4,11 +4,17 @@ RegimeDetector — 1h 캔들 기반 시장 레짐 감지.
 ADX + BB Width + ATR% + Volume Ratio + EMA slope로 레짐을 분류한다.
 히스테리시스 + 연속 확인 + 최소 유지 시간으로 whipsaw를 방지.
 """
+from __future__ import annotations
+
 import structlog
 import pandas as pd
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from services.derivatives_data import DerivativesDataService
 
 from core.enums import Regime
 from core.event_bus import emit_event
@@ -27,6 +33,7 @@ class RegimeState:
     volume_ratio: float
     trend_direction: int    # +1, 0, -1
     timestamp: datetime
+    derivatives_snapshot: dict | None = None  # 파생상품 보조 데이터 (optional)
 
 
 class RegimeDetector:
@@ -48,6 +55,7 @@ class RegimeDetector:
         confirm_count: int = 2,
         min_duration_h: int = 3,
         on_regime_change: Callable[["Regime", "Regime"], None] | None = None,
+        derivatives_data: "DerivativesDataService | None" = None,
     ):
         self._adx_enter = adx_enter
         self._adx_exit = adx_exit
@@ -56,6 +64,7 @@ class RegimeDetector:
         self._confirm_count = confirm_count
         self._min_duration_h = min_duration_h
         self._on_regime_change = on_regime_change
+        self._derivatives_data = derivatives_data
 
         self._current: RegimeState | None = None
         self._pending_regime: Regime | None = None
@@ -135,6 +144,9 @@ class RegimeDetector:
         """
         raw = self.detect(df)
 
+        # 파생상품 보조 시그널 적용 (옵션)
+        raw = self._enrich_with_derivatives(raw, symbol)
+
         # 코인별 레짐 저장
         self._per_coin[symbol] = raw
 
@@ -157,6 +169,98 @@ class RegimeDetector:
             )
 
         return confirmed
+
+    # ── 파생상품 보조 시그널 ─────────────────────────
+
+    # 보조 시그널 임계값 상수
+    _PREMIUM_EXTREME_PCT = 0.5  # 프리미엄 극단 임계값 (%)
+    _FUNDING_EXTREME = 0.001  # 펀딩비율 극단 임계값 (0.1%)
+    _LS_RATIO_EXTREME_HIGH = 3.0  # 롱숏비율 극단 (롱 과열)
+    _LS_RATIO_EXTREME_LOW = 0.33  # 롱숏비율 극단 (숏 과열)
+    _CONFIDENCE_BUMP = 0.05  # 개별 시그널 신뢰도 조정폭
+    _MAX_CONFIDENCE_BUMP = 0.15  # 최대 누적 신뢰도 조정폭
+
+    def _enrich_with_derivatives(
+        self, raw: RegimeState, symbol: str
+    ) -> RegimeState:
+        """파생상품 데이터로 보조 시그널을 추가한다.
+
+        기존 레짐 분류를 변경하지 않고, 신뢰도만 ±조정.
+        derivatives_data가 None이면 원본 그대로 반환 (하위 호환).
+        """
+        if self._derivatives_data is None:
+            return raw
+
+        try:
+            snapshot = self._derivatives_data.get_snapshot(symbol)
+        except Exception:
+            return raw
+
+        if snapshot is None:
+            return raw
+
+        signals: list[str] = []
+        confidence_adj = 0.0
+
+        # 1. 프리미엄 극단 감지
+        premium_pct = snapshot.get("premium_pct")
+        if premium_pct is not None:
+            if abs(premium_pct) > self._PREMIUM_EXTREME_PCT:
+                signals.append("premium_extreme")
+                # 프리미엄 극단 → VOLATILE 방향 신뢰도 보강
+                if raw.regime == Regime.VOLATILE:
+                    confidence_adj += self._CONFIDENCE_BUMP
+                else:
+                    confidence_adj -= self._CONFIDENCE_BUMP
+
+        # 2. 펀딩비율 극단 감지 (과열 확인)
+        funding_rate = snapshot.get("funding_rate")
+        if funding_rate is not None:
+            if abs(funding_rate) > self._FUNDING_EXTREME:
+                signals.append("funding_extreme")
+                if raw.regime == Regime.VOLATILE:
+                    confidence_adj += self._CONFIDENCE_BUMP
+
+        # 3. 롱숏비율 극단 감지 (크라우딩 시그널)
+        long_ratio = snapshot.get("long_account_ratio")
+        short_ratio = snapshot.get("short_account_ratio")
+        if long_ratio is not None and short_ratio is not None and short_ratio > 0:
+            ls_ratio = long_ratio / short_ratio
+            if ls_ratio > self._LS_RATIO_EXTREME_HIGH or ls_ratio < self._LS_RATIO_EXTREME_LOW:
+                signals.append("ls_ratio_extreme")
+                if raw.regime == Regime.VOLATILE:
+                    confidence_adj += self._CONFIDENCE_BUMP
+                else:
+                    confidence_adj -= self._CONFIDENCE_BUMP
+
+        # 클램핑: 최대 조정폭 제한
+        confidence_adj = max(-self._MAX_CONFIDENCE_BUMP, min(self._MAX_CONFIDENCE_BUMP, confidence_adj))
+        new_confidence = max(0.0, min(1.0, raw.confidence + confidence_adj))
+
+        # 스냅샷에 감지된 시그널 추가
+        enriched_snapshot = dict(snapshot)
+        enriched_snapshot["signals"] = signals
+
+        if signals:
+            logger.debug(
+                "regime_derivatives_signals",
+                symbol=symbol,
+                signals=signals,
+                confidence_adj=round(confidence_adj, 3),
+                regime=raw.regime.value,
+            )
+
+        return RegimeState(
+            regime=raw.regime,
+            confidence=new_confidence,
+            adx=raw.adx,
+            bb_width=raw.bb_width,
+            atr_pct=raw.atr_pct,
+            volume_ratio=raw.volume_ratio,
+            trend_direction=raw.trend_direction,
+            timestamp=raw.timestamp,
+            derivatives_snapshot=enriched_snapshot,
+        )
 
     def _classify(
         self,
@@ -218,6 +322,7 @@ class RegimeDetector:
                 volume_ratio=raw.volume_ratio,
                 trend_direction=raw.trend_direction,
                 timestamp=now,
+                derivatives_snapshot=raw.derivatives_snapshot,
             )
             return self._current
 
