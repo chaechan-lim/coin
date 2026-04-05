@@ -11,9 +11,8 @@ Python 3.12 (FastAPI) + React 18 (TypeScript) + PostgreSQL 16.
 
 ### Core Flow
 ```
-전략 (현물 4 / 선물 7) → SignalCombiner (가중 투표, HOLD=기권)
-  → TradingEngine / BinanceFuturesEngine (SL/TP/trailing/시장필터/ML필터)
-  → OrderManager → 거래소 API
+현물: 4전략 → SignalCombiner (가중 투표) → TradingEngine → OrderManager
+선물 V2: RegimeDetector → StrategySelector → 3 레짐 전략 → FuturesEngineV2 → SafeOrderPipeline
 서지: SurgeEngine (거래량 급등 감지 → 독립 단기 매매)
 ```
 
@@ -22,7 +21,7 @@ Python 3.12 (FastAPI) + React 18 (TypeScript) + PostgreSQL 16.
 |------|--------|------|------|
 | TradingEngine | 빗썸 | 현물 KRW, paper (비활성) | 4전략 (SPOT_WEIGHTS) |
 | TradingEngine | 바이낸스 현물 | 현물 USDT, live | 4전략 (SPOT_WEIGHTS) |
-| BinanceFuturesEngine | 바이낸스 선물 | USDM USDT, live 3x | 7전략 (DEFAULT_WEIGHTS) + ML필터 |
+| FuturesEngineV2 | 바이낸스 선물 | USDM USDT, live 3x | 3 레짐 전략 (MR/VB/TF) |
 | SurgeEngine | 바이낸스 서지 | USDM USDT, 3x | 거래량 급등 단기 매매 (선물 PM 잔고 공유) |
 
 ---
@@ -33,7 +32,7 @@ Python 3.12 (FastAPI) + React 18 (TypeScript) + PostgreSQL 16.
 - **모든 코드 변경에 테스트 추가/수정 필수**. 테스트 없는 PR은 허용하지 않음.
 - 변경 후 반드시 `cd backend && .venv/bin/python -m pytest tests/ -x -q` 로 전체 테스트 통과 확인.
 - 테스트는 인메모리 SQLite 기반 (aiosqlite). 외부 의존성 Mock 필수.
-- 현재 **789 테스트**. 줄어들면 안 됨.
+- 테스트 수가 줄어들면 안 됨.
 
 ### 2. Backtest Validation
 - **전략 파라미터 변경 시 반드시 540일 백테스트 검증** 후 적용.
@@ -61,17 +60,21 @@ Python 3.12 (FastAPI) + React 18 (TypeScript) + PostgreSQL 16.
 ## Key Architecture
 
 ### Strategy Config
-- **현물** (4h, 4전략): bnf_deviation(0.23), cis_momentum(0.22), larry_williams(0.31), donchian_channel(0.24) — Optuna 최적화
-- **선물** (4h, 7전략): bollinger_rsi(0.26), rsi(0.21), bb_squeeze(0.15), stochastic_rsi(0.13), obv(0.11), ma(0.07), macd(0.07)
-- min_confidence: 0.55 (현물+선물), MIN_ACTIVE_WEIGHT: 0.12 (crash=0.06)
-- 시장 상태별 적응형 가중치: `combiner.py` ADAPTIVE_PROFILES (선물만, 5상태×7전략)
-- BUY_WEIGHTS / SELL_WEIGHTS: 방향별 가중치 (백테스트 directional mode용)
-- **ML Signal Filter**: LightGBM 23피처, 선물 시그널 사전 필터링 (strategies/ml_filter.py)
+- **현물** (4h, 4전략): cis_momentum(0.42), bnf_deviation(0.25), donchian_channel(0.24), larry_williams(0.10) — Optuna 바이낸스 USDT 재최적화 (v0.39)
+- **선물 V2** (5m+1h, 3 레짐 전략): MeanReversion(RANGING), VolBreakout(VOLATILE), TrendFollower(TRENDING)
+- min_confidence: 0.50(현물), 0.40(선물 V2), MIN_ACTIVE_WEIGHT: 0.12 (crash=0.06)
 
-### Signal Combiner
+### Signal Combiner (현물 전용)
 - HOLD = 기권 (투표 미참여). BUY/SELL만 경쟁.
 - active_weight로 정규화 → min_confidence 이상만 실행.
 - 거래소별 독립 인스턴스 (exchange_name 로그 구분).
+
+### FuturesEngineV2 (선물)
+- RegimeDetector: 1h ADX + BB Width + ATR% + EMA slope → 4 레짐 분류
+- StrategySelector: 레짐 → 단일 전략 매핑 (투표 없음)
+- 3 레짐 전략: MeanReversion(BB+RSI+1h확인), VolBreakout(KC+Vol+RSI), TrendFollower(EMA+ADX)
+- SafeOrderPipeline: 주문 실행 + SL/TP/trailing 관리
+- 백테스트: `backtest_v2.py` — Walk-Forward 검증, 전략별/레짐별 진단
 
 ### EngineConfig
 - `EngineConfig.from_app_config(app_config, exchange_name)` 팩토리.
@@ -94,16 +97,17 @@ Python 3.12 (FastAPI) + React 18 (TypeScript) + PostgreSQL 16.
 backend/
 ├── main.py              # FastAPI lifespan, 쿼드 엔진 조립
 ├── config.py            # Pydantic Settings (AppConfig)
-├── backtest.py          # Backtester (현물/선물/로테이션/포트폴리오)
+├── backtest.py          # Backtester V1 (현물/선물/로테이션/포트폴리오)
+├── backtest_v2.py       # Backtester V2 (레짐 전략, Walk-Forward 검증)
 ├── core/                # models, schemas, enums, event_bus, error_classifier
 ├── exchange/            # base, bithumb_v2, binance_usdm, binance_spot, paper
-├── strategies/          # 11전략 + combiner + registry + ml_filter
-├── engine/              # trading_engine, futures_engine, surge_engine, order_manager, portfolio_manager, recovery, health_monitor
+├── strategies/          # 현물4 + 선물7(V1) + 레짐3(V2) + combiner + registry + ml_filter
+├── engine/              # trading_engine, futures_engine_v2, surge_engine, regime_detector, strategy_selector, order_manager, portfolio_manager
 ├── agents/              # market_analysis, risk_management, trade_review, performance_analytics, strategy_advisor, diagnostic_agent
 ├── services/            # market_data, notification/, llm/, discord_bot/
 ├── api/                 # FastAPI routes (모든 엔드포인트 exchange 파라미터)
 ├── db/                  # SQLAlchemy async session
-└── tests/               # 773 unit tests (pytest + 인메모리 SQLite)
+└── tests/               # pytest + 인메모리 SQLite
 
 frontend/src/            # React 18, TypeScript, Vite, TailwindCSS
 ```
@@ -129,7 +133,7 @@ frontend/src/            # React 18, TypeScript, Vite, TailwindCSS
 ### Config
 - `config.py` Pydantic Settings, env_prefix 기반
 - `TradingConfig` (TRADING_), `BinanceTradingConfig` (BINANCE_TRADING_), `BinanceSpotTradingConfig` (BINANCE_SPOT_TRADING_)
-- `SurgeTradingConfig` (SURGE_TRADING_), `DiscordBotConfig` (DISCORD_BOT_)
+- `FuturesV2Config` (FUTURES_V2_), `SurgeTradingConfig` (SURGE_TRADING_), `DiscordBotConfig` (DISCORD_BOT_)
 
 ---
 
@@ -147,8 +151,11 @@ curl -X POST "http://localhost:8000/api/v1/engine/start?exchange=binance_spot"
 # 테스트
 cd backend && .venv/bin/python -m pytest tests/ -x -q
 
-# 백테스트 (선물, 라이브 파라미터 일치)
+# 백테스트 V1 (선물 7전략 앙상블)
 cd backend && .venv/bin/python backtest.py --futures --portfolio --leverage 3 --trade-cooldown 6 --min-sell-weight 0.20 --dynamic-sl --short-all --days 540
+
+# 백테스트 V2 (선물 레짐 전략, 라이브 파라미터 일치)
+cd backend && .venv/bin/python backtest_v2.py --days 540 --leverage 3 --cooldown 312 --min-confidence 0.4 --eval-interval 48
 ```
 
 ---
@@ -165,6 +172,7 @@ cd backend && .venv/bin/python backtest.py --futures --portfolio --leverage 3 --
 | `ExchangeConfig` | `EXCHANGE_` | api_key, api_secret (빗썸) |
 | `RiskConfig` | `RISK_` | max_single_coin_pct, max_drawdown_pct, rebalancing |
 | `LLMConfig` | `LLM_` | enabled, model, api_key, gemini_api_key |
+| `FuturesV2Config` | `FUTURES_V2_` | enabled, eval_interval, cooldown, max_position_pct, regime_* |
 | `SurgeTradingConfig` | `SURGE_TRADING_` | enabled, mode, leverage, sl/tp/trail |
 | `DiscordBotConfig` | `DISCORD_BOT_` | enabled, bot_token, channel_id |
 

@@ -185,6 +185,65 @@ class TestPerCoin:
         assert detector.per_coin["ETH/USDT"].regime == Regime.RANGING
 
 
+class TestVolatileRanging:
+    """ADX 높지만 실제 변동성 낮을 때 RANGING 재분류 테스트."""
+
+    def test_high_adx_low_vol_becomes_ranging(self):
+        """ADX>=27 + flat EMA slope + 낮은 BB/ATR → RANGING."""
+        detector = RegimeDetector()
+        # ADX 33 (높음), BB width 1% (낮음), ATR 0.3% (낮음), slope flat
+        df = _make_df(
+            adx=33, ema_20=80000, ema_50=79500,
+            bb_upper=80400, bb_lower=79600, bb_mid=80000,
+            atr=240, close=80000, ema_slope_dir=0,
+        )
+        state = detector.detect(df)
+        assert state.regime == Regime.RANGING
+        assert 0.4 <= state.confidence <= 0.6
+
+    def test_high_adx_high_vol_stays_volatile(self):
+        """ADX>=27 + flat slope + 높은 BB/ATR → VOLATILE 유지."""
+        detector = RegimeDetector()
+        # ADX 33, BB width 12.5% (높음), slope flat
+        df = _make_df(
+            adx=33, ema_20=80000, ema_50=79500,
+            bb_upper=85000, bb_lower=75000, bb_mid=80000,
+            atr=4000, close=80000, ema_slope_dir=0,
+        )
+        state = detector.detect(df)
+        assert state.regime == Regime.VOLATILE
+
+    def test_high_adx_with_trend_not_affected(self):
+        """ADX 높고 EMA slope 명확 → 기존 TRENDING 분류 영향 없음."""
+        detector = RegimeDetector()
+        df = _make_df(
+            adx=33, ema_20=81000, ema_50=79000,
+            bb_upper=80400, bb_lower=79600, bb_mid=80000,
+            atr=240, close=80000, ema_slope_dir=1,
+        )
+        state = detector.detect(df)
+        assert state.regime == Regime.TRENDING_UP
+
+    def test_ranging_reclassification_confidence_scales_with_adx(self):
+        """RANGING 재분류 시 신뢰도가 ADX 반비례."""
+        detector = RegimeDetector()
+        # ADX 28 → confidence closer to 0.6
+        df_low = _make_df(
+            adx=28, ema_20=80000, ema_50=79500,
+            bb_upper=80400, bb_lower=79600, bb_mid=80000,
+            atr=240, close=80000, ema_slope_dir=0,
+        )
+        # ADX 38 → confidence closer to 0.4
+        df_high = _make_df(
+            adx=38, ema_20=80000, ema_50=79500,
+            bb_upper=80400, bb_lower=79600, bb_mid=80000,
+            atr=240, close=80000, ema_slope_dir=0,
+        )
+        state_low = detector.detect(df_low)
+        state_high = RegimeDetector().detect(df_high)  # fresh detector
+        assert state_low.confidence > state_high.confidence
+
+
 class TestSafeIloc:
     def test_missing_column(self):
         df = pd.DataFrame({"close": [100.0]})

@@ -183,6 +183,11 @@ class RegimeDetector:
                 confidence = min(1.0, (adx - 20) / 30 * 0.5 + 0.5)
                 return Regime.TRENDING_DOWN, confidence
             else:
+                # ADX 높지만 방향 불명 — 실제 변동성으로 재판정
+                if bb_width < self._bb_width_volatile and atr_pct < self._atr_pct_volatile:
+                    # 실제 변동성 낮음 → RANGING (ADX는 이전 추세의 잔여값)
+                    confidence = max(0.4, min(0.6, 1.0 - adx / 50))
+                    return Regime.RANGING, confidence
                 return Regime.VOLATILE, 0.6
         else:
             # 비추세
