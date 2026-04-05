@@ -2,9 +2,13 @@
 
 Covers:
   - ExchangeConnectionError when WS not initialized
+  - Empty symbols list returns {} immediately
   - Successful return from ccxt.pro watch_mark_prices
   - asyncio.TimeoutError propagation
-  - Fallback to watch_tickers when watch_mark_prices is unavailable
+  - Fallback to watch_tickers when watch_mark_prices is unavailable:
+      * markPrice prefers info.markPrice over last-trade
+      * indexPrice comes from info.indexPrice (not ccxt unified "index")
+      * missing info fields return None gracefully
   - Base adapter raises NotImplementedError
 """
 
@@ -54,6 +58,19 @@ class TestWatchMarkPrices:
             await adapter.watch_mark_prices(["BTC/USDT"])
 
     @pytest.mark.asyncio
+    async def test_empty_symbols_returns_empty_dict(self):
+        """Returns {} immediately for an empty symbols list (no WS call made)."""
+        adapter = _make_adapter()
+        mock_ws = AsyncMock()
+        adapter._ws_exchange = mock_ws
+
+        result = await adapter.watch_mark_prices([])
+
+        assert result == {}
+        mock_ws.watch_mark_prices.assert_not_called()
+        mock_ws.watch_tickers.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_success_returns_dict_from_ws(self):
         """Returns the dict produced by ccxt.pro watch_mark_prices."""
         adapter = _make_adapter()
@@ -80,18 +97,18 @@ class TestWatchMarkPrices:
                 await adapter.watch_mark_prices(["BTC/USDT"])
 
     @pytest.mark.asyncio
-    async def test_fallback_to_watch_tickers_when_unavailable(self):
-        """Falls back to watch_tickers when watch_mark_prices is not available."""
+    async def test_fallback_prefers_info_mark_price_over_last(self):
+        """Fallback uses info.markPrice (not last-trade) when available."""
         adapter = _make_adapter()
         mock_ws = AsyncMock()
-        # Simulate ccxt.pro version without watch_mark_prices
-        mock_ws.watch_mark_prices = None  # triggers getattr fallback path
+        mock_ws.watch_mark_prices = None  # triggers fallback path
         mock_ws.watch_tickers = AsyncMock(
             return_value={
                 "BTC/USDT": {
-                    "last": 65000.0,
-                    "index": 64950.0,
+                    "last": 65100.0,  # last-trade price — should NOT be used
                     "info": {
+                        "markPrice": "65000.0",  # smoothed index-derived mark price
+                        "indexPrice": "64950.0",
                         "fundingRate": "0.0001",
                         "nextFundingTime": "1700000000000",
                     },
@@ -103,13 +120,37 @@ class TestWatchMarkPrices:
         result = await adapter.watch_mark_prices(["BTC/USDT"])
 
         assert "BTC/USDT" in result
-        assert result["BTC/USDT"]["markPrice"] == 65000.0
-        assert result["BTC/USDT"]["indexPrice"] == 64950.0
+        # Must prefer info.markPrice, not the last-trade price
+        assert result["BTC/USDT"]["markPrice"] == "65000.0"
+        assert result["BTC/USDT"]["indexPrice"] == "64950.0"
         mock_ws.watch_tickers.assert_called_once_with(["BTC/USDT"])
 
     @pytest.mark.asyncio
-    async def test_fallback_returns_none_fields_for_missing_info(self):
-        """Fallback gracefully handles ticker data missing info fields."""
+    async def test_fallback_uses_last_trade_when_info_mark_price_absent(self):
+        """Fallback falls back to last-trade only when info.markPrice is absent."""
+        adapter = _make_adapter()
+        mock_ws = AsyncMock()
+        mock_ws.watch_mark_prices = None
+        mock_ws.watch_tickers = AsyncMock(
+            return_value={
+                "BTC/USDT": {
+                    "last": 65000.0,
+                    "info": {
+                        # no markPrice in info
+                        "fundingRate": "0.0001",
+                    },
+                }
+            }
+        )
+        adapter._ws_exchange = mock_ws
+
+        result = await adapter.watch_mark_prices(["BTC/USDT"])
+
+        assert result["BTC/USDT"]["markPrice"] == 65000.0  # falls back to last
+
+    @pytest.mark.asyncio
+    async def test_fallback_returns_none_for_missing_info_fields(self):
+        """Fallback returns None for all info-derived fields when info is absent."""
         adapter = _make_adapter()
         mock_ws = AsyncMock()
         mock_ws.watch_mark_prices = None  # use fallback
@@ -117,7 +158,7 @@ class TestWatchMarkPrices:
             return_value={
                 "ETH/USDT": {
                     "last": 3500.0,
-                    # No "index", no "info"
+                    # No "info" key at all
                 },
             }
         )
@@ -126,6 +167,7 @@ class TestWatchMarkPrices:
         result = await adapter.watch_mark_prices(["ETH/USDT"])
 
         assert "ETH/USDT" in result
+        # No info dict → info-derived fields are None; markPrice falls back to last
         assert result["ETH/USDT"]["markPrice"] == 3500.0
         assert result["ETH/USDT"]["indexPrice"] is None
         assert result["ETH/USDT"]["fundingRate"] is None

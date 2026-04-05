@@ -13,6 +13,7 @@ Thread-safe for asyncio (single-threaded event loop, no locks needed).
 import time
 import structlog
 from collections import OrderedDict
+from typing import Generic, TypeVar
 
 from exchange.data_models import LongShortRatio, MarkPriceInfo, OpenInterest
 
@@ -26,20 +27,22 @@ _LS_RATIO_TTL: float = 300.0
 # Max number of symbols to cache per data type (LRU eviction beyond this)
 _MAX_SYMBOLS: int = 200
 
+T = TypeVar("T")
 
-class _TTLCache:
+
+class _TTLCache(Generic[T]):
     """Simple LRU cache with TTL and configurable max size.
 
     Follows the _LRUCache pattern from services/market_data.py.
-    Stores (timestamp, value) tuples keyed by symbol string.
+    Generic over T so callers get typed values without casts.
     """
 
     def __init__(self, ttl_sec: float, max_size: int = _MAX_SYMBOLS) -> None:
         self._ttl = ttl_sec
         self._max_size = max_size
-        self._data: OrderedDict[str, tuple[float, object]] = OrderedDict()
+        self._data: OrderedDict[str, tuple[float, T]] = OrderedDict()
 
-    def get(self, key: str):
+    def get(self, key: str) -> T | None:
         """Return value if present and not expired; None otherwise."""
         if key in self._data:
             ts, val = self._data[key]
@@ -49,7 +52,7 @@ class _TTLCache:
             del self._data[key]
         return None
 
-    def put(self, key: str, value) -> None:
+    def put(self, key: str, value: T) -> None:
         """Insert or update a value, evicting LRU entry if over max_size."""
         self._data[key] = (time.time(), value)
         self._data.move_to_end(key)
@@ -57,7 +60,12 @@ class _TTLCache:
             self._data.popitem(last=False)
 
     def keys_not_expired(self) -> list[str]:
-        """Return list of keys whose entries have not yet expired."""
+        """Return list of non-expired keys.
+
+        Side-effect: eagerly deletes expired entries from the cache before
+        returning. Callers should be aware that this mutates internal state —
+        don't call purely for the list if you don't want eviction to run.
+        """
         now = time.time()
         expired = [k for k, (ts, _) in self._data.items() if now - ts >= self._ttl]
         for k in expired:
@@ -89,9 +97,13 @@ class DerivativesDataService:
         ls_ratio_ttl: float = _LS_RATIO_TTL,
         max_symbols: int = _MAX_SYMBOLS,
     ) -> None:
-        self._mark_price_cache: _TTLCache = _TTLCache(mark_price_ttl, max_symbols)
-        self._oi_cache: _TTLCache = _TTLCache(oi_ttl, max_symbols)
-        self._ls_ratio_cache: _TTLCache = _TTLCache(ls_ratio_ttl, max_symbols)
+        self._mark_price_cache: _TTLCache[MarkPriceInfo] = _TTLCache(
+            mark_price_ttl, max_symbols
+        )
+        self._oi_cache: _TTLCache[OpenInterest] = _TTLCache(oi_ttl, max_symbols)
+        self._ls_ratio_cache: _TTLCache[LongShortRatio] = _TTLCache(
+            ls_ratio_ttl, max_symbols
+        )
 
     # ── Update methods ──────────────────────────────────────────────
 
@@ -126,15 +138,15 @@ class DerivativesDataService:
 
     def get_mark_price(self, symbol: str) -> MarkPriceInfo | None:
         """Retrieve cached mark price (TTL-checked). Returns None if absent/expired."""
-        return self._mark_price_cache.get(symbol)  # type: ignore[return-value]
+        return self._mark_price_cache.get(symbol)
 
     def get_open_interest(self, symbol: str) -> OpenInterest | None:
         """Retrieve cached open interest (TTL-checked). Returns None if absent/expired."""
-        return self._oi_cache.get(symbol)  # type: ignore[return-value]
+        return self._oi_cache.get(symbol)
 
     def get_long_short_ratio(self, symbol: str) -> LongShortRatio | None:
         """Retrieve cached long/short ratio (TTL-checked). Returns None if absent/expired."""
-        return self._ls_ratio_cache.get(symbol)  # type: ignore[return-value]
+        return self._ls_ratio_cache.get(symbol)
 
     # ── Snapshot methods ────────────────────────────────────────────
 
@@ -143,6 +155,9 @@ class DerivativesDataService:
 
         Used by RegimeDetector. Returns None only if *no* data is cached for
         the symbol. Individual fields are omitted if their cache has expired.
+
+        Timestamp keys use the ``*_ts`` suffix convention consistently:
+        ``mark_price_ts``, ``oi_ts``, ``ls_ts``.
         """
         mark = self.get_mark_price(symbol)
         oi = self.get_open_interest(symbol)
@@ -159,18 +174,18 @@ class DerivativesDataService:
             result["last_funding_rate"] = mark.last_funding_rate
             result["next_funding_time"] = mark.next_funding_time
             result["premium_pct"] = mark.premium_pct
-            result["mark_price_timestamp"] = mark.timestamp
+            result["mark_price_ts"] = mark.timestamp
 
         if oi is not None:
             result["open_interest_value"] = oi.open_interest_value
-            result["oi_timestamp"] = oi.timestamp
+            result["oi_ts"] = oi.timestamp
 
         if ls is not None:
             result["long_account_ratio"] = ls.long_account_ratio
             result["short_account_ratio"] = ls.short_account_ratio
             result["long_position_ratio"] = ls.long_position_ratio
             result["short_position_ratio"] = ls.short_position_ratio
-            result["ls_timestamp"] = ls.timestamp
+            result["ls_ts"] = ls.timestamp
 
         return result
 

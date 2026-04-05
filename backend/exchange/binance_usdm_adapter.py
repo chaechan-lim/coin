@@ -547,6 +547,8 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         """
         if not self._ws_exchange:
             raise ExchangeConnectionError("WebSocket exchange not initialized")
+        if not symbols:
+            return {}
 
         ws_method = getattr(self._ws_exchange, "watch_mark_prices", None)
         if ws_method is not None:
@@ -562,8 +564,13 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         )
         return {
             symbol: {
-                "markPrice": data.get("last"),
-                "indexPrice": data.get("index"),
+                # Prefer the raw exchange markPrice field from info; fall back
+                # to last-trade only when absent (the two diverge in volatile
+                # futures markets — mark price is index-derived, not trade-derived).
+                "markPrice": (data.get("info") or {}).get("markPrice") or data.get("last"),
+                # "index" is not a ccxt unified ticker field; Binance exposes
+                # indexPrice inside the raw info dict.
+                "indexPrice": (data.get("info") or {}).get("indexPrice"),
                 "fundingRate": (data.get("info") or {}).get("fundingRate"),
                 "nextFundingTime": (data.get("info") or {}).get("nextFundingTime"),
             }
