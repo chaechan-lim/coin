@@ -35,6 +35,24 @@ def _df_5m(
     })
 
 
+def _df_1h_rising(n=10, rsi_end=45.0) -> pd.DataFrame:
+    """1h RSI가 상승 중인 데이터 (rsi[-2] < rsi[-1])."""
+    rsi_vals = [rsi_end - 5] * (n - 1) + [rsi_end]
+    return pd.DataFrame({
+        "close": [80500.0] * n,
+        "rsi_14": rsi_vals,
+    })
+
+
+def _df_1h_falling(n=10, rsi_end=55.0) -> pd.DataFrame:
+    """1h RSI가 하락 중인 데이터 (rsi[-2] > rsi[-1])."""
+    rsi_vals = [rsi_end + 5] * (n - 1) + [rsi_end]
+    return pd.DataFrame({
+        "close": [80500.0] * n,
+        "rsi_14": rsi_vals,
+    })
+
+
 @pytest.fixture
 def strategy():
     return TrendFollowerStrategy()
@@ -52,23 +70,33 @@ class TestProperties:
 class TestUptrend:
     @pytest.mark.asyncio
     async def test_uptrend_pullback_buy(self, strategy):
-        """상승 추세 + EMA9>EMA21 + ADX≥25 + RSI 35-48 → 풀백 롱."""
+        """상승 추세 + EMA9>EMA21 + ADX≥25 + RSI 35-48 + 1h RSI↑ → 풀백 롱."""
         df = _df_5m(ema_9=81000, ema_21=80000, rsi=40)
-        result = await strategy.evaluate(df, df, _regime(Regime.TRENDING_UP), None)
+        df_1h = _df_1h_rising(rsi_end=45)
+        result = await strategy.evaluate(df, df_1h, _regime(Regime.TRENDING_UP), None)
         assert result.direction == Direction.LONG
         assert result.sizing_factor > 0
         assert "pullback" in result.reason.lower()
 
     @pytest.mark.asyncio
+    async def test_uptrend_pullback_blocked_1h_falling(self, strategy):
+        """1h RSI 하락 중이면 풀백 매수 차단."""
+        df = _df_5m(ema_9=81000, ema_21=80000, rsi=40)
+        df_1h = _df_1h_falling(rsi_end=45)
+        result = await strategy.evaluate(df, df_1h, _regime(Regime.TRENDING_UP), None)
+        assert result.is_hold
+
+    @pytest.mark.asyncio
     async def test_uptrend_momentum_buy(self, strategy):
-        """상승 추세 + RSI 50-60 + 강한 스프레드 + ADX>30 → 모멘텀 롱."""
+        """상승 추세 + RSI 50-60 + 강한 스프레드 + ADX>30 + 1h RSI↑ → 모멘텀 롱."""
         df = _df_5m(ema_9=80500, ema_21=80000, rsi=55)
+        df_1h = _df_1h_rising(rsi_end=55)
         regime = RegimeState(
             regime=Regime.TRENDING_UP, confidence=0.8, adx=35, bb_width=3.0,
             atr_pct=1.5, volume_ratio=1.2, trend_direction=1,
             timestamp=datetime.now(timezone.utc),
         )
-        result = await strategy.evaluate(df, df, regime, None)
+        result = await strategy.evaluate(df, df_1h, regime, None)
         assert result.direction == Direction.LONG
         assert "momentum" in result.reason.lower()
 
@@ -76,24 +104,27 @@ class TestUptrend:
     async def test_uptrend_no_signal_high_rsi(self, strategy):
         """RSI가 범위 밖이면 HOLD."""
         df = _df_5m(ema_9=81000, ema_21=80000, rsi=70)
-        result = await strategy.evaluate(df, df, _regime(Regime.TRENDING_UP), None)
+        df_1h = _df_1h_rising(rsi_end=70)
+        result = await strategy.evaluate(df, df_1h, _regime(Regime.TRENDING_UP), None)
         assert result.is_hold
 
     @pytest.mark.asyncio
     async def test_uptrend_hold_no_ema_cross(self, strategy):
         """EMA9 < EMA21 + 포지션 없음 → HOLD (SAR 불가)."""
         df = _df_5m(ema_9=79000, ema_21=80000, rsi=50)
+        df_1h = _df_1h_rising()
         result = await strategy.evaluate(
-            df, df, _regime(Regime.TRENDING_UP), None
+            df, df_1h, _regime(Regime.TRENDING_UP), None
         )
         assert result.is_hold
 
     @pytest.mark.asyncio
     async def test_sar_cross_down(self, strategy):
-        """상승 추세에서 EMA 데드크로스 + 롱 보유 → 숏 전환 (SAR)."""
+        """상승 추세에서 EMA 데드크로스 + 롱 보유 → 숏 전환 (SAR, 1h 무관)."""
         df = _df_5m(ema_9=79000, ema_21=80000, rsi=50)
+        df_1h = _df_1h_falling()  # 1h 방향 무관 — SAR은 1h 필터 없음
         result = await strategy.evaluate(
-            df, df, _regime(Regime.TRENDING_UP), Direction.LONG
+            df, df_1h, _regime(Regime.TRENDING_UP), Direction.LONG
         )
         assert result.direction == Direction.SHORT
         assert result.sizing_factor > 0
@@ -102,18 +133,28 @@ class TestUptrend:
 class TestDowntrend:
     @pytest.mark.asyncio
     async def test_rally_sell(self, strategy):
-        """하락 추세 + EMA9<EMA21 + RSI 랠리 → 숏."""
+        """하락 추세 + EMA9<EMA21 + RSI 랠리 + 1h RSI↓ → 숏."""
         df = _df_5m(ema_9=79000, ema_21=80000, rsi=60)
-        result = await strategy.evaluate(df, df, _regime(Regime.TRENDING_DOWN), None)
+        df_1h = _df_1h_falling(rsi_end=55)
+        result = await strategy.evaluate(df, df_1h, _regime(Regime.TRENDING_DOWN), None)
         assert result.direction == Direction.SHORT
         assert result.sizing_factor > 0
+
+    @pytest.mark.asyncio
+    async def test_rally_sell_blocked_1h_rising(self, strategy):
+        """1h RSI 상승 중이면 랠리 매도 차단."""
+        df = _df_5m(ema_9=79000, ema_21=80000, rsi=60)
+        df_1h = _df_1h_rising(rsi_end=55)
+        result = await strategy.evaluate(df, df_1h, _regime(Regime.TRENDING_DOWN), None)
+        assert result.is_hold
 
     @pytest.mark.asyncio
     async def test_sar_cross_up(self, strategy):
         """하락 추세에서 EMA 골든크로스 + 숏 보유 → 롱 전환."""
         df = _df_5m(ema_9=81000, ema_21=80000, rsi=50)
+        df_1h = _df_1h_rising()
         result = await strategy.evaluate(
-            df, df, _regime(Regime.TRENDING_DOWN), Direction.SHORT
+            df, df_1h, _regime(Regime.TRENDING_DOWN), Direction.SHORT
         )
         assert result.direction == Direction.LONG
 
@@ -122,7 +163,8 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_insufficient_data(self, strategy):
         df = _df_5m(n=5)
-        result = await strategy.evaluate(df, df, _regime(), None)
+        df_1h = _df_1h_rising()
+        result = await strategy.evaluate(df, df_1h, _regime(), None)
         assert result.is_hold
         assert "insufficient" in result.reason
 
@@ -130,20 +172,23 @@ class TestEdgeCases:
     async def test_regime_mismatch(self, strategy):
         """RANGING 레짐이면 hold."""
         df = _df_5m()
-        result = await strategy.evaluate(df, df, _regime(Regime.RANGING), None)
+        df_1h = _df_1h_rising()
+        result = await strategy.evaluate(df, df_1h, _regime(Regime.RANGING), None)
         assert result.is_hold
         assert "mismatch" in result.reason
 
     @pytest.mark.asyncio
     async def test_zero_close(self, strategy):
         df = _df_5m(close=0.0)
-        result = await strategy.evaluate(df, df, _regime(), None)
+        df_1h = _df_1h_rising()
+        result = await strategy.evaluate(df, df_1h, _regime(), None)
         assert result.is_hold
 
     @pytest.mark.asyncio
     async def test_missing_columns(self, strategy):
         df = pd.DataFrame({"close": [80000.0] * 50})
-        result = await strategy.evaluate(df, df, _regime(), None)
+        df_1h = _df_1h_rising()
+        result = await strategy.evaluate(df, df_1h, _regime(), None)
         assert result.is_hold
 
 
@@ -152,12 +197,14 @@ class TestSizing:
     async def test_low_volatility_larger_size(self, strategy):
         """저변동 → 큰 사이징 (하락 추세 매도)."""
         df = _df_5m(ema_9=79000, ema_21=80000, rsi=60, atr=500, close=80000)
-        result = await strategy.evaluate(df, df, _regime(Regime.TRENDING_DOWN), None)
+        df_1h = _df_1h_falling(rsi_end=55)
+        result = await strategy.evaluate(df, df_1h, _regime(Regime.TRENDING_DOWN), None)
         assert result.sizing_factor > 0.5
 
     @pytest.mark.asyncio
     async def test_high_volatility_smaller_size(self, strategy):
         """고변동 → 작은 사이징 (하락 추세 매도)."""
         df = _df_5m(ema_9=79000, ema_21=80000, rsi=60, atr=3000, close=80000)
-        result = await strategy.evaluate(df, df, _regime(Regime.TRENDING_DOWN), None)
+        df_1h = _df_1h_falling(rsi_end=55)
+        result = await strategy.evaluate(df, df_1h, _regime(Regime.TRENDING_DOWN), None)
         assert result.sizing_factor < 0.7

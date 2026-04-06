@@ -39,26 +39,35 @@ class TrendFollowerStrategy(RegimeStrategy):
         close = self._col(df_5m, "close")
         adx = regime.adx  # 레짐 감지 시점의 ADX
 
+        # 1h RSI 방향 확인 (MR과 동일 패턴)
+        rsi_1h = self._col(df_1h, "rsi_14")
+        rsi_1h_prev = self._col_offset(df_1h, "rsi_14", 2) if len(df_1h) >= 3 else rsi_1h
+        rsi_1h_rising = rsi_1h > rsi_1h_prev
+        rsi_1h_falling = rsi_1h < rsi_1h_prev
+
         if close <= 0 or ema_slow <= 0:
             return self._hold(current_position, "invalid_price")
 
         if regime.regime == Regime.TRENDING_UP:
             return self._evaluate_uptrend(
                 ema_fast, ema_slow, rsi, atr, close, adx, current_position,
+                rsi_1h_rising,
             )
         elif regime.regime == Regime.TRENDING_DOWN:
             return self._evaluate_downtrend(
                 ema_fast, ema_slow, rsi, atr, close, adx, current_position,
+                rsi_1h_falling,
             )
 
         return self._hold(current_position, "regime_mismatch")
 
     def _evaluate_uptrend(
         self, ema_fast, ema_slow, rsi, atr, close, adx, current_position,
+        rsi_1h_rising: bool = True,
     ) -> StrategyDecision:
         spread_pct = (ema_fast - ema_slow) / ema_slow * 100 if ema_slow > 0 else 0
 
-        if ema_fast > ema_slow and adx >= 25:
+        if ema_fast > ema_slow and adx >= 25 and rsi_1h_rising:
             # 풀백 매수: RSI 35-48 (눌림목, 타이트 범위)
             if 35 <= rsi <= 48 and spread_pct > 0.15:
                 conf = min(1.0, spread_pct / 0.5)
@@ -69,7 +78,7 @@ class TrendFollowerStrategy(RegimeStrategy):
                     direction=Direction.LONG,
                     confidence=conf,
                     sizing_factor=self._calc_sizing(conf, atr, close),
-                    stop_loss_atr=1.5,
+                    stop_loss_atr=2.0,
                     take_profit_atr=3.0,
                     reason=f"Trend pullback buy: spread={spread_pct:.2f}%, RSI={rsi:.0f}, ADX={adx:.0f}",
                     strategy_name=self.name,
@@ -84,7 +93,7 @@ class TrendFollowerStrategy(RegimeStrategy):
                     direction=Direction.LONG,
                     confidence=conf * 0.85,
                     sizing_factor=self._calc_sizing(conf * 0.85, atr, close),
-                    stop_loss_atr=1.5,
+                    stop_loss_atr=2.0,
                     take_profit_atr=2.5,
                     reason=f"Trend momentum buy: spread={spread_pct:.2f}%, RSI={rsi:.0f}",
                     strategy_name=self.name,
@@ -109,10 +118,11 @@ class TrendFollowerStrategy(RegimeStrategy):
 
     def _evaluate_downtrend(
         self, ema_fast, ema_slow, rsi, atr, close, adx, current_position,
+        rsi_1h_falling: bool = True,
     ) -> StrategyDecision:
         spread_pct = (ema_slow - ema_fast) / ema_slow * 100 if ema_slow > 0 else 0
 
-        if ema_fast < ema_slow and adx >= 25:
+        if ema_fast < ema_slow and adx >= 25 and rsi_1h_falling:
             # 랠리 매도: RSI 52-65 (반등 후 재하락, 타이트 범위)
             if 52 <= rsi <= 65 and spread_pct > 0.15:
                 conf = min(1.0, spread_pct / 0.5)
@@ -123,7 +133,7 @@ class TrendFollowerStrategy(RegimeStrategy):
                     direction=Direction.SHORT,
                     confidence=conf,
                     sizing_factor=self._calc_sizing(conf, atr, close),
-                    stop_loss_atr=1.5,
+                    stop_loss_atr=2.0,
                     take_profit_atr=3.0,
                     reason=f"Trend rally sell: spread={spread_pct:.2f}%, RSI={rsi:.0f}, ADX={adx:.0f}",
                     strategy_name=self.name,
@@ -138,7 +148,7 @@ class TrendFollowerStrategy(RegimeStrategy):
                     direction=Direction.SHORT,
                     confidence=conf * 0.85,
                     sizing_factor=self._calc_sizing(conf * 0.85, atr, close),
-                    stop_loss_atr=1.5,
+                    stop_loss_atr=2.0,
                     take_profit_atr=2.5,
                     reason=f"Trend momentum sell: spread={spread_pct:.2f}%, RSI={rsi:.0f}",
                     strategy_name=self.name,
@@ -178,4 +188,11 @@ class TrendFollowerStrategy(RegimeStrategy):
         if name not in df.columns:
             return 0.0
         val = df[name].iloc[-1]
+        return float(val) if pd.notna(val) else 0.0
+
+    @staticmethod
+    def _col_offset(df: pd.DataFrame, name: str, offset: int) -> float:
+        if name not in df.columns or len(df) < offset:
+            return 0.0
+        val = df[name].iloc[-offset]
         return float(val) if pd.notna(val) else 0.0
