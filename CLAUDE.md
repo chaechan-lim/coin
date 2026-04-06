@@ -61,7 +61,7 @@ Python 3.12 (FastAPI) + React 18 (TypeScript) + PostgreSQL 16.
 
 ### Strategy Config
 - **현물** (4h, 4전략): cis_momentum(0.42), bnf_deviation(0.25), donchian_channel(0.24), larry_williams(0.10) — Optuna 바이낸스 USDT 재최적화 (v0.39)
-- **선물 V2** (5m+1h, 3 레짐 전략): MeanReversion(RANGING), VolBreakout(VOLATILE), TrendFollower(TRENDING)
+- **선물 V2** (5m+1h, 2 레짐 전략): MeanReversion(RANGING+VOLATILE), TrendFollower(TRENDING_UP+DOWN)
 - min_confidence: 0.50(현물), 0.40(선물 V2), MIN_ACTIVE_WEIGHT: 0.12 (crash=0.06)
 
 ### Signal Combiner (현물 전용)
@@ -70,9 +70,9 @@ Python 3.12 (FastAPI) + React 18 (TypeScript) + PostgreSQL 16.
 - 거래소별 독립 인스턴스 (exchange_name 로그 구분).
 
 ### FuturesEngineV2 (선물)
-- RegimeDetector: 1h ADX + BB Width + ATR% + EMA slope → 4 레짐 분류
-- StrategySelector: 레짐 → 단일 전략 매핑 (투표 없음)
-- 3 레짐 전략: MeanReversion(BB+RSI+1h확인), VolBreakout(KC+Vol+RSI), TrendFollower(EMA+ADX)
+- RegimeDetector: 1h ADX + BB Width + ATR% + EMA slope → 4 레짐 분류 (히스테리시스: 3h 최소 유지, 2회 확인)
+- StrategySelector: 레짐 → 단일 전략 매핑 (TRENDING→TF, RANGING+VOLATILE→MR)
+- 2 레짐 전략: MeanReversion(BB+RSI+1h RSI확인), TrendFollower(EMA+ADX+1h RSI방향확인, SL 2.0 ATR)
 - SafeOrderPipeline: 주문 실행 + SL/TP/trailing 관리
 - 백테스트: `backtest_v2.py` — Walk-Forward 검증, 전략별/레짐별 진단
 
