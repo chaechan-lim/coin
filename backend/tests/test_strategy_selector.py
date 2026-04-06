@@ -9,10 +9,11 @@ from strategies.vol_breakout import VolBreakoutStrategy
 
 
 class TestStrategySelector:
-    def test_trending_up_selects_trend_follower(self):
+    def test_trending_up_selects_mean_reversion(self):
+        """상승 추세: TF 진입 PF 0.29로 비활성 → MR 폴백."""
         sel = StrategySelector()
         s = sel.select(Regime.TRENDING_UP)
-        assert isinstance(s, TrendFollowerStrategy)
+        assert isinstance(s, MeanReversionStrategy)
 
     def test_trending_down_selects_trend_follower(self):
         sel = StrategySelector()
@@ -29,11 +30,11 @@ class TestStrategySelector:
         s = sel.select(Regime.VOLATILE)
         assert isinstance(s, VolBreakoutStrategy)
 
-    def test_same_instance_for_both_trends(self):
+    def test_trending_up_and_ranging_share_mr(self):
         sel = StrategySelector()
         up = sel.select(Regime.TRENDING_UP)
-        down = sel.select(Regime.TRENDING_DOWN)
-        assert up is down  # 같은 TrendFollower 인스턴스
+        ranging = sel.select(Regime.RANGING)
+        assert up is ranging  # 같은 MeanReversion 인스턴스
 
     def test_all_strategies(self):
         sel = StrategySelector()

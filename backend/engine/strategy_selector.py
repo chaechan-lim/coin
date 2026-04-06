@@ -26,7 +26,7 @@ class StrategySelector:
         mean_rev = MeanReversionStrategy()
         vol_brk = VolBreakoutStrategy()
 
-        self._strategies[Regime.TRENDING_UP] = trend
+        self._strategies[Regime.TRENDING_UP] = mean_rev
         self._strategies[Regime.TRENDING_DOWN] = trend
         self._strategies[Regime.RANGING] = mean_rev
         self._strategies[Regime.VOLATILE] = vol_brk
