@@ -260,7 +260,7 @@ class FuturesV2Config(BaseSettings):
     tier1_coins: list[str] = [
         "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT",
     ]
-    tier1_max_position_pct: float = 0.15
+    tier1_max_position_pct: float = 0.45
     tier1_eval_interval_sec: int = 60
     tier1_base_risk_pct: float = 0.02
     tier1_min_confidence: float = 0.5
