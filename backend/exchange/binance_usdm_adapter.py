@@ -456,16 +456,16 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         base_symbol = symbol.replace("/", "")
         params = {"symbol": base_symbol, "period": period, "limit": 1}
 
-        # Account ratio
+        # Account ratio (ccxt 4.x: fapiPublic → fapiData)
         acct_data = await self._call(
-            self._exchange.fapiPublicGetTopLongShortAccountRatio,
+            self._exchange.fapiDataGetTopLongShortAccountRatio,
             params,
         )
         acct = acct_data[0] if isinstance(acct_data, list) and acct_data else {}
 
-        # Position ratio
+        # Position ratio (ccxt 4.x: fapiPublic → fapiData)
         pos_data = await self._call(
-            self._exchange.fapiPublicGetTopLongShortPositionRatio,
+            self._exchange.fapiDataGetTopLongShortPositionRatio,
             params,
         )
         pos = pos_data[0] if isinstance(pos_data, list) and pos_data else {}

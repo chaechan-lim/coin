@@ -338,7 +338,7 @@ class TestFetchLongShortRatio:
     @pytest.mark.asyncio
     async def test_success(self):
         adapter = _make_adapter()
-        adapter._exchange.fapiPublicGetTopLongShortAccountRatio = AsyncMock(
+        adapter._exchange.fapiDataGetTopLongShortAccountRatio = AsyncMock(
             return_value=[
                 {
                     "symbol": "BTCUSDT",
@@ -348,7 +348,7 @@ class TestFetchLongShortRatio:
                 }
             ]
         )
-        adapter._exchange.fapiPublicGetTopLongShortPositionRatio = AsyncMock(
+        adapter._exchange.fapiDataGetTopLongShortPositionRatio = AsyncMock(
             return_value=[
                 {
                     "symbol": "BTCUSDT",
@@ -372,17 +372,17 @@ class TestFetchLongShortRatio:
     @pytest.mark.asyncio
     async def test_symbol_normalization(self):
         adapter = _make_adapter()
-        adapter._exchange.fapiPublicGetTopLongShortAccountRatio = AsyncMock(
+        adapter._exchange.fapiDataGetTopLongShortAccountRatio = AsyncMock(
             return_value=[]
         )
-        adapter._exchange.fapiPublicGetTopLongShortPositionRatio = AsyncMock(
+        adapter._exchange.fapiDataGetTopLongShortPositionRatio = AsyncMock(
             return_value=[]
         )
 
         await adapter.fetch_long_short_ratio("ETH/USDT", "5m")
 
-        acct_args = adapter._exchange.fapiPublicGetTopLongShortAccountRatio.call_args
-        pos_args = adapter._exchange.fapiPublicGetTopLongShortPositionRatio.call_args
+        acct_args = adapter._exchange.fapiDataGetTopLongShortAccountRatio.call_args
+        pos_args = adapter._exchange.fapiDataGetTopLongShortPositionRatio.call_args
         assert acct_args[0][0]["symbol"] == "ETHUSDT"
         assert pos_args[0][0]["symbol"] == "ETHUSDT"
         assert acct_args[0][0]["period"] == "5m"
@@ -391,10 +391,10 @@ class TestFetchLongShortRatio:
     async def test_empty_account_data(self):
         """Empty account ratio response → zero ratios."""
         adapter = _make_adapter()
-        adapter._exchange.fapiPublicGetTopLongShortAccountRatio = AsyncMock(
+        adapter._exchange.fapiDataGetTopLongShortAccountRatio = AsyncMock(
             return_value=[]
         )
-        adapter._exchange.fapiPublicGetTopLongShortPositionRatio = AsyncMock(
+        adapter._exchange.fapiDataGetTopLongShortPositionRatio = AsyncMock(
             return_value=[
                 {
                     "longPosition": "0.60",
@@ -413,7 +413,7 @@ class TestFetchLongShortRatio:
     async def test_empty_position_data(self):
         """Empty position ratio response → zero ratios."""
         adapter = _make_adapter()
-        adapter._exchange.fapiPublicGetTopLongShortAccountRatio = AsyncMock(
+        adapter._exchange.fapiDataGetTopLongShortAccountRatio = AsyncMock(
             return_value=[
                 {
                     "longAccount": "0.55",
@@ -422,7 +422,7 @@ class TestFetchLongShortRatio:
                 }
             ]
         )
-        adapter._exchange.fapiPublicGetTopLongShortPositionRatio = AsyncMock(
+        adapter._exchange.fapiDataGetTopLongShortPositionRatio = AsyncMock(
             return_value=[]
         )
 
@@ -435,10 +435,10 @@ class TestFetchLongShortRatio:
     async def test_both_empty(self):
         """Both APIs empty → all zero ratios."""
         adapter = _make_adapter()
-        adapter._exchange.fapiPublicGetTopLongShortAccountRatio = AsyncMock(
+        adapter._exchange.fapiDataGetTopLongShortAccountRatio = AsyncMock(
             return_value=[]
         )
-        adapter._exchange.fapiPublicGetTopLongShortPositionRatio = AsyncMock(
+        adapter._exchange.fapiDataGetTopLongShortPositionRatio = AsyncMock(
             return_value=[]
         )
 
@@ -452,10 +452,10 @@ class TestFetchLongShortRatio:
     async def test_non_list_response(self):
         """Non-list from API → zero ratios."""
         adapter = _make_adapter()
-        adapter._exchange.fapiPublicGetTopLongShortAccountRatio = AsyncMock(
+        adapter._exchange.fapiDataGetTopLongShortAccountRatio = AsyncMock(
             return_value={}
         )
-        adapter._exchange.fapiPublicGetTopLongShortPositionRatio = AsyncMock(
+        adapter._exchange.fapiDataGetTopLongShortPositionRatio = AsyncMock(
             return_value={}
         )
 

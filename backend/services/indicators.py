@@ -174,13 +174,16 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if bb_rename:
         df.rename(columns=bb_rename, inplace=True)
 
-    # ── 누락 컬럼 경고 ───────────────────────────────────────────
+    # ── 누락 컬럼 경고 (데이터 부족 시 debug, 그 외 warning) ────
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
-        logger.warning(
+        # MACD는 최소 35봉 필요 — 데이터 부족은 debug 레벨
+        data_shortage = len(df) < 35 and all(c.startswith("macd") for c in missing)
+        log_fn = logger.debug if data_shortage else logger.warning
+        log_fn(
             "indicator.missing_columns",
             missing=missing,
-            available=sorted(df.columns.tolist()),
+            bars=len(df),
         )
 
     return df
