@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, or_
 from typing import Optional
 from datetime import timedelta
 from core.utils import utcnow, ensure_aware
@@ -11,6 +11,9 @@ from core.schemas import OrderResponse, TradeResponse
 from api.dependencies import ExchangeNameType
 
 router = APIRouter(prefix="/trades", tags=["trades"])
+
+# 선물 조회 시 서지 거래도 병합
+_FUTURES_EXCHANGES = ("binance_futures", "binance_surge")
 
 
 @router.get("", response_model=list[OrderResponse])
@@ -24,9 +27,13 @@ async def get_trades(
     exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
+    if exchange == "binance_futures":
+        exchange_filter = Order.exchange.in_(_FUTURES_EXCHANGES)
+    else:
+        exchange_filter = Order.exchange == exchange
     query = (
         select(Order)
-        .where(Order.exchange == exchange)
+        .where(exchange_filter)
         .order_by(desc(Order.created_at))
     )
 
@@ -98,10 +105,14 @@ async def get_trade_summary(
     else:
         start = None
 
-    # 전체 체결 주문 시간순
+    # 전체 체결 주문 시간순 (선물 조회 시 서지 병합)
+    if exchange == "binance_futures":
+        ex_filter = Order.exchange.in_(_FUTURES_EXCHANGES)
+    else:
+        ex_filter = Order.exchange == exchange
     result = await session.execute(
         select(Order)
-        .where(Order.status == "filled", Order.exchange == exchange)
+        .where(Order.status == "filled", ex_filter)
         .order_by(Order.created_at)
     )
     all_orders = list(result.scalars().all())
