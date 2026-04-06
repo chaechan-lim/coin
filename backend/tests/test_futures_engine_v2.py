@@ -190,12 +190,11 @@ class TestAPICompatibility:
         assert isinstance(strats, dict)
 
     def test_strategies_regime_mode_contains_regime_names(self, engine):
-        """COIN-46: 기본(regime) 모드에서 레짐 3전략이 반환되어야 함."""
+        """COIN-46: 기본(regime) 모드에서 레짐 전략이 반환되어야 함."""
         strats = engine.strategies
         strategy_names = set(strats.keys())
         assert "trend_follower" in strategy_names
         assert "mean_reversion" in strategy_names
-        assert "vol_breakout" in strategy_names
 
     def test_strategies_regime_mode_excludes_spot_names(self, engine):
         """COIN-46: regime 모드에서 현물 4전략은 제외."""
@@ -207,9 +206,9 @@ class TestAPICompatibility:
         assert "larry_williams" not in strategy_names
 
     def test_strategies_regime_mode_total_count(self, engine):
-        """COIN-46: regime 모드 → 3전략 (trend_follower 중복 제거)."""
+        """COIN-46: regime 모드 → 2전략 (TF+MR, VB 제거)."""
         strats = engine.strategies
-        assert len(strats) == 3
+        assert len(strats) == 2
 
     def test_strategies_values_have_name_attr(self, engine):
         """각 전략 객체에는 name 속성이 있어야 함."""
@@ -602,12 +601,11 @@ class TestStrategyMode:
         assert regime_engine._long_evaluator is not regime_engine._short_evaluator
 
     def test_regime_mode_strategies_returns_regime_strategies(self, regime_engine):
-        """regime 모드 strategies 프로퍼티: 3전략 반환."""
+        """regime 모드 strategies 프로퍼티: 2전략 반환 (TF+MR)."""
         strats = regime_engine.strategies
-        assert len(strats) == 3
+        assert len(strats) == 2
         assert "trend_follower" in strats
         assert "mean_reversion" in strats
-        assert "vol_breakout" in strats
 
     def test_regime_mode_eval_interval(self, regime_engine):
         """regime 모드 eval_interval이 백테스트 최적 4h로 적용."""

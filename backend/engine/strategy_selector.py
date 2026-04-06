@@ -26,10 +26,10 @@ class StrategySelector:
         mean_rev = MeanReversionStrategy()
         vol_brk = VolBreakoutStrategy()
 
-        self._strategies[Regime.TRENDING_UP] = mean_rev
+        self._strategies[Regime.TRENDING_UP] = trend
         self._strategies[Regime.TRENDING_DOWN] = trend
         self._strategies[Regime.RANGING] = mean_rev
-        self._strategies[Regime.VOLATILE] = vol_brk
+        self._strategies[Regime.VOLATILE] = mean_rev
 
     def select(self, regime: Regime) -> RegimeStrategy:
         """레짐에 맞는 전략을 반환한다."""

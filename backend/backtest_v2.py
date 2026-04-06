@@ -1728,7 +1728,11 @@ class V2Backtester:
     # ── 내부 헬퍼 ─────────────────────────────────────────────
 
     def _precompute_regimes(self, df_1h: pd.DataFrame) -> list[tuple[datetime, RegimeState]]:
-        """1h 캔들마다 레짐을 감지하여 시계열로 반환."""
+        """1h 캔들마다 레짐을 감지하여 시계열로 반환.
+
+        라이브와 동일하게 히스테리시스(ADX 진입/이탈 임계값, 연속 확인,
+        최소 유지 시간)를 적용한다. detect() + _apply_hysteresis() 동기 호출.
+        """
         detector = RegimeDetector(
             confirm_count=self._regime_confirm,
             min_duration_h=self._regime_min_hours,
@@ -1738,8 +1742,9 @@ class V2Backtester:
         regimes = []
         for i in range(50, len(df_1h)):
             window = df_1h.iloc[:i + 1]
-            state = detector.detect(window)
-            regimes.append((df_1h.index[i], state))
+            raw = detector.detect(window)
+            confirmed = detector._apply_hysteresis(raw)
+            regimes.append((df_1h.index[i], confirmed))
         return regimes
 
     def _get_regime_at(

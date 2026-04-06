@@ -87,8 +87,12 @@ class RegimeDetector:
     def per_coin(self) -> dict[str, RegimeState]:
         return self._per_coin
 
-    def detect(self, df: pd.DataFrame) -> RegimeState:
+    def detect(self, df: pd.DataFrame, ts: datetime | None = None) -> RegimeState:
         """DataFrame(1h 캔들)에서 레짐을 감지한다.
+
+        Args:
+            df: 1h OHLCV + 지표 DataFrame.
+            ts: 타임스탬프 오버라이드 (백테스트용). None이면 now() 사용.
 
         필수 컬럼: close, volume, adx_14, atr_14, ema_20, ema_50,
                    bb_upper_20, bb_lower_20, bb_mid_20
@@ -132,6 +136,16 @@ class RegimeDetector:
             adx, bb_width, atr_pct, ema_slope, ema_cross,
         )
 
+        # 백테스트: df 인덱스에서 캔들 시간 추출, 라이브: now()
+        if ts is not None:
+            candle_ts = ts
+        elif hasattr(df.index, 'tz') and df.index.tz is not None:
+            candle_ts = df.index[-1].to_pydatetime()
+        elif isinstance(df.index[-1], pd.Timestamp):
+            candle_ts = df.index[-1].to_pydatetime().replace(tzinfo=timezone.utc)
+        else:
+            candle_ts = datetime.now(timezone.utc)
+
         return RegimeState(
             regime=regime,
             confidence=confidence,
@@ -140,7 +154,7 @@ class RegimeDetector:
             atr_pct=atr_pct,
             volume_ratio=vol_ratio,
             trend_direction=ema_cross,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=candle_ts,
         )
 
     async def update(self, df: pd.DataFrame, symbol: str = "BTC/USDT") -> RegimeState:

@@ -43,21 +43,9 @@ class TrendFollowerStrategy(RegimeStrategy):
             return self._hold(current_position, "invalid_price")
 
         if regime.regime == Regime.TRENDING_UP:
-            # 상승 추세에서는 SAR(기존 롱→숏 전환)만 허용, 신규 진입 차단
-            # 백테스트 결과: 상승 추세 신규 진입 PF 0.29, WR 22% → 비활성화
-            if current_position == Direction.LONG and ema_fast < ema_slow:
-                sar_conf = 0.6 if adx > 25 else 0.5
-                return StrategyDecision(
-                    direction=Direction.SHORT,
-                    confidence=sar_conf,
-                    sizing_factor=0.5,
-                    stop_loss_atr=2.0,
-                    take_profit_atr=2.5,
-                    reason=f"SAR: EMA cross down in uptrend, ADX={adx:.0f}",
-                    strategy_name=self.name,
-                    indicators={"ema_fast": ema_fast, "ema_slow": ema_slow, "adx": adx},
-                )
-            return self._hold(current_position, "uptrend_entry_disabled")
+            return self._evaluate_uptrend(
+                ema_fast, ema_slow, rsi, atr, close, adx, current_position,
+            )
         elif regime.regime == Regime.TRENDING_DOWN:
             return self._evaluate_downtrend(
                 ema_fast, ema_slow, rsi, atr, close, adx, current_position,

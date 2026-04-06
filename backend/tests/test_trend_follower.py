@@ -51,31 +51,52 @@ class TestProperties:
 
 class TestUptrend:
     @pytest.mark.asyncio
-    async def test_uptrend_entry_disabled(self, strategy):
-        """상승 추세에서 신규 진입 비활성화."""
+    async def test_uptrend_pullback_buy(self, strategy):
+        """상승 추세 + EMA9>EMA21 + ADX≥25 + RSI 35-48 → 풀백 롱."""
         df = _df_5m(ema_9=81000, ema_21=80000, rsi=40)
         result = await strategy.evaluate(df, df, _regime(Regime.TRENDING_UP), None)
+        assert result.direction == Direction.LONG
+        assert result.sizing_factor > 0
+        assert "pullback" in result.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_uptrend_momentum_buy(self, strategy):
+        """상승 추세 + RSI 50-60 + 강한 스프레드 + ADX>30 → 모멘텀 롱."""
+        df = _df_5m(ema_9=80500, ema_21=80000, rsi=55)
+        regime = RegimeState(
+            regime=Regime.TRENDING_UP, confidence=0.8, adx=35, bb_width=3.0,
+            atr_pct=1.5, volume_ratio=1.2, trend_direction=1,
+            timestamp=datetime.now(timezone.utc),
+        )
+        result = await strategy.evaluate(df, df, regime, None)
+        assert result.direction == Direction.LONG
+        assert "momentum" in result.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_uptrend_no_signal_high_rsi(self, strategy):
+        """RSI가 범위 밖이면 HOLD."""
+        df = _df_5m(ema_9=81000, ema_21=80000, rsi=70)
+        result = await strategy.evaluate(df, df, _regime(Regime.TRENDING_UP), None)
         assert result.is_hold
-        assert "uptrend" in result.reason.lower() or "disabled" in result.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_uptrend_hold_no_ema_cross(self, strategy):
+        """EMA9 < EMA21 + 포지션 없음 → HOLD (SAR 불가)."""
+        df = _df_5m(ema_9=79000, ema_21=80000, rsi=50)
+        result = await strategy.evaluate(
+            df, df, _regime(Regime.TRENDING_UP), None
+        )
+        assert result.is_hold
 
     @pytest.mark.asyncio
     async def test_sar_cross_down(self, strategy):
-        """상승 추세에서 EMA 데드크로스 + 롱 보유 → 숏 전환 (SAR만 허용)."""
+        """상승 추세에서 EMA 데드크로스 + 롱 보유 → 숏 전환 (SAR)."""
         df = _df_5m(ema_9=79000, ema_21=80000, rsi=50)
         result = await strategy.evaluate(
             df, df, _regime(Regime.TRENDING_UP), Direction.LONG
         )
         assert result.direction == Direction.SHORT
         assert result.sizing_factor > 0
-
-    @pytest.mark.asyncio
-    async def test_no_sar_without_position(self, strategy):
-        """포지션 없으면 SAR 안 함."""
-        df = _df_5m(ema_9=79000, ema_21=80000, rsi=50)
-        result = await strategy.evaluate(
-            df, df, _regime(Regime.TRENDING_UP), None
-        )
-        assert result.is_hold
 
 
 class TestDowntrend:
