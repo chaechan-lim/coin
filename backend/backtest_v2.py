@@ -1476,7 +1476,7 @@ class V2Backtester:
                         if c_margin < MIN_MARGIN_USDT:
                             continue
                         c_quantity = (c_margin * self._leverage) / price_now
-                        c_fee = c_quantity * price_now * self._fee_pct
+                        c_fee = c_quantity * price_now * (self._fee_pct + SLIPPAGE)
                         cash -= c_margin + c_fee
                         total_fees += c_fee
                         # %-기반 SL/TP (레버리지 반영)
@@ -1598,7 +1598,7 @@ class V2Backtester:
                         if t2_margin < MIN_MARGIN_USDT:
                             continue
                         t2_quantity = (t2_margin * self._leverage) / t2_price
-                        t2_fee = t2_quantity * t2_price * self._fee_pct
+                        t2_fee = t2_quantity * t2_price * (self._fee_pct + SLIPPAGE)
                         cash -= t2_margin + t2_fee
                         total_fees += t2_fee
 
