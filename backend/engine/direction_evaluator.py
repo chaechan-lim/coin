@@ -84,3 +84,37 @@ class DirectionEvaluator(Protocol):
     def eval_interval_sec(self) -> int:
         """평가 주기 (초)."""
         ...
+
+
+class NoOpDirectionEvaluator:
+    """항상 HOLD를 반환하는 더미 평가자.
+
+    Long-only 모드 (현물)에서 short_evaluator 자리에 사용.
+    Tier1Manager가 short_evaluator를 호출해도 결정/주문/사이드이펙트 없음.
+    """
+
+    def __init__(self, eval_interval_sec: int = 240):
+        self._eval_interval_sec = eval_interval_sec
+
+    async def evaluate(
+        self,
+        symbol: str,
+        current_position: PositionState | None,
+        *,
+        df_5m: Any = None,
+        df_1h: Any = None,
+    ) -> DirectionDecision:
+        return DirectionDecision(
+            action="hold",
+            direction=None,
+            confidence=0.0,
+            sizing_factor=0.0,
+            stop_loss_atr=0.0,
+            take_profit_atr=0.0,
+            reason="long_only_mode",
+            strategy_name="noop",
+        )
+
+    @property
+    def eval_interval_sec(self) -> int:
+        return self._eval_interval_sec

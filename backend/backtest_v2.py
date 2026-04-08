@@ -40,6 +40,7 @@ from exchange.data_models import Candle, Ticker
 
 # ── 상수 ──────────────────────────────────────────────────────
 FUTURES_FEE = 0.0004      # 0.04% maker/taker (바이낸스 선물)
+SPOT_FEE = 0.001          # 0.10% maker/taker (바이낸스 현물)
 FUNDING_RATE = 0.0001     # 0.01%/8h 평균 펀딩비
 SLIPPAGE = 0.0002         # 0.02% 슬리피지
 MIN_MARGIN_USDT = 5.0     # 최소 마진
@@ -807,6 +808,8 @@ class V2Backtester:
         regime_min_hours: int = 3,     # 레짐 최소 유지 시간
         regime_adx_enter: float = 27.0,  # 추세 진입 ADX 임계값
         regime_adx_exit: float = 23.0,   # 추세 이탈 ADX 임계값
+        long_only: bool = False,         # True = SHORT 시그널 차단 (현물 모드)
+        fee_pct: float = FUTURES_FEE,    # 거래 수수료 (선물 0.04% / 현물 0.10%)
     ):
         self._exchange = exchange
         self._coins = coins
@@ -818,6 +821,8 @@ class V2Backtester:
         self._min_confidence = min_confidence
         self._trending_only = trending_only
         self._eval_interval = eval_interval
+        self._long_only = long_only
+        self._fee_pct = fee_pct
         self._use_v1 = False
         self._v1_adapter: V1StrategyAdapter | None = None
         self._use_spot = False
@@ -917,10 +922,11 @@ class V2Backtester:
     async def run(self, days: int) -> V2BacktestResult:
         """v2 백테스트 실행."""
         mode = "현물 4전략" if self._use_spot else ("v1 7전략" if self._use_v1 else "v2 레짐")
+        market = "현물 (Long-only)" if self._long_only else "선물"
         print(f"\n{'='*60}")
-        print(f"  FuturesEngine V2 백테스트 | {mode} | 5m+1h | {days}일")
+        print(f"  V2 백테스트 [{market}] | {mode} | 5m+1h | {days}일")
         print(f"  코인: {', '.join(self._coins)}")
-        print(f"  레버리지: {self._leverage}x | 수수료: {FUTURES_FEE*100:.2f}%")
+        print(f"  레버리지: {self._leverage}x | 수수료: {self._fee_pct*100:.2f}%")
         print(f"  최대 포지션: {self._max_position_pct*100:.0f}% | 리스크: {self._base_risk_pct*100:.0f}%")
         print(f"  쿨다운: {self._cooldown_candles}캔들 ({self._cooldown_candles*5}분) | 최소 신뢰도: {self._min_confidence}")
         if self._use_spot:
@@ -936,7 +942,15 @@ class V2Backtester:
         if not all_data:
             raise ValueError("사용 가능한 데이터 없음")
 
-        return await self._simulate(all_data, days)
+        # days 슬라이싱: 캐시 전체가 아닌 최근 days만 사용
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        sliced_data = {}
+        for sym, (df_5m, df_1h) in all_data.items():
+            sliced_5m = df_5m[df_5m.index >= cutoff].copy()
+            sliced_1h = df_1h[df_1h.index >= cutoff].copy() if len(df_1h) > 0 else df_1h
+            sliced_data[sym] = (sliced_5m, sliced_1h)
+
+        return await self._simulate(sliced_data, days)
 
     async def _simulate(
         self,
@@ -1278,6 +1292,10 @@ class V2Backtester:
                                 funding_blocks += 1
                                 continue
 
+                    # Long-only 모드: SHORT 시그널 차단 (현물용)
+                    if self._long_only and decision.direction == Direction.SHORT:
+                        continue
+
                     # US 마켓 오픈 시간 필터
                     if self._us_open_filter != "off":
                         kst_hour = (ts + pd.Timedelta(hours=9)).hour
@@ -1379,7 +1397,7 @@ class V2Backtester:
                         continue
 
                     quantity = margin * effective_leverage / price
-                    fee = quantity * price * FUTURES_FEE
+                    fee = quantity * price * self._fee_pct
                     cash -= margin + fee
                     total_fees += fee
 
@@ -1458,7 +1476,7 @@ class V2Backtester:
                         if c_margin < MIN_MARGIN_USDT:
                             continue
                         c_quantity = (c_margin * self._leverage) / price_now
-                        c_fee = c_quantity * price_now * FUTURES_FEE
+                        c_fee = c_quantity * price_now * self._fee_pct
                         cash -= c_margin + c_fee
                         total_fees += c_fee
                         # %-기반 SL/TP (레버리지 반영)
@@ -1580,7 +1598,7 @@ class V2Backtester:
                         if t2_margin < MIN_MARGIN_USDT:
                             continue
                         t2_quantity = (t2_margin * self._leverage) / t2_price
-                        t2_fee = t2_quantity * t2_price * FUTURES_FEE
+                        t2_fee = t2_quantity * t2_price * self._fee_pct
                         cash -= t2_margin + t2_fee
                         total_fees += t2_fee
 
@@ -1931,7 +1949,7 @@ class V2Backtester:
     ) -> tuple[float, float]:
         """포지션 청산. (pnl, fee) 반환."""
         pnl = self._calc_pnl(pos.direction, pos.entry_price, price, pos.quantity)
-        fee = pos.quantity * price * (FUTURES_FEE + SLIPPAGE)
+        fee = pos.quantity * price * (self._fee_pct + SLIPPAGE)
         return pnl, fee
 
     @staticmethod
@@ -2397,6 +2415,10 @@ def parse_args():
     parser.add_argument("--v1-strategies", action="store_true", help="v1 7전략 레짐 미니앙상블 모드")
     parser.add_argument("--spot-strategies", action="store_true",
                         help="현물 4전략 SignalCombiner 가중 투표 모드 (라이브 V2 구성 검증)")
+    parser.add_argument("--long-only", action="store_true",
+                        help="SHORT 시그널 차단 (현물 전용)")
+    parser.add_argument("--spot", action="store_true",
+                        help="현물 모드 메타옵션 (long-only + leverage=1 + fee=0.10%%)")
     parser.add_argument("--walk-forward", action="store_true", help="Walk-Forward 검증 모드")
     parser.add_argument("--train-days", type=int, default=240, help="WF 학습 기간")
     parser.add_argument("--val-days", type=int, default=60, help="WF 검증 기간")
@@ -2475,10 +2497,21 @@ async def main():
     exchange = BinanceUSDMAdapter(api_key="", api_secret="", testnet=False)
     await exchange.initialize()
 
+    # --spot 메타 옵션: long_only=True, leverage=1, fee=0.10%
+    if args.spot:
+        leverage_to_use = 1
+        fee_to_use = SPOT_FEE
+        long_only_to_use = True
+        print("  현물 모드: long-only, leverage=1, fee=0.10%")
+    else:
+        leverage_to_use = args.leverage
+        fee_to_use = FUTURES_FEE
+        long_only_to_use = args.long_only
+
     bt = V2Backtester(
         exchange=exchange,
         coins=coins,
-        leverage=args.leverage,
+        leverage=leverage_to_use,
         initial_balance=args.balance,
         max_position_pct=args.max_position_pct,
         base_risk_pct=args.base_risk_pct,
@@ -2490,6 +2523,8 @@ async def main():
         regime_min_hours=args.regime_min_hours,
         regime_adx_enter=args.regime_adx_enter,
         regime_adx_exit=args.regime_adx_exit,
+        long_only=long_only_to_use,
+        fee_pct=fee_to_use,
     )
 
     if args.us_open_filter != "off":
