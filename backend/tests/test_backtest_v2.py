@@ -174,9 +174,15 @@ class TestV2Backtester:
             extreme_price=80000.0, atr_at_entry=500.0,
             entered_idx=0, strategy_name="test",
         )
-        assert backtester._check_stops(pos, 78000.0) == "stop_loss"
-        assert backtester._check_stops(pos, 80000.0) is None
-        assert backtester._check_stops(pos, 84000.0) == "take_profit"
+        # high/low/close 시그니처 — low가 SL 가로지르면 트리거
+        reason, _ = backtester._check_stops(pos, high=80500.0, low=78000.0, close=79500.0)
+        assert reason == "stop_loss"
+        # 정상 범위 — 트리거 없음
+        reason, _ = backtester._check_stops(pos, high=80500.0, low=79500.0, close=80000.0)
+        assert reason is None
+        # high가 TP 가로지르면 트리거
+        reason, _ = backtester._check_stops(pos, high=84000.0, low=80000.0, close=82000.0)
+        assert reason == "take_profit"
 
     def test_check_stops_sl_short(self, backtester):
         from backtest_v2 import V2Position
@@ -188,9 +194,15 @@ class TestV2Backtester:
             extreme_price=80000.0, atr_at_entry=500.0,
             entered_idx=0, strategy_name="test",
         )
-        assert backtester._check_stops(pos, 82000.0) == "stop_loss"
-        assert backtester._check_stops(pos, 80000.0) is None
-        assert backtester._check_stops(pos, 76000.0) == "take_profit"
+        # high가 SL 가로지르면 트리거
+        reason, _ = backtester._check_stops(pos, high=82000.0, low=79500.0, close=80500.0)
+        assert reason == "stop_loss"
+        # 정상 범위
+        reason, _ = backtester._check_stops(pos, high=80500.0, low=79500.0, close=80000.0)
+        assert reason is None
+        # low가 TP 가로지르면 트리거
+        reason, _ = backtester._check_stops(pos, high=80000.0, low=76000.0, close=78000.0)
+        assert reason == "take_profit"
 
     def test_update_trailing_long(self, backtester):
         from backtest_v2 import V2Position
@@ -202,12 +214,12 @@ class TestV2Backtester:
             extreme_price=80000.0, atr_at_entry=500.0,
             entered_idx=0, strategy_name="test",
         )
-        # 가격이 activation 이하: trailing 비활성
-        backtester._update_trailing(pos, 80500.0)
+        # high가 activation 이하: trailing 비활성
+        backtester._update_trailing(pos, high=80500.0, low=80000.0)
         assert pos.trailing_active is False
 
-        # 가격이 activation 이상: trailing 활성
-        backtester._update_trailing(pos, 81500.0)
+        # high가 activation 이상: trailing 활성
+        backtester._update_trailing(pos, high=81500.0, low=81000.0)
         assert pos.trailing_active is True
         assert pos.trail_stop_price == 81500.0 - 1.0 * 500.0  # 81000
 

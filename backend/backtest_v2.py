@@ -943,11 +943,14 @@ class V2Backtester:
             raise ValueError("사용 가능한 데이터 없음")
 
         # days 슬라이싱: 캐시 전체가 아닌 최근 days만 사용
+        # 5m: cutoff 시점부터 시뮬레이션 시작
+        # 1h: regimes 계산 워밍업 보장 — 50캔들(약 2일) 필요하므로 추가 100h 버퍼
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        warmup_1h = cutoff - timedelta(hours=100)
         sliced_data = {}
         for sym, (df_5m, df_1h) in all_data.items():
             sliced_5m = df_5m[df_5m.index >= cutoff].copy()
-            sliced_1h = df_1h[df_1h.index >= cutoff].copy() if len(df_1h) > 0 else df_1h
+            sliced_1h = df_1h[df_1h.index >= warmup_1h].copy() if len(df_1h) > 0 else df_1h
             sliced_data[sym] = (sliced_5m, sliced_1h)
 
         return await self._simulate(sliced_data, days)
@@ -1072,7 +1075,10 @@ class V2Backtester:
 
             # ─── 현물 시장 상태 갱신 (30분 주기, 4h BTC 리샘플 데이터 사용) ───
             if self._spot_asymmetric and self._use_spot and btc_4h_for_state is not None and candle_idx % spot_state_eval_interval == 0:
-                h4_idx = btc_4h_for_state.index.searchsorted(ts, side="right")
+                # 완성된 4h 캔들만 사용 (look-ahead bias 방지)
+                # 4h timestamp = 시작 시각. 16:00 4h 캔들은 20:00에 완성.
+                complete_4h_ts = ts.floor("4h")
+                h4_idx = btc_4h_for_state.index.searchsorted(complete_4h_ts, side="left")
                 if h4_idx > 60:
                     btc_4h_window = btc_4h_for_state.iloc[max(0, h4_idx - 100):h4_idx]
                     old_state = spot_market_state
@@ -1121,7 +1127,10 @@ class V2Backtester:
                 if ts not in df5m.index:
                     continue
 
-                price = float(df5m.loc[ts, "close"])
+                row = df5m.loc[ts]
+                price = float(row["close"])
+                high = float(row["high"])
+                low = float(row["low"])
 
                 # B&H 가격 기록
                 if sym not in first_prices:
@@ -1130,20 +1139,21 @@ class V2Backtester:
 
                 has_position = sym in positions
 
-                # ─── SL/TP/트레일링 체크 ───
+                # ─── SL/TP/트레일링 체크 (high/low 사용) ───
                 if has_position:
                     pos = positions[sym]
                     # 캐스케이드 포지션 max hold 체크
                     exit_reason = None
+                    exit_price = price
                     if pos.tier == "cascade" and candle_idx - pos.entered_idx >= CASCADE_MAX_HOLD_CANDLES:
                         exit_reason = "cascade_max_hold"
                     else:
-                        exit_reason = self._check_stops(pos, price)
+                        exit_reason, exit_price = self._check_stops(pos, high, low, price)
                     if exit_reason:
-                        pnl, fee = self._close_position(pos, price)
+                        pnl, fee = self._close_position(pos, exit_price)
                         cash += pos.margin + pnl - fee
                         total_fees += fee
-                        trade = self._record_trade(pos, price, ts, exit_reason, pnl, regime)
+                        trade = self._record_trade(pos, exit_price, ts, exit_reason, pnl, regime)
                         trades.append(trade)
                         self._update_coin_stats(coin_stats, trade)
                         # 회피 모드 (D) PnL 추적
@@ -1166,8 +1176,8 @@ class V2Backtester:
                         last_exit_idx[sym] = candle_idx
                         has_position = False
                     else:
-                        # 트레일링 업데이트
-                        self._update_trailing(pos, price)
+                        # 트레일링 업데이트 (high/low 사용)
+                        self._update_trailing(pos, high, low)
 
                 # ─── 전략 평가 (eval_interval 주기로만) ───
                 if candle_idx % self._eval_interval != 0:
@@ -1400,7 +1410,8 @@ class V2Backtester:
                         continue
 
                     quantity = margin * effective_leverage / price
-                    fee = quantity * price * self._fee_pct
+                    # 진입 시 수수료 + 슬리피지 (cascade/tier2와 일관, 라이브 시장가 주문)
+                    fee = quantity * price * (self._fee_pct + SLIPPAGE)
                     cash -= margin + fee
                     total_fees += fee
 
@@ -1917,37 +1928,52 @@ class V2Backtester:
             tp = price - tp_mult * atr
         return sl, tp
 
-    def _check_stops(self, pos: V2Position, price: float) -> str | None:
-        """SL/TP/트레일링 체크. 히트 시 사유 문자열 반환."""
-        if pos.direction == Direction.LONG:
-            if price <= pos.sl_price:
-                return "stop_loss"
-            if price >= pos.tp_price:
-                return "take_profit"
-            if pos.trailing_active and pos.trail_stop_price and price <= pos.trail_stop_price:
-                return "trailing_stop"
-        else:  # SHORT
-            if price >= pos.sl_price:
-                return "stop_loss"
-            if price <= pos.tp_price:
-                return "take_profit"
-            if pos.trailing_active and pos.trail_stop_price and price >= pos.trail_stop_price:
-                return "trailing_stop"
-        return None
+    def _check_stops(
+        self,
+        pos: V2Position,
+        high: float,
+        low: float,
+        close: float,
+    ) -> tuple[str | None, float]:
+        """SL/TP/트레일링 체크 — OHLC 기반 (라이브 실시간 가격 시뮬레이션).
 
-    def _update_trailing(self, pos: V2Position, price: float) -> None:
-        """트레일링 스탑 업데이트."""
+        5m 캔들 내 high/low가 SL/TP를 가로지르면 트리거.
+        같은 캔들에서 SL과 TP 둘 다 가능하면 보수적으로 SL 우선.
+        Returns: (exit_reason, exit_price). exit_price는 트리거 가격 또는 close.
+        """
         if pos.direction == Direction.LONG:
-            if price > pos.extreme_price:
-                pos.extreme_price = price
-            if not pos.trailing_active and price >= pos.trail_activation_price:
+            # SL 우선 (보수적)
+            if low <= pos.sl_price:
+                return "stop_loss", pos.sl_price
+            if high >= pos.tp_price:
+                return "take_profit", pos.tp_price
+            if pos.trailing_active and pos.trail_stop_price and low <= pos.trail_stop_price:
+                return "trailing_stop", pos.trail_stop_price
+        else:  # SHORT
+            if high >= pos.sl_price:
+                return "stop_loss", pos.sl_price
+            if low <= pos.tp_price:
+                return "take_profit", pos.tp_price
+            if pos.trailing_active and pos.trail_stop_price and high >= pos.trail_stop_price:
+                return "trailing_stop", pos.trail_stop_price
+        return None, close
+
+    def _update_trailing(self, pos: V2Position, high: float, low: float) -> None:
+        """트레일링 스탑 업데이트 — high/low 사용.
+
+        5m 캔들 내 극값으로 활성화 여부 + extreme 업데이트.
+        """
+        if pos.direction == Direction.LONG:
+            if high > pos.extreme_price:
+                pos.extreme_price = high
+            if not pos.trailing_active and high >= pos.trail_activation_price:
                 pos.trailing_active = True
             if pos.trailing_active:
                 pos.trail_stop_price = pos.extreme_price - pos.trail_stop_atr * pos.atr_at_entry
         else:  # SHORT
-            if price < pos.extreme_price:
-                pos.extreme_price = price
-            if not pos.trailing_active and price <= pos.trail_activation_price:
+            if low < pos.extreme_price:
+                pos.extreme_price = low
+            if not pos.trailing_active and low <= pos.trail_activation_price:
                 pos.trailing_active = True
             if pos.trailing_active:
                 pos.trail_stop_price = pos.extreme_price + pos.trail_stop_atr * pos.atr_at_entry
