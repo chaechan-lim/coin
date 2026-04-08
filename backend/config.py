@@ -166,6 +166,7 @@ class BinanceTradingConfig(BaseSettings):
 
 class BinanceSpotTradingConfig(BaseSettings):
     """바이낸스 현물 전용 트레이딩 설정."""
+    enabled: bool = True  # 엔진 자동 시작 여부 (False면 lifespan에서 start 안 함)
     mode: str = "paper"  # "paper" or "live" (독립)
     evaluation_interval_sec: int = 300
     initial_balance_usdt: float = 500.0

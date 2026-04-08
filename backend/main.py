@@ -949,7 +949,7 @@ async def lifespan(app: FastAPI):
         auto_start_engines.append(("bithumb", _engine_instance))
     if _binance_engine and not _binance_engine.is_running:
         auto_start_engines.append(("binance_futures", _binance_engine))
-    if _binance_spot_engine and not _binance_spot_engine.is_running:
+    if _binance_spot_engine and not _binance_spot_engine.is_running and config.binance_spot_trading.enabled:
         auto_start_engines.append(("binance_spot", _binance_spot_engine))
     if _surge_engine and not _surge_engine.is_running:
         auto_start_engines.append(("binance_surge", _surge_engine))
