@@ -1222,8 +1222,11 @@ class V2Backtester:
                 start = max(0, idx - LOOKBACK_WINDOW + 1)
                 window_5m = df5m.iloc[start:idx + 1]
 
-                # 1h 윈도우 (가장 가까운 1h 캔들까지)
-                h_idx = df1h.index.searchsorted(ts, side="right")
+                # 1h 윈도우 — 완성된 캔들만 (look-ahead bias 방지)
+                # 1h timestamp = 시작 시각. 18:00 1h 캔들은 19:00에 완성.
+                # ts=18:05 시점에서는 17:00 1h 캔들까지만 사용 가능 (라이브와 동일).
+                complete_1h_ts = ts.floor("1h")  # 18:05 → 18:00
+                h_idx = df1h.index.searchsorted(complete_1h_ts, side="left")
                 h_lookback = SPOT_1H_LOOKBACK if self._use_spot else LOOKBACK_WINDOW
                 h_start = max(0, h_idx - h_lookback)
                 window_1h = df1h.iloc[h_start:h_idx]
@@ -1750,6 +1753,9 @@ class V2Backtester:
 
         라이브와 동일하게 히스테리시스(ADX 진입/이탈 임계값, 연속 확인,
         최소 유지 시간)를 적용한다. detect() + _apply_hysteresis() 동기 호출.
+
+        Look-ahead bias 방지: timestamp를 캔들 *완성 시각*(시작 + 1h)으로 저장.
+        18:00 1h 캔들은 19:00에 완성되므로, 19:00 이후 5m 시점에서만 사용 가능.
         """
         detector = RegimeDetector(
             confirm_count=self._regime_confirm,
@@ -1758,11 +1764,13 @@ class V2Backtester:
             adx_exit=self._regime_adx_exit,
         )
         regimes = []
+        one_hour = pd.Timedelta(hours=1)
         for i in range(50, len(df_1h)):
             window = df_1h.iloc[:i + 1]
             raw = detector.detect(window)
             confirmed = detector._apply_hysteresis(raw)
-            regimes.append((df_1h.index[i], confirmed))
+            # 캔들 시작 시각 + 1h = 완성 시각 (라이브에서 사용 가능 시점)
+            regimes.append((df_1h.index[i] + one_hour, confirmed))
         return regimes
 
     def _get_regime_at(
