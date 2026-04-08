@@ -763,8 +763,9 @@ class TestRegimeChangeTrigger:
                 "volume": [1000.0] * n,
             })
 
-        # 초기 레짐: TRENDING_UP
+        # 초기 레짐: TRENDING_UP (close > ema_20 필수 — price_dir 기반)
         df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df_up["close"] = 82000.0  # close > ema_20 → price_dir=+1
         await detector.update(df_up, "BTC/USDT")
         assert len(fired) == 0  # 첫 감지는 콜백 없음
 
@@ -792,12 +793,12 @@ class TestRegimeChangeTrigger:
 
         n = 100
         df = pd.DataFrame({
-            "close": [80000.0] * n,
+            "close": [82000.0] * n,  # close > ema_20 → price_dir=+1
             "adx_14": [30.0] * n,
             "atr_14": [1000.0] * n,
             "ema_20": [81000.0 * (1 + 0.002 * (i - (n - 1))) for i in range(n)],
             "ema_50": [79000.0] * n,
-            "bb_upper_20": [82000.0] * n,
+            "bb_upper_20": [83000.0] * n,
             "bb_lower_20": [78000.0] * n,
             "bb_mid_20": [80000.0] * n,
             "volume": [1000.0] * n,

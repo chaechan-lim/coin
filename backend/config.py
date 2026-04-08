@@ -322,8 +322,8 @@ class FuturesV2Config(BaseSettings):
     # Regime detector
     regime_adx_enter: float = 27.0
     regime_adx_exit: float = 23.0
-    regime_confirm_count: int = 2
-    regime_min_duration_h: int = 3
+    regime_confirm_count: int = 1
+    regime_min_duration_h: int = 1
 
     # Balance guard
     balance_divergence_warn_pct: float = 3.0

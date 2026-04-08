@@ -50,14 +50,14 @@ def _make_df(
 class TestDetect:
     def test_trending_up(self):
         detector = RegimeDetector()
-        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         state = detector.detect(df)
         assert state.regime == Regime.TRENDING_UP
         assert state.confidence > 0.5
 
     def test_trending_down(self):
         detector = RegimeDetector()
-        df = _make_df(adx=30, ema_20=78000, ema_50=80000, ema_slope_dir=-1)
+        df = _make_df(close=77000, adx=30, ema_20=78000, ema_50=80000, ema_slope_dir=-1)
         state = detector.detect(df)
         assert state.regime == Regime.TRENDING_DOWN
 
@@ -90,7 +90,7 @@ class TestDetect:
 class TestHysteresis:
     def test_first_detection_immediate(self):
         detector = RegimeDetector()
-        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
 
         state = detector.detect(df)
         confirmed = detector._apply_hysteresis(state)
@@ -99,7 +99,7 @@ class TestHysteresis:
 
     def test_same_regime_resets_pending(self):
         detector = RegimeDetector()
-        df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df_up = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
 
         # 초기화
         state1 = detector.detect(df_up)
@@ -114,7 +114,7 @@ class TestHysteresis:
 
     def test_regime_change_needs_confirmation(self):
         detector = RegimeDetector(confirm_count=2, min_duration_h=0)
-        df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df_up = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         df_range = _make_df(adx=15, bb_upper=81000, bb_lower=79000, bb_mid=80000)
 
         # 초기: 상승 추세
@@ -135,7 +135,7 @@ class TestHysteresis:
 
     def test_min_duration_prevents_change(self):
         detector = RegimeDetector(confirm_count=1, min_duration_h=3)
-        df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df_up = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         df_range = _make_df(adx=15, bb_upper=81000, bb_lower=79000, bb_mid=80000)
 
         # 초기화
@@ -150,7 +150,7 @@ class TestHysteresis:
     def test_adx_hysteresis_entry(self):
         """추세 진입: ADX >= 27 필요 (adx_enter)."""
         detector = RegimeDetector(adx_enter=27, adx_exit=23)
-        df = _make_df(adx=26, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df = _make_df(close=82000, adx=26, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         state = detector.detect(df)
         # ADX 26 < 27 → 추세 아님
         assert state.regime != Regime.TRENDING_UP
@@ -160,12 +160,12 @@ class TestHysteresis:
         detector = RegimeDetector(adx_enter=27, adx_exit=23, confirm_count=1, min_duration_h=0)
 
         # 먼저 추세 상태로 설정
-        df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df_up = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         state = detector.detect(df_up)
         detector._apply_hysteresis(state)
 
         # ADX 24 — 추세 유지 (23 이하가 아님)
-        df_mid = _make_df(adx=24, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df_mid = _make_df(close=82000, adx=24, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         state2 = detector.detect(df_mid)
         # in_trend 상태이므로 adx_exit(23) 적용 → 24 >= 23 → 여전히 추세
         assert state2.regime == Regime.TRENDING_UP
@@ -175,7 +175,7 @@ class TestPerCoin:
     @pytest.mark.asyncio
     async def test_per_coin_storage(self):
         detector = RegimeDetector()
-        df_btc = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df_btc = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         df_eth = _make_df(adx=15, bb_upper=81000, bb_lower=79000, bb_mid=80000)
 
         await detector.update(df_btc, "BTC/USDT")
@@ -221,7 +221,7 @@ class TestVolatileRanging:
         df = _make_df(
             adx=33, ema_20=81000, ema_50=79000,
             bb_upper=80400, bb_lower=79600, bb_mid=80000,
-            atr=240, close=80000, ema_slope_dir=1,
+            atr=240, close=82000, ema_slope_dir=1,
         )
         state = detector.detect(df)
         assert state.regime == Regime.TRENDING_UP
@@ -278,7 +278,7 @@ class TestRegimeChangeEmit:
         assert detector.current.regime == Regime.RANGING
 
         # 레짐 변경 (trending_up)
-        df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df_up = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         with patch("engine.regime_detector.emit_event", new_callable=AsyncMock) as mock_emit:
             await detector.update(df_up, "BTC/USDT")
             mock_emit.assert_called_once()
@@ -294,7 +294,7 @@ class TestRegimeChangeEmit:
     async def test_update_no_emit_on_same_regime(self):
         """같은 레짐 유지 시 emit_event 호출 안 됨."""
         detector = RegimeDetector(confirm_count=1, min_duration_h=0)
-        df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df_up = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
 
         await detector.update(df_up, "BTC/USDT")  # 초기 설정
 
@@ -306,7 +306,7 @@ class TestRegimeChangeEmit:
     async def test_update_no_emit_on_first_detection(self):
         """첫 레짐 감지(prev_regime=None)는 emit 안 됨."""
         detector = RegimeDetector(confirm_count=1, min_duration_h=0)
-        df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df_up = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
 
         with patch("engine.regime_detector.emit_event", new_callable=AsyncMock) as mock_emit:
             await detector.update(df_up, "BTC/USDT")  # 최초 감지
@@ -320,7 +320,7 @@ class TestRegimeChangeEmit:
         df_range = _make_df(adx=15, bb_upper=81000, bb_lower=79000, bb_mid=80000)
         await detector.update(df_range, "ETH/USDT")
 
-        df_up = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df_up = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         with patch("engine.regime_detector.emit_event", new_callable=AsyncMock) as mock_emit:
             await detector.update(df_up, "ETH/USDT")
             meta = mock_emit.call_args[1]["metadata"]
@@ -346,7 +346,7 @@ class TestDerivativesDataNone:
     def test_detect_no_snapshot_field(self):
         """derivatives_data=None이면 detect() 반환 RegimeState.derivatives_snapshot=None."""
         detector = RegimeDetector()
-        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         state = detector.detect(df)
         assert state.derivatives_snapshot is None
 
@@ -354,7 +354,7 @@ class TestDerivativesDataNone:
     async def test_update_returns_no_snapshot(self):
         """derivatives_data=None이면 update() 반환 상태에 snapshot 없음."""
         detector = RegimeDetector()
-        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         state = await detector.update(df, "BTC/USDT")
         assert state.derivatives_snapshot is None
 
@@ -363,7 +363,7 @@ class TestDerivativesDataNone:
         """derivatives_data=None이면 신뢰도 조정 없음."""
         detector_plain = RegimeDetector()
         detector_with_none = RegimeDetector(derivatives_data=None)
-        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         state_plain = detector_plain.detect(df)
         state_with_none = detector_with_none.detect(df)
         assert state_plain.confidence == state_with_none.confidence
@@ -385,7 +385,7 @@ class TestDerivativesSnapshotAttached:
         }
         mock_deriv = _make_derivatives_mock(snap)
         detector = RegimeDetector(derivatives_data=mock_deriv)
-        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         state = await detector.update(df, "BTC/USDT")
         assert state.derivatives_snapshot is not None
         assert "signals" in state.derivatives_snapshot
@@ -397,7 +397,7 @@ class TestDerivativesSnapshotAttached:
         """get_snapshot()이 None 반환 → derivatives_snapshot=None."""
         mock_deriv = _make_derivatives_mock(None)
         detector = RegimeDetector(derivatives_data=mock_deriv)
-        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         state = await detector.update(df, "BTC/USDT")
         assert state.derivatives_snapshot is None
 
@@ -415,7 +415,7 @@ class TestDerivativesSnapshotAttached:
         mock_deriv = _make_derivatives_mock(snap)
         detector = RegimeDetector(derivatives_data=mock_deriv)
         # TRENDING_UP 조건
-        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         state = await detector.update(df, "BTC/USDT")
         # 파생상품 신호가 있어도 레짐은 TRENDING_UP 유지
         assert state.regime == Regime.TRENDING_UP
@@ -812,7 +812,7 @@ class TestDerivativesRobustness:
         mock_deriv = MagicMock()
         mock_deriv.get_snapshot.side_effect = RuntimeError("network timeout")
         detector = RegimeDetector(derivatives_data=mock_deriv)
-        df = _make_df(adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
+        df = _make_df(close=82000, adx=30, ema_20=81000, ema_50=79000, ema_slope_dir=1)
         # 예외 없이 정상 RegimeState 반환 (derivatives_snapshot=None)
         state = await detector.update(df, "BTC/USDT")
         assert state.regime == Regime.TRENDING_UP

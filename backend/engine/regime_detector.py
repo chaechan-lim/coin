@@ -128,12 +128,16 @@ class RegimeDetector:
         else:
             ema_slope = 0.0
 
-        # EMA cross direction
+        # EMA cross direction (장기 추세 참고용)
         ema_cross = 1 if ema20 > ema50 else -1
+
+        # 단기 방향: close vs ema20 — 급반등/급락 즉각 감지
+        price_dir = 1 if close > ema20 else -1
 
         # 레짐 분류
         regime, confidence = self._classify(
             adx, bb_width, atr_pct, ema_slope, ema_cross,
+            price_dir=price_dir,
         )
 
         # 백테스트: df 인덱스에서 캔들 시간 추출, 라이브: now()
@@ -316,8 +320,17 @@ class RegimeDetector:
         atr_pct: float,
         ema_slope: float,
         ema_cross: int,
+        *,
+        price_dir: int = 0,
     ) -> tuple[Regime, float]:
-        """원시 지표에서 레짐 + 신뢰도를 계산."""
+        """원시 지표에서 레짐 + 신뢰도를 계산.
+
+        Args:
+            price_dir: 단기 방향 (close vs ema20). +1=위, -1=아래, 0=미사용(폴백→ema_cross).
+        """
+        # price_dir 미제공 시 기존 ema_cross 사용 (하위 호환)
+        direction = price_dir if price_dir != 0 else ema_cross
+
         # 현재 추세 상태에 따라 히스테리시스 임계값 선택
         in_trend = (
             self._current is not None
@@ -327,10 +340,10 @@ class RegimeDetector:
 
         if adx >= adx_threshold:
             # 추세 존재
-            if ema_slope > 0.5 and ema_cross == 1:
+            if ema_slope > 0.5 and direction == 1:
                 confidence = min(1.0, (adx - 20) / 30 * 0.5 + 0.5)
                 return Regime.TRENDING_UP, confidence
-            elif ema_slope < -0.5 and ema_cross == -1:
+            elif ema_slope < -0.5 and direction == -1:
                 confidence = min(1.0, (adx - 20) / 30 * 0.5 + 0.5)
                 return Regime.TRENDING_DOWN, confidence
             else:
