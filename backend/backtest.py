@@ -750,6 +750,9 @@ class Backtester:
         rows = list(df.iterrows())
         for i, (ts, row) in enumerate(rows):
             current_price = float(row["close"])
+            # OHLC 분리: SL/TP/trailing 체크는 high/low 사용 (look-ahead bias 방지)
+            current_high = float(row["high"]) if "high" in row.index else current_price
+            current_low = float(row["low"]) if "low" in row.index else current_price
 
             current_equity = cash + holdings * current_price
 
@@ -786,12 +789,16 @@ class Backtester:
                 last_weight_eval_idx = i
 
             # ── 손절/익절/트레일링 체크 (보유 중일 때) ────────────
+            # high/low 기반 OHLC 시뮬레이션 (라이브 실시간 가격과 일치)
             if holdings > 0 and avg_buy_price > 0:
                 unrealized_pct = (current_price - avg_buy_price) / avg_buy_price * 100
+                # high/low 기준 가격 변동률
+                high_pct = (current_high - avg_buy_price) / avg_buy_price * 100
+                low_pct = (current_low - avg_buy_price) / avg_buy_price * 100
 
-                # 트레일링 스탑: 고점 추적
-                if current_price > peak_price_since_entry:
-                    peak_price_since_entry = current_price
+                # 트레일링 스탑: 고점 추적 (high 사용)
+                if current_high > peak_price_since_entry:
+                    peak_price_since_entry = current_high
 
                 # 비대칭 트레일링: 상승장이면 넓게, 하락장이면 타이트하게
                 if self._asymmetric:
@@ -806,19 +813,42 @@ class Backtester:
                     eff_trail_act = self._trailing_activation
                     eff_trail_stop = self._trailing_stop
 
-                # 트레일링 활성화 체크
+                # 트레일링 활성화 체크 (high 기준)
                 if (eff_trail_act > 0
                         and not trailing_active
-                        and unrealized_pct >= eff_trail_act):
+                        and high_pct >= eff_trail_act):
                     trailing_active = True
 
-                # 트레일링 스탑 발동
+                # 손절 우선 체크 (low가 SL 가로지르면) — 보수적
+                if dynamic_sl_pct > 0 and low_pct <= -dynamic_sl_pct:
+                    sl_price = avg_buy_price * (1 - dynamic_sl_pct / 100)
+                    actual_pnl_pct = (sl_price - avg_buy_price) / avg_buy_price * 100
+                    proceeds, pnl, t = self._execute_sell(
+                        ts, sl_price, holdings, avg_buy_price,
+                        "sell(sl)", "stop_loss", 0,
+                        f"손절: {actual_pnl_pct:.1f}% (한도: -{dynamic_sl_pct:.1f}%)",
+                    )
+                    t.symbol = symbol
+                    cash += proceeds
+                    trades.append(t)
+                    loss_count += 1
+                    total_loss_pct += abs(t.pnl_pct)
+                    holdings = 0
+                    avg_buy_price = 0
+                    peak_price_since_entry = 0
+                    trailing_active = False
+                    last_trade_idx = i
+                    continue
+
+                # 트레일링 스탑 발동 (peak 대비 low의 하락폭)
                 if trailing_active and eff_trail_stop > 0:
-                    drop_from_peak = (peak_price_since_entry - current_price) / peak_price_since_entry * 100
+                    drop_from_peak = (peak_price_since_entry - current_low) / peak_price_since_entry * 100
                     if drop_from_peak >= eff_trail_stop:
-                        actual_pnl_pct = unrealized_pct
+                        # 트리거 가격 = peak * (1 - eff_trail_stop/100)
+                        trail_price = peak_price_since_entry * (1 - eff_trail_stop / 100)
+                        actual_pnl_pct = (trail_price - avg_buy_price) / avg_buy_price * 100
                         proceeds, pnl, t = self._execute_sell(
-                            ts, current_price, holdings, avg_buy_price,
+                            ts, trail_price, holdings, avg_buy_price,
                             "sell(trail)", "trailing_stop", 0,
                             f"트레일링 스탑: 고점 {peak_price_since_entry:,.0f} 대비 "
                             f"-{drop_from_peak:.1f}% (수익 {actual_pnl_pct:+.1f}%)",
@@ -839,33 +869,15 @@ class Backtester:
                         last_trade_idx = i
                         continue
 
-                # 손절 (동적 ATR 또는 고정 %)
-                if dynamic_sl_pct > 0 and unrealized_pct <= -dynamic_sl_pct:
-                    proceeds, pnl, t = self._execute_sell(
-                        ts, current_price, holdings, avg_buy_price,
-                        "sell(sl)", "stop_loss", 0,
-                        f"손절: {unrealized_pct:.1f}% (한도: -{dynamic_sl_pct:.1f}%)",
-                    )
-                    t.symbol = symbol
-                    cash += proceeds
-                    trades.append(t)
-                    loss_count += 1
-                    total_loss_pct += abs(t.pnl_pct)
-                    holdings = 0
-                    avg_buy_price = 0
-                    peak_price_since_entry = 0
-                    trailing_active = False
-                    last_trade_idx = i
-                    continue
-
-                # 익절 (트레일링 미활성 시에만)
+                # 익절 (트레일링 미활성 시에만, high가 TP 가로지르면)
                 if (not trailing_active
                         and self._take_profit_pct > 0
-                        and unrealized_pct >= self._take_profit_pct):
+                        and high_pct >= self._take_profit_pct):
+                    tp_price = avg_buy_price * (1 + self._take_profit_pct / 100)
                     proceeds, pnl, t = self._execute_sell(
-                        ts, current_price, holdings, avg_buy_price,
+                        ts, tp_price, holdings, avg_buy_price,
                         "sell(tp)", "take_profit", 0,
-                        f"익절: +{unrealized_pct:.1f}% (목표: +{self._take_profit_pct}%)",
+                        f"익절: +{self._take_profit_pct}%",
                     )
                     t.symbol = symbol
                     cash += proceeds
@@ -1611,20 +1623,28 @@ class PortfolioBacktester:
                         self._combiner.update_weights(new_weights, source="backtest")
                 last_weight_eval_idx = candle_idx
 
-            # 4f. 보유 포지션 SL/TP/트레일링 체크
+            # 4f. 보유 포지션 SL/TP/트레일링 체크 (high/low 기반, look-ahead bias 방지)
             to_close: list[str] = []
             for pos_key, pos in positions.items():
                 _sym = pos.symbol
                 if _sym not in all_data or ts not in all_data[_sym].index:
                     continue
-                cur_price = float(all_data[_sym].loc[ts, "close"])
+                _row = all_data[_sym].loc[ts]
+                cur_price = float(_row["close"])
+                cur_high = float(_row["high"]) if "high" in _row.index else cur_price
+                cur_low = float(_row["low"]) if "low" in _row.index else cur_price
+                # 가격 변동률 (avg_price 기준)
                 unrealized_pct = (cur_price - pos.avg_price) / pos.avg_price * 100
+                high_pct = (cur_high - pos.avg_price) / pos.avg_price * 100
+                low_pct = (cur_low - pos.avg_price) / pos.avg_price * 100
 
-                if cur_price > pos.peak_price:
-                    pos.peak_price = cur_price
+                # 고점 추적: high 사용
+                if cur_high > pos.peak_price:
+                    pos.peak_price = cur_high
 
                 sell_tag = None
                 sell_text = None
+                exit_price = cur_price  # 트리거된 가격
 
                 # 비대칭 트레일링
                 if self._asymmetric:
@@ -1637,31 +1657,37 @@ class PortfolioBacktester:
                     eff_trail_act = self._trailing_activation
                     eff_trail_stop = self._trailing_stop
 
-                # 트레일링 활성화
-                if (eff_trail_act > 0 and not pos.trailing_active and unrealized_pct >= eff_trail_act):
+                # 트레일링 활성화 (high 기준)
+                if (eff_trail_act > 0 and not pos.trailing_active and high_pct >= eff_trail_act):
                     pos.trailing_active = True
 
-                # 트레일링 스탑
-                if pos.trailing_active and eff_trail_stop > 0:
-                    drop = (pos.peak_price - cur_price) / pos.peak_price * 100
-                    if drop >= eff_trail_stop:
-                        sell_tag = "sell(trail)"
-                        sell_text = f"트레일링 ({_sym}) 고점 대비 -{drop:.1f}% (수익 {unrealized_pct:+.1f}%)"
-
-                # 손절
-                if not sell_tag and pos.dynamic_sl_pct > 0 and unrealized_pct <= -pos.dynamic_sl_pct:
+                # 손절 우선 (low가 SL 가로지르면) — 보수적
+                if pos.dynamic_sl_pct > 0 and low_pct <= -pos.dynamic_sl_pct:
+                    sl_price = pos.avg_price * (1 - pos.dynamic_sl_pct / 100)
                     sell_tag = "sell(sl)"
-                    sell_text = f"손절 ({_sym}) {unrealized_pct:.1f}% (한도 -{pos.dynamic_sl_pct:.1f}%)"
+                    sell_text = f"손절 ({_sym}) -{pos.dynamic_sl_pct:.1f}%"
+                    exit_price = sl_price
 
-                # 익절 (트레일링 미활성 시)
+                # 트레일링 스탑 (low 기준)
+                if not sell_tag and pos.trailing_active and eff_trail_stop > 0:
+                    trail_price = pos.peak_price * (1 - eff_trail_stop / 100)
+                    if cur_low <= trail_price:
+                        drop = (pos.peak_price - trail_price) / pos.peak_price * 100
+                        sell_tag = "sell(trail)"
+                        sell_text = f"트레일링 ({_sym}) 고점 대비 -{drop:.1f}%"
+                        exit_price = trail_price
+
+                # 익절 (high가 TP 가로지르면, 트레일링 미활성 시)
                 if (not sell_tag and not pos.trailing_active
-                        and self._take_profit_pct > 0 and unrealized_pct >= self._take_profit_pct):
+                        and self._take_profit_pct > 0 and high_pct >= self._take_profit_pct):
+                    tp_price = pos.avg_price * (1 + self._take_profit_pct / 100)
                     sell_tag = "sell(tp)"
-                    sell_text = f"익절 ({_sym}) +{unrealized_pct:.1f}%"
+                    sell_text = f"익절 ({_sym}) +{self._take_profit_pct:.1f}%"
+                    exit_price = tp_price
 
                 if sell_tag:
                     proceeds, pnl, pnl_pct, t = self._execute_sell(
-                        ts, cur_price, pos, sell_tag, pos.entry_strategy, 0, sell_text,
+                        ts, exit_price, pos, sell_tag, pos.entry_strategy, 0, sell_text,
                     )
                     cash += proceeds
                     trades.append(t)
