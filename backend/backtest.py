@@ -2549,29 +2549,38 @@ class FuturesBacktester:
                 )
                 unrealized_pct = unrealized_pnl / position.margin * 100 if position.margin > 0 else 0
 
-                # 트레일링: 고점/저점 추적
+                # 트레일링: 고점/저점 추적 (high/low 사용)
                 if position.side == "long":
-                    if current_price > position.peak_price:
-                        position.peak_price = current_price
+                    if high_price > position.peak_price:
+                        position.peak_price = high_price
                 else:  # short
-                    if current_price < position.peak_price:
-                        position.peak_price = current_price
+                    if low_price < position.peak_price:
+                        position.peak_price = low_price
 
-                # 트레일링 활성화
+                # 트레일링 활성화 — high/low 기반 미실현 (intra-candle 극값)
+                if position.side == "long":
+                    extreme_pnl = self._calc_unrealized_pnl(position.side, position.entry_price, high_price, position.quantity)
+                else:
+                    extreme_pnl = self._calc_unrealized_pnl(position.side, position.entry_price, low_price, position.quantity)
+                extreme_pct = extreme_pnl / position.margin * 100 if position.margin > 0 else 0
                 if (self._effective_trail_act > 0
                         and not position.trailing_active
-                        and unrealized_pct >= self._effective_trail_act):
+                        and extreme_pct >= self._effective_trail_act):
                     position.trailing_active = True
 
-                # 트레일링 스탑 발동
+                # 트레일링 스탑 발동 (peak 대비 low/high의 하락폭)
                 if position.trailing_active and self._effective_trail_stop > 0:
                     if position.side == "long":
-                        drop = (position.peak_price - current_price) / position.peak_price * 100
+                        # peak에서 low가 trail_stop% 떨어졌나
+                        drop = (position.peak_price - low_price) / position.peak_price * 100
+                        trail_close_price = position.peak_price * (1 - self._effective_trail_stop / 100)
                     else:
-                        drop = (current_price - position.peak_price) / position.peak_price * 100
+                        # peak (저점)에서 high가 trail_stop% 올랐나
+                        drop = (high_price - position.peak_price) / position.peak_price * 100
+                        trail_close_price = position.peak_price * (1 + self._effective_trail_stop / 100)
                     if drop >= self._effective_trail_stop:
                         net_pnl, fee, pnl_pct, t = self._execute_futures_close(
-                            ts, position, current_price,
+                            ts, position, trail_close_price,
                             f"sell(trail-{position.side})", "trailing_stop", 0,
                             f"트레일링 ({position.side}) 피크 대비 -{drop:.1f}% (수익 {unrealized_pct:+.1f}%)",
                         )
@@ -2631,14 +2640,19 @@ class FuturesBacktester:
                     last_trade_idx = i
                     continue
 
-                # 익절 (트레일링 미활성 시)
+                # 익절 (트레일링 미활성 시) — high/low 기준 intra-candle TP
                 if (not position.trailing_active
                         and self._effective_tp > 0
-                        and unrealized_pct >= self._effective_tp):
+                        and extreme_pct >= self._effective_tp):
+                    # TP 트리거 가격 계산 (entry 기반)
+                    if position.side == "long":
+                        tp_price_level = position.entry_price * (1 + self._effective_tp / 100)
+                    else:
+                        tp_price_level = position.entry_price * (1 - self._effective_tp / 100)
                     net_pnl, fee, pnl_pct, t = self._execute_futures_close(
-                        ts, position, current_price,
+                        ts, position, tp_price_level,
                         f"sell(tp-{position.side})", "take_profit", 0,
-                        f"익절 ({position.side}) +{unrealized_pct:.1f}% (목표 +{self._effective_tp:.1f}%)",
+                        f"익절 ({position.side}) +{self._effective_tp:.1f}%",
                     )
                     t.symbol = symbol
                     cash += position.margin + net_pnl
@@ -3599,49 +3613,78 @@ class FuturesPortfolioBacktester:
                 # 미실현 손익 (margin-relative)
                 unrealized_pnl = self._calc_unrealized_pnl(pos.side, pos.entry_price, cur_price, pos.quantity)
                 unrealized_pct = unrealized_pnl / pos.margin * 100 if pos.margin > 0 else 0
-
-                # 피크 추적
+                # high/low 기반 극값 PnL (intra-candle SL/TP/Trailing 체크용)
                 if pos.side == "long":
-                    if cur_price > pos.peak_price:
-                        pos.peak_price = cur_price
+                    extreme_pnl = self._calc_unrealized_pnl(pos.side, pos.entry_price, high_price, pos.quantity)
                 else:
-                    if cur_price < pos.peak_price:
-                        pos.peak_price = cur_price
+                    extreme_pnl = self._calc_unrealized_pnl(pos.side, pos.entry_price, low_price, pos.quantity)
+                extreme_pct = extreme_pnl / pos.margin * 100 if pos.margin > 0 else 0
 
-                # 트레일링 활성화
+                # 피크 추적 (high/low 사용)
+                if pos.side == "long":
+                    if high_price > pos.peak_price:
+                        pos.peak_price = high_price
+                else:
+                    if low_price < pos.peak_price:
+                        pos.peak_price = low_price
+
+                # 트레일링 활성화 (extreme 기준)
                 if (self._effective_trail_act > 0
                         and not pos.trailing_active
-                        and unrealized_pct >= self._effective_trail_act):
+                        and extreme_pct >= self._effective_trail_act):
                     pos.trailing_active = True
 
                 sell_tag = None
                 sell_text = None
+                exit_price = cur_price
 
-                # 트레일링 스탑
-                if pos.trailing_active and self._effective_trail_stop > 0:
-                    if pos.side == "long":
-                        drop = (pos.peak_price - cur_price) / pos.peak_price * 100
-                    else:
-                        drop = (cur_price - pos.peak_price) / pos.peak_price * 100
-                    if drop >= self._effective_trail_stop:
-                        sell_tag = f"sell(trail-{pos.side})"
-                        sell_text = f"트레일링 ({pos.side}) 피크 대비 -{drop:.1f}% (수익 {unrealized_pct:+.1f}%)"
-
-                # 손절
+                # 손절 우선 (low/high가 SL 가로지르면) — 보수적
                 eff_sl = dynamic_sl_pct.get(sym, self._effective_sl)
-                if not sell_tag and eff_sl > 0 and unrealized_pct <= -eff_sl:
-                    sell_tag = f"sell(sl-{pos.side})"
-                    sell_text = f"손절 ({pos.side}) {unrealized_pct:.1f}% (한도 -{eff_sl:.1f}%)"
+                if eff_sl > 0:
+                    if pos.side == "long":
+                        sl_price_lvl = pos.entry_price * (1 - eff_sl / 100)
+                        if low_price <= sl_price_lvl:
+                            sell_tag = f"sell(sl-{pos.side})"
+                            sell_text = f"손절 ({pos.side}) -{eff_sl:.1f}%"
+                            exit_price = sl_price_lvl
+                    else:
+                        sl_price_lvl = pos.entry_price * (1 + eff_sl / 100)
+                        if high_price >= sl_price_lvl:
+                            sell_tag = f"sell(sl-{pos.side})"
+                            sell_text = f"손절 ({pos.side}) -{eff_sl:.1f}%"
+                            exit_price = sl_price_lvl
 
-                # 익절 (트레일링 미활성 시)
+                # 트레일링 스탑 (low/high가 trail 가로지르면)
+                if not sell_tag and pos.trailing_active and self._effective_trail_stop > 0:
+                    if pos.side == "long":
+                        trail_lvl = pos.peak_price * (1 - self._effective_trail_stop / 100)
+                        if low_price <= trail_lvl:
+                            drop = (pos.peak_price - trail_lvl) / pos.peak_price * 100
+                            sell_tag = f"sell(trail-{pos.side})"
+                            sell_text = f"트레일링 ({pos.side}) 피크 대비 -{drop:.1f}%"
+                            exit_price = trail_lvl
+                    else:
+                        trail_lvl = pos.peak_price * (1 + self._effective_trail_stop / 100)
+                        if high_price >= trail_lvl:
+                            drop = (trail_lvl - pos.peak_price) / pos.peak_price * 100
+                            sell_tag = f"sell(trail-{pos.side})"
+                            sell_text = f"트레일링 ({pos.side}) 피크 대비 -{drop:.1f}%"
+                            exit_price = trail_lvl
+
+                # 익절 (extreme 기준, 트레일링 미활성 시)
                 if (not sell_tag and not pos.trailing_active
-                        and self._effective_tp > 0 and unrealized_pct >= self._effective_tp):
+                        and self._effective_tp > 0 and extreme_pct >= self._effective_tp):
+                    if pos.side == "long":
+                        tp_price_lvl = pos.entry_price * (1 + self._effective_tp / 100)
+                    else:
+                        tp_price_lvl = pos.entry_price * (1 - self._effective_tp / 100)
                     sell_tag = f"sell(tp-{pos.side})"
-                    sell_text = f"익절 ({pos.side}) +{unrealized_pct:.1f}%"
+                    sell_text = f"익절 ({pos.side}) +{self._effective_tp:.1f}%"
+                    exit_price = tp_price_lvl
 
                 if sell_tag:
                     net_pnl, fee, pnl_pct, t = self._execute_futures_close(
-                        ts, pos, cur_price, sell_tag, pos.entry_strategy, 0, sell_text,
+                        ts, pos, exit_price, sell_tag, pos.entry_strategy, 0, sell_text,
                     )
                     cash += pos.margin + net_pnl
                     total_fees += fee
@@ -4538,55 +4581,68 @@ class RotationBacktester:
                         self._combiner.update_weights(new_weights, source="backtest")
                 last_weight_eval_idx = candle_idx
 
-            # ── 보유 포지션 SL/TP/트레일링/시간 체크 ──────────
+            # ── 보유 포지션 SL/TP/트레일링/시간 체크 (high/low 사용, look-ahead 방지) ──
             to_close: list[str] = []
             for sym, pos in positions.items():
                 if sym not in all_data or ts not in all_data[sym].index:
                     continue
 
-                cur_price = float(all_data[sym].loc[ts, "close"])
+                _row = all_data[sym].loc[ts]
+                cur_price = float(_row["close"])
+                cur_high = float(_row["high"]) if "high" in _row.index else cur_price
+                cur_low = float(_row["low"]) if "low" in _row.index else cur_price
                 unrealized_pct = (cur_price - pos.avg_buy_price) / pos.avg_buy_price * 100
+                high_pct = (cur_high - pos.avg_buy_price) / pos.avg_buy_price * 100
+                low_pct = (cur_low - pos.avg_buy_price) / pos.avg_buy_price * 100
 
-                if cur_price > pos.peak_price:
-                    pos.peak_price = cur_price
+                if cur_high > pos.peak_price:
+                    pos.peak_price = cur_high
 
                 sell_tag = None
                 sell_text = None
+                exit_price = cur_price
 
-                # 1) 트레일링 활성화
+                # 1) 트레일링 활성화 (high 기준)
                 if (pos.trailing_activation_pct > 0
                         and not pos.trailing_active
-                        and unrealized_pct >= pos.trailing_activation_pct):
+                        and high_pct >= pos.trailing_activation_pct):
                     pos.trailing_active = True
 
-                # 2) 트레일링 스탑
-                if pos.trailing_active and pos.trailing_stop_pct > 0:
-                    drop = (pos.peak_price - cur_price) / pos.peak_price * 100
-                    if drop >= pos.trailing_stop_pct:
+                # 2) 손절 우선 (low가 SL 가로지르면) — 보수적
+                if pos.stop_loss_pct > 0 and low_pct <= -pos.stop_loss_pct:
+                    sl_price_lvl = pos.avg_buy_price * (1 - pos.stop_loss_pct / 100)
+                    sell_tag = "sell(sl)"
+                    sell_text = f"손절 ({sym}) -{pos.stop_loss_pct:.1f}%"
+                    exit_price = sl_price_lvl
+
+                # 3) 트레일링 스탑 (low 기준)
+                if not sell_tag and pos.trailing_active and pos.trailing_stop_pct > 0:
+                    trail_lvl = pos.peak_price * (1 - pos.trailing_stop_pct / 100)
+                    if cur_low <= trail_lvl:
+                        drop = (pos.peak_price - trail_lvl) / pos.peak_price * 100
                         sell_tag = "sell(trail)"
                         sell_text = f"트레일링 ({sym}) 고점 대비 -{drop:.1f}%"
+                        exit_price = trail_lvl
 
-                # 3) 손절
-                if not sell_tag and pos.stop_loss_pct > 0 and unrealized_pct <= -pos.stop_loss_pct:
-                    sell_tag = "sell(sl)"
-                    sell_text = f"손절 ({sym}) {unrealized_pct:.1f}% (한도 -{pos.stop_loss_pct:.1f}%)"
-
-                # 4) 익절 (트레일링 미활성 시)
+                # 4) 익절 (high 기준, 트레일링 미활성 시)
                 if (not sell_tag and not pos.trailing_active
                         and pos.take_profit_pct > 0
-                        and unrealized_pct >= pos.take_profit_pct):
+                        and high_pct >= pos.take_profit_pct):
+                    tp_price_lvl = pos.avg_buy_price * (1 + pos.take_profit_pct / 100)
                     sell_tag = "sell(tp)"
-                    sell_text = f"익절 ({sym}) +{unrealized_pct:.1f}%"
+                    sell_text = f"익절 ({sym}) +{pos.take_profit_pct:.1f}%"
+                    exit_price = tp_price_lvl
 
                 # 5) 시간 기반 강제 청산
                 if not sell_tag and max_hold_candles > 0:
                     held = candle_idx - pos.entry_candle_idx
                     if held >= max_hold_candles:
                         sell_tag = "sell(time)"
-                        sell_text = f"시간 초과 ({sym}) {held}캔들/{max_hold_candles} (수익 {unrealized_pct:+.1f}%)"
+                        sell_text = f"시간 초과 ({sym}) {held}캔들/{max_hold_candles}"
+                        exit_price = cur_price
 
                 if sell_tag:
-                    exec_price = cur_price * (1 - SLIPPAGE)
+                    exec_price = exit_price * (1 - SLIPPAGE)
                     cost = pos.quantity * exec_price
                     fee = cost * TAKER_FEE
                     proceeds = cost - fee
