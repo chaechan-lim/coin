@@ -134,10 +134,14 @@ class RegimeDetector:
         # 단기 방향: close vs ema20 — 급반등/급락 즉각 감지
         price_dir = 1 if close > ema20 else -1
 
+        # ROC (6h 변화율) — ADX 래그 우회용
+        close_6 = self._safe_iloc(df, "close", offset=7) if len(df) >= 7 else close
+        roc_6h = (close - close_6) / close_6 * 100 if close_6 > 0 else 0.0
+
         # 레짐 분류
         regime, confidence = self._classify(
             adx, bb_width, atr_pct, ema_slope, ema_cross,
-            price_dir=price_dir,
+            price_dir=price_dir, roc_6h=roc_6h,
         )
 
         # 백테스트: df 인덱스에서 캔들 시간 추출, 라이브: now()
@@ -313,6 +317,9 @@ class RegimeDetector:
             derivatives_snapshot=derivatives_snapshot,
         )
 
+    # ROC 패스트패스 임계값 (6h 변화율 %)
+    ROC_FAST_THRESHOLD: float = 3.0
+
     def _classify(
         self,
         adx: float,
@@ -322,15 +329,27 @@ class RegimeDetector:
         ema_cross: int,
         *,
         price_dir: int = 0,
+        roc_6h: float = 0.0,
     ) -> tuple[Regime, float]:
         """원시 지표에서 레짐 + 신뢰도를 계산.
 
         Args:
             price_dir: 단기 방향 (close vs ema20). +1=위, -1=아래, 0=미사용(폴백→ema_cross).
+            roc_6h: 6시간 변화율(%). ADX 래그를 우회하여 급등/급락 즉시 감지.
         """
         # price_dir 미제공 시 기존 ema_cross 사용 (하위 호환)
         direction = price_dir if price_dir != 0 else ema_cross
 
+        # ── ROC 패스트패스: 6h 변화율이 크면 ADX 무시하고 즉시 추세 판정 ──
+        if abs(roc_6h) >= self.ROC_FAST_THRESHOLD:
+            if roc_6h > 0 and direction == 1:
+                confidence = min(1.0, abs(roc_6h) / 10.0 + 0.4)
+                return Regime.TRENDING_UP, confidence
+            elif roc_6h < 0 and direction == -1:
+                confidence = min(1.0, abs(roc_6h) / 10.0 + 0.4)
+                return Regime.TRENDING_DOWN, confidence
+
+        # ── ADX 기반 판정 ──
         # 현재 추세 상태에 따라 히스테리시스 임계값 선택
         in_trend = (
             self._current is not None
