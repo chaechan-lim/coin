@@ -7,8 +7,8 @@ from typing import Any, Literal
 logger = structlog.get_logger(__name__)
 
 # Valid exchange names for API parameter validation
-VALID_EXCHANGES = {"bithumb", "binance_futures", "binance_spot", "binance_surge"}
-ExchangeNameType = Literal["bithumb", "binance_futures", "binance_spot", "binance_surge"]
+VALID_EXCHANGES = {"bithumb", "binance_futures", "binance_spot", "binance_surge", "binance_donchian"}
+ExchangeNameType = Literal["bithumb", "binance_futures", "binance_spot", "binance_surge", "binance_donchian"]
 
 
 def validate_exchange(exchange: str) -> str:

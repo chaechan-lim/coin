@@ -78,6 +78,7 @@ _engine_instance: TradingEngine | None = None
 _binance_engine = None
 _binance_spot_engine = None
 _surge_engine = None
+_donchian_engine = None  # Donchian Daily Ensemble (R&D 라이브)
 _notification_dispatcher: NotificationDispatcher | None = None
 _discord_bot_task: asyncio.Task | None = None
 _discord_bot_instance = None
@@ -221,7 +222,7 @@ def _create_self_healing(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
-    global _scheduler, _engine_instance, _binance_engine, _binance_spot_engine, _surge_engine, _notification_dispatcher
+    global _scheduler, _engine_instance, _binance_engine, _binance_spot_engine, _surge_engine, _donchian_engine, _notification_dispatcher
     config = get_config()
 
     logger.info("startup_begin", mode=config.trading.mode)
@@ -459,6 +460,8 @@ async def lifespan(app: FastAPI):
 
     # ── 7b. 바이낸스 현물 (조건부) ─────────────────────────────
     binance_spot_exchange = None
+    spot_adapter = None  # 7b-2 (Donchian) 등 외부에서 사용
+    spot_market_data = None
     if config.binance.spot_enabled:
         try:
             from exchange.binance_spot_adapter import BinanceSpotAdapter
@@ -543,6 +546,29 @@ async def lifespan(app: FastAPI):
                          tracked_coins=config.binance.tracked_coins)
         except Exception as e:
             logger.error("binance_spot_init_failed", error=str(e), exc_info=True)
+
+    # ── 7b-2. Donchian Daily Ensemble (R&D 라이브) ───────────
+    # 학술 검증 (SSRN 2025): 약세장 방어 alpha +44.71% / 180d, MDD 3.64%
+    # 라이브 운영 — 자금 200 USDT, 손실 한도 -10% / -5% 자동 중지
+    if (config.binance.enabled and binance_spot_exchange
+            and getattr(config, 'donchian_daily_enabled', False)):
+        try:
+            from engine.donchian_daily_engine import DonchianDailyEngine
+            donchian_capital = float(getattr(config, 'donchian_daily_capital_usdt', 200.0))
+            _donchian_engine = DonchianDailyEngine(
+                config=config,
+                spot_exchange=spot_adapter,  # 실제 어댑터 (paper 우회 — 라이브)
+                market_data=spot_market_data,
+                initial_capital_usdt=donchian_capital,
+            )
+            engine_registry.register(
+                "binance_donchian", _donchian_engine, None, None, None,
+            )
+            logger.info("donchian_daily_engine_ready",
+                        capital_usdt=donchian_capital,
+                        coins=_donchian_engine.coins)
+        except Exception as e:
+            logger.error("donchian_daily_init_failed", error=str(e), exc_info=True)
 
     # ── 7c. 서지 엔진 (조건부) — 선물 PM 잔고 통합 ─────────────
     if config.surge_trading.enabled and config.binance.enabled and binance_exchange:
@@ -951,6 +977,8 @@ async def lifespan(app: FastAPI):
         auto_start_engines.append(("binance_futures", _binance_engine))
     if _binance_spot_engine and not _binance_spot_engine.is_running and config.binance_spot_trading.enabled:
         auto_start_engines.append(("binance_spot", _binance_spot_engine))
+    if _donchian_engine and not _donchian_engine.is_running:
+        auto_start_engines.append(("binance_donchian", _donchian_engine))
     if _surge_engine and not _surge_engine.is_running:
         auto_start_engines.append(("binance_surge", _surge_engine))
     for name, eng in auto_start_engines:
@@ -974,6 +1002,8 @@ async def lifespan(app: FastAPI):
         await _binance_engine.stop()
     if _binance_spot_engine:
         await _binance_spot_engine.stop()
+    if _donchian_engine:
+        await _donchian_engine.stop()
     if _surge_engine:
         await _surge_engine.stop()
     if exchange:

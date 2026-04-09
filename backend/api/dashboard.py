@@ -106,6 +106,30 @@ async def start_engine(exchange: ExchangeNameType = Query("bithumb")):
     return {"status": "started", "exchange": exchange}
 
 
+@router.post("/engine/donchian/evaluate")
+async def evaluate_donchian_now():
+    """Donchian Daily 엔진 즉시 평가 트리거 (테스트/디버그용)."""
+    eng = _get_engine("binance_donchian")
+    if not eng:
+        raise HTTPException(status_code=500, detail="Donchian engine not initialized")
+    if not hasattr(eng, "evaluate_now"):
+        raise HTTPException(status_code=500, detail="Engine does not support manual evaluation")
+    await eng.evaluate_now()
+    status = eng.get_status() if hasattr(eng, "get_status") else {}
+    return {"status": "evaluated", "result": status}
+
+
+@router.get("/engine/donchian/status")
+async def get_donchian_status():
+    """Donchian Daily 엔진 현재 상태."""
+    eng = _get_engine("binance_donchian")
+    if not eng:
+        raise HTTPException(status_code=500, detail="Donchian engine not initialized")
+    if hasattr(eng, "get_status"):
+        return eng.get_status()
+    return {"is_running": eng.is_running}
+
+
 @router.post("/engine/stop")
 async def stop_engine(
     exchange: ExchangeNameType = Query("bithumb"),

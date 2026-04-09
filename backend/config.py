@@ -370,6 +370,11 @@ class AppConfig(BaseSettings):
     log_level: str = "INFO"
     ws_idle_timeout_sec: int = Field(default=300, ge=1)  # WebSocket idle timeout; set via APP_WS_IDLE_TIMEOUT_SEC
 
+    # Donchian Daily Ensemble (R&D 라이브)
+    # 학술 검증: SSRN 2025 Zarattini, 약세장 alpha +44.71% / 180d
+    donchian_daily_enabled: bool = False
+    donchian_daily_capital_usdt: float = 200.0
+
     model_config = {"env_prefix": "APP_"}
 
 
