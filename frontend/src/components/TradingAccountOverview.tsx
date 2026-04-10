@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   getCapitalSummary,
@@ -43,11 +44,13 @@ function OverviewCard({
   title,
   subtitle,
   badge,
+  action,
   children,
 }: {
   title: string
   subtitle: string
   badge?: React.ReactNode
+  action?: React.ReactNode
   children: React.ReactNode
 }) {
   return (
@@ -57,9 +60,47 @@ function OverviewCard({
           <h4 className="text-sm font-semibold text-white">{title}</h4>
           <p className="mt-1 text-xs text-gray-400">{subtitle}</p>
         </div>
-        {badge}
+        <div className="flex items-center gap-2">
+          {action}
+          {badge}
+        </div>
       </div>
       <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">{children}</div>
+    </div>
+  )
+}
+
+type SpotHistoryWindow = 'all' | '30d' | '7d'
+
+function WindowToggle({
+  value,
+  onChange,
+}: {
+  value: SpotHistoryWindow
+  onChange: (value: SpotHistoryWindow) => void
+}) {
+  const items: SpotHistoryWindow[] = ['all', '30d', '7d']
+  const labels: Record<SpotHistoryWindow, string> = {
+    all: '전체',
+    '30d': '30d',
+    '7d': '7d',
+  }
+
+  return (
+    <div className="flex items-center gap-1 rounded-full border border-gray-700 bg-gray-900/70 p-1">
+      {items.map((item) => (
+        <button
+          key={item}
+          onClick={() => onChange(item)}
+          className={`rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors ${
+            value === item
+              ? 'bg-sky-600 text-white'
+              : 'text-gray-400 hover:bg-gray-800 hover:text-white'
+          }`}
+        >
+          {labels[item]}
+        </button>
+      ))}
     </div>
   )
 }
@@ -102,19 +143,28 @@ function FuturesCoordinatorCard({ status }: { status?: FuturesRndStatus | null }
 function SpotAccountHistoryCard({
   portfolio,
   capital,
-  trailingTrades,
+  window,
+  periodTrades,
   lastTrade,
+  onWindowChange,
 }: {
   portfolio?: PortfolioSummary
   capital?: CapitalSummary
-  trailingTrades?: TradeSummary
+  window: SpotHistoryWindow
+  periodTrades?: TradeSummary
   lastTrade?: Order
+  onWindowChange: (value: SpotHistoryWindow) => void
 }) {
+  const periodLabel = window === 'all' ? '전체 실현 손익' : `최근 ${window} 실현`
+  const periodPnl = window === 'all' ? (portfolio?.realized_pnl ?? 0) : (periodTrades?.total_pnl ?? 0)
+  const periodTradeCount = window === 'all' ? `${portfolio?.trade_count ?? 0}건` : formatTrades(periodTrades)
+
   return (
     <OverviewCard
       title="Main Spot History"
       subtitle="이 카드는 `binance_spot` 메인 ledger 기준 누적 잔고/손익입니다. 현재 `Donchian Spot` live 전략 성과와 분리해서 읽어야 합니다."
       badge={<span className="rounded-full border border-sky-800/60 bg-sky-950/40 px-2 py-0.5 text-[11px] font-medium text-sky-300">ledger</span>}
+      action={<WindowToggle value={window} onChange={onWindowChange} />}
     >
       <Stat label="계좌 총자산" value={portfolio ? fmtPrice(portfolio.total_value_krw, true) : 'n/a'} />
       <Stat label="가용 현금" value={portfolio ? fmtPrice(portfolio.cash_balance_krw, true) : 'n/a'} />
@@ -125,10 +175,11 @@ function SpotAccountHistoryCard({
         tone={(portfolio?.total_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}
       />
       <Stat
-        label="최근 30일 실현"
-        value={trailingTrades ? fmtSignedPrice(trailingTrades.total_pnl, true) : 'n/a'}
-        tone={(trailingTrades?.total_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}
+        label={periodLabel}
+        value={portfolio ? fmtSignedPrice(periodPnl, true) : 'n/a'}
+        tone={periodPnl >= 0 ? 'text-green-400' : 'text-red-400'}
       />
+      <Stat label={`${window === 'all' ? '누적' : window} 거래수`} value={periodTradeCount} />
       <Stat label="마지막 main spot 체결" value={formatLastTrade(lastTrade)} />
     </OverviewCard>
   )
@@ -199,6 +250,7 @@ function StrategyCard({
 }
 
 export function TradingAccountOverview() {
+  const [spotHistoryWindow, setSpotHistoryWindow] = useState<SpotHistoryWindow>('30d')
   const queryOptions = {
     staleTime: 10_000,
     refetchInterval: 15_000,
@@ -228,10 +280,11 @@ export function TradingAccountOverview() {
     ...queryOptions,
   })
 
-  const { data: spotAccountTrailingTrades } = useQuery({
-    queryKey: ['trades', 'summary', '30d', 'binance_spot'],
-    queryFn: () => getTradeSummary('30d', 'binance_spot'),
+  const { data: spotAccountPeriodTrades } = useQuery({
+    queryKey: ['trades', 'summary', spotHistoryWindow, 'binance_spot'],
+    queryFn: () => getTradeSummary(spotHistoryWindow === 'all' ? '30d' : spotHistoryWindow, 'binance_spot'),
     ...queryOptions,
+    enabled: spotHistoryWindow !== 'all',
   })
 
   const { data: latestSpotTrades } = useQuery({
@@ -290,8 +343,10 @@ export function TradingAccountOverview() {
         <SpotAccountHistoryCard
           portfolio={spotPortfolio}
           capital={spotCapital}
-          trailingTrades={spotAccountTrailingTrades}
+          window={spotHistoryWindow}
+          periodTrades={spotAccountPeriodTrades}
           lastTrade={latestSpotTrades?.[0]}
+          onWindowChange={setSpotHistoryWindow}
         />
         <SpotStrategyCard donchian={donchianSpotStatus} trades={spotTrades} />
         <FuturesCoordinatorCard status={rndStatus} />
