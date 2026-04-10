@@ -71,16 +71,21 @@ function OverviewCard({
 }
 
 type SpotHistoryWindow = 'all' | '30d' | '7d'
+type StrategyWindow = 'today' | '7d' | '30d'
 
 function WindowToggle({
   value,
   onChange,
+  items,
+  labels,
 }: {
-  value: SpotHistoryWindow
-  onChange: (value: SpotHistoryWindow) => void
+  value: string
+  onChange: (value: string) => void
+  items?: readonly string[]
+  labels?: Record<string, string>
 }) {
-  const items: SpotHistoryWindow[] = ['all', '30d', '7d']
-  const labels: Record<SpotHistoryWindow, string> = {
+  const toggleItems = items ?? ['all', '30d', '7d']
+  const toggleLabels = labels ?? {
     all: '전체',
     '30d': '30d',
     '7d': '7d',
@@ -88,7 +93,7 @@ function WindowToggle({
 
   return (
     <div className="flex items-center gap-1 rounded-full border border-gray-700 bg-gray-900/70 p-1">
-      {items.map((item) => (
+      {toggleItems.map((item) => (
         <button
           key={item}
           onClick={() => onChange(item)}
@@ -98,7 +103,7 @@ function WindowToggle({
               : 'text-gray-400 hover:bg-gray-800 hover:text-white'
           }`}
         >
-          {labels[item]}
+          {toggleLabels[item]}
         </button>
       ))}
     </div>
@@ -164,7 +169,7 @@ function SpotAccountHistoryCard({
       title="Main Spot History"
       subtitle="이 카드는 `binance_spot` 메인 ledger 기준 누적 잔고/손익입니다. 현재 `Donchian Spot` live 전략 성과와 분리해서 읽어야 합니다."
       badge={<span className="rounded-full border border-sky-800/60 bg-sky-950/40 px-2 py-0.5 text-[11px] font-medium text-sky-300">ledger</span>}
-      action={<WindowToggle value={window} onChange={onWindowChange} />}
+      action={<WindowToggle value={window} onChange={(value) => onWindowChange(value as SpotHistoryWindow)} />}
     >
       <Stat label="계좌 총자산" value={portfolio ? fmtPrice(portfolio.total_value_krw, true) : 'n/a'} />
       <Stat label="가용 현금" value={portfolio ? fmtPrice(portfolio.cash_balance_krw, true) : 'n/a'} />
@@ -187,21 +192,42 @@ function SpotAccountHistoryCard({
 
 function SpotStrategyCard({
   donchian,
+  window,
   trades,
+  onWindowChange,
 }: {
   donchian?: DonchianSpotStatus
+  window: StrategyWindow
   trades?: TradeSummary
+  onWindowChange: (value: StrategyWindow) => void
 }) {
+  const periodLabel = window === 'today' ? '오늘 거래' : `${window} 거래`
+  const pnlLabel = window === 'today' ? '오늘 실현' : `${window} 실현`
+  const periodPnl = window === 'today' ? (donchian?.daily_pnl ?? 0) : (trades?.total_pnl ?? 0)
+
   return (
     <OverviewCard
       title="Donchian Spot"
       subtitle="현재 live R&D 현물 전략 상태입니다. 계정 누적 손익과 다를 수 있습니다."
       badge={<StatusBadge running={donchian?.is_running ?? false} paused={donchian?.paused_daily_loss || donchian?.paused_total_loss} />}
+      action={
+        <WindowToggle
+          value={window}
+          onChange={(value) => onWindowChange(value as StrategyWindow)}
+          items={['today', '7d', '30d']}
+          labels={{ today: '오늘', '7d': '7d', '30d': '30d' }}
+        />
+      }
     >
       <Stat label="전략 자본" value={donchian ? fmtPrice(donchian.initial_capital, true) : 'n/a'} />
       <Stat label="감시 코인" value={`${donchian?.coins.length ?? 0}종`} />
       <Stat label="활성 포지션" value={formatPositionsCount(donchian?.active_positions)} />
-      <Stat label="오늘 거래" value={formatTrades(trades)} />
+      <Stat label={periodLabel} value={formatTrades(trades)} />
+      <Stat
+        label={pnlLabel}
+        value={donchian ? fmtSignedPrice(periodPnl, true) : 'n/a'}
+        tone={periodPnl >= 0 ? 'text-green-400' : 'text-red-400'}
+      />
       <Stat
         label="누적 손익"
         value={donchian ? fmtSignedPrice(donchian.cumulative_pnl, true) : 'n/a'}
@@ -216,13 +242,17 @@ function StrategyCard({
   title,
   subtitle,
   status,
+  window,
   trades,
+  onWindowChange,
   positionsLabel,
 }: {
   title: string
   subtitle: string
   status?: RndEngineStatus
+  window: StrategyWindow
   trades?: TradeSummary
+  onWindowChange: (value: StrategyWindow) => void
   positionsLabel: string
 }) {
   const openPositions = Array.isArray(status?.positions)
@@ -230,7 +260,9 @@ function StrategyCard({
     : status?.position
       ? 1
       : 0
-  const dailyPnl = status?.daily_realized_pnl ?? 0
+  const periodLabel = window === 'today' ? '오늘 거래' : `${window} 거래`
+  const pnlLabel = window === 'today' ? '오늘 실현' : `${window} 실현`
+  const periodPnl = window === 'today' ? (status?.daily_realized_pnl ?? 0) : (trades?.total_pnl ?? 0)
   const cumulativePnl = status?.cumulative_pnl ?? 0
 
   return (
@@ -238,12 +270,20 @@ function StrategyCard({
       title={title}
       subtitle={subtitle}
       badge={<StatusBadge running={status?.is_running ?? false} paused={status?.paused || status?.daily_paused} />}
+      action={
+        <WindowToggle
+          value={window}
+          onChange={(value) => onWindowChange(value as StrategyWindow)}
+          items={['today', '7d', '30d']}
+          labels={{ today: '오늘', '7d': '7d', '30d': '30d' }}
+        />
+      }
     >
       <Stat label="운용 자본" value={status?.capital_usdt != null ? fmtPrice(status.capital_usdt, true) : 'n/a'} />
       <Stat label="가용 마진" value={status?.available_margin != null ? fmtPrice(status.available_margin, true) : 'n/a'} />
       <Stat label={positionsLabel} value={formatPositionsCount(openPositions)} />
-      <Stat label="오늘 거래" value={formatTrades(trades)} />
-      <Stat label="당일 손익" value={fmtSignedPrice(dailyPnl, true)} tone={dailyPnl >= 0 ? 'text-green-400' : 'text-red-400'} />
+      <Stat label={periodLabel} value={formatTrades(trades)} />
+      <Stat label={pnlLabel} value={fmtSignedPrice(periodPnl, true)} tone={periodPnl >= 0 ? 'text-green-400' : 'text-red-400'} />
       <Stat label="누적 손익" value={fmtSignedPrice(cumulativePnl, true)} tone={cumulativePnl >= 0 ? 'text-green-400' : 'text-red-400'} />
     </OverviewCard>
   )
@@ -251,6 +291,7 @@ function StrategyCard({
 
 export function TradingAccountOverview() {
   const [spotHistoryWindow, setSpotHistoryWindow] = useState<SpotHistoryWindow>('30d')
+  const [strategyWindow, setStrategyWindow] = useState<StrategyWindow>('today')
   const queryOptions = {
     staleTime: 10_000,
     refetchInterval: 15_000,
@@ -269,8 +310,8 @@ export function TradingAccountOverview() {
   })
 
   const { data: spotTrades } = useQuery({
-    queryKey: ['trades', 'summary', 'today', 'binance_donchian'],
-    queryFn: () => getTradeSummary('today', 'binance_donchian'),
+    queryKey: ['trades', 'summary', strategyWindow, 'binance_donchian'],
+    queryFn: () => getTradeSummary(strategyWindow, 'binance_donchian'),
     ...queryOptions,
   })
 
@@ -306,8 +347,8 @@ export function TradingAccountOverview() {
   })
 
   const { data: donchianFuturesTrades } = useQuery({
-    queryKey: ['trades', 'summary', 'today', 'binance_donchian_futures'],
-    queryFn: () => getTradeSummary('today', 'binance_donchian_futures'),
+    queryKey: ['trades', 'summary', strategyWindow, 'binance_donchian_futures'],
+    queryFn: () => getTradeSummary(strategyWindow, 'binance_donchian_futures'),
     ...queryOptions,
   })
 
@@ -318,8 +359,8 @@ export function TradingAccountOverview() {
   })
 
   const { data: pairsTrades } = useQuery({
-    queryKey: ['trades', 'summary', 'today', 'binance_pairs'],
-    queryFn: () => getTradeSummary('today', 'binance_pairs'),
+    queryKey: ['trades', 'summary', strategyWindow, 'binance_pairs'],
+    queryFn: () => getTradeSummary(strategyWindow, 'binance_pairs'),
     ...queryOptions,
   })
 
@@ -346,9 +387,14 @@ export function TradingAccountOverview() {
           window={spotHistoryWindow}
           periodTrades={spotAccountPeriodTrades}
           lastTrade={latestSpotTrades?.[0]}
-          onWindowChange={setSpotHistoryWindow}
+          onWindowChange={(value) => setSpotHistoryWindow(value as SpotHistoryWindow)}
         />
-        <SpotStrategyCard donchian={donchianSpotStatus} trades={spotTrades} />
+        <SpotStrategyCard
+          donchian={donchianSpotStatus}
+          window={strategyWindow}
+          trades={spotTrades}
+          onWindowChange={(value) => setStrategyWindow(value as StrategyWindow)}
+        />
         <FuturesCoordinatorCard status={rndStatus} />
       </div>
 
@@ -357,14 +403,18 @@ export function TradingAccountOverview() {
           title="Donchian Futures"
           subtitle="양방향 Donchian 선물 R&D 엔진 상태와 당일 거래 현황."
           status={donchianFuturesStatus}
+          window={strategyWindow}
           trades={donchianFuturesTrades}
+          onWindowChange={(value) => setStrategyWindow(value as StrategyWindow)}
           positionsLabel="오픈 포지션"
         />
         <StrategyCard
           title="Pairs Trading"
           subtitle="BTC/ETH 페어 실거래 엔진 상태와 당일 거래 현황."
           status={pairsStatus}
+          window={strategyWindow}
           trades={pairsTrades}
+          onWindowChange={(value) => setStrategyWindow(value as StrategyWindow)}
           positionsLabel="오픈 그룹"
         />
       </div>
