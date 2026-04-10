@@ -1,15 +1,19 @@
 import { useQuery } from '@tanstack/react-query'
 import {
+  getCapitalSummary,
   getDonchianEngineStatus,
   getDonchianFuturesEngineStatus,
   getFuturesRndStatus,
   getPairsEngineStatus,
   getPortfolioSummary,
+  getTrades,
   getTradeSummary,
 } from '../api/client'
 import type {
+  CapitalSummary,
   DonchianSpotStatus,
   FuturesRndStatus,
+  Order,
   PortfolioSummary,
   RndEngineStatus,
   TradeSummary,
@@ -95,31 +99,64 @@ function FuturesCoordinatorCard({ status }: { status?: FuturesRndStatus | null }
   )
 }
 
-function SpotAccountCard({
+function SpotAccountHistoryCard({
   portfolio,
+  capital,
+  trailingTrades,
+  lastTrade,
+}: {
+  portfolio?: PortfolioSummary
+  capital?: CapitalSummary
+  trailingTrades?: TradeSummary
+  lastTrade?: Order
+}) {
+  return (
+    <OverviewCard
+      title="Main Spot History"
+      subtitle="이 카드는 `binance_spot` 메인 ledger 기준 누적 잔고/손익입니다. 현재 `Donchian Spot` live 전략 성과와 분리해서 읽어야 합니다."
+      badge={<span className="rounded-full border border-sky-800/60 bg-sky-950/40 px-2 py-0.5 text-[11px] font-medium text-sky-300">ledger</span>}
+    >
+      <Stat label="계좌 총자산" value={portfolio ? fmtPrice(portfolio.total_value_krw, true) : 'n/a'} />
+      <Stat label="가용 현금" value={portfolio ? fmtPrice(portfolio.cash_balance_krw, true) : 'n/a'} />
+      <Stat label="순입금 원금" value={capital ? fmtPrice(capital.net_capital, true) : 'n/a'} />
+      <Stat
+        label="ledger 누적 손익"
+        value={portfolio ? fmtSignedPrice(portfolio.total_pnl, true) : 'n/a'}
+        tone={(portfolio?.total_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}
+      />
+      <Stat
+        label="최근 30일 실현"
+        value={trailingTrades ? fmtSignedPrice(trailingTrades.total_pnl, true) : 'n/a'}
+        tone={(trailingTrades?.total_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}
+      />
+      <Stat label="마지막 main spot 체결" value={formatLastTrade(lastTrade)} />
+    </OverviewCard>
+  )
+}
+
+function SpotStrategyCard({
   donchian,
   trades,
 }: {
-  portfolio?: PortfolioSummary
   donchian?: DonchianSpotStatus
   trades?: TradeSummary
 }) {
   return (
     <OverviewCard
-      title="현물 계좌"
-      subtitle="실제 현물 계좌 잔고와 Donchian Daily 현물 운용 상태를 같이 봅니다."
+      title="Donchian Spot"
+      subtitle="현재 live R&D 현물 전략 상태입니다. 계정 누적 손익과 다를 수 있습니다."
       badge={<StatusBadge running={donchian?.is_running ?? false} paused={donchian?.paused_daily_loss || donchian?.paused_total_loss} />}
     >
-      <Stat label="계좌 총자산" value={portfolio ? fmtPrice(portfolio.total_value_krw, true) : 'n/a'} />
-      <Stat label="가용 현금" value={portfolio ? fmtPrice(portfolio.cash_balance_krw, true) : 'n/a'} />
-      <Stat label="보유 포지션" value={formatPositionsCount(portfolio?.positions.length)} />
-      <Stat label="Donchian 자본" value={donchian ? fmtPrice(donchian.initial_capital, true) : 'n/a'} />
+      <Stat label="전략 자본" value={donchian ? fmtPrice(donchian.initial_capital, true) : 'n/a'} />
+      <Stat label="감시 코인" value={`${donchian?.coins.length ?? 0}종`} />
+      <Stat label="활성 포지션" value={formatPositionsCount(donchian?.active_positions)} />
       <Stat label="오늘 거래" value={formatTrades(trades)} />
       <Stat
         label="누적 손익"
         value={donchian ? fmtSignedPrice(donchian.cumulative_pnl, true) : 'n/a'}
         tone={(donchian?.cumulative_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}
       />
+      <Stat label="상태" value={buildSpotStrategyStatus(donchian)} />
     </OverviewCard>
   )
 }
@@ -185,6 +222,24 @@ export function TradingAccountOverview() {
     ...queryOptions,
   })
 
+  const { data: spotCapital } = useQuery({
+    queryKey: ['capital', 'summary', 'binance_spot'],
+    queryFn: () => getCapitalSummary('binance_spot'),
+    ...queryOptions,
+  })
+
+  const { data: spotAccountTrailingTrades } = useQuery({
+    queryKey: ['trades', 'summary', '30d', 'binance_spot'],
+    queryFn: () => getTradeSummary('30d', 'binance_spot'),
+    ...queryOptions,
+  })
+
+  const { data: latestSpotTrades } = useQuery({
+    queryKey: ['trades', 'latest', 'binance_spot'],
+    queryFn: () => getTrades({ exchange: 'binance_spot', size: 1, page: 1 }),
+    ...queryOptions,
+  })
+
   const { data: futuresCoordinator } = useQuery({
     queryKey: ['engine', 'futures-rnd', 'status'],
     queryFn: () => getFuturesRndStatus(),
@@ -231,8 +286,14 @@ export function TradingAccountOverview() {
         </div>
       </div>
 
-      <div className="grid gap-3 xl:grid-cols-2">
-        <SpotAccountCard portfolio={spotPortfolio} donchian={donchianSpotStatus} trades={spotTrades} />
+      <div className="grid gap-3 xl:grid-cols-3">
+        <SpotAccountHistoryCard
+          portfolio={spotPortfolio}
+          capital={spotCapital}
+          trailingTrades={spotAccountTrailingTrades}
+          lastTrade={latestSpotTrades?.[0]}
+        />
+        <SpotStrategyCard donchian={donchianSpotStatus} trades={spotTrades} />
         <FuturesCoordinatorCard status={rndStatus} />
       </div>
 
@@ -254,4 +315,24 @@ export function TradingAccountOverview() {
       </div>
     </section>
   )
+}
+
+function formatLastTrade(trade?: Order): string {
+  if (!trade?.created_at) return '없음'
+  const date = new Date(trade.created_at)
+  if (Number.isNaN(date.getTime())) return '기록 오류'
+  return date.toLocaleString('ko-KR', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
+
+function buildSpotStrategyStatus(status?: DonchianSpotStatus): string {
+  if (!status) return '상태 수집 중'
+  if (status.paused_total_loss) return '누적 손실 컷 pause'
+  if (status.paused_daily_loss) return '일일 손실 컷 pause'
+  return status.is_running ? 'running' : 'stopped'
 }

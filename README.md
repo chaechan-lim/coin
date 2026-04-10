@@ -60,7 +60,7 @@ Spot 4 strategies + Futures 7 strategies + ML signal filter, weighted voting, dy
 - `Pairs Trading` and `Donchian Futures Bi` include live execution metrics in `auto_review`.
 - Shared futures R&D risk is managed by `GET /api/v1/engine/futures-rnd/status`.
 - Dashboard overview now includes:
-  - `트레이딩 대상 잔고`: separated spot/futures account and live R&D capital/trade status
+  - `트레이딩 대상 잔고`: separates `Main Spot History` from current `Donchian Spot` live status, plus futures R&D capital/trade status
   - `R&D 파이프라인`: grouped trade summaries for `Pairs` and `Donchian Futures`
   - `메인 엔진 제어`: only controls `binance_spot` / `binance_futures` main engines, not the R&D engines
 - Dashboard tabs are grouped by intent:

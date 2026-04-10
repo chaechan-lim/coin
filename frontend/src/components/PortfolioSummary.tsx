@@ -63,6 +63,11 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
 
   return (
     <div className="space-y-4">
+      {exchange === 'binance_spot' && (
+        <div className="rounded-xl border border-sky-800/60 bg-sky-950/20 px-4 py-3 text-sm text-sky-200">
+          이 포트폴리오 요약은 `binance_spot` 메인 ledger 기준 누적 잔고/손익입니다. 현재 live 전략 성과는 개요의 `Donchian Spot` 카드에서 따로 확인하세요.
+        </div>
+      )}
       {exchange === 'binance_futures' && (
         <div className="rounded-xl border border-yellow-800/60 bg-yellow-950/20 px-4 py-3 text-sm text-yellow-200">
           이 포트폴리오 요약은 `binance_futures` 메인 엔진 기준입니다. 현재 실운영 선물 자본과 거래 상황은 상단 `선물 계좌/운용 자본` 카드에서 확인하세요.

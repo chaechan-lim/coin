@@ -98,6 +98,21 @@ export function EngineControl({ liveEvents, exchange = 'bithumb' }: { liveEvents
 
   const isRunning = status?.is_running ?? false
   const isPaper = status?.mode === 'paper'
+  const effectiveRunning = isSpot
+    ? resolveDonchianSpotRunning(donchianSpotStatus) || isRunning
+    : isFutures
+      ? Boolean(donchianFuturesStatus?.is_running || pairsStatus?.is_running || isRunning)
+      : isRunning
+  const modeBadgeLabel = isSpot || isFutures
+    ? '실전(R&D)'
+    : isPaper
+      ? '페이퍼'
+      : '실전'
+  const modeBadgeTone = isSpot || isFutures
+    ? 'bg-cyan-900 text-cyan-300'
+    : isPaper
+      ? 'bg-blue-900 text-blue-300'
+      : 'bg-orange-900 text-orange-300'
   const cardTitle = isFutures || isSpot ? '실운영 상태' : '엔진 상태'
   const cardNote = isFutures
     ? '실운영은 아래 선물 R&D 엔진 카드가 기준입니다. 메인 엔진 제어는 하단으로 내렸습니다.'
@@ -114,11 +129,11 @@ export function EngineControl({ liveEvents, exchange = 'bithumb' }: { liveEvents
       <div className="mb-3 flex items-center justify-between gap-2 md:mb-4">
         <div className="flex min-w-0 flex-wrap items-center gap-2 md:gap-3">
           <div className="flex items-center gap-2">
-            <div className={`h-2.5 w-2.5 shrink-0 rounded-full ${isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`} />
+            <div className={`h-2.5 w-2.5 shrink-0 rounded-full ${effectiveRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`} />
             <h3 className="text-sm font-semibold text-white md:text-base">{cardTitle}</h3>
           </div>
-          <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${isPaper ? 'bg-blue-900 text-blue-300' : 'bg-orange-900 text-orange-300'}`}>
-            {isPaper ? '페이퍼' : '실전'}
+          <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${modeBadgeTone}`}>
+            {modeBadgeLabel}
           </span>
           {cardNote && <span className="text-[11px] text-gray-500">{cardNote}</span>}
         </div>
@@ -155,16 +170,16 @@ export function EngineControl({ liveEvents, exchange = 'bithumb' }: { liveEvents
           </div>
           <div className="grid gap-2 md:grid-cols-3">
             <StatusCard
-              title="Spot Account"
+              title="Main Spot History"
               badge="actual"
               badgeTone="sky"
               subtitle={formatAmount(spotPortfolio?.total_value_krw)}
-              meta={`cash ${formatAmount(spotPortfolio?.cash_balance_krw)}`}
+              meta={`cash ${formatAmount(spotPortfolio?.cash_balance_krw)} · binance_spot ledger 기준`}
               metrics={[
                 { label: '보유 포지션', value: `${spotPortfolio?.positions.length ?? 0}` },
-                { label: '총 손익', value: formatSignedAmount(spotPortfolio?.total_pnl), tone: signedTone(spotPortfolio?.total_pnl ?? 0) },
-                { label: '수익률', value: formatSignedPct(spotPortfolio?.total_pnl_pct ?? 0), tone: signedTone(spotPortfolio?.total_pnl_pct ?? 0) },
-                { label: '거래 수', value: `${spotPortfolio?.trade_count ?? 0}건` },
+                { label: '누적 손익', value: formatSignedAmount(spotPortfolio?.total_pnl), tone: signedTone(spotPortfolio?.total_pnl ?? 0) },
+                { label: '누적 수익률', value: formatSignedPct(spotPortfolio?.total_pnl_pct ?? 0), tone: signedTone(spotPortfolio?.total_pnl_pct ?? 0) },
+                { label: '누적 거래수', value: `${spotPortfolio?.trade_count ?? 0}건` },
               ]}
             />
             <StatusCard

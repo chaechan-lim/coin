@@ -69,7 +69,7 @@ coin/
   - `/api/v1/trades/pairs/groups`
   - `/api/v1/trades/donchian-futures/groups`
 - 프론트엔드 overview 탭에 아래 패널 연결 완료
-  - `트레이딩 대상 잔고`: 현물 계좌 잔고 + Donchian Spot, 선물 R&D 계좌 한도 + Donchian Futures / Pairs 오늘 거래 현황
+  - `트레이딩 대상 잔고`: 현물 `Main Spot History`와 `Donchian Spot` live 상태를 분리 표시, 선물은 R&D 계좌 한도 + Donchian Futures / Pairs 오늘 거래 현황
   - `R&D 파이프라인`
   - `메인 엔진 제어`: main engine와 live R&D engine 상태 분리 표시
 
@@ -78,7 +78,7 @@ coin/
 ### 완료
 | 항목 | 상세 |
 |---|---|
-| Overview 계좌/운용 보드 명확화 (2026-04-10) | `EngineControl.tsx`에서 Binance Spot/Futures를 `메인 엔진`, `실계좌/운용 자본`, `live R&D 엔진`으로 분리 표시. 현물은 `Spot Account` + `Donchian Spot`, 선물은 `Futures R&D Pool` + `Donchian Futures` + `Pairs Trading`의 자본/오늘 거래/포지션 상태를 함께 노출. `PortfolioSummary.tsx`에는 `binance_futures` 값이 메인 엔진 기준임을 명시하는 안내 배너 추가. |
+| Overview 계좌/운용 보드 명확화 (2026-04-10 ~ 2026-04-11) | `EngineControl.tsx`에서 Binance Spot/Futures를 `메인 엔진`, `실계좌/운용 자본`, `live R&D 엔진`으로 분리 표시. 현물은 `Main Spot History`와 `Donchian Spot`를 분리해, `binance_spot` 메인 ledger 누적 손익과 현재 live 전략 성과를 혼동하지 않도록 정리했다. 선물은 `Futures R&D Pool` + `Donchian Futures` + `Pairs Trading`의 자본/오늘 거래/포지션 상태를 함께 노출한다. `PortfolioSummary.tsx`에는 `binance_spot`/`binance_futures` 값이 각각 메인 ledger 기준 / 메인 엔진 기준임을 명시하는 안내 배너를 추가했다. |
 | 프론트 탭 정보구조 재편 (2026-04-10) | `Dashboard.tsx` 탭을 `개요 / 실거래 / R&D / 운영 로그 / 고급`으로 재구성. `실거래`에는 거래/포트폴리오/일일 통계를, `R&D`에는 research pipeline을, `운영 로그`에는 엔진 이벤트/에이전트/시스템 로그를 배치. 기존 `신호 로그`, `전략 성과`, `종목/로테이션`, `일일 통계`는 `고급` 내부 서브탭으로 이동해 현재 live 운영 흐름과 정보 구조를 맞춤. |
 | 실거래 grouped trade 노출 + 탭 lazy load (2026-04-10) | `LiveTradeGroups.tsx` 추가. `실거래` 탭에서 `Pairs` / `Donchian Futures` grouped trade와 상세 modal을 바로 열람 가능하게 함. `Dashboard.tsx`는 `React.lazy` + `Suspense`로 `TradeHistory`, `ResearchMonitor`, `AgentStatus`, `SystemLog`, `OrderLog`, `StrategyPerformance`, `RotationMonitor`, `DailyPnLStats`, `Portfolio*`, `LiveTradeGroups`를 탭 단위로 지연 로딩하도록 변경. |
 | 실거래 KPI + R&D 승격 힌트 연결 (2026-04-10) | `LiveTradeGroups.tsx`에 `Pairs` / `Donchian Futures` grouped trade KPI 카드(open/closed/win rate/realized pnl) 추가. `ResearchMonitor.tsx`에는 `승격 힌트` 패널을 추가해 `auto_review` 결과를 `실거래 탭` / `운영 로그 탭`의 다음 확인 액션으로 직접 연결. |
