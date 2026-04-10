@@ -224,7 +224,7 @@ class PairsTradingLiveEngine:
         logger.info("pairs_live_eval_start", pair=f"{self._coin_a}-{self._coin_b}")
         signal = await self._build_signal()
         if signal is None:
-            self._last_idle_reason = "스프레드 시그널 계산 대기 중"
+            self._last_idle_reason = "스프레드 시그널 계산 대기 중 (데이터 부족 또는 분산 0)"
             return
 
         if self._position is not None:
@@ -243,7 +243,9 @@ class PairsTradingLiveEngine:
             if self._position is None and not self._paused and not self._daily_paused:
                 z = abs(float(signal["z_score"]))
                 if z < self._z_entry:
-                    self._last_idle_reason = f"진입 조건 대기 중 (|z|={z:.2f} < {self._z_entry:.2f})"
+                    self._last_idle_reason = (
+                        f"진입 조건 대기 중 (|z|={z:.2f}, entry={self._z_entry:.2f}, gap={self._z_entry - z:.2f})"
+                    )
                 else:
                     self._last_idle_reason = "진입 검토 완료, 체결 없음"
             elif self._position is not None:

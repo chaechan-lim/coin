@@ -224,7 +224,7 @@ class DonchianDailyEngine:
         elif self._positions:
             self._last_idle_reason = f"포지션 보유 중 ({len(self._positions)}개)"
         else:
-            self._last_idle_reason = "신규 돌파 신호 대기 중"
+            self._last_idle_reason = await self._build_idle_reason()
 
     def _next_evaluation_at(self) -> datetime:
         now = datetime.now(timezone.utc)
@@ -262,6 +262,40 @@ class DonchianDailyEngine:
             df[f"high_{lb}"] = df["high"].rolling(lb).max().shift(1)
             df[f"low_exit_{lb}"] = df["low"].rolling(lb // 2).min().shift(1)
         return df
+
+    async def _build_idle_reason(self) -> str:
+        closest_symbol: str | None = None
+        closest_gap_pct: float | None = None
+        closest_level: float | None = None
+
+        for symbol in self._coins:
+            df = await self._fetch_daily_df(symbol)
+            if df is None:
+                continue
+            last = df.iloc[-1]
+            close = float(last["close"])
+            if close <= 0:
+                continue
+            entry_levels = [
+                float(level)
+                for lb in LOOKBACKS
+                if pd.notna(level := last.get(f"high_{lb}"))
+            ]
+            if not entry_levels:
+                continue
+            nearest_level = min(entry_levels)
+            gap_pct = ((nearest_level - close) / close) * 100
+            if closest_gap_pct is None or gap_pct < closest_gap_pct:
+                closest_gap_pct = gap_pct
+                closest_symbol = symbol
+                closest_level = nearest_level
+
+        if closest_symbol is None or closest_gap_pct is None or closest_level is None:
+            return "신규 돌파 신호 대기 중"
+        return (
+            f"신규 돌파 대기 중 ({closest_symbol.replace('/USDT', '')} +{closest_gap_pct:.2f}% → "
+            f"{closest_level:.2f})"
+        )
 
     async def _check_entry(self, symbol: str):
         df = await self._fetch_daily_df(symbol)

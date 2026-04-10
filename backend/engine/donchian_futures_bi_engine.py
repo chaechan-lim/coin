@@ -250,7 +250,7 @@ class DonchianFuturesBiEngine:
         elif self._positions:
             self._last_idle_reason = f"포지션 보유 중 ({len(self._positions)}개)"
         else:
-            self._last_idle_reason = "양방향 돌파 신호 대기 중"
+            self._last_idle_reason = await self._build_idle_reason()
 
     def _next_evaluation_at(self) -> datetime:
         now = datetime.now(timezone.utc)
@@ -283,6 +283,46 @@ class DonchianFuturesBiEngine:
             df[f"low_exit_{lb}"] = df["low"].rolling(lb // 2).min().shift(1)
             df[f"high_exit_{lb}"] = df["high"].rolling(lb // 2).max().shift(1)
         return df
+
+    async def _build_idle_reason(self) -> str:
+        closest_desc: str | None = None
+        closest_gap_pct: float | None = None
+
+        for symbol in self._coins:
+            df = await self._fetch_daily_df(symbol)
+            if df is None:
+                continue
+            last = df.iloc[-1]
+            close = float(last["close"])
+            if close <= 0:
+                continue
+
+            high_levels = [
+                float(level)
+                for lb in LOOKBACKS
+                if pd.notna(level := last.get(f"high_{lb}"))
+            ]
+            low_levels = [
+                float(level)
+                for lb in LOOKBACKS
+                if pd.notna(level := last.get(f"low_{lb}"))
+            ]
+            candidates: list[tuple[str, float]] = []
+            if high_levels:
+                nearest_high = min(high_levels)
+                candidates.append((f"{symbol.replace('/USDT', '')} long +{((nearest_high - close) / close) * 100:.2f}%", ((nearest_high - close) / close) * 100))
+            if low_levels:
+                nearest_low = max(low_levels)
+                candidates.append((f"{symbol.replace('/USDT', '')} short -{((close - nearest_low) / close) * 100:.2f}%", ((close - nearest_low) / close) * 100))
+
+            for desc, gap_pct in candidates:
+                if closest_gap_pct is None or gap_pct < closest_gap_pct:
+                    closest_gap_pct = gap_pct
+                    closest_desc = desc
+
+        if closest_desc is None:
+            return "양방향 돌파 신호 대기 중"
+        return f"가장 가까운 양방향 돌파 대기: {closest_desc}"
 
     async def _check_entry(self, symbol: str):
         if self._has_engine_conflict():
