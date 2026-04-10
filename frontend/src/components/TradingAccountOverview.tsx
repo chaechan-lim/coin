@@ -43,12 +43,14 @@ function StatusBadge({ running, paused }: { running: boolean; paused?: boolean }
 function OverviewCard({
   title,
   subtitle,
+  note,
   badge,
   action,
   children,
 }: {
   title: string
   subtitle: string
+  note?: React.ReactNode
   badge?: React.ReactNode
   action?: React.ReactNode
   children: React.ReactNode
@@ -59,6 +61,7 @@ function OverviewCard({
         <div>
           <h4 className="text-sm font-semibold text-white">{title}</h4>
           <p className="mt-1 text-xs text-gray-400">{subtitle}</p>
+          {note && <div className="mt-2 text-[11px] leading-5 text-gray-500">{note}</div>}
         </div>
         <div className="flex items-center gap-2">
           {action}
@@ -194,12 +197,10 @@ function SpotStrategyCard({
   donchian,
   window,
   trades,
-  onWindowChange,
 }: {
   donchian?: DonchianSpotStatus
   window: StrategyWindow
   trades?: TradeSummary
-  onWindowChange: (value: StrategyWindow) => void
 }) {
   const periodLabel = window === 'today' ? '오늘 거래' : `${window} 거래`
   const pnlLabel = window === 'today' ? '오늘 실현' : `${window} 실현`
@@ -209,15 +210,13 @@ function SpotStrategyCard({
     <OverviewCard
       title="Donchian Spot"
       subtitle="현재 live R&D 현물 전략 상태입니다. 계정 누적 손익과 다를 수 있습니다."
+      note={buildEngineActivityNote({
+        isRunning: donchian?.is_running ?? false,
+        lastEvaluatedAt: donchian?.last_evaluated_at,
+        nextEvaluationAt: donchian?.next_evaluation_at,
+        recentIdleReason: donchian?.recent_idle_reason,
+      })}
       badge={<StatusBadge running={donchian?.is_running ?? false} paused={donchian?.paused_daily_loss || donchian?.paused_total_loss} />}
-      action={
-        <WindowToggle
-          value={window}
-          onChange={(value) => onWindowChange(value as StrategyWindow)}
-          items={['today', '7d', '30d']}
-          labels={{ today: '오늘', '7d': '7d', '30d': '30d' }}
-        />
-      }
     >
       <Stat label="전략 자본" value={donchian ? fmtPrice(donchian.initial_capital, true) : 'n/a'} />
       <Stat label="감시 코인" value={`${donchian?.coins.length ?? 0}종`} />
@@ -244,7 +243,6 @@ function StrategyCard({
   status,
   window,
   trades,
-  onWindowChange,
   positionsLabel,
 }: {
   title: string
@@ -252,7 +250,6 @@ function StrategyCard({
   status?: RndEngineStatus
   window: StrategyWindow
   trades?: TradeSummary
-  onWindowChange: (value: StrategyWindow) => void
   positionsLabel: string
 }) {
   const openPositions = Array.isArray(status?.positions)
@@ -269,15 +266,13 @@ function StrategyCard({
     <OverviewCard
       title={title}
       subtitle={subtitle}
+      note={buildEngineActivityNote({
+        isRunning: status?.is_running ?? false,
+        lastEvaluatedAt: status?.last_evaluated_at,
+        nextEvaluationAt: status?.next_evaluation_at,
+        recentIdleReason: status?.recent_idle_reason,
+      })}
       badge={<StatusBadge running={status?.is_running ?? false} paused={status?.paused || status?.daily_paused} />}
-      action={
-        <WindowToggle
-          value={window}
-          onChange={(value) => onWindowChange(value as StrategyWindow)}
-          items={['today', '7d', '30d']}
-          labels={{ today: '오늘', '7d': '7d', '30d': '30d' }}
-        />
-      }
     >
       <Stat label="운용 자본" value={status?.capital_usdt != null ? fmtPrice(status.capital_usdt, true) : 'n/a'} />
       <Stat label="가용 마진" value={status?.available_margin != null ? fmtPrice(status.available_margin, true) : 'n/a'} />
@@ -389,13 +384,23 @@ export function TradingAccountOverview() {
           lastTrade={latestSpotTrades?.[0]}
           onWindowChange={(value) => setSpotHistoryWindow(value as SpotHistoryWindow)}
         />
-        <SpotStrategyCard
-          donchian={donchianSpotStatus}
-          window={strategyWindow}
-          trades={spotTrades}
-          onWindowChange={(value) => setStrategyWindow(value as StrategyWindow)}
-        />
+        <SpotStrategyCard donchian={donchianSpotStatus} window={strategyWindow} trades={spotTrades} />
         <FuturesCoordinatorCard status={rndStatus} />
+      </div>
+
+      <div className="rounded-xl border border-gray-700 bg-gray-800/80 px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-white">Live 전략 기간 비교</div>
+            <div className="mt-1 text-xs text-gray-400">아래 `Donchian Spot`, `Donchian Futures`, `Pairs Trading` 카드가 같은 기간 기준으로 같이 바뀝니다.</div>
+          </div>
+          <WindowToggle
+            value={strategyWindow}
+            onChange={(value) => setStrategyWindow(value as StrategyWindow)}
+            items={['today', '7d', '30d']}
+            labels={{ today: '오늘', '7d': '7d', '30d': '30d' }}
+          />
+        </div>
       </div>
 
       <div className="grid gap-3 xl:grid-cols-2">
@@ -405,7 +410,6 @@ export function TradingAccountOverview() {
           status={donchianFuturesStatus}
           window={strategyWindow}
           trades={donchianFuturesTrades}
-          onWindowChange={(value) => setStrategyWindow(value as StrategyWindow)}
           positionsLabel="오픈 포지션"
         />
         <StrategyCard
@@ -414,7 +418,6 @@ export function TradingAccountOverview() {
           status={pairsStatus}
           window={strategyWindow}
           trades={pairsTrades}
-          onWindowChange={(value) => setStrategyWindow(value as StrategyWindow)}
           positionsLabel="오픈 그룹"
         />
       </div>
@@ -440,4 +443,37 @@ function buildSpotStrategyStatus(status?: DonchianSpotStatus): string {
   if (status.paused_total_loss) return '누적 손실 컷 pause'
   if (status.paused_daily_loss) return '일일 손실 컷 pause'
   return status.is_running ? 'running' : 'stopped'
+}
+
+function formatEngineTime(value?: string | null): string {
+  if (!value) return '없음'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '없음'
+  return date.toLocaleString('ko-KR', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
+
+function buildEngineActivityNote({
+  isRunning,
+  lastEvaluatedAt,
+  nextEvaluationAt,
+  recentIdleReason,
+}: {
+  isRunning: boolean
+  lastEvaluatedAt?: string | null
+  nextEvaluationAt?: string | null
+  recentIdleReason?: string | null
+}): React.ReactNode {
+  const statusText = isRunning ? (recentIdleReason ?? '없음') : '엔진 정지'
+  return (
+    <>
+      <div>최근 평가: {formatEngineTime(lastEvaluatedAt)} · 다음 평가: {formatEngineTime(nextEvaluationAt)}</div>
+      <div>최근 상태: {statusText}</div>
+    </>
+  )
 }

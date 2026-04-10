@@ -822,7 +822,14 @@ async def test_pairs_status_endpoint_returns_engine_status():
     exchange = "binance_pairs"
     saved = _save_and_clear(exchange)
     eng = _mock_engine(running=True)
-    eng.get_status = MagicMock(return_value={"exchange": exchange, "is_running": True, "capital_usdt": 75.0})
+    eng.get_status = MagicMock(return_value={
+        "exchange": exchange,
+        "is_running": True,
+        "capital_usdt": 75.0,
+        "last_evaluated_at": "2026-04-11T00:05:00+00:00",
+        "next_evaluation_at": "2026-04-11T01:05:00+00:00",
+        "recent_idle_reason": "진입 조건 대기 중 (|z|=1.42 < 2.00)",
+    })
     _register(exchange, eng)
     try:
         app = _make_test_app()
@@ -832,6 +839,9 @@ async def test_pairs_status_endpoint_returns_engine_status():
         data = resp.json()
         assert data["exchange"] == exchange
         assert data["is_running"] is True
+        assert data["last_evaluated_at"] == "2026-04-11T00:05:00+00:00"
+        assert data["next_evaluation_at"] == "2026-04-11T01:05:00+00:00"
+        assert "진입 조건 대기" in data["recent_idle_reason"]
     finally:
         _restore(exchange, saved)
 

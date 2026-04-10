@@ -375,6 +375,9 @@ export interface RndEngineStatus {
   z_exit?: number
   z_stop?: number
   engine_conflict?: boolean
+  last_evaluated_at?: string | null
+  next_evaluation_at?: string | null
+  recent_idle_reason?: string | null
 }
 
 export interface DonchianSpotStatus {
@@ -388,6 +391,9 @@ export interface DonchianSpotStatus {
   paused_total_loss: boolean
   paused_daily_loss: boolean
   initial_capital: number
+  last_evaluated_at?: string | null
+  next_evaluation_at?: string | null
+  recent_idle_reason?: string | null
 }
 
 // ── Rotation Monitor ────────────────────────────────────────

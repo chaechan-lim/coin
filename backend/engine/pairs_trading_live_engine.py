@@ -90,6 +90,8 @@ class PairsTradingLiveEngine:
         self._cumulative_pnl = 0.0
         self._last_eval_hour: Optional[datetime] = None
         self._last_eval_date: Optional[datetime.date] = None
+        self._last_evaluated_at: Optional[datetime] = None
+        self._last_idle_reason: str = "다음 시간대 평가 대기 중"
         self._paused = False
         self._daily_paused = False
 
@@ -212,24 +214,40 @@ class PairsTradingLiveEngine:
             self._last_eval_date = now.date()
         if not force and self._last_eval_hour == hour_bucket:
             return
+        self._last_evaluated_at = now
         self._last_eval_hour = hour_bucket
 
         if self._paused or self._daily_paused:
+            self._last_idle_reason = "손실 한도 도달로 진입 정지"
             return
 
         logger.info("pairs_live_eval_start", pair=f"{self._coin_a}-{self._coin_b}")
         signal = await self._build_signal()
         if signal is None:
+            self._last_idle_reason = "스프레드 시그널 계산 대기 중"
             return
 
         if self._position is not None:
             await self._check_exit(signal)
+            if self._position is not None and not self._paused and not self._daily_paused:
+                self._last_idle_reason = (
+                    f"청산 조건 대기 중 (|z|={abs(float(signal['z_score'])):.2f}, exit={self._z_exit:.2f})"
+                )
         else:
             await self._check_loss_limits()
             if self._paused or self._daily_paused:
+                self._last_idle_reason = "손실 한도 도달로 진입 정지"
                 logger.warning("pairs_live_entry_skipped_after_loss_limit")
                 return
             await self._check_entry(signal)
+            if self._position is None and not self._paused and not self._daily_paused:
+                z = abs(float(signal["z_score"]))
+                if z < self._z_entry:
+                    self._last_idle_reason = f"진입 조건 대기 중 (|z|={z:.2f} < {self._z_entry:.2f})"
+                else:
+                    self._last_idle_reason = "진입 검토 완료, 체결 없음"
+            elif self._position is not None:
+                self._last_idle_reason = f"포지션 보유 중 (entry z={float(signal['z_score']):.2f})"
 
         await self._check_loss_limits()
         logger.info(
@@ -238,6 +256,13 @@ class PairsTradingLiveEngine:
             daily_pnl=round(self._daily_realized_pnl, 2),
             cumulative_pnl=round(self._cumulative_pnl, 2),
         )
+
+    def _next_evaluation_at(self) -> datetime:
+        now = datetime.now(timezone.utc)
+        target = now.replace(minute=EVALUATION_MINUTE_UTC, second=0, microsecond=0)
+        if target <= now:
+            target = target + pd.Timedelta(hours=1)
+        return target
 
     async def _fetch_hourly_df(self, symbol: str) -> pd.DataFrame | None:
         try:
@@ -935,4 +960,7 @@ class PairsTradingLiveEngine:
             "coordinator_enabled": self._rnd_coordinator is not None,
             "paused": self._paused,
             "daily_paused": self._daily_paused,
+            "last_evaluated_at": self._last_evaluated_at.isoformat() if self._last_evaluated_at else None,
+            "next_evaluation_at": self._next_evaluation_at().isoformat() if self._is_running else None,
+            "recent_idle_reason": self._last_idle_reason,
         }

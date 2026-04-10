@@ -93,6 +93,8 @@ class DonchianDailyEngine:
         self._daily_realized_pnl: float = 0.0
         self._cumulative_pnl: float = 0.0
         self._last_eval_date: Optional[datetime.date] = None
+        self._last_evaluated_at: Optional[datetime] = None
+        self._last_idle_reason: str = "다음 일봉 평가 대기 중"
         self._paused: bool = False  # 손실 한도 도달 시
         self._daily_paused: bool = False
 
@@ -174,6 +176,7 @@ class DonchianDailyEngine:
     async def _evaluation_cycle(self):
         """일일 평가 사이클."""
         now = datetime.now(timezone.utc)
+        self._last_evaluated_at = now
 
         # 일일 리셋
         today = now.date()
@@ -184,9 +187,11 @@ class DonchianDailyEngine:
 
         # 안전 한도 체크
         if self._paused:
+            self._last_idle_reason = "누적 손실 한도 도달로 정지"
             logger.warning("donchian_paused_total_loss", pnl=self._cumulative_pnl)
             return
         if self._daily_paused:
+            self._last_idle_reason = "일일 손실 한도 도달로 당일 정지"
             logger.warning("donchian_daily_paused", pnl=self._daily_realized_pnl)
             return
 
@@ -212,6 +217,26 @@ class DonchianDailyEngine:
                     positions=len(self._positions),
                     daily_pnl=round(self._daily_realized_pnl, 2),
                     cumulative_pnl=round(self._cumulative_pnl, 2))
+        if self._paused:
+            self._last_idle_reason = "누적 손실 한도 도달로 정지"
+        elif self._daily_paused:
+            self._last_idle_reason = "일일 손실 한도 도달로 당일 정지"
+        elif self._positions:
+            self._last_idle_reason = f"포지션 보유 중 ({len(self._positions)}개)"
+        else:
+            self._last_idle_reason = "신규 돌파 신호 대기 중"
+
+    def _next_evaluation_at(self) -> datetime:
+        now = datetime.now(timezone.utc)
+        target = now.replace(
+            hour=EVALUATION_HOUR_UTC,
+            minute=EVALUATION_MINUTE_UTC,
+            second=0,
+            microsecond=0,
+        )
+        if target <= now:
+            target = target + pd.Timedelta(days=1)
+        return target
 
     async def _fetch_daily_df(self, symbol: str) -> pd.DataFrame | None:
         """200일 일봉 + ATR/Donchian 계산 (90일 lookback + 워밍업 버퍼)."""
@@ -481,4 +506,7 @@ class DonchianDailyEngine:
             "paused_total_loss": self._paused,
             "paused_daily_loss": self._daily_paused,
             "initial_capital": self._initial_capital,
+            "last_evaluated_at": self._last_evaluated_at.isoformat() if self._last_evaluated_at else None,
+            "next_evaluation_at": self._next_evaluation_at().isoformat() if self._is_running else None,
+            "recent_idle_reason": self._last_idle_reason,
         }
