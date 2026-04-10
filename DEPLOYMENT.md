@@ -10,7 +10,7 @@
 | IP | 192.168.50.244 (LAN) |
 | OS | Ubuntu, Python 3.12.3, Node.js (NVM) |
 | DB | PostgreSQL 16 (Docker Compose) |
-| 프로세스 관리 | systemd (coin-backend, coin-frontend) |
+| 프로세스 관리 | systemd (`coin-backend`), nginx 정적 서빙 |
 | HTTPS | nginx self-signed (10년) |
 | 네트워크 | WiFi 워치독 3분 cron |
 
@@ -47,19 +47,28 @@ git pull
 cd backend && .venv/bin/pip install -r requirements.txt
 cd ../frontend && npm install
 
+# 2-1. DB 스키마 반영
+cd ../backend && .venv/bin/alembic upgrade head
+
 # 3. 테스트 확인
 cd backend && .venv/bin/python -m pytest tests/ -x -q
 
 # 4. 백엔드 재시작
 sudo systemctl restart coin-backend
 
-# 5. 엔진 시작 (재시작 후 반드시 호출 — 자동 시작 아님)
+# 5. 필요 시 메인 엔진 시작
 curl -X POST "http://localhost:8000/api/v1/engine/start?exchange=binance_futures"
 curl -X POST "http://localhost:8000/api/v1/engine/start?exchange=binance_spot"
 curl -X POST http://localhost:8000/api/v1/engine/start  # 빗썸 (비활성)
 
-# 6. 프론트엔드 재시작 (프론트 변경 시, 조건부 빌드)
-sudo systemctl restart coin-frontend
+# R&D futures 엔진은 .env 플래그 기준으로 backend 부팅 시 자동 시작
+# APP_DONCHIAN_FUTURES_BI_ENABLED=true
+# APP_PAIRS_TRADING_LIVE_ENABLED=true
+# BINANCE_TRADING_ENABLED=false
+
+# 6. 프론트엔드 반영 (프론트 변경 시)
+cd ../frontend && npm run build
+sudo systemctl reload nginx
 ```
 
 ### 서버 중지
@@ -110,6 +119,23 @@ journalctl -u coin-backend | grep "futures_market_buy"
 ```bash
 # 엔진 상태
 curl -s http://localhost:8000/api/v1/engine/status | python3 -m json.tool
+curl -s http://localhost:8000/api/v1/engine/donchian-futures/status | python3 -m json.tool
+curl -s http://localhost:8000/api/v1/engine/pairs/status | python3 -m json.tool
+curl -s http://localhost:8000/api/v1/engine/futures-rnd/status | python3 -m json.tool
+
+# 연구 후보 보드
+curl -s "http://localhost:8000/api/v1/research/overview?include_auto_review=true" | python3 -m json.tool
+# 승인/effective stage 상태
+curl -s "http://localhost:8000/api/v1/research/stages" | python3 -m json.tool
+# 최근 승인 이력
+curl -s "http://localhost:8000/api/v1/research/stage-history?limit=20" | python3 -m json.tool
+# 강등/승격 승인 예시
+curl -X PUT "http://localhost:8000/api/v1/research/candidates/pairs_trading_futures/stage" \
+  -H "Content-Type: application/json" \
+  -d '{"stage":"shadow","approved_by":"operator","note":"pause live execution for review"}'
+# cold start 직후에는 일부 후보가 decision=pending일 수 있음 (백그라운드 캐시 갱신 중)
+curl -s "http://localhost:8000/api/v1/research/auto-review/status" | python3 -m json.tool
+# cold start 직후에는 auto_review가 pending으로 보일 수 있음 (백그라운드 캐시 갱신 전)
 
 # 포트폴리오 요약
 curl -s "http://localhost:8000/api/v1/portfolio/summary?exchange=binance_futures"
@@ -119,7 +145,12 @@ curl -s "http://localhost:8000/api/v1/portfolio/summary?exchange=bithumb"
 curl -s "http://localhost:8000/api/v1/portfolio/positions?exchange=binance_futures"
 
 # 오늘 거래
-curl -s "http://localhost:8000/api/v1/trades?exchange=binance_futures&limit=10"
+curl -s "http://localhost:8000/api/v1/trades?exchange=binance_futures&size=10"
+curl -s "http://localhost:8000/api/v1/trades/pairs/groups"
+curl -s "http://localhost:8000/api/v1/trades/donchian-futures/groups"
+
+# 프론트 overview 탭에서도 R&D 파이프라인 / grouped trade 패널 확인 가능
+# 전용 R&D 엔진 start는 effective stage가 live_rnd / production일 때만 허용
 
 # 헬스체크
 curl -s http://localhost:8000/health

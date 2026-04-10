@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -38,6 +39,20 @@ class DualMomentumResult:
     cash_periods: int    # 현금 보유 기간 (월)
 
 
+@dataclass
+class DualMomentumSweepRow:
+    lookback_days: int
+    rebalance_days: int
+    top_n: int
+    days: int
+    return_pct: float
+    sharpe: float
+    max_drawdown: float
+    cash_periods: int
+    total_fees: float
+
+
+@lru_cache(maxsize=32)
 def load_daily(coin: str) -> pd.DataFrame:
     path = CACHE_DIR / f"{coin}_USDT_1d.csv"
     df = pd.read_csv(path, parse_dates=["timestamp"], index_col="timestamp")
@@ -248,6 +263,57 @@ def print_result(r: DualMomentumResult, label: str = ""):
     print(f"{'='*60}")
 
 
+def run_sweep(
+    coins: list[str],
+    days: int,
+    capital: float,
+    lookbacks: list[int],
+    rebalances: list[int],
+    top_ns: list[int],
+) -> list[DualMomentumSweepRow]:
+    rows: list[DualMomentumSweepRow] = []
+    for lookback in lookbacks:
+        for rebalance in rebalances:
+            for top_n in top_ns:
+                r = simulate_dual_momentum(
+                    coins,
+                    days,
+                    capital,
+                    lookback_days=lookback,
+                    top_n=top_n,
+                    rebalance_days=rebalance,
+                )
+                rows.append(
+                    DualMomentumSweepRow(
+                        lookback_days=lookback,
+                        rebalance_days=rebalance,
+                        top_n=top_n,
+                        days=days,
+                        return_pct=r.return_pct,
+                        sharpe=r.sharpe,
+                        max_drawdown=r.max_drawdown,
+                        cash_periods=r.cash_periods,
+                        total_fees=r.total_fees,
+                    )
+                )
+    rows.sort(key=lambda row: (row.return_pct, row.sharpe, -row.max_drawdown), reverse=True)
+    return rows
+
+
+def print_sweep(rows: list[DualMomentumSweepRow], limit: int = 20):
+    print(f"\n{'='*92}")
+    print("  Dual Momentum Sweep")
+    print(f"{'='*92}")
+    print("  rank  lookback  rebalance  top_n   return    sharpe   max_dd   cash  fees")
+    for idx, row in enumerate(rows[:limit], start=1):
+        print(
+            f"  {idx:>4}  {row.lookback_days:>8}  {row.rebalance_days:>9}  "
+            f"{row.top_n:>5}  {row.return_pct:>7.2f}%  {row.sharpe:>8.2f}  "
+            f"{row.max_drawdown:>7.2f}%  {row.cash_periods:>4}  {row.total_fees:>5.2f}"
+        )
+    print(f"{'='*92}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--coins", nargs="+", default=["BTC", "ETH", "SOL", "XRP", "BNB"])
@@ -255,11 +321,29 @@ def main():
     parser.add_argument("--lookback", type=int, default=365, help="momentum lookback (일)")
     parser.add_argument("--rebalance", type=int, default=30, help="재평가 주기 (일)")
     parser.add_argument("--periods", nargs="+", type=int, default=[180, 360, 540, 1000])
+    parser.add_argument("--days", type=int, default=180, help="sweep 모드 평가 기간 (일)")
     parser.add_argument("--capital", type=float, default=1000.0)
+    parser.add_argument("--sweep", action="store_true", help="여러 lookback/rebalance/top-n 조합 일괄 평가")
+    parser.add_argument("--sweep-lookbacks", nargs="+", type=int, default=[60, 90, 120, 180])
+    parser.add_argument("--sweep-rebalances", nargs="+", type=int, default=[7, 14, 30])
+    parser.add_argument("--sweep-top-n-options", nargs="+", type=int, default=[1, 2])
+    parser.add_argument("--top-k", type=int, default=20, help="sweep 출력 상위 개수")
     args = parser.parse_args()
 
     print(f"\n  Dual Momentum 백테스트")
     print(f"  코인: {', '.join(args.coins)}, top-{args.top_n}, lookback {args.lookback}일, 재평가 {args.rebalance}일마다")
+
+    if args.sweep:
+        rows = run_sweep(
+            args.coins,
+            args.days,
+            args.capital,
+            args.sweep_lookbacks,
+            args.sweep_rebalances,
+            args.sweep_top_n_options,
+        )
+        print_sweep(rows, limit=args.top_k)
+        return
 
     for d in args.periods:
         try:

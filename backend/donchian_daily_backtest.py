@@ -16,16 +16,19 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 import pandas as pd
 import numpy as np
 
 CACHE_DIR = Path(__file__).parent / ".cache"
 
-# 비용 (현물 거래)
+# 비용
 SPOT_FEE = 0.001       # 0.10%
+FUTURES_FEE = 0.0004   # 0.04%
 SLIPPAGE = 0.0002      # 0.02%
 TOTAL_COST = SPOT_FEE + SLIPPAGE
+FUTURES_TOTAL_COST = FUTURES_FEE + SLIPPAGE
 
 # Donchian 앙상블 lookback 후보
 LOOKBACKS = [10, 20, 40, 55, 90]
@@ -50,6 +53,25 @@ class DonchianResult:
     bh_return: float
 
 
+@dataclass
+class DonchianBiDirectionalResult:
+    coin: str
+    days: int
+    initial: float
+    final: float
+    return_pct: float
+    sharpe: float
+    max_drawdown: float
+    n_trades: int
+    n_wins: int
+    n_losses: int
+    total_fees: float
+    long_trades: int
+    short_trades: int
+    bh_return: float
+
+
+@lru_cache(maxsize=32)
 def load_daily(coin: str) -> pd.DataFrame:
     path = CACHE_DIR / f"{coin}_USDT_1d.csv"
     df = pd.read_csv(path, parse_dates=["timestamp"], index_col="timestamp")
@@ -246,6 +268,218 @@ def simulate_donchian(
         return_pct=return_pct, sharpe=sharpe, max_drawdown=max_drawdown,
         n_trades=n_trades, n_wins=n_wins, n_losses=n_losses,
         total_fees=total_fees, bh_return=bh_return,
+    )
+
+
+def simulate_donchian_bi_directional(
+    coin: str,
+    days: int,
+    initial_capital: float = 1000.0,
+    lookbacks: list[int] = LOOKBACKS,
+    min_signals: int = 1,
+    use_atr_sizing: bool = True,
+) -> DonchianBiDirectionalResult:
+    """양방향 Donchian 선물 시뮬레이션.
+
+    - 신고가 돌파: long 진입
+    - 신저가 이탈: short 진입
+    - long: N/2일 low 이탈 시 청산
+    - short: N/2일 high 회복 시 청산
+    """
+    df = load_daily(coin).copy()
+    end_ts = pd.Timestamp(datetime.now(timezone.utc))
+    start_ts = end_ts - pd.Timedelta(days=days + max(lookbacks) + 50)
+    df = df[(df.index >= start_ts) & (df.index <= end_ts)]
+
+    if len(df) < max(lookbacks) + 10:
+        raise ValueError(f"{coin} 데이터 부족: {len(df)}일")
+
+    df["atr_14"] = calculate_atr(df, 14)
+    for lb in lookbacks:
+        df[f"high_{lb}"] = df["high"].rolling(lb).max().shift(1)
+        df[f"low_{lb}"] = df["low"].rolling(lb).min().shift(1)
+        df[f"low_exit_{lb}"] = df["low"].rolling(lb // 2).min().shift(1)
+        df[f"high_exit_{lb}"] = df["high"].rolling(lb // 2).max().shift(1)
+
+    cash = initial_capital
+    position_qty = 0.0
+    position_dir = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    n_trades = 0
+    n_wins = 0
+    n_losses = 0
+    long_trades = 0
+    short_trades = 0
+    total_fees = 0.0
+    equity_curve = []
+
+    sim_start_ts = end_ts - pd.Timedelta(days=days)
+
+    for ts, row in df.iterrows():
+        price = float(row["close"])
+        high = float(row["high"])
+        low = float(row["low"])
+        atr = float(row["atr_14"]) if pd.notna(row["atr_14"]) else 0.0
+
+        if pd.isna(row[f"high_{lookbacks[0]}"]):
+            continue
+
+        if position_dir == 1:
+            equity = cash + (price - entry_price) * position_qty
+        elif position_dir == -1:
+            equity = cash + (entry_price - price) * position_qty
+        else:
+            equity = cash
+        if ts >= sim_start_ts:
+            equity_curve.append((ts, equity))
+
+        if ts < sim_start_ts:
+            continue
+
+        if position_dir == 1:
+            exit_signals = 0
+            exit_candidates = []
+            for lb in lookbacks:
+                exit_lvl = row.get(f"low_exit_{lb}")
+                if pd.notna(exit_lvl) and low <= exit_lvl:
+                    exit_signals += 1
+                    exit_candidates.append(float(exit_lvl))
+            if exit_signals >= min_signals:
+                exit_price = max(low, min(exit_candidates))
+                pnl = (exit_price - entry_price) * position_qty
+                fee = exit_price * position_qty * FUTURES_TOTAL_COST
+                cash += pnl - fee
+                total_fees += fee
+                n_trades += 1
+                long_trades += 1
+                if pnl - fee > 0:
+                    n_wins += 1
+                else:
+                    n_losses += 1
+                position_qty = 0.0
+                position_dir = 0
+                entry_price = 0.0
+                continue
+
+        elif position_dir == -1:
+            exit_signals = 0
+            exit_candidates = []
+            for lb in lookbacks:
+                exit_lvl = row.get(f"high_exit_{lb}")
+                if pd.notna(exit_lvl) and high >= exit_lvl:
+                    exit_signals += 1
+                    exit_candidates.append(float(exit_lvl))
+            if exit_signals >= min_signals:
+                exit_price = min(high, max(exit_candidates))
+                pnl = (entry_price - exit_price) * position_qty
+                fee = exit_price * position_qty * FUTURES_TOTAL_COST
+                cash += pnl - fee
+                total_fees += fee
+                n_trades += 1
+                short_trades += 1
+                if pnl - fee > 0:
+                    n_wins += 1
+                else:
+                    n_losses += 1
+                position_qty = 0.0
+                position_dir = 0
+                entry_price = 0.0
+                continue
+
+        if position_dir == 0:
+            long_signals = 0
+            long_levels = []
+            short_signals = 0
+            short_levels = []
+            for lb in lookbacks:
+                long_lvl = row.get(f"high_{lb}")
+                if pd.notna(long_lvl) and high >= long_lvl:
+                    long_signals += 1
+                    long_levels.append(float(long_lvl))
+                short_lvl = row.get(f"low_{lb}")
+                if pd.notna(short_lvl) and low <= short_lvl:
+                    short_signals += 1
+                    short_levels.append(float(short_lvl))
+
+            chosen_dir = 0
+            exec_price = 0.0
+            if long_signals >= min_signals and long_signals >= short_signals:
+                chosen_dir = 1
+                exec_price = max(min(long_levels), low)
+            elif short_signals >= min_signals:
+                chosen_dir = -1
+                exec_price = min(max(short_levels), high)
+
+            if chosen_dir != 0:
+                if use_atr_sizing and atr > 0:
+                    risk_amount = cash * BASE_RISK_PCT
+                    stop_distance = atr * 2.0
+                    qty = risk_amount / stop_distance
+                    notional = qty * exec_price
+                    if notional > cash * 0.95:
+                        notional = cash * 0.95
+                        qty = notional / exec_price
+                else:
+                    qty = (cash * 0.95) / exec_price
+                if qty <= 0:
+                    continue
+                fee = exec_price * qty * FUTURES_TOTAL_COST
+                cash -= fee
+                total_fees += fee
+                position_qty = qty
+                position_dir = chosen_dir
+                entry_price = exec_price
+
+    if position_dir != 0:
+        last_price = float(df["close"].iloc[-1])
+        if position_dir == 1:
+            pnl = (last_price - entry_price) * position_qty
+            long_trades += 1
+        else:
+            pnl = (entry_price - last_price) * position_qty
+            short_trades += 1
+        fee = last_price * position_qty * FUTURES_TOTAL_COST
+        cash += pnl - fee
+        total_fees += fee
+        n_trades += 1
+        if pnl - fee > 0:
+            n_wins += 1
+        else:
+            n_losses += 1
+
+    final_capital = cash
+    return_pct = (final_capital - initial_capital) / initial_capital * 100
+    bh_start_idx = df.index.searchsorted(sim_start_ts)
+    bh_start = float(df["close"].iloc[bh_start_idx]) if bh_start_idx < len(df) else float(df["close"].iloc[0])
+    bh_end = float(df["close"].iloc[-1])
+    bh_return = (bh_end - bh_start) / bh_start * 100
+
+    if len(equity_curve) >= 2:
+        equities = np.array([e[1] for e in equity_curve])
+        returns = np.diff(equities) / np.maximum(equities[:-1], 1e-9)
+        sharpe = returns.mean() / returns.std() * np.sqrt(365) if len(returns) > 0 and returns.std() > 0 else 0.0
+        peak = np.maximum.accumulate(equities)
+        dd = (peak - equities) / np.maximum(peak, 1e-9)
+        max_drawdown = float(dd.max() * 100)
+    else:
+        sharpe = 0.0
+        max_drawdown = 0.0
+
+    return DonchianBiDirectionalResult(
+        coin=coin,
+        days=days,
+        initial=initial_capital,
+        final=final_capital,
+        return_pct=return_pct,
+        sharpe=sharpe,
+        max_drawdown=max_drawdown,
+        n_trades=n_trades,
+        n_wins=n_wins,
+        n_losses=n_losses,
+        total_fees=total_fees,
+        long_trades=long_trades,
+        short_trades=short_trades,
+        bh_return=bh_return,
     )
 
 

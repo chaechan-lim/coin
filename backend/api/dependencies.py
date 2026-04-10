@@ -7,8 +7,24 @@ from typing import Any, Literal
 logger = structlog.get_logger(__name__)
 
 # Valid exchange names for API parameter validation
-VALID_EXCHANGES = {"bithumb", "binance_futures", "binance_spot", "binance_surge", "binance_donchian"}
-ExchangeNameType = Literal["bithumb", "binance_futures", "binance_spot", "binance_surge", "binance_donchian"]
+VALID_EXCHANGES = {
+    "bithumb",
+    "binance_futures",
+    "binance_spot",
+    "binance_surge",
+    "binance_donchian",
+    "binance_donchian_futures",
+    "binance_pairs",
+}
+ExchangeNameType = Literal[
+    "bithumb",
+    "binance_futures",
+    "binance_spot",
+    "binance_surge",
+    "binance_donchian",
+    "binance_donchian_futures",
+    "binance_pairs",
+]
 
 
 def validate_exchange(exchange: str) -> str:
@@ -26,6 +42,7 @@ class EngineRegistry:
         self._portfolio_managers: dict[str, Any] = {}
         self._combiners: dict[str, Any] = {}
         self._coordinators: dict[str, Any] = {}
+        self._shared: dict[str, Any] = {}
 
     def register(
         self,
@@ -39,6 +56,8 @@ class EngineRegistry:
         self._portfolio_managers[exchange_name] = portfolio_manager
         self._combiners[exchange_name] = combiner
         self._coordinators[exchange_name] = coordinator
+        if engine is not None and hasattr(engine, "set_engine_registry"):
+            engine.set_engine_registry(self)
         logger.info("engine_registered", exchange=exchange_name)
 
     def get_engine(self, exchange: str = "bithumb"):
@@ -52,6 +71,12 @@ class EngineRegistry:
 
     def get_coordinator(self, exchange: str = "bithumb"):
         return self._coordinators.get(exchange)
+
+    def set_shared(self, key: str, value: Any) -> None:
+        self._shared[key] = value
+
+    def get_shared(self, key: str, default: Any = None):
+        return self._shared.get(key, default)
 
     @property
     def available_exchanges(self) -> list[str]:

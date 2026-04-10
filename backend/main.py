@@ -79,6 +79,11 @@ _binance_engine = None
 _binance_spot_engine = None
 _surge_engine = None
 _donchian_engine = None  # Donchian Daily Ensemble (R&D 라이브)
+_donchian_futures_engine = None  # Donchian Futures Bi-Directional (R&D 라이브)
+_pairs_live_engine = None  # Pairs Trading (R&D 라이브)
+_futures_rnd_coordinator = None
+_research_auto_review_service = None
+_research_stage_gate_service = None
 _notification_dispatcher: NotificationDispatcher | None = None
 _discord_bot_task: asyncio.Task | None = None
 _discord_bot_instance = None
@@ -222,7 +227,7 @@ def _create_self_healing(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
-    global _scheduler, _engine_instance, _binance_engine, _binance_spot_engine, _surge_engine, _donchian_engine, _notification_dispatcher
+    global _scheduler, _engine_instance, _binance_engine, _binance_spot_engine, _surge_engine, _donchian_engine, _donchian_futures_engine, _pairs_live_engine, _futures_rnd_coordinator, _research_auto_review_service, _research_stage_gate_service, _notification_dispatcher
     config = get_config()
 
     logger.info("startup_begin", mode=config.trading.mode)
@@ -235,11 +240,26 @@ async def lifespan(app: FastAPI):
         from sqlalchemy import text, inspect as sa_inspect
         def _add_columns(sync_conn):
             insp = sa_inspect(sync_conn)
-            cols = {c["name"] for c in insp.get_columns("positions")}
-            if "strategy_name" not in cols:
+            position_cols = {c["name"] for c in insp.get_columns("positions")}
+            if "strategy_name" not in position_cols:
                 sync_conn.execute(text("ALTER TABLE positions ADD COLUMN strategy_name VARCHAR(50)"))
+            order_cols = {c["name"] for c in insp.get_columns("orders")}
+            if "trade_group_id" not in order_cols:
+                sync_conn.execute(text("ALTER TABLE orders ADD COLUMN trade_group_id VARCHAR(50)"))
+            if "trade_group_type" not in order_cols:
+                sync_conn.execute(text("ALTER TABLE orders ADD COLUMN trade_group_type VARCHAR(30)"))
+            order_indexes = {idx["name"] for idx in insp.get_indexes("orders")}
+            if "ix_orders_trade_group" not in order_indexes:
+                sync_conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_orders_trade_group ON orders (exchange, trade_group_id, created_at)")
+                )
         await conn.run_sync(_add_columns)
     logger.info("db_tables_ready")
+
+    from research.stage_gate import ResearchStageGateService
+
+    _research_stage_gate_service = ResearchStageGateService(get_session_factory(), engine_registry=engine_registry)
+    engine_registry.set_shared("research_stage_gate_service", _research_stage_gate_service)
 
     # ── 알림 어댑터 등록 (엔진 독립) ─────────────────────────
     notification = NotificationDispatcher()
@@ -360,7 +380,9 @@ async def lifespan(app: FastAPI):
                 exchange_name="binance_futures",
             )
 
-            if config.futures_v2.enabled:
+            if not config.binance_trading.enabled:
+                logger.info("binance_futures_main_engine_disabled")
+            elif config.futures_v2.enabled:
                 # ── v2 레짐 적응형 엔진 ──
                 from engine.futures_engine_v2 import FuturesEngineV2
                 from services.derivatives_data import DerivativesDataService
@@ -411,7 +433,7 @@ async def lifespan(app: FastAPI):
                              tier1_coins=list(config.futures_v2.tier1_coins),
                              leverage=config.futures_v2.leverage,
                              tier2_enabled=config.futures_v2.tier2_enabled)
-            else:
+            elif config.binance_trading.enabled:
                 # ── v1 기존 7전략+ML 엔진 ──
                 from engine.futures_engine import BinanceFuturesEngine
 
@@ -570,6 +592,84 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("donchian_daily_init_failed", error=str(e), exc_info=True)
 
+    rd_futures_enabled = bool(
+        getattr(config, "donchian_futures_bi_enabled", False)
+        or getattr(config, "pairs_trading_live_enabled", False)
+    )
+    rd_futures_allowed = not config.binance_trading.enabled
+    if rd_futures_enabled and not rd_futures_allowed:
+        logger.error(
+            "rd_futures_requires_main_engine_disabled",
+            binance_trading_enabled=config.binance_trading.enabled,
+            donchian_futures_enabled=getattr(config, "donchian_futures_bi_enabled", False),
+            pairs_live_enabled=getattr(config, "pairs_trading_live_enabled", False),
+        )
+    elif rd_futures_enabled:
+        from engine.futures_rnd_coordinator import FuturesRndCoordinator
+
+        _futures_rnd_coordinator = FuturesRndCoordinator(
+            global_capital_usdt=float(getattr(config, "futures_rnd_global_capital_usdt", 150.0)),
+            daily_loss_limit_pct=float(getattr(config, "futures_rnd_daily_loss_limit_pct", 0.05)),
+            total_loss_limit_pct=float(getattr(config, "futures_rnd_total_loss_limit_pct", 0.10)),
+        )
+        engine_registry.set_shared("futures_rnd_coordinator", _futures_rnd_coordinator)
+
+    # ── 7b-3. Donchian Futures Bi-Directional (R&D 라이브) ─────────
+    if config.binance.enabled and binance_exchange and rd_futures_allowed and getattr(config, "donchian_futures_bi_enabled", False):
+        try:
+            from engine.donchian_futures_bi_engine import DonchianFuturesBiEngine
+            donchian_futures_capital = float(getattr(config, "donchian_futures_bi_capital_usdt", 100.0))
+            donchian_futures_leverage = int(getattr(config, "donchian_futures_bi_leverage", 2))
+            _donchian_futures_engine = DonchianFuturesBiEngine(
+                config=config,
+                futures_exchange=binance_exchange,
+                market_data=binance_market_data,
+                initial_capital_usdt=donchian_futures_capital,
+                leverage=donchian_futures_leverage,
+            )
+            if _futures_rnd_coordinator is not None:
+                _donchian_futures_engine.set_futures_rnd_coordinator(_futures_rnd_coordinator)
+            engine_registry.register("binance_donchian_futures", _donchian_futures_engine, None, None, None)
+            logger.info(
+                "donchian_futures_bi_engine_ready",
+                capital_usdt=donchian_futures_capital,
+                leverage=donchian_futures_leverage,
+                coins=_donchian_futures_engine.coins,
+            )
+        except Exception as e:
+            logger.error("donchian_futures_bi_init_failed", error=str(e), exc_info=True)
+
+    # ── 7b-4. Pairs Trading Live R&D ─────────────────────────────
+    if config.binance.enabled and binance_exchange and rd_futures_allowed and getattr(config, "pairs_trading_live_enabled", False):
+        try:
+            from engine.pairs_trading_live_engine import PairsTradingLiveEngine
+
+            _pairs_live_engine = PairsTradingLiveEngine(
+                config=config,
+                futures_exchange=binance_exchange,
+                market_data=binance_market_data,
+                initial_capital_usdt=float(getattr(config, "pairs_trading_live_capital_usdt", 75.0)),
+                leverage=int(getattr(config, "pairs_trading_live_leverage", 2)),
+                coin_a=str(getattr(config, "pairs_trading_live_coin_a", "BTC/USDT")),
+                coin_b=str(getattr(config, "pairs_trading_live_coin_b", "ETH/USDT")),
+                lookback_hours=int(getattr(config, "pairs_trading_live_lookback_hours", 336)),
+                z_entry=float(getattr(config, "pairs_trading_live_z_entry", 2.0)),
+                z_exit=float(getattr(config, "pairs_trading_live_z_exit", 0.5)),
+                z_stop=float(getattr(config, "pairs_trading_live_z_stop", 5.0)),
+            )
+            if _futures_rnd_coordinator is not None:
+                _pairs_live_engine.set_futures_rnd_coordinator(_futures_rnd_coordinator)
+            engine_registry.register("binance_pairs", _pairs_live_engine, None, None, None)
+            logger.info(
+                "pairs_live_engine_ready",
+                capital_usdt=getattr(config, "pairs_trading_live_capital_usdt", 75.0),
+                leverage=getattr(config, "pairs_trading_live_leverage", 2),
+                coin_a=getattr(config, "pairs_trading_live_coin_a", "BTC/USDT"),
+                coin_b=getattr(config, "pairs_trading_live_coin_b", "ETH/USDT"),
+            )
+        except Exception as e:
+            logger.error("pairs_live_init_failed", error=str(e), exc_info=True)
+
     # ── 7c. 서지 엔진 (조건부) — 선물 PM 잔고 통합 ─────────────
     if config.surge_trading.enabled and config.binance.enabled and binance_exchange:
         try:
@@ -612,6 +712,20 @@ async def lifespan(app: FastAPI):
         eng = engine_registry.get_engine(ex_name)
         if eng:
             eng.set_engine_registry(engine_registry)
+
+    from research.registry import get_candidate_by_venue
+
+    bootstrap_candidate_keys = {
+        candidate.key
+        for exchange_name in engine_registry.available_exchanges
+        if (candidate := get_candidate_by_venue(exchange_name)) is not None
+    }
+    await _research_stage_gate_service.ensure_bootstrap_states(bootstrap_candidate_keys)
+
+    from research.auto_review_service import ResearchAutoReviewService
+
+    _research_auto_review_service = ResearchAutoReviewService(engine_registry)
+    engine_registry.set_shared("research_auto_review_service", _research_auto_review_service)
 
     # ── 8. 스케줄러 시작 ─────────────────────────────────────
     session_factory = get_session_factory()
@@ -872,7 +986,19 @@ async def lifespan(app: FastAPI):
             seconds=120,
         )
 
+    if _research_auto_review_service is not None:
+        _scheduler.add_job(
+            _wrap(_research_auto_review_service.refresh_all),
+            name="research_auto_review_refresh",
+            seconds=900,
+        )
+
     _scheduler.start()
+    if _research_auto_review_service is not None:
+        asyncio.create_task(
+            _research_auto_review_service.refresh_all(),
+            name="research_auto_review_initial_refresh",
+        )
 
     # 최초 시장 분석 실행
     if bithumb_coord and bithumb_pm:
@@ -979,9 +1105,20 @@ async def lifespan(app: FastAPI):
         auto_start_engines.append(("binance_spot", _binance_spot_engine))
     if _donchian_engine and not _donchian_engine.is_running:
         auto_start_engines.append(("binance_donchian", _donchian_engine))
+    if _donchian_futures_engine and not _donchian_futures_engine.is_running:
+        auto_start_engines.append(("binance_donchian_futures", _donchian_futures_engine))
+    if _pairs_live_engine and not _pairs_live_engine.is_running:
+        auto_start_engines.append(("binance_pairs", _pairs_live_engine))
     if _surge_engine and not _surge_engine.is_running:
         auto_start_engines.append(("binance_surge", _surge_engine))
+    auto_start_allowed: dict[str, bool] = {}
+    if _research_stage_gate_service is not None:
+        for name, _ in auto_start_engines:
+            auto_start_allowed[name] = await _research_stage_gate_service.is_execution_allowed_for_venue(name)
     for name, eng in auto_start_engines:
+        if _research_stage_gate_service is not None and not auto_start_allowed.get(name, True):
+            logger.info("engine_auto_start_blocked_by_stage_gate", exchange=name)
+            continue
         asyncio.create_task(eng.start(), name=f"engine_{name}")
         logger.info("engine_auto_started", exchange=name)
 
@@ -1004,6 +1141,10 @@ async def lifespan(app: FastAPI):
         await _binance_spot_engine.stop()
     if _donchian_engine:
         await _donchian_engine.stop()
+    if _donchian_futures_engine:
+        await _donchian_futures_engine.stop()
+    if _pairs_live_engine:
+        await _pairs_live_engine.stop()
     if _surge_engine:
         await _surge_engine.stop()
     if exchange:

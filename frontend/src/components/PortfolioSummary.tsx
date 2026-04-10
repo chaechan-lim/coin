@@ -63,6 +63,12 @@ export function PortfolioSummary({ exchange = 'bithumb' }: { exchange?: Exchange
 
   return (
     <div className="space-y-4">
+      {exchange === 'binance_futures' && (
+        <div className="rounded-xl border border-yellow-800/60 bg-yellow-950/20 px-4 py-3 text-sm text-yellow-200">
+          이 포트폴리오 요약은 `binance_futures` 메인 엔진 기준입니다. 현재 실운영 선물 자본과 거래 상황은 상단 `선물 계좌/운용 자본` 카드에서 확인하세요.
+        </div>
+      )}
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <StatCard
           label="총 자산"

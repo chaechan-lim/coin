@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import inspect
 
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,10 +13,17 @@ from core.schemas import (
     AgentLogResponse,
     MarketAnalysisResponse,
     RiskAlertResponse,
+    ResearchCandidateResponse,
+    ResearchOverviewResponse,
+    ResearchStageStateResponse,
+    ResearchStageHistoryEntryResponse,
+    ResearchStageUpdateRequest,
     RotationStatusResponse,
     SurgeScoreItem,
 )
 from api.dependencies import engine_registry, validate_exchange, ExchangeNameType
+from research.evaluator import get_auto_review, serialize_auto_review
+from research.registry import RESEARCH_CANDIDATES, get_candidate, get_candidate_by_venue, get_stage_rule
 
 router = APIRouter(tags=["dashboard"])
 
@@ -30,6 +38,57 @@ def _get_coordinator(exchange: str):
     return engine_registry.get_coordinator(exchange)
 
 
+def _get_shared_service(name: str):
+    return engine_registry.get_shared(name)
+
+
+def _get_research_stage_service():
+    return _get_shared_service("research_stage_gate_service")
+
+
+async def _assert_engine_start_allowed(exchange: str):
+    service = _get_research_stage_service()
+    candidate = get_candidate_by_venue(exchange)
+    if candidate is None or service is None:
+        return
+    snapshot = await service.get_snapshot(candidate.key)
+    if snapshot.execution_allowed:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "stage_gate_blocked",
+            "candidate_key": candidate.key,
+            "effective_stage": snapshot.effective_stage,
+            "message": f"{candidate.title} is not approved for live execution",
+        },
+    )
+
+
+def _pending_auto_review(candidate_key: str, stage: str) -> dict:
+    return {
+        "candidate_key": candidate_key,
+        "decision": "pending",
+        "recommended_stage": stage,
+        "summary": "background_auto_review_pending",
+        "blockers": ["백그라운드 자동 판정 갱신 대기 중"],
+        "metrics": [],
+    }
+
+
+@router.get("/research/auto-review/status")
+async def get_research_auto_review_status():
+    service = _get_shared_service("research_auto_review_service")
+    if service is None:
+        return {"status": "not_enabled", "ready": False}
+    if hasattr(service, "get_status"):
+        result = service.get_status()
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    return {"status": "unsupported", "ready": False}
+
+
 @router.get("/exchanges")
 async def list_exchanges():
     """사용 가능한 거래소 목록."""
@@ -38,6 +97,101 @@ async def list_exchanges():
         exchanges = ["binance_spot"]
     default = "binance_spot" if "binance_spot" in exchanges else exchanges[0]
     return {"exchanges": exchanges, "default": default}
+
+
+@router.get("/research/overview", response_model=ResearchOverviewResponse)
+async def get_research_overview(include_auto_review: bool = Query(True)):
+    """운영 시스템 개선용 R&D 전략 보드."""
+    items: list[ResearchCandidateResponse] = []
+    live_count = 0
+    research_count = 0
+    planned_count = 0
+    review_service = _get_shared_service("research_auto_review_service")
+    stage_service = _get_research_stage_service()
+    stage_snapshots = {}
+    if stage_service is not None:
+        for snapshot in await stage_service.list_snapshots():
+            stage_snapshots[snapshot.candidate_key] = snapshot
+
+    for candidate in RESEARCH_CANDIDATES:
+        eng = engine_registry.get_engine(candidate.venue) if candidate.venue and candidate.stage_managed else None
+        is_registered = eng is not None
+        is_running = bool(getattr(eng, "is_running", False)) if eng is not None else False
+        stage_snapshot = stage_snapshots.get(candidate.key)
+        effective_stage = stage_snapshot.effective_stage if stage_snapshot is not None else candidate.stage
+        rule = get_stage_rule(effective_stage)
+
+        if effective_stage == "live_rnd":
+            live_count += 1
+        elif effective_stage in ("research", "candidate", "shadow"):
+            research_count += 1
+        else:
+            planned_count += 1
+
+        auto_review = None
+        if include_auto_review:
+            if review_service is not None:
+                auto_review = review_service.get_snapshot(candidate.key) or _pending_auto_review(candidate.key, effective_stage)
+            else:
+                live_context = {}
+                if candidate.key == "pairs_trading_futures":
+                    live_context["live_capital_usdt"] = getattr(eng, "_initial_capital", None) if eng is not None else None
+                if candidate.key == "donchian_futures_bi":
+                    live_context["live_capital_usdt"] = getattr(eng, "_initial_capital", None) if eng is not None else None
+                try:
+                    auto_review = serialize_auto_review(await get_auto_review(candidate.key, live_context=live_context))
+                except Exception as exc:
+                    auto_review = {
+                        "candidate_key": candidate.key,
+                        "decision": "error",
+                        "recommended_stage": effective_stage,
+                        "summary": f"auto_review_failed: {type(exc).__name__}",
+                        "blockers": ["자동 판정 중 예외 발생"],
+                        "metrics": [],
+                    }
+
+        items.append(
+            ResearchCandidateResponse(
+                key=candidate.key,
+                title=candidate.title,
+                market=candidate.market,
+                directionality=candidate.directionality,
+                stage=effective_stage,
+                catalog_stage=candidate.stage,
+                stage_source=stage_snapshot.stage_source if stage_snapshot is not None else "catalog",
+                execution_allowed=stage_snapshot.execution_allowed if stage_snapshot is not None else effective_stage in {"live_rnd", "production"},
+                venue=candidate.venue,
+                stage_managed=candidate.stage_managed,
+                status=candidate.status,
+                objective=candidate.objective,
+                rationale=candidate.rationale,
+                recommended_next_step=candidate.recommended_next_step,
+                approved_by=stage_snapshot.approved_by if stage_snapshot is not None else None,
+                approval_note=stage_snapshot.approval_note if stage_snapshot is not None else None,
+                approved_at=stage_snapshot.approved_at if stage_snapshot is not None else None,
+                is_live_engine_registered=is_registered,
+                is_live_engine_running=is_running,
+                promotion_criteria=list(rule.promotion_criteria),
+                demotion_criteria=list(rule.demotion_criteria),
+                next_stages=list(rule.next_stages),
+                auto_review=auto_review,
+            )
+        )
+
+    recommended_focus = (
+        "pairs_trading_futures_regime_filter"
+        if any(item.key == "pairs_trading_futures" for item in items)
+        else "donchian_daily_monitoring"
+    )
+
+    return ResearchOverviewResponse(
+        generated_at=datetime.now(timezone.utc),
+        live_candidates=live_count,
+        research_candidates=research_count,
+        planned_candidates=planned_count,
+        recommended_focus=recommended_focus,
+        items=items,
+    )
 
 
 @router.get("/engine/status", response_model=EngineStatusResponse)
@@ -99,11 +253,94 @@ async def start_engine(exchange: ExchangeNameType = Query("bithumb")):
     eng = _get_engine(exchange)
     if not eng:
         raise HTTPException(status_code=500, detail=f"Engine '{exchange}' not initialized")
+    await _assert_engine_start_allowed(exchange)
     if eng.is_running:
         return {"status": "already_running", "exchange": exchange}
     import asyncio
     asyncio.create_task(eng.start(), name=f"engine_{exchange}")
     return {"status": "started", "exchange": exchange}
+
+
+@router.get("/research/stages", response_model=list[ResearchStageStateResponse])
+async def list_research_stages():
+    service = _get_research_stage_service()
+    if service is None:
+        return []
+    snapshots = await service.list_snapshots()
+    return [
+        ResearchStageStateResponse(
+            candidate_key=snapshot.candidate_key,
+            title=snapshot.title,
+            venue=snapshot.venue,
+            catalog_stage=snapshot.catalog_stage,
+            effective_stage=snapshot.effective_stage,
+            approved_stage=snapshot.approved_stage,
+            stage_source=snapshot.stage_source,
+            execution_allowed=snapshot.execution_allowed,
+            approved_by=snapshot.approved_by,
+            approval_note=snapshot.approval_note,
+            approved_at=snapshot.approved_at,
+        )
+        for snapshot in snapshots
+    ]
+
+
+@router.get("/research/stage-history", response_model=list[ResearchStageHistoryEntryResponse])
+async def list_research_stage_history(
+    candidate_key: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    service = _get_research_stage_service()
+    if service is None:
+        return []
+    entries = await service.list_history(candidate_key=candidate_key, limit=limit)
+    return [
+        ResearchStageHistoryEntryResponse(
+            id=entry.id,
+            candidate_key=entry.candidate_key,
+            title=entry.title,
+            from_stage=entry.from_stage,
+            to_stage=entry.to_stage,
+            approval_source=entry.approval_source,
+            approved_by=entry.approved_by,
+            approval_note=entry.approval_note,
+            created_at=entry.created_at,
+        )
+        for entry in entries
+    ]
+
+
+@router.put("/research/candidates/{candidate_key}/stage", response_model=ResearchStageStateResponse)
+async def update_research_stage(candidate_key: str, payload: ResearchStageUpdateRequest):
+    service = _get_research_stage_service()
+    if service is None:
+        raise HTTPException(status_code=503, detail="research_stage_gate_not_enabled")
+
+    try:
+        snapshot = await service.approve_stage(
+            candidate_key,
+            payload.stage,
+            approved_by=payload.approved_by,
+            approval_note=payload.note,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return ResearchStageStateResponse(
+        candidate_key=snapshot.candidate_key,
+        title=snapshot.title,
+        venue=snapshot.venue,
+        catalog_stage=snapshot.catalog_stage,
+        effective_stage=snapshot.effective_stage,
+        approved_stage=snapshot.approved_stage,
+        stage_source=snapshot.stage_source,
+        execution_allowed=snapshot.execution_allowed,
+        approved_by=snapshot.approved_by,
+        approval_note=snapshot.approval_note,
+        approved_at=snapshot.approved_at,
+    )
 
 
 @router.post("/engine/donchian/evaluate")
@@ -128,6 +365,63 @@ async def get_donchian_status():
     if hasattr(eng, "get_status"):
         return eng.get_status()
     return {"is_running": eng.is_running}
+
+
+@router.post("/engine/donchian-futures/evaluate")
+async def evaluate_donchian_futures_now():
+    eng = _get_engine("binance_donchian_futures")
+    if not eng:
+        raise HTTPException(status_code=500, detail="Donchian futures engine not initialized")
+    if not hasattr(eng, "evaluate_now"):
+        raise HTTPException(status_code=500, detail="Engine does not support manual evaluation")
+    await eng.evaluate_now()
+    status = eng.get_status() if hasattr(eng, "get_status") else {}
+    return {"status": "evaluated", "result": status}
+
+
+@router.get("/engine/donchian-futures/status")
+async def get_donchian_futures_status():
+    eng = _get_engine("binance_donchian_futures")
+    if not eng:
+        raise HTTPException(status_code=500, detail="Donchian futures engine not initialized")
+    if hasattr(eng, "get_status"):
+        return eng.get_status()
+    return {"is_running": eng.is_running}
+
+
+@router.post("/engine/pairs/evaluate")
+async def evaluate_pairs_now():
+    eng = _get_engine("binance_pairs")
+    if not eng:
+        raise HTTPException(status_code=500, detail="Pairs engine not initialized")
+    if not hasattr(eng, "evaluate_now"):
+        raise HTTPException(status_code=500, detail="Engine does not support manual evaluation")
+    await eng.evaluate_now()
+    status = eng.get_status() if hasattr(eng, "get_status") else {}
+    return {"status": "evaluated", "result": status}
+
+
+@router.get("/engine/pairs/status")
+async def get_pairs_status():
+    eng = _get_engine("binance_pairs")
+    if not eng:
+        raise HTTPException(status_code=500, detail="Pairs engine not initialized")
+    if hasattr(eng, "get_status"):
+        return eng.get_status()
+    return {"is_running": eng.is_running}
+
+
+@router.get("/engine/futures-rnd/status")
+async def get_futures_rnd_status():
+    coordinator = _get_shared_service("futures_rnd_coordinator")
+    if coordinator is None:
+        return {"status": "not_enabled"}
+    if hasattr(coordinator, "get_status"):
+        result = coordinator.get_status()
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    return {"status": "unsupported"}
 
 
 @router.post("/engine/stop")

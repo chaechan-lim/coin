@@ -96,6 +96,8 @@ class OrderResponse(BaseModel):
     strategy_name: str
     signal_confidence: Optional[float]
     signal_reason: Optional[str]
+    trade_group_id: Optional[str] = None
+    trade_group_type: Optional[str] = None
     combined_score: Optional[float]
     contributing_strategies: Optional[list]
     created_at: datetime
@@ -209,6 +211,73 @@ class EngineStatusResponse(BaseModel):
     min_confidence: float = 0.55
 
 
+class ResearchCandidateResponse(BaseModel):
+    key: str
+    title: str
+    market: str
+    directionality: str
+    stage: str
+    catalog_stage: str
+    stage_source: str = "catalog"
+    execution_allowed: bool = False
+    venue: str
+    stage_managed: bool = False
+    status: str
+    objective: str
+    rationale: str
+    recommended_next_step: str
+    approved_by: Optional[str] = None
+    approval_note: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    is_live_engine_registered: bool = False
+    is_live_engine_running: bool = False
+    promotion_criteria: list[str]
+    demotion_criteria: list[str]
+    next_stages: list[str]
+    auto_review: dict | None = None
+
+
+class ResearchOverviewResponse(BaseModel):
+    generated_at: datetime
+    live_candidates: int
+    research_candidates: int
+    planned_candidates: int
+    recommended_focus: str
+    items: list[ResearchCandidateResponse]
+
+
+class ResearchStageStateResponse(BaseModel):
+    candidate_key: str
+    title: str
+    venue: str
+    catalog_stage: str
+    effective_stage: str
+    approved_stage: Optional[str] = None
+    stage_source: str
+    execution_allowed: bool
+    approved_by: Optional[str] = None
+    approval_note: Optional[str] = None
+    approved_at: Optional[datetime] = None
+
+
+class ResearchStageUpdateRequest(BaseModel):
+    stage: str
+    approved_by: str = "operator"
+    note: Optional[str] = None
+
+
+class ResearchStageHistoryEntryResponse(BaseModel):
+    id: int
+    candidate_key: str
+    title: str
+    from_stage: Optional[str] = None
+    to_stage: str
+    approval_source: str
+    approved_by: Optional[str] = None
+    approval_note: Optional[str] = None
+    created_at: datetime
+
+
 class ModeUpdate(BaseModel):
     mode: str  # "paper" or "live"
 
@@ -222,6 +291,40 @@ class ServerEventResponse(BaseModel):
     detail: Optional[str]
     metadata: Optional[dict]
     created_at: datetime
+
+
+class PairsTradeGroupResponse(BaseModel):
+    trade_id: str
+    pair_direction: str
+    status: str
+    symbols: list[str]
+    opened_at: datetime
+    closed_at: Optional[datetime] = None
+    realized_pnl: float
+    total_fees: float
+    order_ids: list[int]
+
+
+class PairsTradeGroupDetailResponse(PairsTradeGroupResponse):
+    orders: list[OrderResponse]
+    journal: list[ServerEventResponse]
+
+
+class DonchianFuturesTradeGroupResponse(BaseModel):
+    trade_id: str
+    symbol: str
+    direction: str
+    status: str
+    opened_at: datetime
+    closed_at: Optional[datetime] = None
+    realized_pnl: float
+    total_fees: float
+    order_ids: list[int]
+
+
+class DonchianFuturesTradeGroupDetailResponse(DonchianFuturesTradeGroupResponse):
+    orders: list[OrderResponse]
+    journal: list[ServerEventResponse]
 
 
 # -- Rotation Monitor --

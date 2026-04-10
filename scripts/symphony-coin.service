@@ -1,0 +1,19 @@
+[Unit]
+Description=Symphony-ClaudeCode Coin Orchestrator
+After=network.target
+
+[Service]
+Type=simple
+User=chans
+WorkingDirectory=/home/chans/symphony-claudecode
+EnvironmentFile=/home/chans/symphony-claudecode/.env
+ExecStart=/home/chans/symphony-claudecode/.venv/bin/symphony run --workflow /home/chans/coin/WORKFLOW.md --port 8002
+Restart=on-failure
+RestartSec=30
+
+# Resource limits for Raspberry Pi
+MemoryMax=2G
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target

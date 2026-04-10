@@ -1,14 +1,14 @@
 # 코인 자동 매매 시스템 — 운영 참조
 
-> 최종 업데이트: 2026-04-07
+> 최종 업데이트: 2026-04-10
 > 완료된 Phase 1-5 상세 및 버전 이력은 `CHANGELOG.md` 참고.
 
 ---
 
 ## 개요
 
-빗썸(현물, 비활성) + 바이낸스 현물(live) + 바이낸스 USDM 선물(live, 3x) + 서지 **쿼드 엔진** 24시간 자동 트레이딩 시스템.
-가중 투표 (HOLD=기권) + ML 시그널 필터 + 5요소 시장 감지 + 적응형 가중치, AI 에이전트 5종, Discord 봇(자연어 제어), React 대시보드(8탭).
+빗썸(현물, 비활성) + 바이낸스 현물(live) + 바이낸스 USDM 선물(메인 엔진 비활성) + 선물 `live_rnd` 엔진 2종(Donchian Futures Bi, Pairs Trading) + 서지 지원 시스템.
+가중 투표 (HOLD=기권) + ML 시그널 필터 + 5요소 시장 감지 + 적응형 가중치, AI 에이전트 5종, Discord 봇, React 대시보드, grouped trade journal, 연구 승격 파이프라인.
 **현물 4전략** (BNF이격도, CIS모멘텀, 래리윌리엄스, 돈치안채널) + **선물 7전략** (MA, RSI, MACD, 볼린저RSI, 스토캐스틱RSI, OBV, BB스퀴즈).
 **자기 치유 엔진** (에러 분류 → 자동 복구 → LLM 진단).
 
@@ -44,8 +44,9 @@ coin/
 │   ├── services/      (market_data, notification/, llm/, discord_bot/)
 │   ├── strategies/    (11전략 + combiner + registry + ml_filter)
 │   ├── agents/        (market_analysis, risk_management, trade_review, performance_analytics, strategy_advisor, diagnostic_agent, coordinator)
-│   ├── engine/        (trading_engine, futures_engine, surge_engine, order_manager, portfolio_manager, recovery, health_monitor, capital_sync, scheduler)
+│   ├── engine/        (trading_engine, futures_engine, donchian_futures_bi_engine, pairs_trading_live_engine, futures_rnd_coordinator, surge_engine, order_manager, portfolio_manager, recovery, health_monitor, capital_sync, scheduler)
 │   ├── api/           (router, dependencies, dashboard, portfolio, trades, strategies, events, capital, websocket)
+│   ├── research/      (registry, evaluator, auto_review_service)
 │   └── tests/
 └── frontend/
     └── src/           (Dashboard, 8탭 컴포넌트, hooks, types)
@@ -53,11 +54,37 @@ coin/
 
 ---
 
+## 현재 운영 상태
+
+- 메인 `binance_futures` 엔진은 비활성화하고, 동일 계정 위에서 소액 `live_rnd` 엔진 2종 운영
+- `binance_donchian_futures`: 100 USDT
+- `binance_pairs`: 50 USDT
+- 공용 리스크 계층: `futures_rnd_coordinator`
+- 연구 후보 보드: `/api/v1/research/overview` (`auto_review` 백그라운드 캐시)
+- 승인 stage API: `/api/v1/research/stages`, `/api/v1/research/candidates/{candidate_key}/stage`
+- 승인 이력 API: `/api/v1/research/stage-history`
+- 캐시 상태 API: `/api/v1/research/auto-review/status`
+- 실행 경계: 전용 R&D 엔진은 `effective stage`가 `live_rnd` 또는 `production`일 때만 start/auto-start 허용
+- grouped trade 조회:
+  - `/api/v1/trades/pairs/groups`
+  - `/api/v1/trades/donchian-futures/groups`
+- 프론트엔드 overview 탭에 아래 패널 연결 완료
+  - `트레이딩 대상 잔고`: 현물 계좌 잔고 + Donchian Spot, 선물 R&D 계좌 한도 + Donchian Futures / Pairs 오늘 거래 현황
+  - `R&D 파이프라인`
+  - `메인 엔진 제어`: main engine와 live R&D engine 상태 분리 표시
+
 ## 남은 과제 (Phase 6)
 
 ### 완료
 | 항목 | 상세 |
 |---|---|
+| Overview 계좌/운용 보드 명확화 (2026-04-10) | `EngineControl.tsx`에서 Binance Spot/Futures를 `메인 엔진`, `실계좌/운용 자본`, `live R&D 엔진`으로 분리 표시. 현물은 `Spot Account` + `Donchian Spot`, 선물은 `Futures R&D Pool` + `Donchian Futures` + `Pairs Trading`의 자본/오늘 거래/포지션 상태를 함께 노출. `PortfolioSummary.tsx`에는 `binance_futures` 값이 메인 엔진 기준임을 명시하는 안내 배너 추가. |
+| 프론트 탭 정보구조 재편 (2026-04-10) | `Dashboard.tsx` 탭을 `개요 / 실거래 / R&D / 운영 로그 / 고급`으로 재구성. `실거래`에는 거래/포트폴리오/일일 통계를, `R&D`에는 research pipeline을, `운영 로그`에는 엔진 이벤트/에이전트/시스템 로그를 배치. 기존 `신호 로그`, `전략 성과`, `종목/로테이션`, `일일 통계`는 `고급` 내부 서브탭으로 이동해 현재 live 운영 흐름과 정보 구조를 맞춤. |
+| 실거래 grouped trade 노출 + 탭 lazy load (2026-04-10) | `LiveTradeGroups.tsx` 추가. `실거래` 탭에서 `Pairs` / `Donchian Futures` grouped trade와 상세 modal을 바로 열람 가능하게 함. `Dashboard.tsx`는 `React.lazy` + `Suspense`로 `TradeHistory`, `ResearchMonitor`, `AgentStatus`, `SystemLog`, `OrderLog`, `StrategyPerformance`, `RotationMonitor`, `DailyPnLStats`, `Portfolio*`, `LiveTradeGroups`를 탭 단위로 지연 로딩하도록 변경. |
+| 실거래 KPI + R&D 승격 힌트 연결 (2026-04-10) | `LiveTradeGroups.tsx`에 `Pairs` / `Donchian Futures` grouped trade KPI 카드(open/closed/win rate/realized pnl) 추가. `ResearchMonitor.tsx`에는 `승격 힌트` 패널을 추가해 `auto_review` 결과를 `실거래 탭` / `운영 로그 탭`의 다음 확인 액션으로 직접 연결. |
+| 실거래 KPI 기간 선택 + 승격 힌트 직접 이동 (2026-04-10) | `LiveTradeGroups.tsx`에 `today / 7d / 30d` 기간 선택 추가, 기간별 `TradeSummary` 기준 실현손익/승률/체결 수를 표시. `ResearchMonitor.tsx`의 `승격 힌트`에는 버튼을 추가해 `실거래` 또는 `운영 로그` 탭으로 직접 이동하도록 연결. `Dashboard.tsx`가 탭 전환 콜백을 전달. |
+| 승인형 승격/강등 + stage-driven execution gate (2026-04-10) | `research_candidate_states` 테이블과 `ResearchStageGateService` 추가. `/api/v1/research/overview`는 catalog stage와 approved/effective stage를 함께 노출하고, `/api/v1/research/stages` / `PUT /api/v1/research/candidates/{candidate_key}/stage`로 수동 승격/강등을 적용. 전용 R&D 엔진(`binance_donchian`, `binance_donchian_futures`, `binance_pairs`)은 `live_rnd`/`production` 승인 없이는 auto-start 및 `/engine/start`가 차단되며, 강등 시 commit 전에 엔진 stop을 선행한다. 기존 live 운영 상태 유지를 위해 실제로 등록된 Donchian Spot / Donchian Futures / Pairs 엔진만 bootstrap 승인값을 자동 시드. |
+| R&D 승인 UI + stage history (2026-04-10) | `ResearchMonitor.tsx`에서 각 후보 카드에 `catalog/effective stage`, `stage_source`, `execution_allowed`, 승인 메모, inline 승격/강등 승인 폼을 노출. 최근 승인 변경은 `/api/v1/research/stage-history`로 조회해 별도 이력 패널에 표시. 백엔드는 `research_candidate_stage_history` 테이블과 history API를 추가해 `from_stage -> to_stage`, 승인자, 메모를 기록. |
 | WS 자동 재연결 | 선물 엔진: 3회 연속 실패 → 지수 백오프 재연결 (5s→300s), 성공 시 폴백 해제 |
 | Discord 봇 대화 컨텍스트 | 채널별 최근 10턴 히스토리, 1시간 만료, 후속 질문 지원 |
 | 메모리 최적화 | Spot USDT 마켓만, WS markets 공유, gc.collect() (~200MB) |
@@ -146,6 +173,7 @@ coin/
 | V2 방향성 거래 전환 + TF 1h RSI (2026-04-07) | StrategySelector: TRENDING_UP→TF, VOLATILE→MR. TF에 1h RSI 방향 확인 + SL 2.0 ATR. 540d(45%/6%): **PF 2.92, +89.9%, MDD 8.59%, WR 79.8%**. WF **4/4 ALL PASS**, 최악 PF 3.87. |
 | 레짐 감지 속도 개선 (2026-04-08) | 3단계 개선: ①EMA cross→price_dir(close>ema20), ②히스테리시스 3h/2확인→1h/1확인, ③**ROC 패스트패스(6h ROC≥3% → ADX 우회 즉시 추세 판정)**. TF 30→40거래, TF PF 1.52→**1.97**. 540d: **PF 2.93, +82.1%, MDD 10.26%**. WF **4/4 ALL PASS**, 평균 PF **8.32**, 최악 5.24. |
 | 선물 청산 버퍼 검증 (COIN-76) | 진입 전 청산가까지 거리가 SL 거리의 2배 이상인지 검증하는 `LiquidationGuard` 추가. **어댑터**: `BinanceUSDMAdapter.fetch_leverage_brackets()` (GET /fapi/v1/leverageBracket), `fetch_position_risk()` (GET /fapi/v2/positionRisk). **LiquidationGuard**: Binance USDM isolated margin 청산가 계산(LONG: liq=entry*(1-1/L+MMR), SHORT: liq=entry*(1+1/L-MMR)), 청산거리 < SL거리×2 시 레버리지 자동 하향(L→1), 모두 실패 시 진입 거부. 5분 TTL 브라켓 캐시. Graceful degradation: API 실패 → 기본 MMR(2.5%) 사용. **Tier1Manager**: `liquidation_guard=None` 파라미터 추가, ATR 레버리지 스케일링 후 체크, `suggested_leverage` 적용. **FuturesEngineV2**: `LiquidationGuard(exchange)` 생성 후 Tier1Manager에 주입. |
+| R&D 승격 파이프라인 + 라이브 엔진 확장 (2026-04-09) | `research/registry.py` 상태 머신(`research -> candidate -> shadow -> live_rnd -> production -> hold`)과 `/api/v1/research/overview` 추가. `Donchian Daily`, `Pairs`, `Donchian Futures Bi`, `Funding Arb`, `HMM`, `Volatility Adaptive Trend` 자동 판정 연결. `binance_donchian_futures`, `binance_pairs` live R&D 엔진 추가. 공용 `FuturesRndCoordinator`로 자본 한도/심볼 예약/전역 손실 컷 관리. `Order.trade_group_id/type` 정규화, `Pairs`/`Donchian Futures` grouped trade API 추가, 실거래 execution KPI를 auto review에 반영. `research_auto_review_service`가 백그라운드에서 캐시 갱신하여 `/research/overview` 요청 경로의 백테스트 부하를 제거하고, `/api/v1/research/auto-review/status` 및 프론트 overview의 `R&D 파이프라인` 패널에서 상태를 직접 확인 가능하게 함. |
 
 ### 낮은 우선순위
 
@@ -227,7 +255,7 @@ coin/
 
 ## API 엔드포인트
 
-> 모든 엔드포인트: `?exchange=bithumb|binance_futures|binance_spot` (기본: bithumb)
+> 일반 엔드포인트는 `?exchange=bithumb|binance_futures|binance_spot`를 사용하고, R&D 전용 엔드포인트는 `binance_pairs`, `binance_donchian_futures`도 사용합니다.
 
 ### REST (prefix: /api/v1)
 

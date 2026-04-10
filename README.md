@@ -1,7 +1,7 @@
 # Coin Auto-Trading System
 
-Bithumb (spot, inactive) + Binance Spot + Binance USDM (futures) + Surge **quad-engine** auto-trading bot.
-Spot 4 strategies + Futures 7 strategies + ML signal filter, weighted voting, dynamic SL/TP, volume surge rotation, AI agents (5), Discord bot, React dashboard (8 tabs). 773 tests.
+Bithumb (spot, inactive) + Binance Spot + Binance USDM (main futures engine disabled) + live R&D futures engines (`Donchian Futures Bi`, `Pairs Trading`) + Surge support.
+Spot 4 strategies + Futures 7 strategies + ML signal filter, weighted voting, dynamic SL/TP, shared futures R&D risk coordinator, research promotion pipeline, Discord bot, React dashboard.
 
 ---
 
@@ -10,7 +10,7 @@ Spot 4 strategies + Futures 7 strategies + ML signal filter, weighted voting, dy
 ```
                     ┌──────────────┐
                     │  React UI    │ :3000
-                    │  Dashboard   │ (8 tabs)
+                    │  Dashboard   │
                     └──────┬───────┘
                            │ REST + WebSocket
                     ┌──────┴───────┐
@@ -21,10 +21,10 @@ Spot 4 strategies + Futures 7 strategies + ML signal filter, weighted voting, dy
           ┌────────────────┼────────────────┐
           │                │                │
    ┌──────┴──────┐ ┌──────┴──────┐ ┌───────┴──────┐
-   │  Strategies  │ │  Engines×4  │ │  AI Agents   │
+   │  Strategies  │ │   Engines   │ │  AI Agents   │
    │  Spot 4 +   │ │ Bithumb     │ │  Market/Risk │
    │  Futures 7  │ │ + BN Spot   │ │  TradeReview │
-   │  + ML Filter │ │ + BN Future │ │  + Analytics │
+   │  + ML Filter │ │ + R&D + Surge│ │  + Analytics │
    └──────┬──────┘ │ + Surge     │ └──────────────┘
           │        └──────┬──────┘
    ┌──────┴──────┐        │
@@ -33,14 +33,46 @@ Spot 4 strategies + Futures 7 strategies + ML signal filter, weighted voting, dy
    └─────────────┘ └─────────────┘
 ```
 
-### Quad Engine
+### Engine Layout
 
 | Engine | Exchange | Market | Features |
 |--------|----------|--------|----------|
 | TradingEngine | Bithumb V2 | Spot KRW (inactive) | SL/TP/trailing, rotation, dynamic SL, asymmetric mode |
 | TradingEngine | Binance Spot | Spot USDT (live) | Same as Bithumb, USDT base, paired exit |
-| BinanceFuturesEngine | Binance USDM | Futures USDT (live, 3x) | Long/short, ML filter, SL/TP/trailing, WebSocket |
-| SurgeEngine | Binance Surge | Futures USDT (3x) | Volume spike detection, short-term trades, shares futures PM |
+| BinanceFuturesEngine / FuturesEngineV2 | Binance USDM | Futures USDT | Main engine available but can be disabled independently |
+| DonchianFuturesBiEngine | Binance USDM | Futures USDT (live R&D) | Daily breakout long/short, grouped trade journal, shared R&D coordinator |
+| PairsTradingLiveEngine | Binance USDM | Futures USDT (live R&D) | Delta-neutral pair trading, grouped trade journal, shared R&D coordinator |
+| SurgeEngine | Binance Surge | Futures USDT | Volume spike detection, short-term trades, shares futures PM |
+
+### Research Pipeline
+
+- `GET /api/v1/research/overview` returns the R&D candidate board.
+- `GET /api/v1/research/stages` returns the approved/effective stage state.
+- `GET /api/v1/research/stage-history` returns recent promotion/demotion approvals.
+- `PUT /api/v1/research/candidates/{candidate_key}/stage` is the approval path for promotion/demotion.
+- `GET /api/v1/research/auto-review/status` returns auto-review cache readiness and refresh age.
+- Auto review is refreshed in the background and cached, not recomputed on every request.
+- Cold start can briefly return `pending` until the first background refresh finishes.
+- `auto_review` only recommends. Actual live execution permission follows the approved effective stage.
+- Execution is hard-gated by stage for dedicated R&D engines:
+  - `research`, `candidate`, `shadow`, `hold`: no live order execution
+  - `live_rnd`, `production`: live execution allowed
+- `Pairs Trading` and `Donchian Futures Bi` include live execution metrics in `auto_review`.
+- Shared futures R&D risk is managed by `GET /api/v1/engine/futures-rnd/status`.
+- Dashboard overview now includes:
+  - `트레이딩 대상 잔고`: separated spot/futures account and live R&D capital/trade status
+  - `R&D 파이프라인`: grouped trade summaries for `Pairs` and `Donchian Futures`
+  - `메인 엔진 제어`: only controls `binance_spot` / `binance_futures` main engines, not the R&D engines
+- Dashboard tabs are grouped by intent:
+  - `개요`: current engines and capital allocation
+  - `실거래`: trade history, portfolio, grouped trades, daily PnL
+  - `R&D`: candidate board and grouped trades
+  - `운영 로그`: engine live feed, agent panel, system events
+  - `고급`: signal log, strategy performance, rotation, extra stats
+- Heavy dashboard panels are lazy-loaded by tab to keep the initial bundle smaller.
+- `실거래` now includes grouped-trade KPI cards for `Pairs` and `Donchian Futures` with `today / 7d / 30d` period switching.
+- `R&D` now includes promotion hints with direct actions to the relevant `실거래` or `운영 로그` tab for next verification.
+- `R&D` also shows `catalog/effective stage`, `stage source`, approval note, and an inline approval form with recent stage history.
 
 ### Strategies
 
@@ -142,10 +174,22 @@ curl -X POST "http://localhost:8000/api/v1/engine/start?exchange=binance_futures
 # 바이낸스 현물 엔진 시작
 curl -X POST "http://localhost:8000/api/v1/engine/start?exchange=binance_spot"
 
-# 선물 엔진 중지 (포지션 있으면 경고)
+# 메인 선물 엔진 중지 (포지션 있으면 경고)
 curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures"
 # 강제 중지
 curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures&force=true"
+```
+
+For dedicated research engines, `POST /api/v1/engine/start` is blocked unless the candidate is approved to `live_rnd` or `production`.
+
+R&D futures engines are normally controlled by `.env` flags and auto-start on backend boot:
+
+```bash
+APP_DONCHIAN_FUTURES_BI_ENABLED=true
+APP_DONCHIAN_FUTURES_BI_CAPITAL_USDT=100
+APP_PAIRS_TRADING_LIVE_ENABLED=true
+APP_PAIRS_TRADING_LIVE_CAPITAL_USDT=50
+BINANCE_TRADING_ENABLED=false
 ```
 
 - Dashboard: http://localhost:3000
@@ -165,6 +209,10 @@ curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures&
 | `BINANCE_SPOT_TRADING_MODE` | `paper` / `live` (spot, independent) | `paper` |
 | `DB_URL` | Database connection string | PostgreSQL |
 | `BINANCE_DEFAULT_LEVERAGE` | Futures leverage | `3` |
+| `APP_DONCHIAN_FUTURES_BI_ENABLED` | Enable Donchian Futures Bi live R&D | `false` |
+| `APP_DONCHIAN_FUTURES_BI_CAPITAL_USDT` | Donchian Futures Bi capital budget | `100` |
+| `APP_PAIRS_TRADING_LIVE_ENABLED` | Enable Pairs live R&D | `false` |
+| `APP_PAIRS_TRADING_LIVE_CAPITAL_USDT` | Pairs live R&D capital budget | `50` |
 | `SURGE_TRADING_ENABLED` | Enable surge engine | `false` |
 | `DISCORD_BOT_ENABLED` | Enable Discord bot | `false` |
 | `LLM_ENABLED` | Enable AI agents | `false` |
@@ -175,8 +223,38 @@ curl -X POST "http://localhost:8000/api/v1/engine/stop?exchange=binance_futures&
 
 ```bash
 cd backend
-.venv/bin/python -m pytest tests/ -v   # 773 tests
+.venv/bin/python -m pytest tests/ -v
 # Tests use in-memory SQLite (aiosqlite)
+```
+
+## R&D APIs
+
+```bash
+# Candidate board + cached auto review
+curl -s "http://localhost:8000/api/v1/research/overview?include_auto_review=true"
+
+# Approved/effective stage state
+curl -s "http://localhost:8000/api/v1/research/stages"
+
+# Recent stage approval history
+curl -s "http://localhost:8000/api/v1/research/stage-history?limit=20"
+
+# Approve stage transition (example: pairs live_rnd -> shadow)
+curl -X PUT "http://localhost:8000/api/v1/research/candidates/pairs_trading_futures/stage" \
+  -H "Content-Type: application/json" \
+  -d '{"stage":"shadow","approved_by":"operator","note":"pause live execution for review"}'
+
+# Auto-review cache status
+curl -s "http://localhost:8000/api/v1/research/auto-review/status"
+
+# Shared futures R&D coordinator
+curl -s "http://localhost:8000/api/v1/engine/futures-rnd/status"
+
+# Pairs grouped trades
+curl -s "http://localhost:8000/api/v1/trades/pairs/groups"
+
+# Donchian futures grouped trades
+curl -s "http://localhost:8000/api/v1/trades/donchian-futures/groups"
 ```
 
 ---

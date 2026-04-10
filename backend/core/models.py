@@ -47,6 +47,7 @@ class Order(Base):
         Index("ix_orders_status", "status"),
         Index("ix_orders_strategy", "strategy_name"),
         Index("ix_orders_exchange_created", "exchange", "created_at"),
+        Index("ix_orders_trade_group", "exchange", "trade_group_id", "created_at"),
     )
 
     id = Column(Integer, primary_key=True)
@@ -78,6 +79,8 @@ class Order(Base):
     strategy_name = Column(String(50), nullable=False)
     signal_confidence = Column(Float)
     signal_reason = Column(Text)
+    trade_group_id = Column(String(50), nullable=True)
+    trade_group_type = Column(String(30), nullable=True)
     combined_score = Column(Float, nullable=True)
     contributing_strategies = Column(JSON, nullable=True)
 
@@ -253,6 +256,39 @@ class DailyPnL(Base):
     sell_count = Column(Integer, default=0)
     win_count = Column(Integer, default=0)
     loss_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=_utcnow)
+
+
+class ResearchCandidateState(Base):
+    __tablename__ = "research_candidate_states"
+    __table_args__ = (
+        UniqueConstraint("candidate_key", name="uq_research_candidate_state_key"),
+        Index("ix_research_candidate_state_stage", "approved_stage", "updated_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    candidate_key = Column(String(80), nullable=False)
+    approved_stage = Column(String(20), nullable=False)
+    approval_source = Column(String(20), nullable=False, default="manual")
+    approved_by = Column(String(80), nullable=True)
+    approval_note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class ResearchCandidateStageHistory(Base):
+    __tablename__ = "research_candidate_stage_history"
+    __table_args__ = (
+        Index("ix_research_candidate_stage_history_key_at", "candidate_key", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    candidate_key = Column(String(80), nullable=False)
+    from_stage = Column(String(20), nullable=True)
+    to_stage = Column(String(20), nullable=False)
+    approval_source = Column(String(20), nullable=False, default="manual")
+    approved_by = Column(String(80), nullable=True)
+    approval_note = Column(Text, nullable=True)
     created_at = Column(DateTime, default=_utcnow)
 
 

@@ -7,6 +7,7 @@ Claude API tool_use에 전달할 도구 스키마와,
 from __future__ import annotations
 
 import json
+import inspect
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -554,6 +555,18 @@ async def _handle_start_engine(ctx: ToolContext, input_data: dict) -> dict:
     eng = ctx.engine_registry.get_engine(exchange)
     if not eng:
         return {"error": f"거래소 '{exchange}' 미등록"}
+    stage_service = ctx.engine_registry.get_shared("research_stage_gate_service")
+    if stage_service is not None and hasattr(stage_service, "get_snapshot_for_venue"):
+        snapshot = stage_service.get_snapshot_for_venue(exchange)
+        if inspect.isawaitable(snapshot):
+            snapshot = await snapshot
+        if snapshot is not None and not snapshot.execution_allowed:
+            return {
+                "error": "stage_gate_blocked",
+                "exchange": exchange,
+                "candidate_key": snapshot.candidate_key,
+                "effective_stage": snapshot.effective_stage,
+            }
     if eng.is_running:
         return {"status": "already_running", "exchange": exchange}
     import asyncio

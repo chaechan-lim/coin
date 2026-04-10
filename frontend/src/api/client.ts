@@ -14,10 +14,22 @@ import type {
   RiskAlert,
   AgentLog,
   EngineStatus,
+  DonchianSpotStatus,
+  RndEngineStatus,
   RotationStatus,
   ServerEvent,
   CapitalTransaction,
   CapitalSummary,
+  ResearchOverview,
+  ResearchAutoReviewStatus,
+  ResearchStageHistoryEntry,
+  ResearchStageState,
+  ResearchStageUpdateRequest,
+  FuturesRndStatus,
+  PairsTradeGroup,
+  PairsTradeGroupDetail,
+  DonchianFuturesTradeGroup,
+  DonchianFuturesTradeGroupDetail,
 } from '../types'
 
 const api = axios.create({
@@ -54,6 +66,28 @@ export const getTradeDetail = (id: number) =>
 
 export const getTradeSummary = (period = '7d', exchange: ExchangeName = 'bithumb') =>
   api.get<TradeSummary>('/trades/summary', { params: { period, exchange } }).then((r) => r.data)
+
+export const getPairsTradeGroups = (params?: {
+  page?: number
+  size?: number
+  status?: 'open' | 'closed' | 'all'
+  exchange?: Extract<ExchangeName, 'binance_futures' | 'binance_spot'> | 'binance_pairs'
+}) => api.get<PairsTradeGroup[]>('/trades/pairs/groups', { params: { exchange: 'binance_pairs', ...params } }).then((r) => r.data)
+
+export const getDonchianFuturesTradeGroups = (params?: {
+  page?: number
+  size?: number
+  status?: 'open' | 'closed' | 'all'
+  exchange?: 'binance_donchian_futures'
+}) => api.get<DonchianFuturesTradeGroup[]>('/trades/donchian-futures/groups', { params: { exchange: 'binance_donchian_futures', ...params } }).then((r) => r.data)
+
+export const getPairsTradeGroupDetail = (tradeId: string, exchange: 'binance_pairs' = 'binance_pairs') =>
+  api.get<PairsTradeGroupDetail>(`/trades/pairs/groups/${tradeId}`, { params: { exchange } }).then((r) => r.data)
+
+export const getDonchianFuturesTradeGroupDetail = (
+  tradeId: string,
+  exchange: 'binance_donchian_futures' = 'binance_donchian_futures'
+) => api.get<DonchianFuturesTradeGroupDetail>(`/trades/donchian-futures/groups/${tradeId}`, { params: { exchange } }).then((r) => r.data)
 
 // ── Strategies ───────────────────────────────────────────────
 export const getStrategies = (exchange: ExchangeName = 'bithumb') =>
@@ -94,6 +128,33 @@ export const getRotationStatus = (exchange: ExchangeName = 'bithumb') =>
 
 export const getSurgeScanStatus = () =>
   api.get('/engine/surge-scan').then((r) => r.data)
+
+export const getFuturesRndStatus = () =>
+  api.get<FuturesRndStatus | { status: string }>('/engine/futures-rnd/status').then((r) => r.data)
+
+export const getPairsEngineStatus = () =>
+  api.get<RndEngineStatus>('/engine/pairs/status').then((r) => r.data)
+
+export const getDonchianEngineStatus = () =>
+  api.get<DonchianSpotStatus>('/engine/donchian/status').then((r) => r.data)
+
+export const getDonchianFuturesEngineStatus = () =>
+  api.get<RndEngineStatus>('/engine/donchian-futures/status').then((r) => r.data)
+
+export const getResearchOverview = () =>
+  api.get<ResearchOverview>('/research/overview', { params: { include_auto_review: true } }).then((r) => r.data)
+
+export const getResearchAutoReviewStatus = () =>
+  api.get<ResearchAutoReviewStatus>('/research/auto-review/status').then((r) => r.data)
+
+export const getResearchStages = () =>
+  api.get<ResearchStageState[]>('/research/stages').then((r) => r.data)
+
+export const getResearchStageHistory = (params?: { candidate_key?: string; limit?: number }) =>
+  api.get<ResearchStageHistoryEntry[]>('/research/stage-history', { params }).then((r) => r.data)
+
+export const updateResearchStage = (candidateKey: string, payload: ResearchStageUpdateRequest) =>
+  api.put<ResearchStageState>(`/research/candidates/${candidateKey}/stage`, payload).then((r) => r.data)
 
 // ── Agents ───────────────────────────────────────────────────
 export const getMarketAnalysis = (exchange: ExchangeName = 'bithumb') =>

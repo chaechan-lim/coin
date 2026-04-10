@@ -136,6 +136,7 @@ class BinanceConfig(BaseSettings):
 
 class BinanceTradingConfig(BaseSettings):
     """바이낸스 선물 전용 트레이딩 설정."""
+    enabled: bool = True  # 메인 선물 엔진 활성화 여부 (R&D futures 엔진과 분리)
     mode: str = "paper"  # "paper" or "live" (빗썸과 독립)
     evaluation_interval_sec: int = 300
     initial_balance_usdt: float = 1000.0
@@ -374,6 +375,21 @@ class AppConfig(BaseSettings):
     # 학술 검증: SSRN 2025 Zarattini, 약세장 alpha +44.71% / 180d
     donchian_daily_enabled: bool = False
     donchian_daily_capital_usdt: float = 200.0
+    donchian_futures_bi_enabled: bool = False
+    donchian_futures_bi_capital_usdt: float = 100.0
+    donchian_futures_bi_leverage: int = 2
+    pairs_trading_live_enabled: bool = False
+    pairs_trading_live_capital_usdt: float = 75.0
+    pairs_trading_live_leverage: int = 2
+    pairs_trading_live_coin_a: str = "BTC/USDT"
+    pairs_trading_live_coin_b: str = "ETH/USDT"
+    pairs_trading_live_lookback_hours: int = 336
+    pairs_trading_live_z_entry: float = 2.0
+    pairs_trading_live_z_exit: float = 0.5
+    pairs_trading_live_z_stop: float = 5.0
+    futures_rnd_global_capital_usdt: float = 150.0
+    futures_rnd_daily_loss_limit_pct: float = 0.05
+    futures_rnd_total_loss_limit_pct: float = 0.10
 
     model_config = {"env_prefix": "APP_"}
 

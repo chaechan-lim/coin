@@ -1,5 +1,12 @@
 // ── Exchange ─────────────────────────────────────────────────
-export type ExchangeName = 'binance_futures' | 'binance_spot' | 'binance_surge' | 'bithumb'
+export type ExchangeName =
+  | 'binance_futures'
+  | 'binance_spot'
+  | 'binance_surge'
+  | 'binance_donchian'
+  | 'binance_donchian_futures'
+  | 'binance_pairs'
+  | 'bithumb'
 
 export interface ExchangeInfo {
   exchanges: ExchangeName[]
@@ -18,11 +25,9 @@ export interface Position {
   total_invested?: number | null
   margin_used?: number | null
   entered_at?: string | null
-  // Futures-specific
   direction?: string | null
   leverage?: number | null
   liquidation_price?: number | null
-  // SL/TP target prices + tracker params
   stop_loss_price?: number | null
   take_profit_price?: number | null
   stop_loss_pct?: number | null
@@ -81,15 +86,12 @@ export interface Order {
   executed_quantity: number | null
   fee: number
   is_paper: boolean
-  // Futures-specific
   direction?: string | null
   leverage?: number | null
   margin_used?: number | null
-  // PnL (sell/close orders)
   entry_price?: number | null
   realized_pnl?: number | null
   realized_pnl_pct?: number | null
-  // Strategy attribution
   strategy_name: string
   signal_confidence: number | null
   signal_reason: string | null
@@ -108,6 +110,40 @@ export interface TradeSummary {
   losing_trades: number
   win_rate: number
   total_pnl: number
+}
+
+export interface PairsTradeGroup {
+  trade_id: string
+  pair_direction: string
+  status: string
+  symbols: string[]
+  opened_at: string
+  closed_at: string | null
+  realized_pnl: number
+  total_fees: number
+  order_ids: number[]
+}
+
+export interface PairsTradeGroupDetail extends PairsTradeGroup {
+  orders: Order[]
+  journal: ServerEvent[]
+}
+
+export interface DonchianFuturesTradeGroup {
+  trade_id: string
+  symbol: string
+  direction: string
+  status: string
+  opened_at: string
+  closed_at: string | null
+  realized_pnl: number
+  total_fees: number
+  order_ids: number[]
+}
+
+export interface DonchianFuturesTradeGroupDetail extends DonchianFuturesTradeGroup {
+  orders: Order[]
+  journal: ServerEvent[]
 }
 
 // ── Strategies ───────────────────────────────────────────────
@@ -145,6 +181,129 @@ export interface StrategyLog {
   logged_at: string
 }
 
+// ── Research ─────────────────────────────────────────────────
+export interface ResearchMetric {
+  source: string
+  computed_at: string
+  window_days: number
+  return_pct: number
+  sharpe: number
+  max_drawdown: number
+  trade_count: number | null
+  alpha_pct: number | null
+  extra?: Record<string, unknown> | null
+}
+
+export interface AutoReview {
+  candidate_key: string
+  decision: string
+  recommended_stage: string
+  summary: string
+  blockers: string[]
+  metrics: ResearchMetric[]
+}
+
+export interface ResearchCandidate {
+  key: string
+  title: string
+  market: string
+  directionality: string
+  stage: string
+  catalog_stage: string
+  stage_source: string
+  execution_allowed: boolean
+  venue: string
+  stage_managed: boolean
+  status: string
+  objective: string
+  rationale: string
+  recommended_next_step: string
+  approved_by?: string | null
+  approval_note?: string | null
+  approved_at?: string | null
+  is_live_engine_registered: boolean
+  is_live_engine_running: boolean
+  promotion_criteria: string[]
+  demotion_criteria: string[]
+  next_stages: string[]
+  auto_review?: AutoReview | null
+}
+
+export interface ResearchStageState {
+  candidate_key: string
+  title: string
+  venue: string
+  catalog_stage: string
+  effective_stage: string
+  approved_stage?: string | null
+  stage_source: string
+  execution_allowed: boolean
+  approved_by?: string | null
+  approval_note?: string | null
+  approved_at?: string | null
+}
+
+export interface ResearchStageUpdateRequest {
+  stage: string
+  approved_by: string
+  note?: string
+}
+
+export interface ResearchStageHistoryEntry {
+  id: number
+  candidate_key: string
+  title: string
+  from_stage?: string | null
+  to_stage: string
+  approval_source: string
+  approved_by?: string | null
+  approval_note?: string | null
+  created_at: string
+}
+
+export interface ResearchOverview {
+  generated_at: string
+  live_candidates: number
+  research_candidates: number
+  planned_candidates: number
+  recommended_focus: string
+  items: ResearchCandidate[]
+}
+
+export interface ResearchAutoReviewStatus {
+  ready: boolean
+  candidate_count?: number
+  total_candidates?: number
+  pending_candidates?: number
+  last_refresh_at?: string | null
+  refresh_interval_sec?: number
+  snapshot_age_sec?: number | null
+  status?: string
+}
+
+export interface FuturesRndEngineStatus {
+  capital_limit: number
+  confirmed_symbols: string[]
+  confirmed_margin: number
+  pending_margin: number
+  pending_symbols: string[]
+  cumulative_pnl: number
+  daily_pnl: number
+}
+
+export interface FuturesRndStatus {
+  global_capital_usdt: number
+  global_reserved_margin: number
+  global_available_margin: number
+  global_cumulative_pnl: number
+  global_daily_pnl: number
+  daily_loss_limit_pct: number
+  total_loss_limit_pct: number
+  entry_paused: boolean
+  reserved_symbols: Record<string, string[]>
+  engines: Record<string, FuturesRndEngineStatus>
+}
+
 // ── Agents ───────────────────────────────────────────────────
 export interface V2Regime {
   regime: string
@@ -162,7 +321,6 @@ export interface MarketAnalysis {
   recommended_weights: Record<string, number>
   reasoning: string
   v2_regime?: V2Regime
-  // COIN-53: 에이전트 비활성화 상태 표시
   disabled?: boolean
   disabled_reason?: string
 }
@@ -194,6 +352,42 @@ export interface EngineStatus {
   daily_trade_count: number
   strategies_active: string[]
   min_confidence?: number
+}
+
+export interface RndEngineStatus {
+  exchange: string
+  is_running: boolean
+  capital_usdt?: number
+  leverage?: number
+  tracked_coins?: string[]
+  positions?: unknown[]
+  position?: unknown | null
+  coordinator_enabled?: boolean
+  paused?: boolean
+  daily_paused?: boolean
+  available_margin?: number
+  daily_realized_pnl?: number
+  cumulative_pnl?: number
+  coin_a?: string
+  coin_b?: string
+  lookback_hours?: number
+  z_entry?: number
+  z_exit?: number
+  z_stop?: number
+  engine_conflict?: boolean
+}
+
+export interface DonchianSpotStatus {
+  exchange: string
+  is_running: boolean
+  coins: string[]
+  active_positions: number
+  positions: unknown[]
+  daily_pnl: number
+  cumulative_pnl: number
+  paused_total_loss: boolean
+  paused_daily_loss: boolean
+  initial_capital: number
 }
 
 // ── Rotation Monitor ────────────────────────────────────────
