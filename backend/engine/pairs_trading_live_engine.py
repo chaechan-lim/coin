@@ -511,6 +511,9 @@ class PairsTradingLiveEngine:
                 "entry_order_price_b": exec_price_b,
             },
         )
+        await emit_event("info", "engine",
+                         f"📊 Pairs {pair_direction}: {self._coin_a}-{self._coin_b}",
+                         detail=f"z={z:.2f} (진입 ±{self._z_entry:.1f} / 청산 ±{self._z_exit:.1f} / 손절 ±{self._z_stop:.1f})")
 
     async def _check_exit(self, signal: dict):
         pos = self._position

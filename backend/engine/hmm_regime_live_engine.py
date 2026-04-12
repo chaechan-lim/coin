@@ -273,8 +273,11 @@ class HMMRegimeLiveEngine:
             )
             await self._record_order("buy" if side == "long" else "sell",
                                       exec_price, exec_qty, reason=f"hmm_{side}_entry")
+            notional = exec_qty * exec_price
+            max_loss = self._initial_capital * MAX_TOTAL_LOSS_PCT
             await emit_event("info", "engine",
-                             f"{'📈' if side=='long' else '📉'} HMM {side}: {self._symbol} @ {exec_price:.2f}")
+                             f"{'📈' if side=='long' else '📉'} HMM {side}: {self._symbol} @ {exec_price:.2f}",
+                             detail=f"수량 {exec_qty:.6f} | 명목 {notional:.1f} USDT | 청산: regime 전환 시 | 최대손실 한도 -{max_loss:.0f} USDT")
         except Exception as e:
             logger.error("hmm_open_error", side=side, error=str(e))
 

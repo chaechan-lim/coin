@@ -350,8 +350,10 @@ class DonchianDailyEngine:
 
             await self._record_order(symbol, "buy", executed_price, executed_qty,
                                       reason=f"donchian_entry: signals={entry_signals}, atr={atr:.4f}")
+            sl_pct = abs(stop_loss - executed_price) / executed_price * 100
             await emit_event("info", "engine",
-                             f"📈 Donchian 매수: {symbol} {executed_qty:.4f} @ {executed_price:.2f} (SL {stop_loss:.2f})")
+                             f"📈 Donchian 매수: {symbol} {executed_qty:.4f} @ {executed_price:.2f}",
+                             detail=f"SL {stop_loss:.2f} (-{sl_pct:.1f}%) | 청산: N/2일 저가 이탈 | ATR {atr:.2f}")
             logger.info("donchian_entry_executed", symbol=symbol,
                         qty=executed_qty, price=executed_price, sl=stop_loss)
         except Exception as e:

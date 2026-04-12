@@ -221,8 +221,10 @@ class MomentumRotationLiveEngine:
             await self._record_order(symbol, "buy" if side == "long" else "sell",
                                       exec_price, exec_qty,
                                       reason=f"momentum_{side}_entry")
+            notional = exec_qty * exec_price
             await emit_event("info", "engine",
-                             f"{'📈' if side=='long' else '📉'} Momentum {side}: {symbol} @ {exec_price:.2f}")
+                             f"{'📈' if side=='long' else '📉'} Momentum {side}: {symbol} @ {exec_price:.2f}",
+                             detail=f"수량 {exec_qty:.6f} | 명목 {notional:.1f} USDT | 청산: 다음 주 리밸런싱")
         except Exception as e:
             logger.error("momentum_open_error", symbol=symbol, side=side, error=str(e))
 

@@ -211,8 +211,13 @@ class FearGreedDCAEngine:
                 )
 
             await self._record_order(symbol, "buy", exec_price, exec_qty, reason=f"fgdca_{reason}_buy")
+            holding = self._holdings.get(symbol)
+            total_qty = holding.quantity if holding else exec_qty
+            total_cost = holding.total_cost if holding else amount
+            avg = holding.avg_price if holding else exec_price
             await emit_event("info", "engine",
-                             f"🛒 DCA {reason} 매수: {symbol} ${amount:.0f} @ {exec_price:.2f}")
+                             f"🛒 DCA {reason} 매수: {symbol} ${amount:.0f} @ {exec_price:.2f}",
+                             detail=f"보유 {total_qty:.6f}개 | 평단 {avg:.2f} | 총투자 ${total_cost:.0f} | 매도: 탐욕(RSI>70) 시")
             logger.info("fgdca_buy", symbol=symbol, reason=reason, amount=round(amount, 2),
                         price=exec_price, qty=exec_qty)
         except Exception as e:

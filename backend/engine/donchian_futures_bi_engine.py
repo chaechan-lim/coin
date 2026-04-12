@@ -491,6 +491,11 @@ class DonchianFuturesBiEngine:
             detail=f"direction={direction} qty={round(filled_qty, 6)}",
             extra={"entry_price": round(exec_price, 6), "stop_price": round(stop_price, 6)},
         )
+        icon = "📈" if direction == "long" else "📉"
+        sl_pct = abs(stop_price - exec_price) / exec_price * 100
+        await emit_event("info", "engine",
+                         f"{icon} DonchianF {direction}: {symbol} @ {exec_price:.2f}",
+                         detail=f"SL {stop_price:.2f} (-{sl_pct:.1f}%) | 수량 {filled_qty:.6f} | 청산: N/2일 고저 회복")
 
     async def _check_exit(self, symbol: str):
         pos = self._positions.get(symbol)
