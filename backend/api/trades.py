@@ -48,6 +48,16 @@ def _parse_reason_tags(reason: str | None) -> dict[str, str]:
 
 
 def _order_to_response(o: Order) -> OrderResponse:
+    # R&D 엔진은 realized_pnl_pct를 안 채우는 경우가 있음 → 자동 계산
+    pnl = getattr(o, 'realized_pnl', None)
+    pnl_pct = getattr(o, 'realized_pnl_pct', None)
+    if pnl is not None and pnl != 0 and pnl_pct is None:
+        qty = o.executed_quantity or 0
+        px = o.executed_price or 0
+        cost = qty * px
+        if cost > 0:
+            pnl_pct = round(pnl / cost * 100, 2)
+
     return OrderResponse(
         id=o.id,
         exchange=o.exchange,
@@ -65,8 +75,8 @@ def _order_to_response(o: Order) -> OrderResponse:
         leverage=o.leverage,
         margin_used=o.margin_used,
         entry_price=getattr(o, 'entry_price', None),
-        realized_pnl=getattr(o, 'realized_pnl', None),
-        realized_pnl_pct=getattr(o, 'realized_pnl_pct', None),
+        realized_pnl=pnl,
+        realized_pnl_pct=pnl_pct,
         strategy_name=o.strategy_name,
         signal_confidence=o.signal_confidence,
         signal_reason=o.signal_reason,
