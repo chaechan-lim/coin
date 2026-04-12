@@ -227,6 +227,14 @@ class HMMRegimeLiveEngine:
 
             price = float(df["close"].iloc[-1])
 
+            state_name = {self._bullish_state: "bullish", self._bearish_state: "bearish",
+                          self._neutral_state: "neutral"}.get(state, f"unknown({state})")
+            desired_name = {1: "long", -1: "short", 0: "flat"}[desired]
+            current_name = {1: "long", -1: "short", 0: "flat"}[current]
+            logger.info("hmm_eval_tick", state=state_name, desired=desired_name,
+                        current=current_name, price=round(price, 2),
+                        pnl=round(self._cumulative_pnl, 2))
+
             # 포지션 전환
             if desired != current:
                 # 기존 청산
