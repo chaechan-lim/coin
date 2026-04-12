@@ -401,6 +401,10 @@ class AppConfig(BaseSettings):
     hmm_regime_live_capital_usdt: float = 100.0
     hmm_regime_live_leverage: int = 2
 
+    # Fear & Greed DCA (현물)
+    fear_greed_dca_enabled: bool = False
+    fear_greed_dca_capital_usdt: float = 200.0
+
     model_config = {"env_prefix": "APP_"}
 
 

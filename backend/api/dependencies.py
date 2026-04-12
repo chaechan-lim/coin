@@ -17,6 +17,7 @@ VALID_EXCHANGES = {
     "binance_pairs",
     "binance_momentum",
     "binance_hmm",
+    "binance_fgdca",
 }
 ExchangeNameType = Literal[
     "bithumb",
@@ -28,6 +29,7 @@ ExchangeNameType = Literal[
     "binance_pairs",
     "binance_momentum",
     "binance_hmm",
+    "binance_fgdca",
 ]
 
 

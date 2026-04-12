@@ -592,6 +592,24 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("donchian_daily_init_failed", error=str(e), exc_info=True)
 
+    # ── 7b-2b. Fear & Greed DCA (현물, 매주 월요일) ───────────
+    _fgdca_engine = None
+    if (getattr(config, 'fear_greed_dca_enabled', False)
+            and config.binance.enabled and binance_spot_exchange):
+        try:
+            from engine.fear_greed_dca_engine import FearGreedDCAEngine
+            fgdca_capital = float(getattr(config, 'fear_greed_dca_capital_usdt', 200.0))
+            _fgdca_engine = FearGreedDCAEngine(
+                config=config,
+                spot_exchange=spot_adapter,
+                market_data=spot_market_data,
+                initial_capital_usdt=fgdca_capital,
+            )
+            engine_registry.register("binance_fgdca", _fgdca_engine, None, None, None)
+            logger.info("fgdca_engine_ready", capital=fgdca_capital)
+        except Exception as e:
+            logger.error("fgdca_init_failed", error=str(e), exc_info=True)
+
     rd_futures_enabled = bool(
         getattr(config, "donchian_futures_bi_enabled", False)
         or getattr(config, "pairs_trading_live_enabled", False)
@@ -1149,6 +1167,8 @@ async def lifespan(app: FastAPI):
         auto_start_engines.append(("binance_spot", _binance_spot_engine))
     if _donchian_engine and not _donchian_engine.is_running:
         auto_start_engines.append(("binance_donchian", _donchian_engine))
+    if _fgdca_engine and not _fgdca_engine.is_running:
+        auto_start_engines.append(("binance_fgdca", _fgdca_engine))
     if _donchian_futures_engine and not _donchian_futures_engine.is_running:
         auto_start_engines.append(("binance_donchian_futures", _donchian_futures_engine))
     if _pairs_live_engine and not _pairs_live_engine.is_running:
@@ -1189,6 +1209,8 @@ async def lifespan(app: FastAPI):
         await _binance_spot_engine.stop()
     if _donchian_engine:
         await _donchian_engine.stop()
+    if _fgdca_engine:
+        await _fgdca_engine.stop()
     if _donchian_futures_engine:
         await _donchian_futures_engine.stop()
     if _pairs_live_engine:
