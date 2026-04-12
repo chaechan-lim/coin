@@ -15,6 +15,8 @@ VALID_EXCHANGES = {
     "binance_donchian",
     "binance_donchian_futures",
     "binance_pairs",
+    "binance_momentum",
+    "binance_hmm",
 }
 ExchangeNameType = Literal[
     "bithumb",
@@ -24,6 +26,8 @@ ExchangeNameType = Literal[
     "binance_donchian",
     "binance_donchian_futures",
     "binance_pairs",
+    "binance_momentum",
+    "binance_hmm",
 ]
 
 

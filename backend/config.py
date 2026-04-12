@@ -391,6 +391,16 @@ class AppConfig(BaseSettings):
     futures_rnd_daily_loss_limit_pct: float = 0.05
     futures_rnd_total_loss_limit_pct: float = 0.10
 
+    # Momentum Rotation (선물 Long/Short Equity)
+    momentum_rotation_live_enabled: bool = False
+    momentum_rotation_live_capital_usdt: float = 100.0
+    momentum_rotation_live_leverage: int = 2
+
+    # HMM Regime Detection (선물)
+    hmm_regime_live_enabled: bool = False
+    hmm_regime_live_capital_usdt: float = 100.0
+    hmm_regime_live_leverage: int = 2
+
     model_config = {"env_prefix": "APP_"}
 
 

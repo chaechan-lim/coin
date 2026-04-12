@@ -670,6 +670,50 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("pairs_live_init_failed", error=str(e), exc_info=True)
 
+    # ── 7b-5. Momentum Rotation (선물 Long/Short, 매주 리밸런싱) ──
+    _momentum_engine = None
+    if (config.momentum_rotation_live_enabled and config.binance.enabled
+            and binance_exchange and rd_futures_allowed):
+        try:
+            from engine.momentum_rotation_live_engine import MomentumRotationLiveEngine
+            _momentum_engine = MomentumRotationLiveEngine(
+                config=config,
+                futures_exchange=binance_exchange,
+                market_data=binance_market_data,
+                initial_capital_usdt=config.momentum_rotation_live_capital_usdt,
+                leverage=config.momentum_rotation_live_leverage,
+            )
+            if _futures_rnd_coordinator:
+                _momentum_engine.set_futures_rnd_coordinator(_futures_rnd_coordinator)
+            engine_registry.register("binance_momentum", _momentum_engine, None, None, None)
+            logger.info("momentum_rotation_engine_ready",
+                        capital=config.momentum_rotation_live_capital_usdt,
+                        leverage=config.momentum_rotation_live_leverage)
+        except Exception as e:
+            logger.error("momentum_rotation_init_failed", error=str(e), exc_info=True)
+
+    # ── 7b-6. HMM Regime Detection (선물, 매시간 평가) ──
+    _hmm_engine = None
+    if (config.hmm_regime_live_enabled and config.binance.enabled
+            and binance_exchange and rd_futures_allowed):
+        try:
+            from engine.hmm_regime_live_engine import HMMRegimeLiveEngine
+            _hmm_engine = HMMRegimeLiveEngine(
+                config=config,
+                futures_exchange=binance_exchange,
+                market_data=binance_market_data,
+                initial_capital_usdt=config.hmm_regime_live_capital_usdt,
+                leverage=config.hmm_regime_live_leverage,
+            )
+            if _futures_rnd_coordinator:
+                _hmm_engine.set_futures_rnd_coordinator(_futures_rnd_coordinator)
+            engine_registry.register("binance_hmm", _hmm_engine, None, None, None)
+            logger.info("hmm_regime_engine_ready",
+                        capital=config.hmm_regime_live_capital_usdt,
+                        leverage=config.hmm_regime_live_leverage)
+        except Exception as e:
+            logger.error("hmm_regime_init_failed", error=str(e), exc_info=True)
+
     # ── 7c. 서지 엔진 (조건부) — 선물 PM 잔고 통합 ─────────────
     if config.surge_trading.enabled and config.binance.enabled and binance_exchange:
         try:
@@ -1109,6 +1153,10 @@ async def lifespan(app: FastAPI):
         auto_start_engines.append(("binance_donchian_futures", _donchian_futures_engine))
     if _pairs_live_engine and not _pairs_live_engine.is_running:
         auto_start_engines.append(("binance_pairs", _pairs_live_engine))
+    if _momentum_engine and not _momentum_engine.is_running:
+        auto_start_engines.append(("binance_momentum", _momentum_engine))
+    if _hmm_engine and not _hmm_engine.is_running:
+        auto_start_engines.append(("binance_hmm", _hmm_engine))
     if _surge_engine and not _surge_engine.is_running:
         auto_start_engines.append(("binance_surge", _surge_engine))
     auto_start_allowed: dict[str, bool] = {}
@@ -1145,6 +1193,10 @@ async def lifespan(app: FastAPI):
         await _donchian_futures_engine.stop()
     if _pairs_live_engine:
         await _pairs_live_engine.stop()
+    if _momentum_engine:
+        await _momentum_engine.stop()
+    if _hmm_engine:
+        await _hmm_engine.stop()
     if _surge_engine:
         await _surge_engine.stop()
     if exchange:
