@@ -56,10 +56,16 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
   const [expanded, setExpanded] = useState(false)
   const side = order.side === 'buy'
   const price = order.executed_price ?? order.requested_price ?? 0
-  const isFutures = !!order.direction
-  const dirLabel = order.direction === 'short' ? 'SHORT' : 'LONG'
-  const dirColor = order.direction === 'short' ? 'text-sell' : 'text-buy'
-  // 청산 주문: 롱→sell, 숏→buy(close). realized_pnl이 있으면 청산 주문
+  // R&D 엔진은 direction 미설정 — signal_reason에서 추론
+  const reason = order.signal_reason ?? ''
+  const inferredDirection = reason.includes('long') ? 'long' : reason.includes('short') ? 'short' : order.direction
+  const isEntry = reason.includes('entry')
+  const isExit = reason.includes('exit')
+  const isFutures = !!inferredDirection || !!order.direction
+  const dirLabel = (inferredDirection ?? order.direction) === 'short' ? 'SHORT' : 'LONG'
+  const dirColor = (inferredDirection ?? order.direction) === 'short' ? 'text-sell' : 'text-buy'
+  const actionLabel = isEntry ? '진입' : isExit ? '청산' : (side ? '매수' : '매도')
+  // 청산 주문: realized_pnl이 있으면 청산 주문
   const hasPnl = order.realized_pnl_pct != null
   // realized_pnl_pct는 raw 가격변동% (DB 저장값). 레버리지 선물은 레버리지를 곱해 수익률로 표시.
   const displayPnlPct = hasPnl ? order.realized_pnl_pct! * (order.leverage ?? 1) : null
@@ -75,7 +81,7 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
           <div className="flex items-center gap-3">
             {isFutures ? (
               <span className={`text-sm font-bold ${dirColor}`}>
-                {order.direction === 'short' ? '▼ SHORT' : '▲ LONG'}
+                {dirLabel === 'SHORT' ? '▼' : '▲'} {dirLabel} {actionLabel}
               </span>
             ) : (
               <span className={`text-sm font-bold ${side ? 'text-buy' : 'text-sell'}`}>
@@ -109,7 +115,7 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
             <div className="flex items-center gap-2">
               {isFutures ? (
                 <span className={`text-sm font-bold ${dirColor}`}>
-                  {order.direction === 'short' ? '▼ SHORT' : '▲ LONG'}
+                  {dirLabel === 'SHORT' ? '▼' : '▲'} {dirLabel} {actionLabel}
                 </span>
               ) : (
                 <span className={`text-sm font-bold ${side ? 'text-buy' : 'text-sell'}`}>
