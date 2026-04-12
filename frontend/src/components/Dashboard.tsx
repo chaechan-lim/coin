@@ -193,7 +193,7 @@ export function Dashboard() {
         <Suspense fallback={<PanelFallback />}>
           {tab === 'overview' && (
             <>
-              <RndOverview />
+              <RndOverview market={exchange === 'binance_spot' ? 'spot' : exchange === 'binance_futures' ? 'futures' : 'all'} />
               <EngineControl liveEvents={liveEvents} exchange={exchange} />
               <TradingAccountOverview />
             </>
@@ -201,9 +201,9 @@ export function Dashboard() {
 
           {tab === 'live' && (
             <>
+              <RndOverview market={exchange === 'binance_spot' ? 'spot' : 'futures'} />
               <LiveTradeGroups exchange={exchange} />
               <TradeHistory exchange={exchange} />
-              <PortfolioSummary exchange={exchange} />
               <PortfolioChart exchange={exchange} />
               <DailyPnLStats exchange={exchange} />
             </>

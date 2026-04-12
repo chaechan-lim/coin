@@ -1,5 +1,9 @@
+import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getRndOverview } from '../api/client'
+
+const SPOT_ENGINES = new Set(['binance_donchian', 'binance_fgdca'])
+const FUTURES_ENGINES = new Set(['binance_donchian_futures', 'binance_pairs', 'binance_momentum', 'binance_hmm'])
 
 interface RndEngine {
   name: string
@@ -40,46 +44,70 @@ function pnlColor(v: number) {
   return 'text-gray-400'
 }
 
-export function RndOverview() {
+export function RndOverview({ market }: { market?: 'spot' | 'futures' | 'all' }) {
   const { data, isLoading } = useQuery<RndOverviewData>({
     queryKey: ['rnd', 'overview'],
     queryFn: getRndOverview,
     refetchInterval: 15_000,
   })
 
-  if (isLoading || !data) {
+  const filtered = useMemo(() => {
+    if (!data) return null
+    const engines = data.engines.filter((e) => {
+      if (market === 'spot') return SPOT_ENGINES.has(e.exchange)
+      if (market === 'futures') return FUTURES_ENGINES.has(e.exchange)
+      return true
+    })
+    const total_capital = engines.reduce((s, e) => s + e.capital, 0)
+    const total_pnl = engines.reduce((s, e) => s + e.cumulative_pnl, 0)
+    const total_positions = engines.reduce((s, e) => s + e.positions.length, 0)
+    return {
+      ...data,
+      engines,
+      total_capital,
+      total_cumulative_pnl: total_pnl,
+      total_pnl_pct: total_capital > 0 ? (total_pnl / total_capital) * 100 : 0,
+      total_positions,
+    }
+  }, [data, market])
+
+  if (isLoading || !filtered) {
     return <div className="rounded-xl border border-gray-700 bg-gray-800 p-4 text-sm text-gray-500">R&D 로딩 중...</div>
   }
+
+  if (filtered.engines.length === 0) return null
+
+  const label = market === 'spot' ? '현물' : market === 'futures' ? '선물' : '전체'
 
   return (
     <div className="space-y-3">
       {/* 요약 바 */}
       <div className="flex flex-wrap gap-4 rounded-xl border border-gray-700 bg-gray-800 px-4 py-3">
         <div>
-          <div className="text-[11px] uppercase text-gray-500">총 자본</div>
-          <div className="text-lg font-bold text-white">{data.total_capital.toFixed(0)} USDT</div>
+          <div className="text-[11px] uppercase text-gray-500">{label} R&D 자본</div>
+          <div className="text-lg font-bold text-white">{filtered.total_capital.toFixed(0)} USDT</div>
         </div>
         <div>
-          <div className="text-[11px] uppercase text-gray-500">총 수익</div>
-          <div className={`text-lg font-bold ${pnlColor(data.total_cumulative_pnl)}`}>
-            {formatPnl(data.total_cumulative_pnl)} ({data.total_pnl_pct.toFixed(2)}%)
+          <div className="text-[11px] uppercase text-gray-500">수익</div>
+          <div className={`text-lg font-bold ${pnlColor(filtered.total_cumulative_pnl)}`}>
+            {formatPnl(filtered.total_cumulative_pnl)} ({filtered.total_pnl_pct.toFixed(2)}%)
           </div>
         </div>
         <div>
-          <div className="text-[11px] uppercase text-gray-500">보유 포지션</div>
-          <div className="text-lg font-bold text-white">{data.total_positions}건</div>
+          <div className="text-[11px] uppercase text-gray-500">포지션</div>
+          <div className="text-lg font-bold text-white">{filtered.total_positions}건</div>
         </div>
         <div>
           <div className="text-[11px] uppercase text-gray-500">엔진</div>
           <div className="text-lg font-bold text-white">
-            {data.engines.filter((e) => e.running && !e.paused).length}/{data.engines.length} 활성
+            {filtered.engines.filter((e) => e.running && !e.paused).length}/{filtered.engines.length} 활성
           </div>
         </div>
       </div>
 
       {/* 전략별 카드 */}
       <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-        {data.engines.map((eng) => {
+        {filtered.engines.map((eng) => {
           const pnlPct = eng.capital > 0 ? (eng.cumulative_pnl / eng.capital) * 100 : 0
           return (
             <div
