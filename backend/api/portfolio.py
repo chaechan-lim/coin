@@ -109,13 +109,91 @@ async def _merge_surge_positions(summary: dict, session: AsyncSession) -> dict:
     return summary
 
 
+_RND_FUTURES_ENGINES = ("binance_donchian_futures", "binance_pairs", "binance_momentum", "binance_hmm")
+_RND_SPOT_ENGINES = ("binance_donchian", "binance_fgdca")
+
+
+def _merge_rnd_positions(summary: dict, engine_names: tuple[str, ...]) -> dict:
+    """R&D 엔진의 get_status()에서 포지션 정보를 수집하여 병합."""
+    for eng_name in engine_names:
+        eng = engine_registry.get_engine(eng_name)
+        if eng is None or not hasattr(eng, "get_status"):
+            continue
+        try:
+            status = eng.get_status()
+        except Exception:
+            continue
+
+        # 포지션 목록 추출 (엔진마다 형태가 다름)
+        positions_raw = status.get("positions") or []
+        if isinstance(positions_raw, dict):
+            # HMM 단일 포지션
+            pos = status.get("position")
+            positions_raw = [pos] if pos else []
+
+        for p in positions_raw:
+            if not isinstance(p, dict):
+                continue
+            symbol = p.get("symbol", "")
+            entry = p.get("entry_price") or p.get("entry") or 0
+            qty = p.get("quantity") or p.get("qty") or 0
+            side = p.get("side") or p.get("direction") or "long"
+            if qty <= 0 and entry <= 0:
+                continue
+
+            summary["positions"].append({
+                "symbol": symbol,
+                "quantity": qty,
+                "average_buy_price": entry,
+                "current_price": entry,  # 정확한 현재가는 없으므로 entry 사용
+                "current_value": 0,
+                "unrealized_pnl": 0,
+                "unrealized_pnl_pct": 0,
+                "total_invested": qty * entry if entry > 0 else 0,
+                "direction": side,
+                "leverage": status.get("leverage", 1),
+                "is_surge": False,
+                "is_rnd": True,
+                "rnd_engine": eng_name,
+            })
+
+        # 누적 PnL 병합
+        cum_pnl = status.get("cumulative_pnl", 0)
+        summary["realized_pnl"] = round(summary.get("realized_pnl", 0) + cum_pnl, 2)
+
+    return summary
+
+
 @router.get("/summary", response_model=PortfolioSummaryResponse)
 async def get_portfolio_summary(
     exchange: ExchangeNameType = Query("bithumb"),
     session: AsyncSession = Depends(get_db),
 ):
     pm = _get_pm(exchange)
+
+    # PM이 없어도 R&D 엔진 포지션은 보여줌
     if not pm:
+        if exchange == "binance_futures":
+            # R&D 선물 엔진 포지션 수집
+            summary = {
+                "exchange": exchange, "total_value_krw": 0, "cash_balance_krw": 0,
+                "invested_value_krw": 0, "initial_balance_krw": 0,
+                "realized_pnl": 0, "unrealized_pnl": 0, "total_pnl": 0, "total_pnl_pct": 0,
+                "total_fees": 0, "trade_count": 0, "peak_value": 0, "drawdown_pct": 0,
+                "positions": [],
+            }
+            summary = _merge_rnd_positions(summary, _RND_FUTURES_ENGINES)
+            return PortfolioSummaryResponse(**summary)
+        elif exchange == "binance_spot":
+            summary = {
+                "exchange": exchange, "total_value_krw": 0, "cash_balance_krw": 0,
+                "invested_value_krw": 0, "initial_balance_krw": 0,
+                "realized_pnl": 0, "unrealized_pnl": 0, "total_pnl": 0, "total_pnl_pct": 0,
+                "total_fees": 0, "trade_count": 0, "peak_value": 0, "drawdown_pct": 0,
+                "positions": [],
+            }
+            summary = _merge_rnd_positions(summary, _RND_SPOT_ENGINES)
+            return PortfolioSummaryResponse(**summary)
         return PortfolioSummaryResponse(
             exchange=exchange,
             total_value_krw=0, cash_balance_krw=0, invested_value_krw=0,
@@ -124,11 +202,15 @@ async def get_portfolio_summary(
             total_fees=0, trade_count=0,
             peak_value=0, drawdown_pct=0, positions=[],
         )
+
     summary = await pm.get_portfolio_summary(session)
 
-    # 선물 조회 시 서지 포지션 병합
+    # 선물 조회 시 서지 + R&D 포지션 병합
     if exchange == "binance_futures":
         summary = await _merge_surge_positions(summary, session)
+        summary = _merge_rnd_positions(summary, _RND_FUTURES_ENGINES)
+    elif exchange == "binance_spot":
+        summary = _merge_rnd_positions(summary, _RND_SPOT_ENGINES)
 
     return PortfolioSummaryResponse(**summary)
 
