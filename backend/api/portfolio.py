@@ -126,10 +126,10 @@ def _merge_rnd_positions(summary: dict, engine_names: tuple[str, ...]) -> dict:
 
         # 포지션 목록 추출 (엔진마다 형태가 다름)
         positions_raw = status.get("positions") or []
-        if isinstance(positions_raw, dict):
-            # HMM 단일 포지션
-            pos = status.get("position")
-            positions_raw = [pos] if pos else []
+        # HMM 등 단일 포지션: "position" (단수) 키
+        single_pos = status.get("position")
+        if single_pos and isinstance(single_pos, dict):
+            positions_raw = [single_pos]
 
         for p in positions_raw:
             if not isinstance(p, dict):
