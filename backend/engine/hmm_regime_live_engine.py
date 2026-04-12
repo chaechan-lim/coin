@@ -33,7 +33,7 @@ logger = structlog.get_logger(__name__)
 MAX_TOTAL_LOSS_PCT = 0.10
 MAX_DAILY_LOSS_PCT = 0.05
 MIN_NOTIONAL = 10
-TRAIN_HOURS = 24 * 60  # 60일 학습
+TRAIN_HOURS = 24 * 30  # 30일 학습 (720h, MarketDataService 1000캔들 한도 내)
 REFIT_INTERVAL_HOURS = 24  # 매일 refit
 EVAL_INTERVAL_HOURS = 1  # 매시간 predict
 
