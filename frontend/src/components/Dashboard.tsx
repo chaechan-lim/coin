@@ -18,6 +18,7 @@ const StrategyPerformance = lazy(() => import('./StrategyPerformance').then((m) 
 const RotationMonitor = lazy(() => import('./RotationMonitor').then((m) => ({ default: m.RotationMonitor })))
 const DailyPnLStats = lazy(() => import('./DailyPnLStats').then((m) => ({ default: m.DailyPnLStats })))
 const SystemLog = lazy(() => import('./SystemLog').then((m) => ({ default: m.SystemLog })))
+const RndOverview = lazy(() => import('./RndOverview').then((m) => ({ default: m.RndOverview })))
 
 const TABS = [
   { id: 'overview', label: '개요', description: '현재 어떤 엔진이 돌고 있고, 어디에 얼마를 배정했는지 한 번에 봅니다.' },
@@ -192,6 +193,7 @@ export function Dashboard() {
         <Suspense fallback={<PanelFallback />}>
           {tab === 'overview' && (
             <>
+              <RndOverview />
               <EngineControl liveEvents={liveEvents} exchange={exchange} />
               <TradingAccountOverview />
             </>

@@ -150,6 +150,9 @@ export const getHMMEngineStatus = () =>
 export const getFGDCAEngineStatus = () =>
   api.get<RndEngineStatus>('/engine/status', { params: { exchange: 'binance_fgdca' } }).then((r) => r.data)
 
+export const getRndOverview = () =>
+  api.get<any>('/engine/rnd/overview').then((r) => r.data)
+
 export const getResearchOverview = () =>
   api.get<ResearchOverview>('/research/overview', { params: { include_auto_review: true } }).then((r) => r.data)
 

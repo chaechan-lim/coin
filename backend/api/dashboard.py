@@ -343,6 +343,76 @@ async def update_research_stage(candidate_key: str, payload: ResearchStageUpdate
     )
 
 
+@router.get("/engine/rnd/overview")
+async def get_rnd_overview():
+    """R&D 전략 전체 현황 — 한눈에 보기."""
+    engines_info = []
+    rnd_names = [
+        ("Donchian Spot", "binance_donchian"),
+        ("Donchian Futures", "binance_donchian_futures"),
+        ("Pairs Trading", "binance_pairs"),
+        ("Momentum Rotation", "binance_momentum"),
+        ("HMM Regime", "binance_hmm"),
+        ("Fear & Greed DCA", "binance_fgdca"),
+    ]
+    for label, name in rnd_names:
+        eng = _get_engine(name)
+        if eng is None:
+            continue
+        status = eng.get_status() if hasattr(eng, "get_status") else {}
+        # 포지션 정리
+        positions = []
+        raw_positions = status.get("positions") or []
+        single = status.get("position")
+        if single and isinstance(single, dict):
+            raw_positions = [single]
+        for p in raw_positions:
+            if isinstance(p, dict):
+                positions.append({
+                    "symbol": p.get("symbol", ""),
+                    "side": p.get("side") or p.get("direction", ""),
+                    "entry": p.get("entry_price") or p.get("entry", 0),
+                    "qty": p.get("quantity") or p.get("qty", 0),
+                })
+        # holdings (DCA)
+        holdings = status.get("holdings")
+        if holdings and isinstance(holdings, dict):
+            for sym, h in holdings.items():
+                positions.append({
+                    "symbol": sym,
+                    "side": "long",
+                    "entry": h.get("avg_price", 0),
+                    "qty": h.get("qty", 0),
+                })
+
+        engines_info.append({
+            "name": label,
+            "exchange": name,
+            "running": status.get("is_running", eng.is_running),
+            "paused": status.get("paused") or status.get("paused_total_loss", False),
+            "capital": status.get("capital_usdt") or status.get("initial_capital", 0),
+            "cumulative_pnl": status.get("cumulative_pnl", 0),
+            "daily_pnl": status.get("daily_pnl") or status.get("daily_realized_pnl", 0),
+            "positions": positions,
+            "leverage": status.get("leverage", 1),
+            "idle_reason": status.get("recent_idle_reason"),
+            "last_evaluated_at": status.get("last_evaluated_at"),
+            "next_evaluation_at": status.get("next_evaluation_at"),
+        })
+
+    total_capital = sum(e["capital"] for e in engines_info)
+    total_pnl = sum(e["cumulative_pnl"] for e in engines_info)
+    total_positions = sum(len(e["positions"]) for e in engines_info)
+
+    return {
+        "total_capital": round(total_capital, 2),
+        "total_cumulative_pnl": round(total_pnl, 2),
+        "total_pnl_pct": round(total_pnl / total_capital * 100, 2) if total_capital > 0 else 0,
+        "total_positions": total_positions,
+        "engines": engines_info,
+    }
+
+
 @router.post("/engine/donchian/evaluate")
 async def evaluate_donchian_now():
     """Donchian Daily 엔진 즉시 평가 트리거 (테스트/디버그용)."""
