@@ -4,6 +4,9 @@ import {
   getDonchianFuturesTradeGroupDetail,
   getDonchianFuturesTradeGroups,
   getFuturesRndStatus,
+  getMomentumEngineStatus,
+  getHMMEngineStatus,
+  getFGDCAEngineStatus,
   getPairsTradeGroupDetail,
   getPairsTradeGroups,
   getResearchAutoReviewStatus,
@@ -774,6 +777,30 @@ export function ResearchMonitor({
     enabled,
   })
 
+  const { data: momentumStatus } = useQuery({
+    queryKey: ['engine', 'momentum', 'status'],
+    queryFn: () => getMomentumEngineStatus(),
+    staleTime: 10_000,
+    refetchInterval: 15_000,
+    enabled,
+  })
+
+  const { data: hmmStatus } = useQuery({
+    queryKey: ['engine', 'hmm', 'status'],
+    queryFn: () => getHMMEngineStatus(),
+    staleTime: 10_000,
+    refetchInterval: 15_000,
+    enabled,
+  })
+
+  const { data: fgdcaStatus } = useQuery({
+    queryKey: ['engine', 'fgdca', 'status'],
+    queryFn: () => getFGDCAEngineStatus(),
+    staleTime: 10_000,
+    refetchInterval: 15_000,
+    enabled,
+  })
+
   const { data: pairsGroups } = useQuery({
     queryKey: ['trades', 'pairs', 'groups', 'closed'],
     queryFn: () => getPairsTradeGroups({ status: 'all', size: 5 }),
@@ -872,21 +899,40 @@ export function ResearchMonitor({
         {overviewLoading ? (
           <div className="rounded-lg bg-gray-900/50 p-6 text-center text-sm text-gray-500">R&D 상태 로딩 중...</div>
         ) : (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-            <SummaryCard label="Live R&D" value={String(overview?.live_candidates ?? 0)} hint="현재 소액 실거래" />
-            <SummaryCard label="Research" value={String(overview?.research_candidates ?? 0)} hint={overview?.recommended_focus} />
-            <SummaryCard label="Planned" value={String(overview?.planned_candidates ?? 0)} hint="미연결 후보" />
-            <SummaryCard
-              label="Auto Review"
-              value={reviewStatus?.ready ? `${reviewStatus.candidate_count}/${reviewStatus.total_candidates}` : 'warming'}
-              hint={reviewStatus?.last_refresh_at ? `last ${formatTs(reviewStatus.last_refresh_at, 'MM/dd HH:mm:ss')}` : '첫 갱신 대기'}
-            />
-            <SummaryCard
-              label="Futures R&D"
-              value={rndStatus ? `${rndStatus.global_available_margin.toFixed(1)} USDT` : 'n/a'}
-              hint={rndStatus ? `reserved ${rndStatus.global_reserved_margin.toFixed(1)} / pause ${rndStatus.entry_paused ? 'on' : 'off'}` : 'coordinator 없음'}
-            />
-          </div>
+          <>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+              <SummaryCard label="Live R&D" value={String(overview?.live_candidates ?? 0)} hint="현재 소액 실거래" />
+              <SummaryCard label="Research" value={String(overview?.research_candidates ?? 0)} hint={overview?.recommended_focus} />
+              <SummaryCard label="Planned" value={String(overview?.planned_candidates ?? 0)} hint="미연결 후보" />
+              <SummaryCard
+                label="Auto Review"
+                value={reviewStatus?.ready ? `${reviewStatus.candidate_count}/${reviewStatus.total_candidates}` : 'warming'}
+                hint={reviewStatus?.last_refresh_at ? `last ${formatTs(reviewStatus.last_refresh_at, 'MM/dd HH:mm:ss')}` : '첫 갱신 대기'}
+              />
+              <SummaryCard
+                label="Futures R&D"
+                value={rndStatus ? `${rndStatus.global_available_margin.toFixed(1)} USDT` : 'n/a'}
+                hint={rndStatus ? `reserved ${rndStatus.global_reserved_margin.toFixed(1)} / pause ${rndStatus.entry_paused ? 'on' : 'off'}` : 'coordinator 없음'}
+              />
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-3">
+              <SummaryCard
+                label="Momentum Rotation"
+                value={momentumStatus?.is_running ? '🟢 running' : '⏸ stopped'}
+                hint={`PnL ${(momentumStatus as any)?.cumulative_pnl?.toFixed(2) ?? '0.00'} / ${(momentumStatus as any)?.daily_trade_count ?? 0} trades today`}
+              />
+              <SummaryCard
+                label="HMM Regime"
+                value={hmmStatus?.is_running ? '🟢 running' : '⏸ stopped'}
+                hint={`PnL ${(hmmStatus as any)?.cumulative_pnl?.toFixed(2) ?? '0.00'} / ${(hmmStatus as any)?.daily_trade_count ?? 0} trades today`}
+              />
+              <SummaryCard
+                label="Fear & Greed DCA"
+                value={fgdcaStatus?.is_running ? '🟢 running' : '⏸ stopped'}
+                hint={`PnL ${(fgdcaStatus as any)?.cumulative_pnl?.toFixed(2) ?? '0.00'} / ${(fgdcaStatus as any)?.daily_trade_count ?? 0} trades today`}
+              />
+            </div>
+          </>
         )}
       </div>
 

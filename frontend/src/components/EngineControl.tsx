@@ -86,6 +86,27 @@ export function EngineControl({ liveEvents, exchange = 'bithumb' }: { liveEvents
     enabled: isFutures,
   })
 
+  const { data: momentumStatus } = useQuery({
+    queryKey: ['engine', 'status', 'binance_momentum'],
+    queryFn: () => getEngineStatus('binance_momentum' as ExchangeName),
+    refetchInterval: 10_000,
+    enabled: isFutures,
+  })
+
+  const { data: hmmStatus } = useQuery({
+    queryKey: ['engine', 'status', 'binance_hmm'],
+    queryFn: () => getEngineStatus('binance_hmm' as ExchangeName),
+    refetchInterval: 10_000,
+    enabled: isFutures,
+  })
+
+  const { data: fgdcaStatus } = useQuery({
+    queryKey: ['engine', 'status', 'binance_fgdca'],
+    queryFn: () => getEngineStatus('binance_fgdca' as ExchangeName),
+    refetchInterval: 10_000,
+    enabled: isSpot,
+  })
+
   const startMut = useMutation({
     mutationFn: () => startEngine(exchange),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['engine'] }),
@@ -210,6 +231,16 @@ export function EngineControl({ liveEvents, exchange = 'bithumb' }: { liveEvents
                 { label: '누적 손익', value: formatSignedAmount(donchianSpotStatus?.cumulative_pnl), tone: signedTone(donchianSpotStatus?.cumulative_pnl ?? 0) },
               ]}
             />
+            <StatusCard
+              title="Fear & Greed DCA"
+              badge={fgdcaStatus?.is_running ? 'started' : 'stopped'}
+              badgeTone={fgdcaStatus?.is_running ? 'green' : 'gray'}
+              subtitle="200 USDT · BTC/ETH · 매주 월요일"
+              emphasis="primary"
+              metrics={[
+                { label: '오늘 거래', value: `${fgdcaStatus?.daily_trade_count ?? 0}건` },
+              ]}
+            />
           </div>
         </div>
       )}
@@ -264,6 +295,26 @@ export function EngineControl({ liveEvents, exchange = 'bithumb' }: { liveEvents
                 { label: '오늘 거래', value: `${pairsTradeSummary?.total_trades ?? 0}건` },
                 { label: '가용 마진', value: formatUsdtValue(pairsStatus?.available_margin) },
                 { label: '일일 손익', value: formatSignedAmount(pairsStatus?.daily_realized_pnl), tone: signedTone(pairsStatus?.daily_realized_pnl ?? 0) },
+              ]}
+            />
+            <StatusCard
+              title="Momentum Rotation"
+              badge={momentumStatus?.is_running ? 'started' : 'stopped'}
+              badgeTone={momentumStatus?.is_running ? 'green' : 'gray'}
+              subtitle="100 USDT · 2x · 매주 수요일"
+              emphasis="primary"
+              metrics={[
+                { label: '오늘 거래', value: `${momentumStatus?.daily_trade_count ?? 0}건` },
+              ]}
+            />
+            <StatusCard
+              title="HMM Regime"
+              badge={hmmStatus?.is_running ? 'started' : 'stopped'}
+              badgeTone={hmmStatus?.is_running ? 'green' : 'gray'}
+              subtitle="100 USDT · 2x · BTC 매시간"
+              emphasis="primary"
+              metrics={[
+                { label: '오늘 거래', value: `${hmmStatus?.daily_trade_count ?? 0}건` },
               ]}
             />
           </div>

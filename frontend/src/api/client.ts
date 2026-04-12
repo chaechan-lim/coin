@@ -141,6 +141,15 @@ export const getDonchianEngineStatus = () =>
 export const getDonchianFuturesEngineStatus = () =>
   api.get<RndEngineStatus>('/engine/donchian-futures/status').then((r) => r.data)
 
+export const getMomentumEngineStatus = () =>
+  api.get<RndEngineStatus>('/engine/status', { params: { exchange: 'binance_momentum' } }).then((r) => r.data)
+
+export const getHMMEngineStatus = () =>
+  api.get<RndEngineStatus>('/engine/status', { params: { exchange: 'binance_hmm' } }).then((r) => r.data)
+
+export const getFGDCAEngineStatus = () =>
+  api.get<RndEngineStatus>('/engine/status', { params: { exchange: 'binance_fgdca' } }).then((r) => r.data)
+
 export const getResearchOverview = () =>
   api.get<ResearchOverview>('/research/overview', { params: { include_auto_review: true } }).then((r) => r.data)
 
