@@ -6,6 +6,7 @@ import {
   getFuturesRndStatus,
   getPairsEngineStatus,
   getPortfolioSummary,
+  getTrades,
   getTradeSummary,
   startEngine,
   stopEngine,
@@ -441,20 +442,7 @@ export function EngineControl({ liveEvents, exchange = 'bithumb' }: { liveEvents
         </div>
       )}
 
-      <div>
-        <div className="mb-1 text-xs text-gray-500">실시간 이벤트</div>
-        <div className="h-24 overflow-y-auto rounded-lg bg-gray-900 p-2 font-mono text-xs space-y-0.5">
-          {liveEvents.length === 0 ? (
-            <div className="text-gray-600">대기 중...</div>
-          ) : (
-            [...liveEvents].reverse().map((event, index) => (
-              <div key={index} className="text-gray-400">
-                {event}
-              </div>
-            ))
-          )}
-        </div>
-      </div>
+      <RecentRndTrades />
     </div>
   )
 }
@@ -582,4 +570,64 @@ function formatPairLabel(coinA?: string, coinB?: string): string {
 function countReservedSymbols(status: FuturesRndStatus | null): number {
   if (!status) return 0
   return Object.values(status.reserved_symbols).reduce((sum, items) => sum + items.length, 0)
+}
+
+const ENGINE_LABELS: Record<string, string> = {
+  binance_hmm: 'HMM',
+  binance_momentum: 'Momentum',
+  binance_donchian: 'Donchian',
+  binance_donchian_futures: 'DonchianF',
+  binance_pairs: 'Pairs',
+  binance_fgdca: 'DCA',
+}
+
+function RecentRndTrades() {
+  // R&D 선물 + 현물 최근 거래
+  const { data: futuresTrades } = useQuery({
+    queryKey: ['trades', 'rnd', 'futures', 'recent'],
+    queryFn: () => getTrades({ page: 1, size: 10, exchange: 'binance_futures' as ExchangeName }),
+    refetchInterval: 15_000,
+  })
+  const { data: spotTrades } = useQuery({
+    queryKey: ['trades', 'rnd', 'spot', 'recent'],
+    queryFn: () => getTrades({ page: 1, size: 5, exchange: 'binance_spot' as ExchangeName }),
+    refetchInterval: 15_000,
+  })
+
+  const allTrades = [...(futuresTrades ?? []), ...(spotTrades ?? [])]
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    .slice(0, 10)
+
+  return (
+    <div>
+      <div className="mb-1 text-xs text-gray-500">최근 R&D 거래</div>
+      <div className="h-28 overflow-y-auto rounded-lg bg-gray-900 p-2 font-mono text-xs space-y-0.5">
+        {allTrades.length === 0 ? (
+          <div className="text-gray-600">거래 없음 — 시그널 대기 중</div>
+        ) : (
+          allTrades.map((t: any, i: number) => {
+            const time = new Date(t.created_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
+            const date = new Date(t.created_at).toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' })
+            const side = t.side === 'buy' ? '▲매수' : '▼매도'
+            const sideColor = t.side === 'buy' ? 'text-green-400' : 'text-red-400'
+            const engine = ENGINE_LABELS[t.exchange] || t.exchange
+            const pnl = t.realized_pnl && t.realized_pnl !== 0
+              ? ` PnL ${t.realized_pnl > 0 ? '+' : ''}${t.realized_pnl.toFixed(2)}`
+              : ''
+            const pnlColor = t.realized_pnl > 0 ? 'text-green-400' : t.realized_pnl < 0 ? 'text-red-400' : ''
+            return (
+              <div key={i} className="text-gray-400 flex gap-1">
+                <span className="text-gray-600">{date} {time}</span>
+                <span className={sideColor}>{side}</span>
+                <span>{t.symbol?.replace('/USDT', '')}</span>
+                <span className="text-gray-600">@{t.executed_price?.toFixed(1)}</span>
+                <span className="text-gray-600">[{engine}]</span>
+                {pnl && <span className={pnlColor}>{pnl}</span>}
+              </div>
+            )
+          })
+        )}
+      </div>
+    </div>
+  )
 }
