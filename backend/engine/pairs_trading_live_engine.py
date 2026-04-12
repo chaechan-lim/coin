@@ -867,11 +867,8 @@ class PairsTradingLiveEngine:
         pos_a = await self._exchange.fetch_futures_position(self._coin_a)
         pos_b = await self._exchange.fetch_futures_position(self._coin_b)
         if self._position is None:
-            if pos_a is None and pos_b is None:
-                return
-            self._paused = True
-            logger.error("pairs_live_reconcile_failed", reason="exchange_position_without_local_state")
-            await emit_event("error", "engine", "Pairs Trading 거래소 포지션이 DB 상태와 다릅니다. 수동 확인 전까지 정지.")
+            # 거래소에 포지션 존재해도 이 엔진이 소유하지 않으면 무시
+            # (다른 R&D 엔진이 같은 계좌에서 거래 중일 수 있음)
             return
         if not await self._exchange_position_matches():
             self._paused = True

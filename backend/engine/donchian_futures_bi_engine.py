@@ -720,7 +720,11 @@ class DonchianFuturesBiEngine:
             local_pos = self._positions.get(symbol)
             if exchange_pos is None and local_pos is None:
                 continue
-            if exchange_pos is None or local_pos is None:
+            # 거래소에 포지션 있지만 이 엔진이 소유 안 함 → 다른 엔진 포지션이므로 무시
+            if exchange_pos is not None and local_pos is None:
+                continue
+            # 이 엔진이 소유하지만 거래소에 없음 → 진짜 불일치
+            if exchange_pos is None and local_pos is not None:
                 mismatches.append(symbol)
                 continue
             exchange_side = "long" if exchange_pos.side == "long" else "short"
