@@ -413,6 +413,14 @@ async def get_rnd_overview():
     }
 
 
+@router.post("/engine/rnd/performance-review")
+async def trigger_rnd_performance_review():
+    """R&D 성과 분석 수동 실행."""
+    from services.rnd_performance_review import run_rnd_performance_review
+    result = await run_rnd_performance_review()
+    return result
+
+
 @router.post("/engine/donchian/evaluate")
 async def evaluate_donchian_now():
     """Donchian Daily 엔진 즉시 평가 트리거 (테스트/디버그용)."""

@@ -822,27 +822,25 @@ async def lifespan(app: FastAPI):
                 name="binance_risk_check",
                 seconds=300,
             )
-            # trade_review: 매도 5회마다 엔진에서 직접 트리거
-
-            # 성과 분석: 매일 21:30 KST (12:30 UTC)
-            _scheduler.add_cron_job(
-                _wrap(binance_coord.run_performance_analysis),
-                name="binance_futures_performance_analytics",
-                hour=12, minute=30,
-            )
-            # 전략 어드바이저: 매주 일요일 22:00 KST (13:00 UTC)
-            _scheduler.add_weekly_cron_job(
-                _wrap(binance_coord.run_strategy_advice),
-                name="binance_futures_strategy_advice",
-                day_of_week="sun", hour=13, minute=0,
-            )
+            # 메인 엔진 성과 분석/전략 어드바이저 — V2 비활성이므로 스킵
+            # (R&D 성과 분석은 별도 rnd_performance_review 스케줄에서 처리)
+            if config.futures_v2.enabled:
+                _scheduler.add_cron_job(
+                    _wrap(binance_coord.run_performance_analysis),
+                    name="binance_futures_performance_analytics",
+                    hour=12, minute=30,
+                )
+                _scheduler.add_weekly_cron_job(
+                    _wrap(binance_coord.run_strategy_advice),
+                    name="binance_futures_strategy_advice",
+                    day_of_week="sun", hour=13, minute=0,
+                )
 
     # 바이낸스 현물 스케줄 잡 추가
     if config.binance.spot_enabled and _binance_spot_engine:
         spot_coord = engine_registry.get_coordinator("binance_spot")
         spot_pm = engine_registry.get_portfolio_manager("binance_spot")
         if spot_coord and spot_pm:
-            # COIN-53: MarketAnalysisAgent 비활성화 — 에이전트 판정이 매매에 미사용
             if MARKET_ANALYSIS_ENABLED:
                 _scheduler.add_job(
                     _wrap(spot_coord.run_market_analysis),
@@ -857,20 +855,27 @@ async def lifespan(app: FastAPI):
                 name="binance_spot_risk_check",
                 seconds=300,
             )
-            # trade_review: 매도 5회마다 엔진에서 직접 트리거
+            # 메인 현물 엔진 성과 분석 — 비활성
+            if config.binance_spot_trading.enabled:
+                _scheduler.add_cron_job(
+                    _wrap(spot_coord.run_performance_analysis),
+                    name="binance_spot_performance_analytics",
+                    hour=12, minute=30,
+                )
+                _scheduler.add_weekly_cron_job(
+                    _wrap(spot_coord.run_strategy_advice),
+                    name="binance_spot_strategy_advice",
+                    day_of_week="sun", hour=13, minute=0,
+                )
 
-            # 성과 분석: 매일 21:30 KST (12:30 UTC)
-            _scheduler.add_cron_job(
-                _wrap(spot_coord.run_performance_analysis),
-                name="binance_spot_performance_analytics",
-                hour=12, minute=30,
-            )
-            # 전략 어드바이저: 매주 일요일 22:00 KST (13:00 UTC)
-            _scheduler.add_weekly_cron_job(
-                _wrap(spot_coord.run_strategy_advice),
-                name="binance_spot_strategy_advice",
-                day_of_week="sun", hour=13, minute=0,
-            )
+    # ── R&D 성과 분석 스케줄러 — 매일 22:00 KST (13:00 UTC) ──
+    from services.rnd_performance_review import run_rnd_performance_review
+    _scheduler.add_cron_job(
+        _wrap(run_rnd_performance_review),
+        name="rnd_performance_review",
+        hour=13, minute=0,  # 22:00 KST
+    )
+    logger.info("rnd_performance_review_scheduled", time="22:00 KST daily")
 
     # ── 입출금 자동 감지 스케줄러 ───────────────────────────────
     from engine.capital_sync import sync_binance_deposits, sync_binance_internal_transfers, detect_bithumb_balance_change
