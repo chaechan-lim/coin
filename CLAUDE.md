@@ -6,23 +6,27 @@
 
 ## Project Summary
 
-빗썸(현물, 비활성) + 바이낸스 현물 + 바이낸스 USDM 선물 + 서지 **쿼드 엔진** 암호화폐 자동 매매 시스템.
+R&D 기반 멀티 전략 암호화폐 자동 매매 시스템.
 Python 3.12 (FastAPI) + React 18 (TypeScript) + PostgreSQL 16.
 
-### Core Flow
-```
-현물: 4전략 → SignalCombiner (가중 투표) → TradingEngine → OrderManager
-선물 V2: RegimeDetector → StrategySelector → 3 레짐 전략 → FuturesEngineV2 → SafeOrderPipeline
-서지: SurgeEngine (거래량 급등 감지 → 독립 단기 매매)
-```
+**현재 상태 (2026-04-13)**: 메인 엔진(4전략/V2/서지) 비활성 → 6개 R&D 전략 라이브 운영 중.
 
-### Quad Engine
-| 엔진 | 거래소 | 시장 | 전략 |
-|------|--------|------|------|
-| TradingEngine | 빗썸 | 현물 KRW, paper (비활성) | 4전략 (SPOT_WEIGHTS) |
-| TradingEngine | 바이낸스 현물 | 현물 USDT, live | 4전략 (SPOT_WEIGHTS) |
-| FuturesEngineV2 | 바이낸스 선물 | USDM USDT, live 3x | 3 레짐 전략 (MR/VB/TF) |
-| SurgeEngine | 바이낸스 서지 | USDM USDT, 3x | 거래량 급등 단기 매매 (선물 PM 잔고 공유) |
+### R&D 엔진 (활성)
+| 엔진 | 거래소 | 시장 | 전략 | 자금 |
+|------|--------|------|------|------|
+| DonchianDailyEngine | 현물 | long-only | 일봉 Donchian 앙상블 (10/20/40/55/90) | 200 USDT |
+| DonchianFuturesBiEngine | 선물 2x | long+short | 양방향 Donchian | 200 USDT |
+| PairsTradingLiveEngine | 선물 2x | delta-neutral | BTC-ETH z-score | 150 USDT |
+| MomentumRotationLiveEngine | 선물 2x | long+short | 주간 상대강약 top2/bottom2 | 200 USDT |
+| HMMRegimeLiveEngine | 선물 2x | long/short/flat | 1h HMM 3-state 체제전환 | 200 USDT |
+| FearGreedDCAEngine | 현물 | long-only DCA | RSI+30일변동 기반 분할매수 | 200 USDT |
+
+### 비활성 (메인 엔진)
+| 엔진 | 사유 |
+|------|------|
+| TradingEngine (4전략) | 백테스트 look-ahead bias 발견, alpha 없음 확인 |
+| FuturesEngineV2 (레짐) | 동일 — 모든 V2 결과 무효화 |
+| SurgeEngine | 선물 V2와 함께 비활성 |
 
 ---
 

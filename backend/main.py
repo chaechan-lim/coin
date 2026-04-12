@@ -1119,22 +1119,41 @@ async def lifespan(app: FastAPI):
         )
 
     logger.info("startup_complete")
-    bithumb_active = config.exchange.enabled and config.trading.mode == "live" and spot_coins
+
+    # R&D 엔진 현황 수집
+    rnd_engines_active = []
+    rnd_total_capital = 0.0
+    for name, label in [
+        ("binance_donchian", "Donchian Spot"),
+        ("binance_donchian_futures", "DonchianF"),
+        ("binance_pairs", "Pairs"),
+        ("binance_momentum", "Momentum"),
+        ("binance_hmm", "HMM"),
+        ("binance_fgdca", "DCA"),
+    ]:
+        eng = engine_registry.get_engine(name)
+        if eng and eng.is_running:
+            cap = 0
+            if hasattr(eng, "get_status"):
+                s = eng.get_status()
+                cap = s.get("capital_usdt") or s.get("initial_capital", 0)
+            rnd_engines_active.append(f"{label}({cap:.0f})")
+            rnd_total_capital += cap
+
     startup_parts = []
-    if not config.exchange.enabled:
-        startup_parts.append("빗썸 비활성")
+    if rnd_engines_active:
+        startup_parts.append(f"R&D {len(rnd_engines_active)}개 엔진: {', '.join(rnd_engines_active)} (총 {rnd_total_capital:.0f} USDT)")
     else:
-        startup_parts.append(f"빗썸 {config.trading.mode}")
-    if bithumb_active:
-        startup_parts.append(f"빗썸 현물: {', '.join(spot_coins)}")
-    if config.binance.enabled:
-        startup_parts.append(f"선물: {', '.join(futures_coins)}")
-    if config.binance.spot_enabled:
-        startup_parts.append(f"바이낸스 현물: {', '.join(config.binance.tracked_coins)}")
+        startup_parts.append("R&D 엔진 없음")
+    if not config.futures_v2.enabled:
+        startup_parts.append("메인 선물 V2 비활성")
+    if not config.binance_spot_trading.enabled:
+        startup_parts.append("메인 현물 비활성")
+
     startup_detail = " | ".join(startup_parts)
     metadata = {
-        "spot_coins": spot_coins,
-        "futures_coins": futures_coins if config.binance.enabled else [],
+        "rnd_engines": rnd_engines_active,
+        "rnd_total_capital": rnd_total_capital,
         "positions_summary": positions_summary or None,
     }
     await emit_event("info", "system", "서버 시작", detail=startup_detail, metadata=metadata)
