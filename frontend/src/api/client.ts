@@ -59,6 +59,7 @@ export const getTrades = (params?: {
   strategy?: string
   side?: string
   exchange?: ExchangeName
+  rnd_only?: boolean
 }) => api.get<Order[]>('/trades', { params: { exchange: 'bithumb', ...params } }).then((r) => r.data)
 
 export const getTradeDetail = (id: number) =>

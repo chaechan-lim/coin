@@ -30,6 +30,9 @@ _SPOT_EXCHANGES = (
     "binance_spot",
     "binance_donchian", "binance_fgdca",
 )
+# R&D 전용 (메인 엔진 비활성 시 거래 내역에서 R&D만 표시)
+_RND_FUTURES = ("binance_donchian_futures", "binance_pairs", "binance_momentum", "binance_hmm")
+_RND_SPOT = ("binance_donchian", "binance_fgdca")
 
 
 def _parse_reason_tags(reason: str | None) -> dict[str, str]:
@@ -193,12 +196,19 @@ async def get_trades(
     side: Optional[str] = None,
     status: Optional[str] = Query(None, pattern="^(filled|open|cancelled|failed|all)$"),
     exchange: ExchangeNameType = Query("bithumb"),
+    rnd_only: bool = Query(False, description="R&D 엔진 거래만 (메인 엔진 제외)"),
     session: AsyncSession = Depends(get_db),
 ):
     if exchange == "binance_futures":
-        exchange_filter = Order.exchange.in_(_FUTURES_EXCHANGES)
+        if rnd_only:
+            exchange_filter = Order.exchange.in_(_RND_FUTURES)
+        else:
+            exchange_filter = Order.exchange.in_(_FUTURES_EXCHANGES)
     elif exchange == "binance_spot":
-        exchange_filter = Order.exchange.in_(_SPOT_EXCHANGES)
+        if rnd_only:
+            exchange_filter = Order.exchange.in_(_RND_SPOT)
+        else:
+            exchange_filter = Order.exchange.in_(_SPOT_EXCHANGES)
     else:
         exchange_filter = Order.exchange == exchange
     query = (

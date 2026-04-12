@@ -248,7 +248,7 @@ export function TradeHistory({ exchange = 'bithumb' }: { exchange?: ExchangeName
   const [side, setSide] = useState('')
 
   const { data, isLoading } = useQuery({
-    queryKey: ['trades', page, symbol, strategy, side, exchange],
+    queryKey: ['trades', page, symbol, strategy, side, exchange, 'rnd'],
     queryFn: () =>
       getTrades({
         page,
@@ -257,6 +257,7 @@ export function TradeHistory({ exchange = 'bithumb' }: { exchange?: ExchangeName
         strategy: strategy || undefined,
         side: side || undefined,
         exchange,
+        rnd_only: true,
       }),
     staleTime: 15_000,
   })
@@ -279,31 +280,13 @@ export function TradeHistory({ exchange = 'bithumb' }: { exchange?: ExchangeName
               onChange={(e) => { setStrategy(e.target.value); setPage(1) }}
             >
               <option value="">전략</option>
-              <optgroup label="활성 전략">
-                <option value="bnf_deviation">BNF 이격도</option>
-                <option value="cis_momentum">CIS 모멘텀</option>
-                <option value="larry_williams">래리 윌리엄스</option>
-                <option value="donchian_channel">돈치안 채널</option>
-                <option value="spot_eval">현물 시그널</option>
-                <option value="tier2_surge">서지 스캐너</option>
-              </optgroup>
-              <optgroup label="운영">
-                <option value="stop_loss">손절</option>
-                <option value="take_profit">익절</option>
-                <option value="trailing_stop">트레일링 스탑</option>
-                <option value="forced_liquidation">강제 청산</option>
-                <option value="time_expiry">시간 만료</option>
-                <option value="position_sync">포지션 동기화</option>
-                <option value="risk_management">리스크 관리</option>
-              </optgroup>
-              <optgroup label="레거시 (V1)">
-                <option value="bollinger_rsi">볼린저 RSI</option>
-                <option value="rsi">RSI</option>
-                <option value="ma_crossover">이동평균 교차</option>
-                <option value="macd_crossover">MACD 교차</option>
-                <option value="stochastic_rsi">스토캐스틱 RSI</option>
-                <option value="obv_divergence">OBV 다이버전스</option>
-                <option value="bb_squeeze">BB 스퀴즈</option>
+              <optgroup label="R&D 전략">
+                <option value="donchian_daily">Donchian Daily</option>
+                <option value="donchian_futures_bi">Donchian Futures</option>
+                <option value="pairs_trading">Pairs Trading</option>
+                <option value="momentum_rotation">Momentum Rotation</option>
+                <option value="hmm_regime">HMM Regime</option>
+                <option value="fear_greed_dca">Fear & Greed DCA</option>
               </optgroup>
             </select>
             <select
