@@ -21,7 +21,15 @@ from api.dependencies import ExchangeNameType
 router = APIRouter(prefix="/trades", tags=["trades"])
 
 # 선물 조회 시 서지 거래도 병합
-_FUTURES_EXCHANGES = ("binance_futures", "binance_surge")
+_FUTURES_EXCHANGES = (
+    "binance_futures", "binance_surge",
+    "binance_donchian_futures", "binance_pairs",
+    "binance_momentum", "binance_hmm",
+)
+_SPOT_EXCHANGES = (
+    "binance_spot",
+    "binance_donchian", "binance_fgdca",
+)
 
 
 def _parse_reason_tags(reason: str | None) -> dict[str, str]:
@@ -189,6 +197,8 @@ async def get_trades(
 ):
     if exchange == "binance_futures":
         exchange_filter = Order.exchange.in_(_FUTURES_EXCHANGES)
+    elif exchange == "binance_spot":
+        exchange_filter = Order.exchange.in_(_SPOT_EXCHANGES)
     else:
         exchange_filter = Order.exchange == exchange
     query = (
@@ -388,9 +398,11 @@ async def get_trade_summary(
     else:
         start = None
 
-    # 전체 체결 주문 시간순 (선물 조회 시 서지 병합)
+    # 전체 체결 주문 시간순 (선물/현물 R&D 병합)
     if exchange == "binance_futures":
         ex_filter = Order.exchange.in_(_FUTURES_EXCHANGES)
+    elif exchange == "binance_spot":
+        ex_filter = Order.exchange.in_(_SPOT_EXCHANGES)
     else:
         ex_filter = Order.exchange == exchange
     result = await session.execute(

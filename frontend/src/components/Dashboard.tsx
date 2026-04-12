@@ -60,14 +60,17 @@ export function Dashboard() {
     staleTime: 60_000,
   })
 
-  const exchanges = exchangeInfo?.exchanges?.filter(
-    (e: ExchangeName) =>
-      e !== 'bithumb' &&
-      e !== 'binance_surge' &&
-      e !== 'binance_donchian' &&
-      e !== 'binance_donchian_futures' &&
-      e !== 'binance_pairs'
+  const RND_FUTURES = ['binance_donchian_futures', 'binance_pairs', 'binance_momentum', 'binance_hmm'] as const
+  const RND_SPOT = ['binance_donchian', 'binance_fgdca'] as const
+  const ALL_RND = [...RND_FUTURES, ...RND_SPOT, 'binance_surge'] as const
+  const rawExchanges = exchangeInfo?.exchanges?.filter(
+    (e: ExchangeName) => e !== 'bithumb' && !ALL_RND.includes(e as any)
   ) ?? ['binance_spot']
+  // R&D 선물 엔진이 있으면 binance_futures 탭 보장
+  const hasRndFutures = exchangeInfo?.exchanges?.some((e: ExchangeName) => (RND_FUTURES as readonly string[]).includes(e))
+  const exchanges = hasRndFutures && !rawExchanges.includes('binance_futures' as ExchangeName)
+    ? ['binance_futures' as ExchangeName, ...rawExchanges]
+    : rawExchanges
 
   const onMessage = useCallback(
     (event: WsEvent) => {
