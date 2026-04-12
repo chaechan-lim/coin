@@ -321,6 +321,7 @@ class TradingBot:
     _ALERT_EVENTS = {
         ("warning", "health"),
         ("critical", "health"),
+        ("info", "engine"),            # R&D 엔진 거래 알림 (매수/매도/시작/중지)
         ("warning", "engine"),
         ("critical", "engine"),
         ("error", "engine"),
