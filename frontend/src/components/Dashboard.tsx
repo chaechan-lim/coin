@@ -21,8 +21,9 @@ const SystemLog = lazy(() => import('./SystemLog').then((m) => ({ default: m.Sys
 const RndOverview = lazy(() => import('./RndOverview').then((m) => ({ default: m.RndOverview })))
 
 const TABS = [
-  { id: 'overview', label: '개요', description: '현재 어떤 엔진이 돌고 있고, 어디에 얼마를 배정했는지 한 번에 봅니다.' },
-  { id: 'live', label: '실거래', description: '실제 체결, 포트폴리오, grouped trade, 손익 흐름을 확인합니다.' },
+  { id: 'overview', label: '개요', description: 'R&D 전략 현황과 엔진 상태를 한 번에 봅니다.' },
+  { id: 'live', label: '실거래', description: '실제 체결 내역만 봅니다.' },
+  { id: 'assets', label: '자산', description: '자산 그래프, 잔고, 일별 수익률을 봅니다.' },
   { id: 'rnd', label: 'R&D', description: '후보 전략, grouped trade, auto-review 상태를 봅니다.' },
   { id: 'ops', label: '운영 로그', description: '실시간 이벤트, 시스템 이벤트, 에이전트 판단을 점검합니다.' },
   { id: 'advanced', label: '고급', description: '신호 로그, 전략 성과, 로테이션 같은 보조 분석 도구입니다.' },
@@ -195,17 +196,21 @@ export function Dashboard() {
             <>
               <RndOverview market={exchange === 'binance_spot' ? 'spot' : exchange === 'binance_futures' ? 'futures' : 'all'} />
               <EngineControl liveEvents={liveEvents} exchange={exchange} />
-              <TradingAccountOverview />
             </>
           )}
 
           {tab === 'live' && (
             <>
-              <RndOverview market={exchange === 'binance_spot' ? 'spot' : 'futures'} />
-              <LiveTradeGroups exchange={exchange} />
               <TradeHistory exchange={exchange} />
+            </>
+          )}
+
+          {tab === 'assets' && (
+            <>
+              <PortfolioSummary exchange={exchange} />
               <PortfolioChart exchange={exchange} />
               <DailyPnLStats exchange={exchange} />
+              <TradingAccountOverview />
             </>
           )}
 
