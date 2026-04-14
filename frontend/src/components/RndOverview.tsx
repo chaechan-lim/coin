@@ -13,7 +13,7 @@ interface RndEngine {
   capital: number
   cumulative_pnl: number
   daily_pnl: number
-  positions: { symbol: string; side: string; entry: number; qty: number }[]
+  positions: { symbol: string; side: string; entry: number; qty: number; current_price?: number; unrealized_pnl?: number; pnl_pct?: number }[]
   leverage: number
   idle_reason?: string | null
   next_evaluation_at?: string | null
@@ -135,13 +135,24 @@ export function RndOverview({ market }: { market?: 'spot' | 'futures' | 'all' })
 
               {eng.positions.length > 0 ? (
                 <div className="mt-1 space-y-1">
-                  {eng.positions.map((p, i) => (
-                    <div key={i} className="flex items-center gap-2 text-xs">
+                  {eng.positions.map((p: any, i: number) => (
+                    <div key={i} className="flex items-center gap-2 text-xs flex-wrap">
                       <span className={p.side === 'long' ? 'text-green-400' : 'text-red-400'}>
                         {p.side === 'long' ? '▲' : '▼'} {p.side.toUpperCase()}
                       </span>
-                      <span className="text-gray-300">{p.symbol}</span>
-                      <span className="text-gray-500">@ {p.entry.toFixed(2)}</span>
+                      <span className="text-gray-300">{p.symbol?.replace('/USDT', '')}</span>
+                      <span className="text-gray-500">@ {p.entry?.toFixed(1)}</span>
+                      {p.current_price > 0 && (
+                        <>
+                          <span className="text-gray-500">→ {p.current_price?.toFixed(1)}</span>
+                          <span className={p.pnl_pct >= 0 ? 'text-green-400 font-semibold' : 'text-red-400 font-semibold'}>
+                            {p.pnl_pct >= 0 ? '+' : ''}{p.pnl_pct?.toFixed(2)}%
+                          </span>
+                          <span className={p.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}>
+                            ({p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)})
+                          </span>
+                        </>
+                      )}
                     </div>
                   ))}
                 </div>

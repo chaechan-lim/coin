@@ -346,6 +346,27 @@ async def update_research_stage(candidate_key: str, payload: ResearchStageUpdate
 @router.get("/engine/rnd/overview")
 async def get_rnd_overview():
     """R&D 전략 전체 현황 — 한눈에 보기."""
+    # 현재가 캐시 (같은 심볼 중복 조회 방지)
+    price_cache: dict[str, float] = {}
+
+    async def _get_price(symbol: str) -> float:
+        if not symbol:
+            return 0.0
+        if symbol in price_cache:
+            return price_cache[symbol]
+        # 아무 R&D 엔진의 market_data로 조회
+        for ename in ("binance_hmm", "binance_donchian_futures", "binance_donchian"):
+            eng = _get_engine(ename)
+            if eng and hasattr(eng, "_market_data"):
+                try:
+                    p = await eng._market_data.get_current_price(symbol)
+                    if p > 0:
+                        price_cache[symbol] = p
+                        return p
+                except Exception:
+                    pass
+        return 0.0
+
     engines_info = []
     rnd_names = [
         ("Donchian Spot", "binance_donchian"),
@@ -360,29 +381,56 @@ async def get_rnd_overview():
         if eng is None:
             continue
         status = eng.get_status() if hasattr(eng, "get_status") else {}
-        # 포지션 정리
+        # 포지션 정리 + 현재가/미실현PnL
         positions = []
         raw_positions = status.get("positions") or []
         single = status.get("position")
         if single and isinstance(single, dict):
             raw_positions = [single]
+        leverage = status.get("leverage", 1)
         for p in raw_positions:
             if isinstance(p, dict):
+                symbol = p.get("symbol", "")
+                side = p.get("side") or p.get("direction", "")
+                entry = p.get("entry_price") or p.get("entry", 0)
+                qty = p.get("quantity") or p.get("qty", 0)
+                current_price = await _get_price(symbol)
+                # 미실현 PnL
+                if entry > 0 and qty > 0 and current_price > 0:
+                    if side == "long":
+                        unrealized = (current_price - entry) * qty
+                    else:
+                        unrealized = (entry - current_price) * qty
+                    pnl_pct = unrealized / (entry * qty) * 100 * leverage
+                else:
+                    unrealized = 0.0
+                    pnl_pct = 0.0
                 positions.append({
-                    "symbol": p.get("symbol", ""),
-                    "side": p.get("side") or p.get("direction", ""),
-                    "entry": p.get("entry_price") or p.get("entry", 0),
-                    "qty": p.get("quantity") or p.get("qty", 0),
+                    "symbol": symbol,
+                    "side": side,
+                    "entry": entry,
+                    "qty": qty,
+                    "current_price": round(current_price, 2),
+                    "unrealized_pnl": round(unrealized, 2),
+                    "pnl_pct": round(pnl_pct, 2),
                 })
         # holdings (DCA)
         holdings = status.get("holdings")
         if holdings and isinstance(holdings, dict):
             for sym, h in holdings.items():
+                entry = h.get("avg_price", 0)
+                qty = h.get("qty", 0)
+                current_price = await _get_price(sym)
+                unrealized = (current_price - entry) * qty if entry > 0 and current_price > 0 else 0.0
+                pnl_pct = (current_price - entry) / entry * 100 if entry > 0 and current_price > 0 else 0.0
                 positions.append({
                     "symbol": sym,
                     "side": "long",
-                    "entry": h.get("avg_price", 0),
-                    "qty": h.get("qty", 0),
+                    "entry": entry,
+                    "qty": qty,
+                    "current_price": round(current_price, 2),
+                    "unrealized_pnl": round(unrealized, 2),
+                    "pnl_pct": round(pnl_pct, 2),
                 })
 
         engines_info.append({
