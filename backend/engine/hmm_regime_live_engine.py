@@ -177,7 +177,7 @@ class HMMRegimeLiveEngine:
 
             # state 분류 (수익률 평균으로 bullish/bearish/neutral)
             states = model.predict(X)
-            returns = df["log_return"].values[-TRAIN_HOURS:]
+            returns = df["log_return"].values[-min_bars:]
             state_mean = {}
             for s in range(3):
                 mask = states == s
