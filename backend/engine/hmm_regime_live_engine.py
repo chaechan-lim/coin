@@ -33,9 +33,11 @@ logger = structlog.get_logger(__name__)
 MAX_TOTAL_LOSS_PCT = 0.10
 MAX_DAILY_LOSS_PCT = 0.05
 MIN_NOTIONAL = 10
-TRAIN_HOURS = 24 * 30  # 30일 학습 (720h, MarketDataService 1000캔들 한도 내)
+TRAIN_HOURS = 24 * 30  # 30일 학습
 REFIT_INTERVAL_HOURS = 24  # 매일 refit
-EVAL_INTERVAL_HOURS = 1  # 매시간 predict
+EVAL_INTERVAL_HOURS = 4  # 4시간마다 predict (1h→4h, 노이즈 감소)
+USE_4H_CANDLE = True  # 4h 캔들 기반 (백테스트: 360d +38.5%, 거래 23건)
+MIN_STATE_PROB = 0.7  # state 확신도 70% 이상이어야 전환
 
 
 @dataclass
@@ -131,12 +133,12 @@ class HMMRegimeLiveEngine:
                         (now - self._last_refit_at).total_seconds() > REFIT_INTERVAL_HOURS * 3600):
                     await self._refit_model()
 
-                # 매시간 predict + 포지션 전환
+                # 4시간마다 predict + 포지션 전환
                 await self._evaluate()
 
-                # 다음 정시까지 대기
-                next_hour = (now + pd.Timedelta(hours=1)).replace(minute=5, second=0, microsecond=0)
-                wait = max(10, (next_hour - datetime.now(timezone.utc)).total_seconds())
+                # 다음 EVAL_INTERVAL까지 대기
+                next_eval = (now + pd.Timedelta(hours=EVAL_INTERVAL_HOURS)).replace(minute=5, second=0, microsecond=0)
+                wait = max(10, (next_eval - datetime.now(timezone.utc)).total_seconds())
                 await asyncio.sleep(wait)
             except asyncio.CancelledError:
                 break
@@ -148,21 +150,26 @@ class HMMRegimeLiveEngine:
         await self._evaluate()
 
     async def _refit_model(self):
-        """HMM 모델 학습 (60일 1h 데이터)."""
+        """HMM 모델 학습 (4h 캔들 기반)."""
         try:
             from hmmlearn.hmm import GaussianHMM
 
-            df = await self._market_data.get_ohlcv_df(self._symbol, "1h", limit=TRAIN_HOURS + 50)
-            if df is None or len(df) < TRAIN_HOURS:
-                logger.warning("hmm_refit_insufficient_data", available=len(df) if df is not None else 0)
+            tf = "4h" if USE_4H_CANDLE else "1h"
+            limit = TRAIN_HOURS // (4 if USE_4H_CANDLE else 1) + 50
+            df = await self._market_data.get_ohlcv_df(self._symbol, tf, limit=limit)
+            min_bars = TRAIN_HOURS // (4 if USE_4H_CANDLE else 1)
+            if df is None or len(df) < min_bars:
+                logger.warning("hmm_refit_insufficient_data", available=len(df) if df is not None else 0, need=min_bars)
                 return
 
             df = df.copy()
             df["log_return"] = np.log(df["close"] / df["close"].shift(1)).fillna(0.0)
-            df["vol_24"] = df["log_return"].rolling(24).std().fillna(0.0)
-            df["mom_24"] = df["close"].pct_change(24).fillna(0.0)
+            vol_window = 6 if USE_4H_CANDLE else 24  # 24h equivalent
+            mom_window = 6 if USE_4H_CANDLE else 24
+            df["vol_24"] = df["log_return"].rolling(vol_window).std().fillna(0.0)
+            df["mom_24"] = df["close"].pct_change(mom_window).fillna(0.0)
 
-            X = df[["log_return", "vol_24", "mom_24"]].values[-TRAIN_HOURS:]
+            X = df[["log_return", "vol_24", "mom_24"]].values[-min_bars:]
 
             model = GaussianHMM(n_components=3, covariance_type="full", n_iter=200, random_state=42)
             with contextlib.redirect_stderr(io.StringIO()):
@@ -203,23 +210,33 @@ class HMMRegimeLiveEngine:
             return
 
         try:
-            df = await self._market_data.get_ohlcv_df(self._symbol, "1h", limit=50)
-            if df is None or len(df) < 30:
+            tf = "4h" if USE_4H_CANDLE else "1h"
+            df = await self._market_data.get_ohlcv_df(self._symbol, tf, limit=50)
+            if df is None or len(df) < 10:
                 return
 
             df = df.copy()
             df["log_return"] = np.log(df["close"] / df["close"].shift(1)).fillna(0.0)
-            df["vol_24"] = df["log_return"].rolling(24).std().fillna(0.0)
-            df["mom_24"] = df["close"].pct_change(24).fillna(0.0)
+            vol_window = 6 if USE_4H_CANDLE else 24
+            mom_window = 6 if USE_4H_CANDLE else 24
+            df["vol_24"] = df["log_return"].rolling(vol_window).std().fillna(0.0)
+            df["mom_24"] = df["close"].pct_change(mom_window).fillna(0.0)
 
             X = df[["log_return", "vol_24", "mom_24"]].values[-1:]
             state = int(self._model.predict(X)[0])
+            state_prob = float(self._model.predict_proba(X)[0][state])
 
             desired = 0  # flat
-            if state == self._bullish_state:
-                desired = 1  # long
-            elif state == self._bearish_state:
-                desired = -1  # short
+            if state_prob >= MIN_STATE_PROB:
+                if state == self._bullish_state:
+                    desired = 1  # long
+                elif state == self._bearish_state:
+                    desired = -1  # short
+            else:
+                # 확신도 부족 → 기존 포지션 유지
+                desired = 0
+                if self._position:
+                    desired = 1 if self._position.side == "long" else -1
 
             current = 0
             if self._position:
