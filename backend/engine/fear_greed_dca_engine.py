@@ -41,7 +41,7 @@ GREED_RSI = 70.0
 FEAR_CHANGE_PCT = -20.0
 GREED_CHANGE_PCT = 20.0
 FEAR_BUY_PCT = 0.05    # 공포: 현금의 5%
-NORMAL_BUY_PCT = 0.01  # 중립: 현금의 1%
+NORMAL_BUY_PCT = 0.03  # 중립: 현금의 3% (200*0.03=6, 최소 5 이상)
 GREED_SELL_PCT = 0.50   # 탐욕: 보유의 50%
 
 MAX_TOTAL_LOSS_PCT = 0.15  # DCA는 장기라 15%
