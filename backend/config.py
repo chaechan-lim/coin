@@ -405,6 +405,21 @@ class AppConfig(BaseSettings):
     fear_greed_dca_enabled: bool = False
     fear_greed_dca_capital_usdt: float = 200.0
 
+    # Breakout Pullback (선물 R&D)
+    breakout_pullback_enabled: bool = False
+    breakout_pullback_capital_usdt: float = 150.0
+    breakout_pullback_leverage: int = 2
+
+    # Volume Momentum (선물 R&D)
+    volume_momentum_enabled: bool = False
+    volume_momentum_capital_usdt: float = 100.0
+    volume_momentum_leverage: int = 2
+
+    # BTC Neutral Alt MR (선물 R&D)
+    btc_neutral_mr_enabled: bool = False
+    btc_neutral_mr_capital_usdt: float = 100.0
+    btc_neutral_mr_leverage: int = 2
+
     model_config = {"env_prefix": "APP_"}
 
 

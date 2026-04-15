@@ -613,6 +613,9 @@ async def lifespan(app: FastAPI):
     rd_futures_enabled = bool(
         getattr(config, "donchian_futures_bi_enabled", False)
         or getattr(config, "pairs_trading_live_enabled", False)
+        or getattr(config, "breakout_pullback_enabled", False)
+        or getattr(config, "volume_momentum_enabled", False)
+        or getattr(config, "btc_neutral_mr_enabled", False)
     )
     rd_futures_allowed = not config.binance_trading.enabled
     if rd_futures_enabled and not rd_futures_allowed:
@@ -731,6 +734,72 @@ async def lifespan(app: FastAPI):
                         leverage=config.hmm_regime_live_leverage)
         except Exception as e:
             logger.error("hmm_regime_init_failed", error=str(e), exc_info=True)
+
+    # ── 7b-7. Breakout Pullback (선물 R&D, 매일 00:45 UTC) ──
+    _breakout_pb_engine = None
+    if (getattr(config, "breakout_pullback_enabled", False) and config.binance.enabled
+            and binance_exchange and rd_futures_allowed):
+        try:
+            from engine.breakout_pullback_engine import BreakoutPullbackEngine
+            _breakout_pb_engine = BreakoutPullbackEngine(
+                config=config,
+                futures_exchange=binance_exchange,
+                market_data=binance_market_data,
+                initial_capital_usdt=config.breakout_pullback_capital_usdt,
+                leverage=config.breakout_pullback_leverage,
+            )
+            if _futures_rnd_coordinator:
+                _breakout_pb_engine.set_futures_rnd_coordinator(_futures_rnd_coordinator)
+            engine_registry.register("binance_breakout_pb", _breakout_pb_engine, None, None, None)
+            logger.info("breakout_pullback_engine_ready",
+                        capital=config.breakout_pullback_capital_usdt,
+                        leverage=config.breakout_pullback_leverage)
+        except Exception as e:
+            logger.error("breakout_pullback_init_failed", error=str(e), exc_info=True)
+
+    # ── 7b-8. Volume Momentum (선물 R&D, 매시간 xx:05) ──
+    _vol_mom_engine = None
+    if (getattr(config, "volume_momentum_enabled", False) and config.binance.enabled
+            and binance_exchange and rd_futures_allowed):
+        try:
+            from engine.volume_momentum_engine import VolumeMomentumEngine
+            _vol_mom_engine = VolumeMomentumEngine(
+                config=config,
+                futures_exchange=binance_exchange,
+                market_data=binance_market_data,
+                initial_capital_usdt=config.volume_momentum_capital_usdt,
+                leverage=config.volume_momentum_leverage,
+            )
+            if _futures_rnd_coordinator:
+                _vol_mom_engine.set_futures_rnd_coordinator(_futures_rnd_coordinator)
+            engine_registry.register("binance_vol_mom", _vol_mom_engine, None, None, None)
+            logger.info("volume_momentum_engine_ready",
+                        capital=config.volume_momentum_capital_usdt,
+                        leverage=config.volume_momentum_leverage)
+        except Exception as e:
+            logger.error("volume_momentum_init_failed", error=str(e), exc_info=True)
+
+    # ── 7b-9. BTC Neutral Alt MR (선물 R&D, 매일 01:00 UTC) ──
+    _btc_neutral_engine = None
+    if (getattr(config, "btc_neutral_mr_enabled", False) and config.binance.enabled
+            and binance_exchange and rd_futures_allowed):
+        try:
+            from engine.btc_neutral_alt_mr_engine import BTCNeutralAltMREngine
+            _btc_neutral_engine = BTCNeutralAltMREngine(
+                config=config,
+                futures_exchange=binance_exchange,
+                market_data=binance_market_data,
+                initial_capital_usdt=config.btc_neutral_mr_capital_usdt,
+                leverage=config.btc_neutral_mr_leverage,
+            )
+            if _futures_rnd_coordinator:
+                _btc_neutral_engine.set_futures_rnd_coordinator(_futures_rnd_coordinator)
+            engine_registry.register("binance_btc_neutral", _btc_neutral_engine, None, None, None)
+            logger.info("btc_neutral_mr_engine_ready",
+                        capital=config.btc_neutral_mr_capital_usdt,
+                        leverage=config.btc_neutral_mr_leverage)
+        except Exception as e:
+            logger.error("btc_neutral_mr_init_failed", error=str(e), exc_info=True)
 
     # ── 7c. 서지 엔진 (조건부) — 선물 PM 잔고 통합 ─────────────
     if config.surge_trading.enabled and config.binance.enabled and binance_exchange:
@@ -1121,6 +1190,9 @@ async def lifespan(app: FastAPI):
         ("binance_momentum", "Momentum"),
         ("binance_hmm", "HMM"),
         ("binance_fgdca", "DCA"),
+        ("binance_breakout_pb", "BreakoutPB"),
+        ("binance_vol_mom", "VolMom"),
+        ("binance_btc_neutral", "BTCNeutral"),
     ]:
         eng = engine_registry.get_engine(name)
         if eng and eng.is_running:
@@ -1192,6 +1264,12 @@ async def lifespan(app: FastAPI):
         auto_start_engines.append(("binance_momentum", _momentum_engine))
     if _hmm_engine and not _hmm_engine.is_running:
         auto_start_engines.append(("binance_hmm", _hmm_engine))
+    if _breakout_pb_engine and not _breakout_pb_engine.is_running:
+        auto_start_engines.append(("binance_breakout_pb", _breakout_pb_engine))
+    if _vol_mom_engine and not _vol_mom_engine.is_running:
+        auto_start_engines.append(("binance_vol_mom", _vol_mom_engine))
+    if _btc_neutral_engine and not _btc_neutral_engine.is_running:
+        auto_start_engines.append(("binance_btc_neutral", _btc_neutral_engine))
     if _surge_engine and not _surge_engine.is_running:
         auto_start_engines.append(("binance_surge", _surge_engine))
     auto_start_allowed: dict[str, bool] = {}
@@ -1234,6 +1312,12 @@ async def lifespan(app: FastAPI):
         await _momentum_engine.stop()
     if _hmm_engine:
         await _hmm_engine.stop()
+    if _breakout_pb_engine:
+        await _breakout_pb_engine.stop()
+    if _vol_mom_engine:
+        await _vol_mom_engine.stop()
+    if _btc_neutral_engine:
+        await _btc_neutral_engine.stop()
     if _surge_engine:
         await _surge_engine.stop()
     if exchange:
