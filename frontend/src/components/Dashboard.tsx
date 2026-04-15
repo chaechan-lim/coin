@@ -50,7 +50,7 @@ const FUTURES_EXCHANGES: ExchangeName[] = ['binance_futures']
 export function Dashboard() {
   const [tab, setTab] = useState<TabId>('overview')
   const [advancedView, setAdvancedView] = useState<AdvancedViewId>('signals')
-  const [exchange, setExchange] = useState<ExchangeName>('binance_spot')
+  const [exchange, setExchange] = useState<ExchangeName>('binance_futures')
   const [liveEvents, setLiveEvents] = useState<string[]>([])
   const [realtimeServerEvents, setRealtimeServerEvents] = useState<ServerEvent[]>([])
   const qc = useQueryClient()

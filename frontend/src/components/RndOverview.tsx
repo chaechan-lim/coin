@@ -3,7 +3,10 @@ import { useQuery } from '@tanstack/react-query'
 import { getRndOverview } from '../api/client'
 
 const SPOT_ENGINES = new Set(['binance_donchian', 'binance_fgdca'])
-const FUTURES_ENGINES = new Set(['binance_donchian_futures', 'binance_pairs', 'binance_momentum', 'binance_hmm'])
+const FUTURES_ENGINES = new Set([
+  'binance_donchian_futures', 'binance_pairs', 'binance_momentum', 'binance_hmm',
+  'binance_breakout_pb', 'binance_vol_mom', 'binance_btc_neutral',
+])
 
 interface RndEngine {
   name: string

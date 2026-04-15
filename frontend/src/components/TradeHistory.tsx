@@ -287,12 +287,13 @@ export function TradeHistory({ exchange = 'bithumb' }: { exchange?: ExchangeName
             >
               <option value="">전략</option>
               <optgroup label="R&D 전략">
-                <option value="donchian_daily">Donchian Daily</option>
                 <option value="donchian_futures_bi">Donchian Futures</option>
                 <option value="pairs_trading">Pairs Trading</option>
                 <option value="momentum_rotation">Momentum Rotation</option>
                 <option value="hmm_regime">HMM Regime</option>
-                <option value="fear_greed_dca">Fear & Greed DCA</option>
+                <option value="breakout_pullback">Breakout-Pullback</option>
+                <option value="volume_momentum">Volume Momentum</option>
+                <option value="btc_neutral_mr">BTC-neutral MR</option>
               </optgroup>
             </select>
             <select

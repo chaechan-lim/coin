@@ -579,6 +579,9 @@ const ENGINE_LABELS: Record<string, string> = {
   binance_donchian_futures: 'DonchianF',
   binance_pairs: 'Pairs',
   binance_fgdca: 'DCA',
+  binance_breakout_pb: 'BP',
+  binance_vol_mom: 'VolMom',
+  binance_btc_neutral: 'BTCneutral',
 }
 
 function RecentRndTrades() {
