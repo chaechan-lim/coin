@@ -153,17 +153,17 @@ export function Dashboard() {
         )
         return (
           <div className="flex items-center gap-1.5 border-b border-gray-700 px-3 py-1.5 md:gap-2 md:px-6">
-            {spotExs.length > 0 && (
-              <>
-                <span className="text-[10px] font-medium uppercase tracking-wider text-gray-500">현물</span>
-                {spotExs.map((ex) => <ExBtn key={ex} ex={ex} />)}
-              </>
-            )}
-            {spotExs.length > 0 && futuresExs.length > 0 && <div className="mx-1 h-5 w-px bg-gray-700" />}
             {futuresExs.length > 0 && (
               <>
                 <span className="text-[10px] font-medium uppercase tracking-wider text-gray-500">선물</span>
                 {futuresExs.map((ex) => <ExBtn key={ex} ex={ex} />)}
+              </>
+            )}
+            {spotExs.length > 0 && futuresExs.length > 0 && <div className="mx-1 h-5 w-px bg-gray-700" />}
+            {spotExs.length > 0 && (
+              <>
+                <span className="text-[10px] font-medium uppercase tracking-wider text-gray-500">현물</span>
+                {spotExs.map((ex) => <ExBtn key={ex} ex={ex} />)}
               </>
             )}
           </div>
