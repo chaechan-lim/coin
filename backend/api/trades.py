@@ -25,13 +25,15 @@ _FUTURES_EXCHANGES = (
     "binance_futures", "binance_surge",
     "binance_donchian_futures", "binance_pairs",
     "binance_momentum", "binance_hmm",
+    "binance_breakout_pb", "binance_vol_mom", "binance_btc_neutral",
 )
 _SPOT_EXCHANGES = (
     "binance_spot",
     "binance_donchian", "binance_fgdca",
 )
 # R&D 전용 (메인 엔진 비활성 시 거래 내역에서 R&D만 표시)
-_RND_FUTURES = ("binance_donchian_futures", "binance_pairs", "binance_momentum", "binance_hmm")
+_RND_FUTURES = ("binance_donchian_futures", "binance_pairs", "binance_momentum", "binance_hmm",
+                "binance_breakout_pb", "binance_vol_mom", "binance_btc_neutral")
 _RND_SPOT = ("binance_donchian", "binance_fgdca")
 
 

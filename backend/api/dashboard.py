@@ -375,6 +375,9 @@ async def get_rnd_overview():
         ("Momentum Rotation", "binance_momentum"),
         ("HMM Regime", "binance_hmm"),
         ("Fear & Greed DCA", "binance_fgdca"),
+        ("Breakout-Pullback", "binance_breakout_pb"),
+        ("Volume Momentum", "binance_vol_mom"),
+        ("BTC-neutral MR", "binance_btc_neutral"),
     ]
     for label, name in rnd_names:
         eng = _get_engine(name)

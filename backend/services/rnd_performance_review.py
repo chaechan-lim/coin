@@ -27,6 +27,7 @@ logger = structlog.get_logger(__name__)
 RND_EXCHANGES = (
     "binance_donchian", "binance_donchian_futures", "binance_pairs",
     "binance_momentum", "binance_hmm", "binance_fgdca",
+    "binance_breakout_pb", "binance_vol_mom", "binance_btc_neutral",
 )
 
 ENGINE_LABELS = {
@@ -36,6 +37,9 @@ ENGINE_LABELS = {
     "binance_momentum": "Momentum Rotation",
     "binance_hmm": "HMM Regime",
     "binance_fgdca": "Fear & Greed DCA",
+    "binance_breakout_pb": "Breakout-Pullback",
+    "binance_vol_mom": "Volume Momentum",
+    "binance_btc_neutral": "BTC-neutral MR",
 }
 
 MIN_TRADES_FOR_LLM = 10  # LLM 분석 최소 거래 수
