@@ -1067,23 +1067,14 @@ async def lifespan(app: FastAPI):
             name="research_auto_review_initial_refresh",
         )
 
-    # 최초 시장 분석 실행
-    if bithumb_coord and bithumb_pm:
-        asyncio.create_task(_run_initial_analysis(bithumb_coord, bithumb_pm, config), name="bithumb_initial_analysis")
-
-    # 바이낸스 최초 시장 분석
-    if config.binance.enabled and _binance_engine:
-        binance_coord = engine_registry.get_coordinator("binance_futures")
-        binance_pm_init = engine_registry.get_portfolio_manager("binance_futures")
-        if binance_coord and binance_pm_init:
-            asyncio.create_task(_run_initial_analysis(binance_coord, binance_pm_init, config), name="futures_initial_analysis")
-
-    # 바이낸스 현물 최초 시장 분석
-    if config.binance.spot_enabled and _binance_spot_engine:
-        spot_coord = engine_registry.get_coordinator("binance_spot")
-        spot_pm_init = engine_registry.get_portfolio_manager("binance_spot")
-        if spot_coord and spot_pm_init:
-            asyncio.create_task(_run_initial_analysis(spot_coord, spot_pm_init, config), name="spot_initial_analysis")
+    # 최초 시장 분석 — 메인 엔진 비활성이므로 스킵
+    # R&D 엔진은 자체 평가 루프가 있어서 별도 initial analysis 불필요
+    # if bithumb_coord and bithumb_pm:
+    #     asyncio.create_task(_run_initial_analysis(bithumb_coord, bithumb_pm, config))
+    # if config.futures_v2.enabled and _binance_engine:
+    #     ...
+    # if config.binance_spot_trading.enabled and _binance_spot_engine:
+    #     ...
 
     # 실제 추적 코인 리스트 (엔진 인스턴스의 동적 코인 포함)
     spot_coins = _engine_instance.tracked_coins if _engine_instance else config.trading.tracked_coins
