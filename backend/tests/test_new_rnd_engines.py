@@ -53,6 +53,7 @@ async def session_factory(db_engine):
 class FakeOrder:
     executed_price: float = 0.0
     executed_quantity: float = 0.0
+    status: str = "filled"
 
 
 def _make_ohlcv_df(n: int = 50, base_price: float = 100.0, timeframe: str = "1h",
@@ -681,3 +682,161 @@ class TestEngineLifecycle:
                 assert engine.is_running is True
                 await engine.stop()
                 assert engine.is_running is False
+
+
+# ═══════════════════════════════════════════════════════════════
+# Fill check tests — position must NOT be updated on unfilled orders
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class UnfilledOrder:
+    """Simulates an order that was not filled (e.g. rejected, pending)."""
+    executed_price: float = 0.0
+    executed_quantity: float = 0.0
+    status: str = "open"  # not filled
+
+
+class TestFillCheckBreakoutPullback:
+
+    def _make_engine(self, exchange=None, market_data=None, capital=150.0):
+        from engine.breakout_pullback_engine import BreakoutPullbackEngine
+        return BreakoutPullbackEngine(
+            config=AppConfig(),
+            futures_exchange=exchange or _mock_exchange(),
+            market_data=market_data or _mock_market_data(),
+            initial_capital_usdt=capital,
+            leverage=2,
+        )
+
+    @pytest.mark.asyncio
+    async def test_open_position_not_registered_on_unfilled(self, session_factory):
+        """주문 미체결 시 포지션 미등록."""
+        exchange = AsyncMock()
+        exchange.create_market_buy = AsyncMock(return_value=UnfilledOrder())
+        engine = self._make_engine(exchange=exchange, capital=150.0)
+
+        with patch("engine.breakout_pullback_engine.get_session_factory", return_value=session_factory):
+            with patch("engine.breakout_pullback_engine.emit_event", new_callable=AsyncMock):
+                await engine._open_position("BTC/USDT", "long", 50000.0)
+
+        assert "BTC/USDT" not in engine._positions
+
+    @pytest.mark.asyncio
+    async def test_close_position_kept_on_unfilled(self, session_factory):
+        """청산 주문 미체결 시 포지션 유지."""
+        from engine.breakout_pullback_engine import BPPosition
+        exchange = AsyncMock()
+        exchange.create_market_sell = AsyncMock(return_value=UnfilledOrder())
+        engine = self._make_engine(exchange=exchange, capital=150.0)
+        engine._positions["BTC/USDT"] = BPPosition(
+            symbol="BTC/USDT", side="long", quantity=0.01,
+            entry_price=50000.0, sl_price=47500.0, tp_price=54000.0,
+            highest_since_entry=50000.0, lowest_since_entry=50000.0,
+        )
+
+        with patch("engine.breakout_pullback_engine.get_session_factory", return_value=session_factory):
+            with patch("engine.breakout_pullback_engine.emit_event", new_callable=AsyncMock):
+                await engine._close_position("BTC/USDT", 49000.0, "sl_hit")
+
+        # Position should still be there (not deleted)
+        assert "BTC/USDT" in engine._positions
+
+
+class TestFillCheckVolumeMomentum:
+
+    def _make_engine(self, exchange=None, market_data=None, capital=100.0):
+        from engine.volume_momentum_engine import VolumeMomentumEngine
+        return VolumeMomentumEngine(
+            config=AppConfig(),
+            futures_exchange=exchange or _mock_exchange(),
+            market_data=market_data or _mock_market_data(),
+            initial_capital_usdt=capital,
+            leverage=2,
+        )
+
+    @pytest.mark.asyncio
+    async def test_open_position_not_registered_on_unfilled(self, session_factory):
+        """주문 미체결 시 포지션 미등록."""
+        exchange = AsyncMock()
+        exchange.create_market_buy = AsyncMock(return_value=UnfilledOrder())
+        engine = self._make_engine(exchange=exchange)
+
+        with patch("engine.volume_momentum_engine.get_session_factory", return_value=session_factory):
+            with patch("engine.volume_momentum_engine.emit_event", new_callable=AsyncMock):
+                await engine._open_position("BTC/USDT", "long", 50000.0, 47500.0, 55000.0, "detail")
+
+        assert "BTC/USDT" not in engine._positions
+
+    @pytest.mark.asyncio
+    async def test_close_position_kept_on_unfilled(self, session_factory):
+        """청산 주문 미체결 시 포지션 유지."""
+        from engine.volume_momentum_engine import VMPosition
+        exchange = AsyncMock()
+        exchange.create_market_sell = AsyncMock(return_value=UnfilledOrder())
+        engine = self._make_engine(exchange=exchange)
+        engine._positions["BTC/USDT"] = VMPosition(
+            symbol="BTC/USDT", side="long", quantity=0.01,
+            entry_price=50000.0, sl_price=47500.0, tp_price=55000.0,
+        )
+
+        with patch("engine.volume_momentum_engine.get_session_factory", return_value=session_factory):
+            with patch("engine.volume_momentum_engine.emit_event", new_callable=AsyncMock):
+                await engine._close_position("BTC/USDT", 47000.0, "sl_hit")
+
+        assert "BTC/USDT" in engine._positions
+
+
+class TestFillCheckBTCNeutral:
+
+    def _make_engine(self, exchange=None, market_data=None, capital=100.0):
+        from engine.btc_neutral_alt_mr_engine import BTCNeutralAltMREngine
+        return BTCNeutralAltMREngine(
+            config=AppConfig(),
+            futures_exchange=exchange or _mock_exchange(),
+            market_data=market_data or _mock_market_data(),
+            initial_capital_usdt=capital,
+            leverage=2,
+        )
+
+    @pytest.mark.asyncio
+    async def test_open_pair_not_registered_if_alt_unfilled(self, session_factory):
+        """Alt 주문 미체결 시 포지션 미등록."""
+        exchange = AsyncMock()
+        exchange.create_market_buy = AsyncMock(return_value=UnfilledOrder())
+        exchange.create_market_sell = AsyncMock(return_value=UnfilledOrder())
+
+        n = 200
+        dates = pd.date_range("2026-01-01", periods=n, freq="1h")
+        prices = np.full(n, 100.0)
+        df = pd.DataFrame({"open": prices, "high": prices*1.01, "low": prices*0.99,
+                            "close": prices, "volume": np.ones(n)*1000})
+        md = AsyncMock()
+        md.get_ohlcv_df = AsyncMock(return_value=df)
+
+        engine = self._make_engine(exchange=exchange, market_data=md)
+
+        with patch("engine.btc_neutral_alt_mr_engine.get_session_factory", return_value=session_factory):
+            with patch("engine.btc_neutral_alt_mr_engine.emit_event", new_callable=AsyncMock):
+                await engine._open_pair("ETH/USDT", "long", z=3.0)
+
+        assert "ETH/USDT" not in engine._positions
+
+    @pytest.mark.asyncio
+    async def test_close_pair_kept_if_alt_unfilled(self, session_factory):
+        """Alt 청산 주문 미체결 시 포지션 유지."""
+        from engine.btc_neutral_alt_mr_engine import NeutralPosition
+        exchange = AsyncMock()
+        exchange.create_market_sell = AsyncMock(return_value=UnfilledOrder())
+        exchange.create_market_buy = AsyncMock(return_value=UnfilledOrder())
+        engine = self._make_engine(exchange=exchange)
+        engine._positions["ETH/USDT"] = NeutralPosition(
+            alt_symbol="ETH/USDT", alt_side="long",
+            alt_qty=0.05, alt_entry=3000.0,
+            btc_side="short", btc_qty=0.001, btc_entry=50000.0,
+        )
+
+        with patch("engine.btc_neutral_alt_mr_engine.get_session_factory", return_value=session_factory):
+            with patch("engine.btc_neutral_alt_mr_engine.emit_event", new_callable=AsyncMock):
+                await engine._close_pair("ETH/USDT", reason="test")
+
+        assert "ETH/USDT" in engine._positions

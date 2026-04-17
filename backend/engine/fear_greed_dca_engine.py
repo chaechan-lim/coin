@@ -191,8 +191,15 @@ class FearGreedDCAEngine:
         try:
             qty = amount / price
             order = await self._exchange.create_market_buy(symbol, qty)
-            exec_price = float(getattr(order, 'executed_price', None) or price)
-            exec_qty = float(getattr(order, 'executed_quantity', None) or qty)
+
+            status = getattr(order, 'status', None)
+            exec_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
+            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+
+            if status not in ('filled', 'closed') or exec_qty <= 0 or exec_price <= 0:
+                logger.error("fgdca_buy_not_filled", symbol=symbol, status=status)
+                return
+
             fee = exec_qty * exec_price * 0.001
 
             self._cash -= amount
@@ -226,8 +233,15 @@ class FearGreedDCAEngine:
     async def _sell(self, symbol: str, qty: float, price: float, reason: str):
         try:
             order = await self._exchange.create_market_sell(symbol, qty)
-            exec_price = float(getattr(order, 'executed_price', None) or price)
-            exec_qty = float(getattr(order, 'executed_quantity', None) or qty)
+
+            status = getattr(order, 'status', None)
+            exec_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
+            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+
+            if status not in ('filled', 'closed') or exec_qty <= 0 or exec_price <= 0:
+                logger.error("fgdca_sell_not_filled", symbol=symbol, status=status)
+                return
+
             proceeds = exec_qty * exec_price
             fee = proceeds * 0.001
 

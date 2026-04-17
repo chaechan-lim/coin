@@ -282,15 +282,20 @@ class HMMRegimeLiveEngine:
             else:
                 order = await self._exchange.create_market_sell(self._symbol, qty)
 
-            exec_price = float(getattr(order, 'executed_price', None) or price)
-            exec_qty = float(getattr(order, 'executed_quantity', None) or qty)
+            status = getattr(order, 'status', None)
+            filled_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
+            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+
+            if status not in ('filled', 'closed') or filled_qty <= 0 or exec_price <= 0:
+                logger.error("hmm_open_not_filled", side=side, symbol=self._symbol, status=status)
+                return
 
             self._position = HMMPosition(
-                symbol=self._symbol, side=side, quantity=exec_qty, entry_price=exec_price
+                symbol=self._symbol, side=side, quantity=filled_qty, entry_price=exec_price
             )
             await self._record_order("buy" if side == "long" else "sell",
-                                      exec_price, exec_qty, reason=f"hmm_{side}_entry")
-            notional = exec_qty * exec_price
+                                      exec_price, filled_qty, reason=f"hmm_{side}_entry")
+            notional = filled_qty * exec_price
             max_loss = self._initial_capital * MAX_TOTAL_LOSS_PCT
             await emit_event("info", "engine",
                              f"{'📈' if side=='long' else '📉'} HMM {side}: {self._symbol} @ {exec_price:.2f}",
@@ -305,18 +310,28 @@ class HMMRegimeLiveEngine:
         try:
             if pos.side == "long":
                 order = await self._exchange.create_market_sell(self._symbol, pos.quantity)
-                pnl = (price - pos.entry_price) * pos.quantity
             else:
                 order = await self._exchange.create_market_buy(self._symbol, pos.quantity)
-                pnl = (pos.entry_price - price) * pos.quantity
+
+            status = getattr(order, 'status', None)
+            filled_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
+            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+
+            if status not in ('filled', 'closed') or filled_qty <= 0 or exec_price <= 0:
+                logger.error("hmm_close_not_filled", side=pos.side, symbol=self._symbol, status=status)
+                return
+
+            if pos.side == "long":
+                pnl = (exec_price - pos.entry_price) * filled_qty
+            else:
+                pnl = (pos.entry_price - exec_price) * filled_qty
 
             self._cumulative_pnl += pnl
             self._daily_pnl += pnl
             self._position = None
 
-            exec_price = float(getattr(order, 'executed_price', None) or price)
             await self._record_order("sell" if pos.side == "long" else "buy",
-                                      exec_price, pos.quantity, pnl=pnl,
+                                      exec_price, filled_qty, pnl=pnl,
                                       reason=f"hmm_{pos.side}_exit")
             emoji = "💰" if pnl > 0 else "💸"
             await emit_event("info", "engine",

@@ -447,9 +447,23 @@ class DonchianFuturesBiEngine:
             stop_price = close + atr * ATR_STOP_MULT
             side = "sell"
 
-        exec_price = float(order.price or close or 0.0)
-        filled_qty = float(order.filled or qty)
-        fee = float(order.fee or (exec_price * filled_qty * FEE_RATE))
+        status = getattr(order, 'status', None)
+        filled_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
+        exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'price', None) or getattr(order, 'average', 0) or 0)
+
+        if status not in ('filled', 'closed') or filled_qty <= 0 or exec_price <= 0:
+            logger.error("donchian_futures_bi_entry_not_filled", symbol=symbol, direction=direction, status=status)
+            if self._rnd_coordinator is not None:
+                await self._rnd_coordinator.release_reservation(self.EXCHANGE_NAME, reservation_token)
+                await self._sync_rnd_coordinator_state()
+            await self._emit_trade_journal(
+                trade_id, symbol, direction, "entry_not_filled",
+                f"Donchian futures entry not filled: {symbol}",
+                detail=f"status={status}", level="error",
+            )
+            return
+
+        fee = float(getattr(order, 'fee', None) or (exec_price * filled_qty * FEE_RATE))
         margin_used = exec_price * filled_qty / max(self._leverage, 1)
         self._positions[symbol] = DonchianFuturesPosition(
             trade_id=trade_id,
@@ -551,13 +565,26 @@ class DonchianFuturesBiEngine:
             extra={"stop_price": round(pos.stop_price, 6)},
         )
         order = await (self._exchange.create_market_sell(symbol, pos.quantity) if close_side == "sell" else self._exchange.create_market_buy(symbol, pos.quantity))
-        exec_price = float(order.price or close or 0.0)
-        fee = float(order.fee or (exec_price * pos.quantity * FEE_RATE))
+
+        exit_status = getattr(order, 'status', None)
+        exit_filled = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
+        exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'price', None) or getattr(order, 'average', 0) or 0)
+
+        if exit_status not in ('filled', 'closed') or exit_filled <= 0 or exec_price <= 0:
+            logger.error("donchian_futures_bi_exit_not_filled", symbol=symbol, direction=pos.direction, status=exit_status)
+            await self._emit_trade_journal(
+                pos.trade_id, symbol, pos.direction, "exit_not_filled",
+                f"Donchian futures exit not filled: {symbol}",
+                detail=f"status={exit_status}", level="error",
+            )
+            return
+
+        fee = float(getattr(order, 'fee', None) or (exec_price * exit_filled * FEE_RATE))
         if pos.direction == "long":
-            pnl = (exec_price - pos.entry_price) * pos.quantity
+            pnl = (exec_price - pos.entry_price) * exit_filled
             pnl_pct = ((exec_price - pos.entry_price) / pos.entry_price * 100) if pos.entry_price > 0 else 0.0
         else:
-            pnl = (pos.entry_price - exec_price) * pos.quantity
+            pnl = (pos.entry_price - exec_price) * exit_filled
             pnl_pct = ((pos.entry_price - exec_price) / pos.entry_price * 100) if pos.entry_price > 0 else 0.0
 
         realized = pnl - fee
@@ -568,7 +595,7 @@ class DonchianFuturesBiEngine:
             close_side,
             pos.direction,
             exec_price,
-            pos.quantity,
+            exit_filled,
             pos.margin_used,
             realized,
             pnl_pct,

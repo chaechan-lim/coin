@@ -307,8 +307,13 @@ class BreakoutPullbackEngine:
             else:
                 order = await self._exchange.create_market_sell(symbol, qty)
 
-            exec_price = float(getattr(order, 'executed_price', None) or price)
-            exec_qty = float(getattr(order, 'executed_quantity', None) or qty)
+            status = getattr(order, 'status', None)
+            exec_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
+            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+
+            if status not in ('filled', 'closed') or exec_qty <= 0 or exec_price <= 0:
+                logger.error("breakout_pb_open_not_filled", symbol=symbol, side=side, status=status)
+                return
 
             self._positions[symbol] = BPPosition(
                 symbol=symbol, side=side, quantity=exec_qty, entry_price=exec_price,
@@ -337,18 +342,28 @@ class BreakoutPullbackEngine:
         try:
             if pos.side == "long":
                 order = await self._exchange.create_market_sell(symbol, pos.quantity)
-                pnl = (price - pos.entry_price) * pos.quantity
             else:
                 order = await self._exchange.create_market_buy(symbol, pos.quantity)
-                pnl = (pos.entry_price - price) * pos.quantity
 
-            exec_price = float(getattr(order, 'executed_price', None) or price)
+            status = getattr(order, 'status', None)
+            filled_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
+            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+
+            if status not in ('filled', 'closed') or filled_qty <= 0 or exec_price <= 0:
+                logger.error("breakout_pb_close_not_filled", symbol=symbol, side=pos.side, status=status)
+                return
+
+            if pos.side == "long":
+                pnl = (exec_price - pos.entry_price) * filled_qty
+            else:
+                pnl = (pos.entry_price - exec_price) * filled_qty
+
             self._cumulative_pnl += pnl
             self._daily_pnl += pnl
             del self._positions[symbol]
 
             await self._record_order(symbol, "sell" if pos.side == "long" else "buy",
-                                     exec_price, pos.quantity,
+                                     exec_price, filled_qty,
                                      pnl=pnl, reason=f"breakout_pb_{pos.side}_exit_{reason}")
             emoji = "💰" if pnl > 0 else "💸"
             await emit_event("info", "engine",

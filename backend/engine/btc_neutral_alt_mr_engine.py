@@ -294,16 +294,36 @@ class BTCNeutralAltMREngine:
             else:
                 alt_order = await self._exchange.create_market_sell(alt_symbol, alt_qty)
 
+            alt_status = getattr(alt_order, 'status', None)
+            alt_exec_qty = float(getattr(alt_order, 'executed_quantity', None) or getattr(alt_order, 'filled', 0) or 0)
+            alt_exec_price = float(getattr(alt_order, 'executed_price', None) or getattr(alt_order, 'average', 0) or 0)
+
+            if alt_status not in ('filled', 'closed') or alt_exec_qty <= 0 or alt_exec_price <= 0:
+                logger.error("btc_neutral_alt_order_not_filled", symbol=alt_symbol, status=alt_status)
+                return
+
             # BTC 주문
             if btc_side == "long":
                 btc_order = await self._exchange.create_market_buy(self.BTC_SYMBOL, btc_qty)
             else:
                 btc_order = await self._exchange.create_market_sell(self.BTC_SYMBOL, btc_qty)
 
-            alt_exec_price = float(getattr(alt_order, 'executed_price', None) or alt_price)
-            alt_exec_qty = float(getattr(alt_order, 'executed_quantity', None) or alt_qty)
-            btc_exec_price = float(getattr(btc_order, 'executed_price', None) or btc_price)
-            btc_exec_qty = float(getattr(btc_order, 'executed_quantity', None) or btc_qty)
+            btc_status = getattr(btc_order, 'status', None)
+            btc_exec_qty = float(getattr(btc_order, 'executed_quantity', None) or getattr(btc_order, 'filled', 0) or 0)
+            btc_exec_price = float(getattr(btc_order, 'executed_price', None) or getattr(btc_order, 'average', 0) or 0)
+
+            if btc_status not in ('filled', 'closed') or btc_exec_qty <= 0 or btc_exec_price <= 0:
+                logger.error("btc_neutral_btc_order_not_filled", symbol=self.BTC_SYMBOL, status=btc_status)
+                # Alt 주문은 체결됐으나 BTC 실패 → 롤백
+                try:
+                    if alt_side == "long":
+                        await self._exchange.create_market_sell(alt_symbol, alt_exec_qty)
+                    else:
+                        await self._exchange.create_market_buy(alt_symbol, alt_exec_qty)
+                    logger.info("btc_neutral_alt_rollback_ok", symbol=alt_symbol)
+                except Exception as rb_err:
+                    logger.error("btc_neutral_alt_rollback_failed", symbol=alt_symbol, error=str(rb_err))
+                return
 
             self._positions[alt_symbol] = NeutralPosition(
                 alt_symbol=alt_symbol, alt_side=alt_side,
@@ -339,27 +359,43 @@ class BTCNeutralAltMREngine:
             return
 
         try:
-            # 현재 가격
-            alt_df = await self._market_data.get_ohlcv_df(alt_symbol, "1h", limit=5)
-            btc_df = await self._market_data.get_ohlcv_df(self.BTC_SYMBOL, "1h", limit=5)
-            alt_price = float(alt_df["close"].iloc[-1]) if alt_df is not None else pos.alt_entry
-            btc_price = float(btc_df["close"].iloc[-1]) if btc_df is not None else pos.btc_entry
-
             # Alt 청산
             if pos.alt_side == "long":
-                await self._exchange.create_market_sell(alt_symbol, pos.alt_qty)
-                alt_pnl = (alt_price - pos.alt_entry) * pos.alt_qty
+                alt_order = await self._exchange.create_market_sell(alt_symbol, pos.alt_qty)
             else:
-                await self._exchange.create_market_buy(alt_symbol, pos.alt_qty)
-                alt_pnl = (pos.alt_entry - alt_price) * pos.alt_qty
+                alt_order = await self._exchange.create_market_buy(alt_symbol, pos.alt_qty)
+
+            alt_status = getattr(alt_order, 'status', None)
+            alt_filled = float(getattr(alt_order, 'executed_quantity', None) or getattr(alt_order, 'filled', 0) or 0)
+            alt_exec_price = float(getattr(alt_order, 'executed_price', None) or getattr(alt_order, 'average', 0) or 0)
+
+            if alt_status not in ('filled', 'closed') or alt_filled <= 0 or alt_exec_price <= 0:
+                logger.error("btc_neutral_alt_close_not_filled", symbol=alt_symbol, status=alt_status)
+                return
 
             # BTC 청산
             if pos.btc_side == "long":
-                await self._exchange.create_market_sell(self.BTC_SYMBOL, pos.btc_qty)
-                btc_pnl = (btc_price - pos.btc_entry) * pos.btc_qty
+                btc_order = await self._exchange.create_market_sell(self.BTC_SYMBOL, pos.btc_qty)
             else:
-                await self._exchange.create_market_buy(self.BTC_SYMBOL, pos.btc_qty)
-                btc_pnl = (pos.btc_entry - btc_price) * pos.btc_qty
+                btc_order = await self._exchange.create_market_buy(self.BTC_SYMBOL, pos.btc_qty)
+
+            btc_status = getattr(btc_order, 'status', None)
+            btc_filled = float(getattr(btc_order, 'executed_quantity', None) or getattr(btc_order, 'filled', 0) or 0)
+            btc_exec_price = float(getattr(btc_order, 'executed_price', None) or getattr(btc_order, 'average', 0) or 0)
+
+            if btc_status not in ('filled', 'closed') or btc_filled <= 0 or btc_exec_price <= 0:
+                logger.error("btc_neutral_btc_close_not_filled", symbol=self.BTC_SYMBOL, status=btc_status)
+                return
+
+            if pos.alt_side == "long":
+                alt_pnl = (alt_exec_price - pos.alt_entry) * alt_filled
+            else:
+                alt_pnl = (pos.alt_entry - alt_exec_price) * alt_filled
+
+            if pos.btc_side == "long":
+                btc_pnl = (btc_exec_price - pos.btc_entry) * btc_filled
+            else:
+                btc_pnl = (pos.btc_entry - btc_exec_price) * btc_filled
 
             total_pnl = alt_pnl + btc_pnl
             self._cumulative_pnl += total_pnl
@@ -370,11 +406,11 @@ class BTCNeutralAltMREngine:
             exit_alt_side = "sell" if pos.alt_side == "long" else "buy"
             exit_btc_side = "sell" if pos.btc_side == "long" else "buy"
             await self._record_order(alt_symbol, exit_alt_side,
-                                     alt_price, pos.alt_qty,
+                                     alt_exec_price, alt_filled,
                                      pnl=alt_pnl,
                                      reason=f"btcneutral_{pos.alt_side}_alt_exit_{reason}")
             await self._record_order(self.BTC_SYMBOL, exit_btc_side,
-                                     btc_price, pos.btc_qty,
+                                     btc_exec_price, btc_filled,
                                      pnl=btc_pnl,
                                      reason=f"btcneutral_{pos.btc_side}_btc_exit_{reason}")
 

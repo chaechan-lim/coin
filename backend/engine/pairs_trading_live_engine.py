@@ -444,12 +444,37 @@ class PairsTradingLiveEngine:
             )
             return
 
-        exec_price_a = float(order_a.price or signal["price_a"])
-        exec_price_b = float(order_b.price or signal["price_b"])
-        filled_a = float(order_a.filled or qty_a)
-        filled_b = float(order_b.filled or qty_b)
-        fee_a = float(order_a.fee or (exec_price_a * filled_a * TOTAL_COST_RATE))
-        fee_b = float(order_b.fee or (exec_price_b * filled_b * TOTAL_COST_RATE))
+        status_a = getattr(order_a, 'status', None)
+        filled_a = float(getattr(order_a, 'executed_quantity', None) or getattr(order_a, 'filled', 0) or 0)
+        exec_price_a = float(getattr(order_a, 'executed_price', None) or getattr(order_a, 'price', None) or getattr(order_a, 'average', 0) or 0)
+
+        status_b = getattr(order_b, 'status', None)
+        filled_b = float(getattr(order_b, 'executed_quantity', None) or getattr(order_b, 'filled', 0) or 0)
+        exec_price_b = float(getattr(order_b, 'executed_price', None) or getattr(order_b, 'price', None) or getattr(order_b, 'average', 0) or 0)
+
+        if (status_a not in ('filled', 'closed') or filled_a <= 0 or exec_price_a <= 0 or
+                status_b not in ('filled', 'closed') or filled_b <= 0 or exec_price_b <= 0):
+            logger.error("pairs_live_entry_not_filled", status_a=status_a, status_b=status_b)
+            # 하나라도 체결 안 됨 → 체결된 레그 롤백
+            if status_a in ('filled', 'closed') and filled_a > 0:
+                try:
+                    rollback_side = "sell" if open_a_side == "buy" else "buy"
+                    await self._submit_order(self._coin_a, rollback_side, filled_a)
+                except Exception:
+                    logger.error("pairs_live_entry_not_filled_rollback_a_failed", exc_info=True)
+            if status_b in ('filled', 'closed') and filled_b > 0:
+                try:
+                    rollback_side = "sell" if open_b_side == "buy" else "buy"
+                    await self._submit_order(self._coin_b, rollback_side, filled_b)
+                except Exception:
+                    logger.error("pairs_live_entry_not_filled_rollback_b_failed", exc_info=True)
+            if self._rnd_coordinator is not None:
+                await self._rnd_coordinator.release_reservation(self.EXCHANGE_NAME, reservation_token)
+                await self._sync_rnd_coordinator_state()
+            return
+
+        fee_a = float(getattr(order_a, 'fee', None) or (exec_price_a * filled_a * TOTAL_COST_RATE))
+        fee_b = float(getattr(order_b, 'fee', None) or (exec_price_b * filled_b * TOTAL_COST_RATE))
         margin_used = (exec_price_a * filled_a + exec_price_b * filled_b) / max(self._leverage, 1)
         self._position = PairPosition(
             trade_id=trade_id,
@@ -642,17 +667,36 @@ class PairsTradingLiveEngine:
             )
             return
 
-        exec_price_a = float(order_a.price or signal["price_a"])
-        exec_price_b = float(order_b.price or signal["price_b"])
-        fee_a = float(order_a.fee or (exec_price_a * pos.qty_a * TOTAL_COST_RATE))
-        fee_b = float(order_b.fee or (exec_price_b * pos.qty_b * TOTAL_COST_RATE))
+        exit_status_a = getattr(order_a, 'status', None)
+        exit_filled_a = float(getattr(order_a, 'executed_quantity', None) or getattr(order_a, 'filled', 0) or 0)
+        exec_price_a = float(getattr(order_a, 'executed_price', None) or getattr(order_a, 'price', None) or getattr(order_a, 'average', 0) or 0)
+
+        exit_status_b = getattr(order_b, 'status', None)
+        exit_filled_b = float(getattr(order_b, 'executed_quantity', None) or getattr(order_b, 'filled', 0) or 0)
+        exec_price_b = float(getattr(order_b, 'executed_price', None) or getattr(order_b, 'price', None) or getattr(order_b, 'average', 0) or 0)
+
+        if (exit_status_a not in ('filled', 'closed') or exit_filled_a <= 0 or exec_price_a <= 0 or
+                exit_status_b not in ('filled', 'closed') or exit_filled_b <= 0 or exec_price_b <= 0):
+            logger.error("pairs_live_exit_not_filled",
+                         status_a=exit_status_a, status_b=exit_status_b,
+                         trade_id=pos.trade_id)
+            await self._emit_pairs_journal(
+                pos.trade_id, pos.pair_direction, "exit_not_filled",
+                "Pairs exit not filled — position kept",
+                detail=f"status_a={exit_status_a}, status_b={exit_status_b}",
+                level="error",
+            )
+            return
+
+        fee_a = float(getattr(order_a, 'fee', None) or (exec_price_a * exit_filled_a * TOTAL_COST_RATE))
+        fee_b = float(getattr(order_b, 'fee', None) or (exec_price_b * exit_filled_b * TOTAL_COST_RATE))
 
         if pos.pair_direction == "long_a_short_b":
-            pnl_a = (exec_price_a - pos.entry_price_a) * pos.qty_a
-            pnl_b = (pos.entry_price_b - exec_price_b) * pos.qty_b
+            pnl_a = (exec_price_a - pos.entry_price_a) * exit_filled_a
+            pnl_b = (pos.entry_price_b - exec_price_b) * exit_filled_b
         else:
-            pnl_a = (pos.entry_price_a - exec_price_a) * pos.qty_a
-            pnl_b = (exec_price_b - pos.entry_price_b) * pos.qty_b
+            pnl_a = (pos.entry_price_a - exec_price_a) * exit_filled_a
+            pnl_b = (exec_price_b - pos.entry_price_b) * exit_filled_b
         realized = pnl_a + pnl_b - fee_a - fee_b
         pnl_pct = (realized / max(pos.margin_used, 1e-9)) * 100.0
         self._daily_realized_pnl += realized
@@ -664,7 +708,7 @@ class PairsTradingLiveEngine:
             close_a_side,
             leg_a_direction,
             exec_price_a,
-            pos.qty_a,
+            exit_filled_a,
             pos.margin_used / 2,
             pnl_a - fee_a,
             pnl_pct,
@@ -678,7 +722,7 @@ class PairsTradingLiveEngine:
             close_b_side,
             leg_b_direction,
             exec_price_b,
-            pos.qty_b,
+            exit_filled_b,
             pos.margin_used / 2,
             pnl_b - fee_b,
             pnl_pct,
@@ -698,8 +742,8 @@ class PairsTradingLiveEngine:
                 "pnl_pct": round(pnl_pct, 4),
                 "order_a_id": getattr(order_a, "id", None),
                 "order_b_id": getattr(order_b, "id", None),
-                "exit_qty_a": pos.qty_a,
-                "exit_qty_b": pos.qty_b,
+                "exit_qty_a": exit_filled_a,
+                "exit_qty_b": exit_filled_b,
             },
         )
         self._position = None
