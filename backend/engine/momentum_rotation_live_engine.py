@@ -28,11 +28,23 @@ from services.market_data import MarketDataService
 
 logger = structlog.get_logger(__name__)
 
-COINS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT"]
+COINS = [
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT",
+    "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
+    "UNI/USDT", "ATOM/USDT", "FIL/USDT", "APT/USDT", "ARB/USDT",
+    "OP/USDT", "NEAR/USDT", "SUI/USDT", "TIA/USDT", "SEI/USDT",
+    "INJ/USDT", "AAVE/USDT", "LTC/USDT", "ETC/USDT",
+]
 LOOKBACK_DAYS = 14
 REBALANCE_INTERVAL_HOURS = 168  # 7일
-TOP_N = 2
-BOTTOM_N = 2
+TOP_N = 3
+BOTTOM_N = 3
+
+# SL/Trailing (백테스트: SL8+trail4/2 → 360d +173.8%)
+SL_PCT = 8.0          # 손절 8% (레버리지 반영)
+TRAIL_ACT_PCT = 4.0   # 수익 4% 이상 시 trailing 활성
+TRAIL_STOP_PCT = 2.0  # 고점 대비 2% 하락 시 청산
+DAILY_SL_CHECK = True  # 매일 SL/trailing 체크
 
 MAX_TOTAL_LOSS_PCT = 0.10
 MAX_DAILY_LOSS_PCT = 0.05
@@ -45,6 +57,7 @@ class MomentumPosition:
     side: str  # "long" or "short"
     quantity: float
     entry_price: float
+    peak: float = 0.0  # trailing용 고점/저점
 
 
 class MomentumRotationLiveEngine:
@@ -77,6 +90,7 @@ class MomentumRotationLiveEngine:
         self._paused = False
         self._daily_paused = False
         self._coordinator = None
+        self._last_rebalance_date = None
 
     @property
     def is_running(self) -> bool:
@@ -114,22 +128,28 @@ class MomentumRotationLiveEngine:
         logger.info("momentum_rotation_stopped")
 
     async def _loop(self):
-        """매주 수요일 UTC 01:00 리밸런싱."""
+        """매일 SL/trailing 체크 + 매주 수요일 리밸런싱."""
         while self._is_running:
             try:
                 now = datetime.now(timezone.utc)
-                # 다음 수요일 01:00 계산 (weekday: 0=월, 2=수)
-                days_until_wed = (2 - now.weekday()) % 7
-                if days_until_wed == 0 and now.hour >= 1:
-                    days_until_wed = 7
-                target = (now + pd.Timedelta(days=days_until_wed)).replace(
-                    hour=1, minute=0, second=0, microsecond=0
-                )
-                wait = (target - now).total_seconds()
-                logger.info("momentum_next_rebalance", at=target.isoformat(), wait_hours=round(wait/3600, 1))
+
+                # 매일 SL/trailing 체크
+                if DAILY_SL_CHECK and self._positions:
+                    await self._check_sl_trailing()
+
+                # 수요일이면 리밸런싱
+                if now.weekday() == 2 and now.hour >= 1:
+                    # 오늘 이미 리밸런싱했으면 스킵
+                    if not self._last_rebalance_date or self._last_rebalance_date != now.date():
+                        await self._rebalance()
+                        self._last_rebalance_date = now.date()
+
+                # 다음 날 01:05까지 대기
+                tomorrow = (now + pd.Timedelta(days=1)).replace(hour=1, minute=5, second=0, microsecond=0)
+                wait = max(60, (tomorrow - datetime.now(timezone.utc)).total_seconds())
+                logger.info("momentum_next_check", at=tomorrow.isoformat(),
+                            positions=len(self._positions), wait_hours=round(wait/3600, 1))
                 await asyncio.sleep(wait)
-                if self._is_running:
-                    await self._rebalance()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -216,7 +236,8 @@ class MomentumRotationLiveEngine:
             exec_qty = float(getattr(order, 'executed_quantity', None) or qty)
 
             self._positions[symbol] = MomentumPosition(
-                symbol=symbol, side=side, quantity=exec_qty, entry_price=exec_price
+                symbol=symbol, side=side, quantity=exec_qty, entry_price=exec_price,
+                peak=exec_price,
             )
             await self._record_order(symbol, "buy" if side == "long" else "sell",
                                       exec_price, exec_qty,
@@ -227,6 +248,84 @@ class MomentumRotationLiveEngine:
                              detail=f"수량 {exec_qty:.6f} | 명목 {notional:.1f} USDT | 청산: 다음 주 리밸런싱")
         except Exception as e:
             logger.error("momentum_open_error", symbol=symbol, side=side, error=str(e))
+
+    async def _check_sl_trailing(self):
+        """매일 SL/trailing 체크 — 보유 포지션 high/low 기반."""
+        for symbol in list(self._positions.keys()):
+            pos = self._positions[symbol]
+            try:
+                df = await self._market_data.get_ohlcv_df(symbol, "1d", limit=3)
+                if df is None or len(df) < 1:
+                    continue
+                last = df.iloc[-1]
+                price = float(last["close"])
+                high = float(last["high"])
+                low = float(last["low"])
+
+                if pos.side == "long":
+                    if high > getattr(pos, 'peak', pos.entry_price):
+                        pos.peak = high
+                    # SL (low 기준)
+                    low_pnl = (low - pos.entry_price) / pos.entry_price * 100 * self._leverage
+                    if SL_PCT > 0 and low_pnl <= -SL_PCT:
+                        sl_price = pos.entry_price * (1 - SL_PCT / 100 / self._leverage)
+                        await self._close_position_at(symbol, sl_price, f"sl_hit ({low_pnl:.1f}%)")
+                        continue
+                    # Trailing
+                    peak = getattr(pos, 'peak', pos.entry_price)
+                    peak_pnl = (peak - pos.entry_price) / pos.entry_price * 100 * self._leverage
+                    if TRAIL_ACT_PCT > 0 and peak_pnl >= TRAIL_ACT_PCT:
+                        trail_price = peak * (1 - TRAIL_STOP_PCT / 100 / self._leverage)
+                        if low <= trail_price:
+                            await self._close_position_at(symbol, trail_price, f"trailing ({peak_pnl:.1f}%→{TRAIL_STOP_PCT}% drop)")
+                            continue
+                else:  # short
+                    if low < getattr(pos, 'peak', pos.entry_price):
+                        pos.peak = low
+                    high_pnl = (pos.entry_price - high) / pos.entry_price * 100 * self._leverage
+                    if SL_PCT > 0 and high_pnl <= -SL_PCT:
+                        sl_price = pos.entry_price * (1 + SL_PCT / 100 / self._leverage)
+                        await self._close_position_at(symbol, sl_price, f"sl_hit ({high_pnl:.1f}%)")
+                        continue
+                    peak = getattr(pos, 'peak', pos.entry_price)
+                    peak_pnl = (pos.entry_price - peak) / pos.entry_price * 100 * self._leverage
+                    if TRAIL_ACT_PCT > 0 and peak_pnl >= TRAIL_ACT_PCT:
+                        trail_price = peak * (1 + TRAIL_STOP_PCT / 100 / self._leverage)
+                        if high >= trail_price:
+                            await self._close_position_at(symbol, trail_price, f"trailing ({peak_pnl:.1f}%→{TRAIL_STOP_PCT}% rise)")
+                            continue
+            except Exception as e:
+                logger.error("momentum_sl_check_error", symbol=symbol, error=str(e))
+
+    async def _close_position_at(self, symbol: str, trigger_price: float, reason: str):
+        """특정 가격에 포지션 청산 (SL/trailing)."""
+        pos = self._positions.get(symbol)
+        if not pos:
+            return
+        try:
+            if pos.side == "long":
+                order = await self._exchange.create_market_sell(symbol, pos.quantity)
+                pnl = (trigger_price - pos.entry_price) * pos.quantity
+            else:
+                order = await self._exchange.create_market_buy(symbol, pos.quantity)
+                pnl = (pos.entry_price - trigger_price) * pos.quantity
+
+            self._cumulative_pnl += pnl
+            self._daily_pnl += pnl
+            del self._positions[symbol]
+
+            exec_price = float(getattr(order, 'executed_price', None) or trigger_price)
+            await self._record_order(symbol, "sell" if pos.side == "long" else "buy",
+                                      exec_price, pos.quantity,
+                                      pnl=pnl, reason=f"momentum_{pos.side}_{reason}")
+            emoji = "🛑" if pnl < 0 else "💰"
+            await emit_event("info", "engine",
+                             f"{emoji} Momentum {reason}: {symbol} PnL {pnl:+.2f}",
+                             detail=f"진입 {pos.entry_price:.2f} → 청산 {trigger_price:.2f} | {pos.side}")
+            logger.info("momentum_sl_trailing_exit", symbol=symbol, reason=reason, pnl=round(pnl, 2))
+            await self._check_loss_limits()
+        except Exception as e:
+            logger.error("momentum_sl_close_error", symbol=symbol, error=str(e))
 
     async def _close_position(self, symbol: str):
         pos = self._positions.get(symbol)
