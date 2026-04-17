@@ -57,7 +57,7 @@ class MomentumPosition:
     side: str  # "long" or "short"
     quantity: float
     entry_price: float
-    peak: float = 0.0  # trailing용 고점/저점
+    peak: float = 0.0  # trailing용 고점(long)/저점(short), 0이면 entry_price 사용
 
 
 class MomentumRotationLiveEngine:
@@ -263,8 +263,9 @@ class MomentumRotationLiveEngine:
                 low = float(last["low"])
 
                 if pos.side == "long":
-                    if high > getattr(pos, 'peak', pos.entry_price):
-                        pos.peak = high
+                    # peak 초기화 방어 (0이면 entry_price)
+                    if pos.peak <= 0: pos.peak = pos.entry_price
+                    if high > pos.peak: pos.peak = high
                     # SL (low 기준)
                     low_pnl = (low - pos.entry_price) / pos.entry_price * 100 * self._leverage
                     if SL_PCT > 0 and low_pnl <= -SL_PCT:
@@ -272,23 +273,22 @@ class MomentumRotationLiveEngine:
                         await self._close_position_at(symbol, sl_price, f"sl_hit ({low_pnl:.1f}%)")
                         continue
                     # Trailing
-                    peak = getattr(pos, 'peak', pos.entry_price)
-                    peak_pnl = (peak - pos.entry_price) / pos.entry_price * 100 * self._leverage
+                    peak_pnl = (pos.peak - pos.entry_price) / pos.entry_price * 100 * self._leverage
                     if TRAIL_ACT_PCT > 0 and peak_pnl >= TRAIL_ACT_PCT:
                         trail_price = peak * (1 - TRAIL_STOP_PCT / 100 / self._leverage)
                         if low <= trail_price:
                             await self._close_position_at(symbol, trail_price, f"trailing ({peak_pnl:.1f}%→{TRAIL_STOP_PCT}% drop)")
                             continue
                 else:  # short
-                    if low < getattr(pos, 'peak', pos.entry_price):
-                        pos.peak = low
+                    # peak 초기화 방어 (0이면 entry_price)
+                    if pos.peak <= 0: pos.peak = pos.entry_price
+                    if low < pos.peak: pos.peak = low
                     high_pnl = (pos.entry_price - high) / pos.entry_price * 100 * self._leverage
                     if SL_PCT > 0 and high_pnl <= -SL_PCT:
                         sl_price = pos.entry_price * (1 + SL_PCT / 100 / self._leverage)
                         await self._close_position_at(symbol, sl_price, f"sl_hit ({high_pnl:.1f}%)")
                         continue
-                    peak = getattr(pos, 'peak', pos.entry_price)
-                    peak_pnl = (pos.entry_price - peak) / pos.entry_price * 100 * self._leverage
+                    peak_pnl = (pos.entry_price - pos.peak) / pos.entry_price * 100 * self._leverage
                     if TRAIL_ACT_PCT > 0 and peak_pnl >= TRAIL_ACT_PCT:
                         trail_price = peak * (1 + TRAIL_STOP_PCT / 100 / self._leverage)
                         if high >= trail_price:
@@ -373,7 +373,8 @@ class MomentumRotationLiveEngine:
                 executed_price=price, executed_quantity=qty,
                 fee=qty * price * 0.0004, fee_currency="USDT",
                 is_paper=False, strategy_name="momentum_rotation",
-                signal_reason=reason, realized_pnl=pnl if "exit" in reason else 0.0,
+                signal_reason=reason,
+                realized_pnl=pnl if ("exit" in reason or "sl_hit" in reason or "trailing" in reason) else 0.0,
                 created_at=datetime.now(timezone.utc), filled_at=datetime.now(timezone.utc),
             )
             session.add(order)
@@ -393,16 +394,18 @@ class MomentumRotationLiveEngine:
             for o in orders:
                 q = float(o.executed_quantity or 0)
                 p = float(o.executed_price or 0)
-                if "entry" in (o.signal_reason or ""):
+                reason = o.signal_reason or ""
+                if "entry" in reason:
                     side = "long" if o.side == "buy" else "short"
                     net[o.symbol] = {"side": side, "qty": q, "price": p}
-                elif "exit" in (o.signal_reason or ""):
+                elif "exit" in reason or "sl_hit" in reason or "trailing" in reason:
                     net.pop(o.symbol, None)
                     cum_pnl += float(o.realized_pnl or 0)
             self._cumulative_pnl = cum_pnl
             for sym, info in net.items():
                 self._positions[sym] = MomentumPosition(
-                    symbol=sym, side=info["side"], quantity=info["qty"], entry_price=info["price"]
+                    symbol=sym, side=info["side"], quantity=info["qty"],
+                    entry_price=info["price"], peak=info["price"],
                 )
             logger.info("momentum_restored", positions=len(self._positions), pnl=round(cum_pnl, 2))
 
