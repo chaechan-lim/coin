@@ -917,14 +917,15 @@ async def lifespan(app: FastAPI):
                     seconds=900,
                 )
 
-            async def binance_spot_risk_check():
-                await spot_coord.run_risk_evaluation(spot_pm.cash_balance)
-            _scheduler.add_job(
-                _wrap(binance_spot_risk_check),
-                name="binance_spot_risk_check",
-                seconds=300,
-            )
-            # 메인 현물 엔진 성과 분석 — 비활성
+            # 메인 현물 엔진 — 비활성 시 risk/performance/strategy 모두 스킵
+            if config.binance_spot_trading.enabled:
+                async def binance_spot_risk_check():
+                    await spot_coord.run_risk_evaluation(spot_pm.cash_balance)
+                _scheduler.add_job(
+                    _wrap(binance_spot_risk_check),
+                    name="binance_spot_risk_check",
+                    seconds=300,
+                )
             if config.binance_spot_trading.enabled:
                 _scheduler.add_cron_job(
                     _wrap(spot_coord.run_performance_analysis),
@@ -1115,7 +1116,7 @@ async def lifespan(app: FastAPI):
             name="futures_health_check",
             seconds=120,
         )
-    if _binance_spot_engine and spot_health:
+    if _binance_spot_engine and spot_health and config.binance_spot_trading.enabled:
         _scheduler.add_job(
             _wrap(spot_health.run_health_checks),
             name="spot_health_check",
