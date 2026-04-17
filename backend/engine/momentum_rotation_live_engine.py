@@ -232,8 +232,15 @@ class MomentumRotationLiveEngine:
             else:
                 order = await self._exchange.create_market_sell(symbol, qty)
 
-            exec_price = float(getattr(order, 'executed_price', None) or price)
-            exec_qty = float(getattr(order, 'executed_quantity', None) or qty)
+            # 체결 확인
+            status = getattr(order, 'status', None)
+            exec_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
+            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+
+            if status not in ('filled', 'closed') or exec_qty <= 0 or exec_price <= 0:
+                logger.error("momentum_open_not_filled",
+                             symbol=symbol, side=side, status=status, filled=exec_qty, price=exec_price)
+                return  # 체결 안 됨 → 포지션 미등록
 
             self._positions[symbol] = MomentumPosition(
                 symbol=symbol, side=side, quantity=exec_qty, entry_price=exec_price,
@@ -298,51 +305,76 @@ class MomentumRotationLiveEngine:
                 logger.error("momentum_sl_check_error", symbol=symbol, error=str(e))
 
     async def _close_position_at(self, symbol: str, trigger_price: float, reason: str):
-        """특정 가격에 포지션 청산 (SL/trailing)."""
+        """특정 가격에 포지션 청산 (SL/trailing). 체결 확인 후에만 포지션 삭제."""
         pos = self._positions.get(symbol)
         if not pos:
             return
         try:
             if pos.side == "long":
                 order = await self._exchange.create_market_sell(symbol, pos.quantity)
-                pnl = (trigger_price - pos.entry_price) * pos.quantity
             else:
                 order = await self._exchange.create_market_buy(symbol, pos.quantity)
-                pnl = (pos.entry_price - trigger_price) * pos.quantity
+
+            # 체결 확인 — 체결 안 되면 포지션 유지
+            status = getattr(order, 'status', None)
+            filled_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
+            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+
+            if status not in ('filled', 'closed') or filled_qty <= 0 or exec_price <= 0:
+                logger.error("momentum_sl_close_not_filled",
+                             symbol=symbol, status=status, filled=filled_qty, price=exec_price)
+                return  # 체결 안 됨 → 포지션 유지, 다음 체크에서 재시도
+
+            # 실제 체결가 기준 PnL
+            if pos.side == "long":
+                pnl = (exec_price - pos.entry_price) * filled_qty
+            else:
+                pnl = (pos.entry_price - exec_price) * filled_qty
 
             self._cumulative_pnl += pnl
             self._daily_pnl += pnl
             del self._positions[symbol]
 
-            exec_price = float(getattr(order, 'executed_price', None) or trigger_price)
             await self._record_order(symbol, "sell" if pos.side == "long" else "buy",
-                                      exec_price, pos.quantity,
+                                      exec_price, filled_qty,
                                       pnl=pnl, reason=f"momentum_{pos.side}_{reason}")
             emoji = "🛑" if pnl < 0 else "💰"
             await emit_event("info", "engine",
                              f"{emoji} Momentum {reason}: {symbol} PnL {pnl:+.2f}",
-                             detail=f"진입 {pos.entry_price:.2f} → 청산 {trigger_price:.2f} | {pos.side}")
-            logger.info("momentum_sl_trailing_exit", symbol=symbol, reason=reason, pnl=round(pnl, 2))
+                             detail=f"진입 {pos.entry_price:.2f} → 청산 {exec_price:.2f} | {pos.side}")
+            logger.info("momentum_sl_trailing_exit", symbol=symbol, reason=reason,
+                        pnl=round(pnl, 2), exec_price=exec_price, filled=filled_qty)
             await self._check_loss_limits()
         except Exception as e:
-            logger.error("momentum_sl_close_error", symbol=symbol, error=str(e))
+            # 주문 실패 → 포지션 유지 (다음 체크에서 재시도)
+            logger.error("momentum_sl_close_error", symbol=symbol, error=str(e), exc_info=True)
 
     async def _close_position(self, symbol: str):
+        """리밸런싱 청산. 체결 확인 후에만 포지션 삭제."""
         pos = self._positions.get(symbol)
         if not pos:
             return
         try:
-            df = await self._market_data.get_ohlcv_df(symbol, "1d", limit=5)
-            price = float(df["close"].iloc[-1]) if df is not None else pos.entry_price
-
             if pos.side == "long":
                 order = await self._exchange.create_market_sell(symbol, pos.quantity)
-                pnl = (price - pos.entry_price) * pos.quantity
             else:
                 order = await self._exchange.create_market_buy(symbol, pos.quantity)
-                pnl = (pos.entry_price - price) * pos.quantity
 
-            exec_price = float(getattr(order, 'executed_price', None) or price)
+            # 체결 확인
+            status = getattr(order, 'status', None)
+            filled_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
+            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+
+            if status not in ('filled', 'closed') or filled_qty <= 0 or exec_price <= 0:
+                logger.error("momentum_close_not_filled",
+                             symbol=symbol, status=status, filled=filled_qty, price=exec_price)
+                return  # 체결 안 됨 → 포지션 유지
+
+            if pos.side == "long":
+                pnl = (exec_price - pos.entry_price) * filled_qty
+            else:
+                pnl = (pos.entry_price - exec_price) * filled_qty
+
             self._cumulative_pnl += pnl
             self._daily_pnl += pnl
             del self._positions[symbol]
