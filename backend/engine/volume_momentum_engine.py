@@ -163,6 +163,8 @@ class VolumeMomentumEngine:
             except Exception as e:
                 logger.error("vol_mom_eval_error", symbol=symbol, error=str(e), exc_info=True)
 
+        logger.info("vol_mom_eval_complete", positions=len(self._positions),
+                     pnl=round(self._cumulative_pnl, 2))
         await self._check_loss_limits()
 
     async def _evaluate_symbol(self, symbol: str):

@@ -178,6 +178,9 @@ class BreakoutPullbackEngine:
             except Exception as e:
                 logger.error("breakout_pb_eval_error", symbol=symbol, error=str(e), exc_info=True)
 
+        logger.info("breakout_pb_eval_complete", positions=len(self._positions),
+                     pending=len(getattr(self, '_pending_signals', {})),
+                     pnl=round(self._cumulative_pnl, 2))
         await self._check_loss_limits()
 
     async def _evaluate_symbol(self, symbol: str):

@@ -173,6 +173,8 @@ class BTCNeutralAltMREngine:
         if len(self._positions) < self._max_concurrent:
             await self._scan_entries()
 
+        logger.info("btc_neutral_eval_complete", positions=len(self._positions),
+                     pnl=round(self._cumulative_pnl, 2))
         await self._check_loss_limits()
 
     async def _scan_entries(self):
