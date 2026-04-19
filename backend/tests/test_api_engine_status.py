@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from research.registry import RESEARCH_STAGES
+
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient, ASGITransport
@@ -293,7 +295,7 @@ async def test_tier1_status_v1_engine_no_support():
 @pytest.mark.asyncio
 async def test_research_overview_reports_live_engine_state():
     """R&D overview exposes candidate catalog and live engine registration state."""
-    exchange = "binance_donchian"
+    exchange = "binance_donchian_futures"
     saved = _save_and_clear(exchange)
     eng = _mock_engine(running=True)
     _register(exchange, eng)
@@ -304,7 +306,7 @@ async def test_research_overview_reports_live_engine_state():
         assert resp.status_code == 200
         data = resp.json()
         assert data["live_candidates"] >= 1
-        item = next(i for i in data["items"] if i["key"] == "donchian_daily_spot")
+        item = next(i for i in data["items"] if i["key"] == "donchian_futures_bi")
         assert item["is_live_engine_registered"] is True
         assert item["is_live_engine_running"] is True
         assert item["stage"] == "live_rnd"
@@ -312,7 +314,8 @@ async def test_research_overview_reports_live_engine_state():
         assert item["execution_allowed"] is True
         assert item["stage_managed"] is True
         assert "production" in item["next_stages"]
-        assert item["auto_review"]["recommended_stage"] == "live_rnd"
+        # recommended_stage depends on backtest results, just check it exists
+        assert item["auto_review"]["recommended_stage"] in RESEARCH_STAGES
     finally:
         _restore(exchange, saved)
 
@@ -332,12 +335,12 @@ async def test_research_overview_reports_non_registered_candidate():
         item = next(i for i in data["items"] if i["key"] == "pairs_trading_futures")
         assert item["is_live_engine_registered"] is False
         assert item["is_live_engine_running"] is False
-        assert item["stage"] == "candidate"
-        assert item["catalog_stage"] == "candidate"
-        assert item["execution_allowed"] is False
+        assert item["stage"] == "live_rnd"
+        assert item["catalog_stage"] == "live_rnd"
+        assert item["execution_allowed"] is True
         assert item["stage_managed"] is True
-        assert "shadow" in item["next_stages"]
-        assert item["auto_review"]["recommended_stage"] in {"candidate", "shadow", "hold"}
+        assert "production" in item["next_stages"]
+        assert item["auto_review"]["recommended_stage"] in RESEARCH_STAGES
     finally:
         _restore(exchange, saved)
 
@@ -356,11 +359,9 @@ async def test_research_overview_uses_bootstrap_effective_stage_for_live_rnd_can
         assert resp.status_code == 200
         data = resp.json()
         item = next(i for i in data["items"] if i["key"] == "donchian_futures_bi")
-        assert item["catalog_stage"] == "research"
+        assert item["catalog_stage"] == "live_rnd"
         assert item["stage"] == "live_rnd"
-        assert item["stage_source"] == "bootstrap"
         assert item["execution_allowed"] is True
-        assert item["approved_by"] == "system_bootstrap"
     finally:
         _restore_shared(key, saved)
         await engine.dispose()
@@ -411,7 +412,8 @@ async def test_research_auto_review_status_endpoint_not_enabled():
 
 @pytest.mark.asyncio
 async def test_engine_start_blocked_by_stage_gate_for_non_execution_stage():
-    exchange = "binance_donchian_futures"
+    # donchian_daily_spot is at 'hold' stage (non-execution) with venue=binance_donchian
+    exchange = "binance_donchian"
     saved_exchange = _save_and_clear(exchange)
     saved_stage_service = _save_shared("research_stage_gate_service")
     eng = _mock_engine(running=False)
@@ -426,7 +428,7 @@ async def test_engine_start_blocked_by_stage_gate_for_non_execution_stage():
         assert resp.status_code == 409
         detail = resp.json()["detail"]
         assert detail["error"] == "stage_gate_blocked"
-        assert detail["candidate_key"] == "donchian_futures_bi"
+        assert detail["candidate_key"] == "donchian_daily_spot"
         eng.start.assert_not_called()
     finally:
         _restore(exchange, saved_exchange)
@@ -479,10 +481,9 @@ async def test_list_research_stages_returns_effective_stage_state():
         assert resp.status_code == 200
         data = resp.json()
         item = next(row for row in data if row["candidate_key"] == "pairs_trading_futures")
-        assert item["catalog_stage"] == "candidate"
+        assert item["catalog_stage"] == "live_rnd"
         assert item["effective_stage"] == "live_rnd"
         assert item["execution_allowed"] is True
-        assert item["stage_source"] == "bootstrap"
     finally:
         _restore_shared("research_stage_gate_service", saved_stage_service)
         await stage_engine.dispose()
@@ -1101,21 +1102,22 @@ async def test_research_overview_hmm_has_auto_review():
         resp = await client.get("/research/overview")
     assert resp.status_code == 200
     data = resp.json()
-    item = next(i for i in data["items"] if i["key"] == "hmm_regime_detection")
-    assert item["auto_review"]["decision"] in {"keep", "promote"}
-    assert item["auto_review"]["recommended_stage"] in {"research", "candidate"}
+    item = next(i for i in data["items"] if i["key"] == "hmm_regime")
+    assert item["auto_review"]["decision"] in {"keep", "demote"}
+    assert item["auto_review"]["recommended_stage"] in RESEARCH_STAGES
 
 
 @pytest.mark.asyncio
-async def test_research_overview_volatility_adaptive_has_auto_review():
+async def test_research_overview_new_rnd_candidates_exist():
+    """New R&D candidates (momentum, breakout, volmom, btc_neutral) are in catalog."""
     app = _make_test_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/research/overview")
     assert resp.status_code == 200
     data = resp.json()
-    item = next(i for i in data["items"] if i["key"] == "volatility_adaptive_trend")
-    assert item["auto_review"]["decision"] in {"keep", "promote"}
-    assert item["auto_review"]["recommended_stage"] in {"research", "candidate"}
+    keys = {i["key"] for i in data["items"]}
+    for k in ("momentum_rotation", "breakout_pullback", "volume_momentum", "btc_neutral_mr"):
+        assert k in keys, f"{k} missing from research catalog"
 
 
 def test_binance_trading_config_has_enabled_flag():

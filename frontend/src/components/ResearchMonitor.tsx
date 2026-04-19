@@ -4,9 +4,7 @@ import {
   getDonchianFuturesTradeGroupDetail,
   getDonchianFuturesTradeGroups,
   getFuturesRndStatus,
-  getMomentumEngineStatus,
-  getHMMEngineStatus,
-  getFGDCAEngineStatus,
+  getRndOverview,
   getPairsTradeGroupDetail,
   getPairsTradeGroups,
   getResearchAutoReviewStatus,
@@ -777,25 +775,9 @@ export function ResearchMonitor({
     enabled,
   })
 
-  const { data: momentumStatus } = useQuery({
-    queryKey: ['engine', 'momentum', 'status'],
-    queryFn: () => getMomentumEngineStatus(),
-    staleTime: 10_000,
-    refetchInterval: 15_000,
-    enabled,
-  })
-
-  const { data: hmmStatus } = useQuery({
-    queryKey: ['engine', 'hmm', 'status'],
-    queryFn: () => getHMMEngineStatus(),
-    staleTime: 10_000,
-    refetchInterval: 15_000,
-    enabled,
-  })
-
-  const { data: fgdcaStatus } = useQuery({
-    queryKey: ['engine', 'fgdca', 'status'],
-    queryFn: () => getFGDCAEngineStatus(),
+  const { data: rndEngines } = useQuery({
+    queryKey: ['engine', 'rnd', 'overview'],
+    queryFn: () => getRndOverview(),
     staleTime: 10_000,
     refetchInterval: 15_000,
     enabled,
@@ -915,23 +897,18 @@ export function ResearchMonitor({
                 hint={rndStatus ? `reserved ${rndStatus.global_reserved_margin.toFixed(1)} / pause ${rndStatus.entry_paused ? 'on' : 'off'}` : 'coordinator 없음'}
               />
             </div>
-            <div className="mt-3 grid gap-3 md:grid-cols-3">
-              <SummaryCard
-                label="Momentum Rotation"
-                value={momentumStatus?.is_running ? '🟢 running' : '⏸ stopped'}
-                hint={`PnL ${(momentumStatus as any)?.cumulative_pnl?.toFixed(2) ?? '0.00'} / ${(momentumStatus as any)?.daily_trade_count ?? 0} trades today`}
-              />
-              <SummaryCard
-                label="HMM Regime"
-                value={hmmStatus?.is_running ? '🟢 running' : '⏸ stopped'}
-                hint={`PnL ${(hmmStatus as any)?.cumulative_pnl?.toFixed(2) ?? '0.00'} / ${(hmmStatus as any)?.daily_trade_count ?? 0} trades today`}
-              />
-              <SummaryCard
-                label="Fear & Greed DCA"
-                value={fgdcaStatus?.is_running ? '🟢 running' : '⏸ stopped'}
-                hint={`PnL ${(fgdcaStatus as any)?.cumulative_pnl?.toFixed(2) ?? '0.00'} / ${(fgdcaStatus as any)?.daily_trade_count ?? 0} trades today`}
-              />
-            </div>
+            {rndEngines?.engines?.length > 0 && (
+              <div className="mt-3 grid gap-3 md:grid-cols-3 xl:grid-cols-4">
+                {rndEngines.engines.map((eng: any) => (
+                  <SummaryCard
+                    key={eng.exchange}
+                    label={eng.name}
+                    value={eng.running ? (eng.paused ? '⏸ paused' : '🟢 running') : '⏹ stopped'}
+                    hint={`PnL ${eng.cumulative_pnl?.toFixed(2) ?? '0.00'} / pos ${eng.positions?.length ?? 0} / ${eng.capital ?? 0} USDT`}
+                  />
+                ))}
+              </div>
+            )}
           </>
         )}
       </div>

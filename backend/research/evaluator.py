@@ -650,17 +650,17 @@ def _hmm_review() -> AutoReview:
     )
     blockers: list[str] = []
     decision = "keep"
-    recommended_stage = "research"
+    recommended_stage = "live_rnd"
     if r.return_pct <= 0:
         blockers.append("최근 180일 HMM 체제 전략 수익률이 0 이하")
     if r.max_drawdown > 20:
         blockers.append("MDD가 research 상한을 초과")
-    if not blockers and r.sharpe > 0.7 and r.n_trades >= 8:
-        decision = "promote"
-        recommended_stage = "candidate"
-    summary = "HMM 기반 체제 전략을 최소 실험 가능한 상태로 연결함"
+    if blockers:
+        decision = "demote"
+        recommended_stage = "shadow"
+    summary = "HMM 4h 3-state 체제전환 전략 — 라이브 소액 운영 중"
     return AutoReview(
-        candidate_key="hmm_regime_detection",
+        candidate_key="hmm_regime",
         decision=decision,
         recommended_stage=recommended_stage,
         summary=summary,
@@ -727,8 +727,7 @@ async def get_auto_review(candidate_key: str, live_context: dict[str, Any] | Non
         "dual_momentum_spot": _dual_review,
         "funding_arb": _funding_review,
         "donchian_futures_bi": _donchian_futures_bi_review,
-        "hmm_regime_detection": _hmm_review,
-        "volatility_adaptive_trend": _volatility_adaptive_trend_review,
+        "hmm_regime": _hmm_review,
     }
     builder = builders.get(candidate_key)
     if builder is None:
