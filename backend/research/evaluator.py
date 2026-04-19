@@ -709,6 +709,100 @@ def _volatility_adaptive_trend_review() -> AutoReview:
     )
 
 
+async def _live_execution_review(candidate_key: str, exchange_name: str) -> AutoReview:
+    """주문 테이블 기반 범용 라이브 판정기 — 백테스터 없는 R&D 엔진용."""
+    from research.registry import RESEARCH_CANDIDATE_BY_KEY
+    candidate = RESEARCH_CANDIDATE_BY_KEY.get(candidate_key)
+    title = candidate.title if candidate else candidate_key
+
+    sf = get_session_factory()
+    async with sf() as session:
+        cutoff = _now() - timedelta(days=30)
+        result = await session.execute(
+            select(Order).where(
+                Order.exchange == exchange_name,
+                Order.status == "filled",
+                Order.filled_at >= cutoff,
+            ).order_by(Order.filled_at)
+        )
+        orders = list(result.scalars().all())
+
+    sell_orders = [o for o in orders if o.side == "sell"]
+    total_trades = len(orders)
+    sell_count = len(sell_orders)
+    buy_count = total_trades - sell_count
+
+    pnls = [float(o.realized_pnl or 0) for o in sell_orders]
+    total_pnl = sum(pnls)
+    wins = [p for p in pnls if p >= 0]
+    losses = [p for p in pnls if p < 0]
+    win_rate = len(wins) / len(pnls) * 100 if pnls else 0
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    pf = gross_profit / gross_loss if gross_loss > 0 else (999 if gross_profit > 0 else 0)
+
+    # 간이 MDD 추정 (누적 PnL 기반)
+    cumulative = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for p in pnls:
+        cumulative += p
+        if cumulative > peak:
+            peak = cumulative
+        dd = peak - cumulative
+        if dd > max_dd:
+            max_dd = dd
+
+    metrics = (
+        MetricSnapshot(
+            source=f"{exchange_name}_live_execution",
+            computed_at=_now(),
+            window_days=30,
+            return_pct=total_pnl,
+            sharpe=0,
+            max_drawdown=max_dd,
+            trade_count=total_trades,
+            extra={
+                "buy_count": buy_count,
+                "sell_count": sell_count,
+                "win_rate": round(win_rate, 1),
+                "profit_factor": round(pf, 2),
+            },
+        ),
+    )
+
+    blockers: list[str] = []
+    if total_trades == 0:
+        blockers.append("최근 30일 체결 내역이 없어 판정 불가")
+    if sell_count < 3:
+        blockers.append(f"매도 표본 {sell_count}건 — 최소 3건 이상 필요")
+    if total_pnl < 0 and sell_count >= 3:
+        blockers.append(f"최근 30일 실현 PnL {total_pnl:+.2f} USDT 음수")
+
+    if blockers:
+        decision = "keep" if total_trades == 0 else "demote"
+        recommended = "live_rnd" if total_trades == 0 else "shadow"
+    elif win_rate >= 50 and pf >= 1.0:
+        decision = "keep"
+        recommended = "live_rnd"
+    else:
+        decision = "keep"
+        recommended = "live_rnd"
+
+    pnl_str = f"{total_pnl:+.2f}" if total_trades > 0 else "n/a"
+    wr_str = f"{win_rate:.0f}%" if sell_count > 0 else "n/a"
+    summary = f"{title} 라이브 30일: {total_trades}건, PnL {pnl_str}, WR {wr_str}, PF {pf:.2f}"
+
+    return AutoReview(
+        candidate_key=candidate_key,
+        decision=decision,
+        recommended_stage=recommended,
+        summary=summary,
+        blockers=tuple(blockers),
+        metrics=metrics,
+    )
+
+
 def _not_ready_review(candidate_key: str, summary: str) -> AutoReview:
     return AutoReview(
         candidate_key=candidate_key,
@@ -729,8 +823,19 @@ async def get_auto_review(candidate_key: str, live_context: dict[str, Any] | Non
         "donchian_futures_bi": _donchian_futures_bi_review,
         "hmm_regime": _hmm_review,
     }
+    # 백테스터 없는 R&D 엔진 → 라이브 주문 기반 판정
+    _live_candidates = {
+        "momentum_rotation": "binance_momentum",
+        "breakout_pullback": "binance_breakout_pb",
+        "volume_momentum": "binance_vol_mom",
+        "btc_neutral_mr": "binance_btc_neutral",
+        "fear_greed_dca": "binance_fgdca",
+    }
     builder = builders.get(candidate_key)
     if builder is None:
+        live_exchange = _live_candidates.get(candidate_key)
+        if live_exchange:
+            return await _cached(candidate_key, lambda: _live_execution_review(candidate_key, live_exchange))
         return _not_ready_review(candidate_key, "등록된 자동 판정기가 없음")
     builder_kwargs: dict[str, Any] = {}
     cache_key = candidate_key
