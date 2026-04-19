@@ -125,14 +125,16 @@ export function Dashboard() {
 
   return (
     <div className="min-h-screen bg-gray-900 text-white">
-      <header className="flex items-center justify-between border-b border-gray-700 px-3 py-2.5 md:px-6 md:py-3">
-        <div className="flex min-w-0 items-center gap-2 md:gap-3">
-          <span className="whitespace-nowrap text-base font-bold md:text-xl">🪙 코인 자동 매매</span>
-          <span className="hidden text-xs text-gray-500 md:block">live trading + R&D pipeline</span>
+      <header className="flex items-center justify-between border-b border-gray-800 px-4 py-3 md:px-6">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="whitespace-nowrap text-sm font-semibold tracking-tight text-gray-100 md:text-base">
+            코인 자동 매매
+          </span>
+          <span className="hidden text-xs tracking-wide text-gray-600 md:block">R&D</span>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <div className={`h-2 w-2 rounded-full ${connected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
-          <span className="text-xs text-gray-400">{connected ? '연결됨' : '연결 중...'}</span>
+        <div className="flex shrink-0 items-center gap-2">
+          <div className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
+          <span className="text-xs text-gray-500">{connected ? 'live' : '...'}</span>
         </div>
       </header>
 
@@ -142,27 +144,27 @@ export function Dashboard() {
         const ExBtn = ({ ex }: { ex: ExchangeName }) => (
           <button
             onClick={() => setExchange(ex)}
-            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors md:text-sm ${
+            className={`rounded-lg px-3 py-1 text-xs font-medium transition-colors ${
               exchange === ex
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white'
+                ? 'bg-gray-700 text-white'
+                : 'text-gray-500 hover:text-gray-300'
             }`}
           >
             {EXCHANGE_LABELS[ex] ?? ex}
           </button>
         )
         return (
-          <div className="flex items-center gap-1.5 border-b border-gray-700 px-3 py-1.5 md:gap-2 md:px-6">
+          <div className="flex items-center gap-2 border-b border-gray-800 px-4 py-2 md:px-6">
             {futuresExs.length > 0 && (
               <>
-                <span className="text-[10px] font-medium uppercase tracking-wider text-gray-500">선물</span>
+                <span className="text-[10px] font-medium uppercase tracking-widest text-gray-600">선물</span>
                 {futuresExs.map((ex) => <ExBtn key={ex} ex={ex} />)}
               </>
             )}
-            {spotExs.length > 0 && futuresExs.length > 0 && <div className="mx-1 h-5 w-px bg-gray-700" />}
+            {spotExs.length > 0 && futuresExs.length > 0 && <div className="mx-1.5 h-4 w-px bg-gray-800" />}
             {spotExs.length > 0 && (
               <>
-                <span className="text-[10px] font-medium uppercase tracking-wider text-gray-500">현물</span>
+                <span className="text-[10px] font-medium uppercase tracking-widest text-gray-600">현물</span>
                 {spotExs.map((ex) => <ExBtn key={ex} ex={ex} />)}
               </>
             )}
@@ -170,16 +172,16 @@ export function Dashboard() {
         )
       })()}
 
-      <nav className="border-b border-gray-700 px-1 md:px-0">
-        <div className="flex flex-wrap md:flex-nowrap">
+      <nav className="border-b border-gray-800 px-2 md:px-4">
+        <div className="flex gap-1">
           {TABS.map((item) => (
             <button
               key={item.id}
               onClick={() => setTab(item.id)}
-              className={`-mb-px border-b-2 px-3 py-2 text-xs font-medium whitespace-nowrap transition-colors md:px-4 md:py-3 md:text-sm ${
+              className={`-mb-px border-b-2 px-3 py-2.5 text-xs font-medium whitespace-nowrap transition-colors md:px-4 md:py-3 md:text-sm ${
                 tab === item.id
-                  ? 'border-blue-500 text-blue-400'
-                  : 'border-transparent text-gray-400 hover:text-white active:text-white'
+                  ? 'border-blue-500 text-white'
+                  : 'border-transparent text-gray-500 hover:text-gray-300'
               }`}
             >
               {item.label}
@@ -237,18 +239,18 @@ export function Dashboard() {
 
 function SectionHeader({ title, description }: { title: string; description: string }) {
   return (
-    <section className="rounded-xl border border-gray-700 bg-gray-800/70 px-4 py-3">
-      <h2 className="text-base font-semibold text-white">{title}</h2>
-      <p className="mt-1 text-sm text-gray-400">{description}</p>
-    </section>
+    <div className="px-1 py-2">
+      <h2 className="text-sm font-semibold text-gray-200">{title}</h2>
+      <p className="mt-0.5 text-xs text-gray-500">{description}</p>
+    </div>
   )
 }
 
 function PanelFallback() {
   return (
-    <section className="rounded-xl border border-gray-700 bg-gray-800/70 p-6 text-sm text-gray-400">
-      패널 로딩 중...
-    </section>
+    <div className="rounded-xl bg-gray-800/50 p-8 text-center text-sm text-gray-500">
+      로딩 중...
+    </div>
   )
 }
 
@@ -268,10 +270,10 @@ function AdvancedPanel({
           <button
             key={view.id}
             onClick={() => onSelect(view.id)}
-            className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors md:text-sm ${
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors md:text-sm ${
               selected === view.id
-                ? 'border-blue-500 bg-blue-600/20 text-blue-300'
-                : 'border-gray-700 bg-gray-800 text-gray-400 hover:text-white'
+                ? 'bg-gray-700 text-white'
+                : 'text-gray-500 hover:bg-gray-800 hover:text-gray-300'
             }`}
           >
             {view.label}
