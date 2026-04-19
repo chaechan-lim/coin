@@ -6,6 +6,7 @@ import {
   getFuturesRndStatus,
   getPairsEngineStatus,
   getPortfolioSummary,
+  getRndOverview,
   getTrades,
   getTradeSummary,
   startEngine,
@@ -87,18 +88,11 @@ export function EngineControl({ liveEvents, exchange = 'bithumb' }: { liveEvents
     enabled: isFutures,
   })
 
-  const { data: momentumStatus } = useQuery({
-    queryKey: ['engine', 'status', 'binance_momentum'],
-    queryFn: () => getEngineStatus('binance_momentum' as ExchangeName),
-    refetchInterval: 10_000,
-    enabled: isFutures,
-  })
-
-  const { data: hmmStatus } = useQuery({
-    queryKey: ['engine', 'status', 'binance_hmm'],
-    queryFn: () => getEngineStatus('binance_hmm' as ExchangeName),
-    refetchInterval: 10_000,
-    enabled: isFutures,
+  const { data: rndOverviewData } = useQuery({
+    queryKey: ['rnd', 'overview'],
+    queryFn: () => getRndOverview(),
+    refetchInterval: 15_000,
+    enabled: isFutures || isSpot,
   })
 
   const { data: fgdcaStatus } = useQuery({
@@ -247,127 +241,46 @@ export function EngineControl({ liveEvents, exchange = 'bithumb' }: { liveEvents
       )}
 
       {isFutures && (
-        <div className="mb-3 rounded-lg border border-gray-700 bg-gray-900/50 p-3">
+        <div className="mb-3 rounded-lg bg-gray-900/50 p-3">
           <div className="mb-2 flex items-center justify-between gap-2">
-            <div className="text-xs font-medium text-gray-400">선물 운영 상태</div>
-            {!isRunning && (
-              <div className="text-[11px] text-yellow-400">
-                메인 `binance_futures` 엔진은 비활성입니다. 현재 실운영은 아래 R&D 선물 엔진 카드로 확인하세요.
-              </div>
-            )}
+            <div className="text-xs font-medium text-gray-400">선물 R&D 엔진 상태</div>
           </div>
           <div className="grid gap-2 md:grid-cols-3">
-            <StatusCard
-              title="Main Futures"
-              badge={isRunning ? 'started' : 'stopped'}
-              badgeTone={isRunning ? 'green' : 'gray'}
-              subtitle={isPaper ? 'paper' : 'live'}
-              emphasis={!isRunning ? 'muted' : 'normal'}
-              metrics={[
-                { label: '오늘 거래', value: `${status?.daily_trade_count ?? 0}건` },
-                { label: '평가 주기', value: `${status?.evaluation_interval_sec ?? 0}초` },
-                { label: '추적 코인', value: `${status?.tracked_coins.length ?? 0}종` },
-                { label: '전략 수', value: `${status?.strategies_active.length ?? 0}개` },
-              ]}
-            />
-            <StatusCard
-              title="Donchian Futures"
-              badge={donchianFuturesStatus?.is_running ? 'started' : 'stopped'}
-              badgeTone={donchianFuturesStatus?.is_running ? 'green' : 'gray'}
-              subtitle={`${donchianFuturesStatus?.capital_usdt ?? 0} USDT · ${donchianFuturesStatus?.leverage ?? 0}x`}
-              meta={buildFuturesMeta(donchianFuturesStatus?.paused, donchianFuturesStatus?.daily_paused, donchianFuturesStatus?.engine_conflict)}
-              emphasis="primary"
-              metrics={[
-                { label: '활성 포지션', value: `${donchianFuturesStatus?.positions?.length ?? 0}` },
-                { label: '오늘 거래', value: `${donchianFuturesTradeSummary?.total_trades ?? 0}건` },
-                { label: '가용 마진', value: formatUsdtValue(donchianFuturesStatus?.available_margin) },
-                { label: '일일 손익', value: formatSignedAmount(donchianFuturesStatus?.daily_realized_pnl), tone: signedTone(donchianFuturesStatus?.daily_realized_pnl ?? 0) },
-              ]}
-            />
-            <StatusCard
-              title="Pairs Trading"
-              badge={pairsStatus?.is_running ? 'started' : 'stopped'}
-              badgeTone={pairsStatus?.is_running ? 'green' : 'gray'}
-              subtitle={`${pairsStatus?.capital_usdt ?? 0} USDT · ${formatPairLabel(pairsStatus?.coin_a, pairsStatus?.coin_b)}`}
-              meta={buildPairsMeta(pairsStatus)}
-              emphasis="primary"
-              metrics={[
-                { label: '오픈 페어', value: pairsStatus?.position ? '1' : '0' },
-                { label: '오늘 거래', value: `${pairsTradeSummary?.total_trades ?? 0}건` },
-                { label: '가용 마진', value: formatUsdtValue(pairsStatus?.available_margin) },
-                { label: '일일 손익', value: formatSignedAmount(pairsStatus?.daily_realized_pnl), tone: signedTone(pairsStatus?.daily_realized_pnl ?? 0) },
-              ]}
-            />
-            <StatusCard
-              title="Momentum Rotation"
-              badge={momentumStatus?.is_running ? 'started' : 'stopped'}
-              badgeTone={momentumStatus?.is_running ? 'green' : 'gray'}
-              subtitle="100 USDT · 2x · 매주 수요일"
-              emphasis="primary"
-              metrics={[
-                { label: '오늘 거래', value: `${momentumStatus?.daily_trade_count ?? 0}건` },
-              ]}
-            />
-            <StatusCard
-              title="HMM Regime"
-              badge={hmmStatus?.is_running ? 'started' : 'stopped'}
-              badgeTone={hmmStatus?.is_running ? 'green' : 'gray'}
-              subtitle="100 USDT · 2x · BTC 매시간"
-              emphasis="primary"
-              metrics={[
-                { label: '오늘 거래', value: `${hmmStatus?.daily_trade_count ?? 0}건` },
-              ]}
-            />
+            {(rndOverviewData?.engines ?? [])
+              .filter((e: any) => !['binance_donchian', 'binance_fgdca'].includes(e.exchange))
+              .map((eng: any) => (
+                <StatusCard
+                  key={eng.exchange}
+                  title={eng.name}
+                  badge={eng.paused ? 'paused' : eng.running ? 'running' : 'stopped'}
+                  badgeTone={eng.paused ? 'amber' : eng.running ? 'green' : 'gray'}
+                  subtitle={`${eng.capital ?? 0} USDT${eng.leverage > 1 ? ` · ${eng.leverage}x` : ''}`}
+                  emphasis="primary"
+                  metrics={[
+                    { label: '포지션', value: `${eng.positions?.length ?? 0}` },
+                    { label: '누적 PnL', value: formatSignedAmount(eng.cumulative_pnl), tone: signedTone(eng.cumulative_pnl ?? 0) },
+                    { label: '일일 PnL', value: formatSignedAmount(eng.daily_pnl), tone: signedTone(eng.daily_pnl ?? 0) },
+                  ]}
+                />
+              ))}
           </div>
         </div>
       )}
 
-      {isFutures && (
-        <div className="mb-3 rounded-lg border border-gray-700 bg-gray-900/50 p-3">
-          <div className="mb-2">
-            <div className="text-xs font-medium text-gray-400">선물 계좌/운용 자본</div>
-            <div className="text-[11px] text-gray-500">
-              메인 `binance_futures` 포트폴리오와 별개로, 현재는 분리된 선물 R&D 자본 풀 기준으로 운용 중입니다.
-            </div>
-          </div>
-          <div className="grid gap-2 md:grid-cols-3">
+      {isFutures && futuresRndStatus && (
+        <div className="mb-3 rounded-lg bg-gray-900/50 p-3">
+          <div className="mb-2 text-xs font-medium text-gray-400">R&D 자본 풀</div>
+          <div className="grid gap-2 md:grid-cols-4">
             <StatusCard
-              title="Futures R&D Pool"
-              badge={futuresRndStatus?.entry_paused ? 'paused' : 'open'}
-              badgeTone={futuresRndStatus?.entry_paused ? 'amber' : 'sky'}
-              subtitle={formatUsdtValue(futuresRndStatus?.global_capital_usdt)}
-              meta={`reserved ${formatUsdtValue(futuresRndStatus?.global_reserved_margin)}`}
+              title="R&D Pool"
+              badge={futuresRndStatus.entry_paused ? 'paused' : 'open'}
+              badgeTone={futuresRndStatus.entry_paused ? 'amber' : 'sky'}
+              subtitle={formatUsdtValue(futuresRndStatus.global_capital_usdt)}
               metrics={[
-                { label: '가용 마진', value: formatUsdtValue(futuresRndStatus?.global_available_margin) },
-                { label: '일일 손익', value: formatSignedAmount(futuresRndStatus?.global_daily_pnl), tone: signedTone(futuresRndStatus?.global_daily_pnl ?? 0) },
-                { label: '누적 손익', value: formatSignedAmount(futuresRndStatus?.global_cumulative_pnl), tone: signedTone(futuresRndStatus?.global_cumulative_pnl ?? 0) },
+                { label: '가용 마진', value: formatUsdtValue(futuresRndStatus.global_available_margin) },
+                { label: '예약 마진', value: formatUsdtValue(futuresRndStatus.global_reserved_margin) },
+                { label: '누적 손익', value: formatSignedAmount(futuresRndStatus.global_cumulative_pnl), tone: signedTone(futuresRndStatus.global_cumulative_pnl ?? 0) },
                 { label: '예약 심볼', value: `${countReservedSymbols(futuresRndStatus)}` },
-              ]}
-            />
-            <StatusCard
-              title="Donchian Allocation"
-              badge={donchianFuturesStatus?.coordinator_enabled ? 'coordinated' : 'standalone'}
-              badgeTone={donchianFuturesStatus?.coordinator_enabled ? 'sky' : 'gray'}
-              subtitle={formatUsdtValue(donchianFuturesStatus?.capital_usdt)}
-              meta={`${donchianFuturesStatus?.tracked_coins?.length ?? 0}종 스캔`}
-              metrics={[
-                { label: '누적 손익', value: formatSignedAmount(donchianFuturesStatus?.cumulative_pnl), tone: signedTone(donchianFuturesStatus?.cumulative_pnl ?? 0) },
-                { label: 'Win Rate', value: formatWinRate(donchianFuturesTradeSummary?.win_rate) },
-                { label: '실현 손익', value: formatSignedAmount(donchianFuturesTradeSummary?.total_pnl), tone: signedTone(donchianFuturesTradeSummary?.total_pnl ?? 0) },
-                { label: '체결 수', value: `${donchianFuturesTradeSummary?.total_trades ?? 0}건` },
-              ]}
-            />
-            <StatusCard
-              title="Pairs Allocation"
-              badge={pairsStatus?.coordinator_enabled ? 'coordinated' : 'standalone'}
-              badgeTone={pairsStatus?.coordinator_enabled ? 'sky' : 'gray'}
-              subtitle={formatUsdtValue(pairsStatus?.capital_usdt)}
-              meta={`${pairsStatus?.lookback_hours ?? 0}h / z ${pairsStatus?.z_entry ?? 0}-${pairsStatus?.z_exit ?? 0}`}
-              metrics={[
-                { label: '누적 손익', value: formatSignedAmount(pairsStatus?.cumulative_pnl), tone: signedTone(pairsStatus?.cumulative_pnl ?? 0) },
-                { label: 'Win Rate', value: formatWinRate(pairsTradeSummary?.win_rate) },
-                { label: '실현 손익', value: formatSignedAmount(pairsTradeSummary?.total_pnl), tone: signedTone(pairsTradeSummary?.total_pnl ?? 0) },
-                { label: '체결 수', value: `${pairsTradeSummary?.total_trades ?? 0}건` },
               ]}
             />
           </div>
