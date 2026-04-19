@@ -156,7 +156,15 @@ export function OrderLog({ exchange = 'bithumb' }: { exchange?: ExchangeName }) 
       {isLoading ? (
         <div className="p-8 text-center text-gray-500">로딩 중...</div>
       ) : !data || data.length === 0 ? (
-        <div className="p-8 text-center text-gray-500">로그 없음</div>
+        <div className="p-8 text-center text-gray-500">
+          <p>전략 투표 로그 없음</p>
+          {exchange.startsWith('binance') && (
+            <p className="mt-1.5 text-xs text-gray-600">
+              메인 엔진(SignalCombiner) 비활성 시 로그가 생성되지 않습니다.
+              <br />R&D 거래 내역은 <span className="text-blue-400">실거래</span> 탭에서 확인하세요.
+            </p>
+          )}
+        </div>
       ) : (
         <>
           <div className="p-2 md:p-3 space-y-2">

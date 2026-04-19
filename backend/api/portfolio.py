@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
-from datetime import timedelta
+from sqlalchemy import select, desc, func, case, and_
+from datetime import date as date_type, timedelta
 from core.utils import utcnow
 
 from db.session import get_db
-from core.models import PortfolioSnapshot, DailyPnL, Position
+from core.models import PortfolioSnapshot, DailyPnL, Position, Order
 from core.schemas import PortfolioSummaryResponse, PortfolioHistoryPoint, DailyPnLResponse
 from api.dependencies import engine_registry, ExchangeNameType
 
@@ -109,8 +109,15 @@ async def _merge_surge_positions(summary: dict, session: AsyncSession) -> dict:
     return summary
 
 
-_RND_FUTURES_ENGINES = ("binance_donchian_futures", "binance_pairs", "binance_momentum", "binance_hmm")
+_RND_FUTURES_ENGINES = (
+    "binance_donchian_futures", "binance_pairs", "binance_momentum", "binance_hmm",
+    "binance_breakout_pb", "binance_vol_mom", "binance_btc_neutral",
+)
 _RND_SPOT_ENGINES = ("binance_donchian", "binance_fgdca")
+
+# daily-pnl 집계 시 포함할 관련 엔진 (R&D + 서지)
+_RELATED_FUTURES_ORDER_EXCHANGES = _RND_FUTURES_ENGINES + ("binance_surge",)
+_RELATED_SPOT_ORDER_EXCHANGES = _RND_SPOT_ENGINES
 
 
 def _merge_rnd_positions(summary: dict, engine_names: tuple[str, ...]) -> dict:
@@ -255,6 +262,71 @@ async def get_portfolio_history(
     ]
 
 
+def _related_order_exchanges(exchange: str) -> tuple[str, ...]:
+    """R&D/서지 엔진의 exchange 이름 목록 (daily-pnl 집계용)."""
+    if exchange == "binance_futures":
+        return _RELATED_FUTURES_ORDER_EXCHANGES
+    elif exchange == "binance_spot":
+        return _RELATED_SPOT_ORDER_EXCHANGES
+    return ()
+
+
+async def _compute_daily_pnl_from_orders(
+    session: AsyncSession,
+    exchanges: tuple[str, ...],
+    start_date: date_type,
+) -> list[dict]:
+    """주문 테이블에서 일별 PnL 통계 집계 (R&D/서지 엔진용)."""
+    order_day = func.date(Order.created_at)
+
+    stmt = (
+        select(
+            order_day.label("day"),
+            func.coalesce(
+                func.sum(case(
+                    (Order.side == "sell", func.coalesce(Order.realized_pnl, 0)),
+                    else_=0,
+                )),
+                0,
+            ).label("realized_pnl"),
+            func.coalesce(func.sum(func.coalesce(Order.fee, 0)), 0).label("total_fees"),
+            func.count().label("trade_count"),
+            func.sum(case((Order.side == "buy", 1), else_=0)).label("buy_count"),
+            func.sum(case((Order.side == "sell", 1), else_=0)).label("sell_count"),
+            func.sum(case(
+                (and_(Order.side == "sell", Order.realized_pnl >= 0), 1),
+                else_=0,
+            )).label("win_count"),
+            func.sum(case(
+                (and_(Order.side == "sell", Order.realized_pnl < 0), 1),
+                else_=0,
+            )).label("loss_count"),
+        )
+        .where(
+            Order.exchange.in_(exchanges),
+            Order.status == "filled",
+            order_day >= start_date,
+        )
+        .group_by(order_day)
+        .order_by(order_day.asc())
+    )
+
+    result = await session.execute(stmt)
+    return [
+        {
+            "day": row.day,
+            "realized_pnl": float(row.realized_pnl or 0),
+            "total_fees": float(row.total_fees or 0),
+            "trade_count": int(row.trade_count or 0),
+            "buy_count": int(row.buy_count or 0),
+            "sell_count": int(row.sell_count or 0),
+            "win_count": int(row.win_count or 0),
+            "loss_count": int(row.loss_count or 0),
+        }
+        for row in result.all()
+    ]
+
+
 @router.get("/daily-pnl", response_model=list[DailyPnLResponse])
 async def get_daily_pnl(
     days: int = Query(30, ge=1, le=365),
@@ -264,30 +336,67 @@ async def get_daily_pnl(
     now = utcnow()
     start_date = (now - timedelta(days=days)).date()
 
+    # 1. 기존 DailyPnL 레코드 (메인 엔진 PortfolioManager 생성분)
     result = await session.execute(
         select(DailyPnL)
-        .where(
-            DailyPnL.exchange == exchange,
-            DailyPnL.date >= start_date,
-        )
+        .where(DailyPnL.exchange == exchange, DailyPnL.date >= start_date)
         .order_by(DailyPnL.date.asc())
     )
-    records = result.scalars().all()
+    db_records = result.scalars().all()
 
-    return [
-        DailyPnLResponse(
-            date=r.date,
-            open_value=r.open_value or 0,
-            close_value=r.close_value or 0,
-            daily_pnl=r.daily_pnl or 0,
-            daily_pnl_pct=r.daily_pnl_pct or 0,
-            realized_pnl=r.realized_pnl or 0,
-            total_fees=r.total_fees or 0,
-            trade_count=r.trade_count or 0,
-            buy_count=r.buy_count or 0,
-            sell_count=r.sell_count or 0,
-            win_count=r.win_count or 0,
-            loss_count=r.loss_count or 0,
-        )
-        for r in records
-    ]
+    # 2. R&D/서지 엔진 주문 기반 일별 PnL
+    related = _related_order_exchanges(exchange)
+    if not related:
+        return [
+            DailyPnLResponse(
+                date=r.date, open_value=r.open_value or 0, close_value=r.close_value or 0,
+                daily_pnl=r.daily_pnl or 0, daily_pnl_pct=r.daily_pnl_pct or 0,
+                realized_pnl=r.realized_pnl or 0, total_fees=r.total_fees or 0,
+                trade_count=r.trade_count or 0, buy_count=r.buy_count or 0,
+                sell_count=r.sell_count or 0, win_count=r.win_count or 0,
+                loss_count=r.loss_count or 0,
+            )
+            for r in db_records
+        ]
+
+    order_data = await _compute_daily_pnl_from_orders(session, related, start_date)
+
+    # 3. 날짜별 병합 (DailyPnL + 주문 기반)
+    merged: dict[date_type, dict] = {}
+
+    for r in db_records:
+        merged[r.date] = {
+            "date": r.date, "open_value": r.open_value or 0, "close_value": r.close_value or 0,
+            "daily_pnl": r.daily_pnl or 0, "daily_pnl_pct": r.daily_pnl_pct or 0,
+            "realized_pnl": r.realized_pnl or 0, "total_fees": r.total_fees or 0,
+            "trade_count": r.trade_count or 0, "buy_count": r.buy_count or 0,
+            "sell_count": r.sell_count or 0, "win_count": r.win_count or 0,
+            "loss_count": r.loss_count or 0,
+        }
+
+    for o in order_data:
+        d = o["day"]
+        if isinstance(d, str):
+            d = date_type.fromisoformat(d)
+
+        if d in merged:
+            m = merged[d]
+            m["daily_pnl"] += o["realized_pnl"]
+            m["realized_pnl"] += o["realized_pnl"]
+            m["total_fees"] += o["total_fees"]
+            m["trade_count"] += o["trade_count"]
+            m["buy_count"] += o["buy_count"]
+            m["sell_count"] += o["sell_count"]
+            m["win_count"] += o["win_count"]
+            m["loss_count"] += o["loss_count"]
+        else:
+            merged[d] = {
+                "date": d, "open_value": 0, "close_value": 0,
+                "daily_pnl": o["realized_pnl"], "daily_pnl_pct": 0,
+                "realized_pnl": o["realized_pnl"], "total_fees": o["total_fees"],
+                "trade_count": o["trade_count"], "buy_count": o["buy_count"],
+                "sell_count": o["sell_count"], "win_count": o["win_count"],
+                "loss_count": o["loss_count"],
+            }
+
+    return [DailyPnLResponse(**merged[d]) for d in sorted(merged.keys())]

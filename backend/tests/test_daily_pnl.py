@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from core.models import PortfolioSnapshot, Order, Position, DailyPnL, CapitalTransaction
 from engine.portfolio_manager import PortfolioManager
+from api.portfolio import _compute_daily_pnl_from_orders, _related_order_exchanges
 
 
 def _utc(year, month, day, hour=0, minute=0):
@@ -270,3 +271,127 @@ async def test_record_daily_pnl_withdrawal(session):
     record = await PortfolioManager.record_daily_pnl(session, "bithumb", target)
     assert record is not None
     assert record.daily_pnl == 0  # 출금 보정 → 손익 없음
+
+
+# ── R&D 주문 기반 daily PnL 테스트 ──
+
+
+def test_related_order_exchanges():
+    """binance_futures/spot에 대해 올바른 R&D 엔진 목록 반환."""
+    futures = _related_order_exchanges("binance_futures")
+    assert "binance_donchian_futures" in futures
+    assert "binance_breakout_pb" in futures
+    assert "binance_surge" in futures
+
+    spot = _related_order_exchanges("binance_spot")
+    assert "binance_donchian" in spot
+    assert "binance_fgdca" in spot
+
+    assert _related_order_exchanges("bithumb") == ()
+
+
+@pytest.mark.asyncio
+async def test_compute_daily_pnl_from_orders_basic(session):
+    """R&D 주문 데이터에서 일별 PnL 집계."""
+    target_date = date(2026, 4, 10)
+
+    # 매수 주문
+    session.add(Order(
+        exchange="binance_momentum", symbol="ETH/USDT", side="buy",
+        order_type="market", status="filled",
+        executed_price=3000.0, executed_quantity=0.1,
+        fee=0.12, is_paper=False, strategy_name="momentum_rotation",
+        created_at=_utc(2026, 4, 10, 8, 0),
+    ))
+    # 매도 주문 (수익)
+    session.add(Order(
+        exchange="binance_momentum", symbol="ETH/USDT", side="sell",
+        order_type="market", status="filled",
+        executed_price=3200.0, executed_quantity=0.1,
+        fee=0.13, realized_pnl=19.75, is_paper=False,
+        strategy_name="momentum_rotation",
+        created_at=_utc(2026, 4, 10, 16, 0),
+    ))
+    # 매도 주문 (손실, 다른 엔진)
+    session.add(Order(
+        exchange="binance_hmm", symbol="BTC/USDT", side="sell",
+        order_type="market", status="filled",
+        executed_price=60000.0, executed_quantity=0.001,
+        fee=0.024, realized_pnl=-5.0, is_paper=False,
+        strategy_name="hmm_regime",
+        created_at=_utc(2026, 4, 10, 20, 0),
+    ))
+    # 관계없는 엔진 주문 (포함되면 안 됨)
+    session.add(Order(
+        exchange="bithumb", symbol="BTC/KRW", side="sell",
+        order_type="market", status="filled",
+        executed_price=80000000, executed_quantity=0.001,
+        fee=200, realized_pnl=5000, is_paper=False,
+        strategy_name="rsi",
+        created_at=_utc(2026, 4, 10, 12, 0),
+    ))
+    await session.flush()
+
+    results = await _compute_daily_pnl_from_orders(
+        session,
+        ("binance_momentum", "binance_hmm"),
+        date(2026, 4, 1),
+    )
+
+    assert len(results) == 1
+    row = results[0]
+    assert abs(row["realized_pnl"] - 14.75) < 0.01  # 19.75 + (-5.0)
+    assert row["trade_count"] == 3
+    assert row["buy_count"] == 1
+    assert row["sell_count"] == 2
+    assert row["win_count"] == 1
+    assert row["loss_count"] == 1
+    assert abs(row["total_fees"] - 0.274) < 0.01
+
+
+@pytest.mark.asyncio
+async def test_compute_daily_pnl_from_orders_multi_day(session):
+    """여러 날에 걸친 주문 분리 집계."""
+    for day, pnl in [(10, 20.0), (10, -5.0), (12, 15.0)]:
+        session.add(Order(
+            exchange="binance_donchian_futures", symbol="BTC/USDT", side="sell",
+            order_type="market", status="filled",
+            executed_price=60000, executed_quantity=0.001,
+            fee=0.024, realized_pnl=pnl, is_paper=False,
+            strategy_name="donchian_futures",
+            created_at=_utc(2026, 4, day, 12, 0),
+        ))
+    await session.flush()
+
+    results = await _compute_daily_pnl_from_orders(
+        session,
+        ("binance_donchian_futures",),
+        date(2026, 4, 1),
+    )
+
+    assert len(results) == 2
+    # 4/10: 20 + (-5) = 15
+    assert abs(results[0]["realized_pnl"] - 15.0) < 0.01
+    assert results[0]["win_count"] == 1
+    assert results[0]["loss_count"] == 1
+    # 4/12: 15
+    assert abs(results[1]["realized_pnl"] - 15.0) < 0.01
+
+
+@pytest.mark.asyncio
+async def test_compute_daily_pnl_excludes_unfilled(session):
+    """미체결 주문은 집계에서 제외."""
+    session.add(Order(
+        exchange="binance_pairs", symbol="ETH/USDT", side="sell",
+        order_type="market", status="cancelled",
+        executed_price=3000, executed_quantity=0,
+        fee=0, realized_pnl=0, is_paper=False,
+        strategy_name="pairs_trading",
+        created_at=_utc(2026, 4, 10, 12, 0),
+    ))
+    await session.flush()
+
+    results = await _compute_daily_pnl_from_orders(
+        session, ("binance_pairs",), date(2026, 4, 1),
+    )
+    assert len(results) == 0
