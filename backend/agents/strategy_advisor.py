@@ -45,8 +45,9 @@ class StrategyAdvice:
 class StrategyAdvisorAgent:
     """전략 상관 분석 + 파라미터 민감도 + LLM 종합 제안."""
 
-    def __init__(self, exchange_name: str = "bithumb"):
+    def __init__(self, exchange_name: str = "bithumb", extra_exchanges: list[str] | None = None):
         self._exchange_name = exchange_name
+        self._exchange_list = [exchange_name] + (extra_exchanges or [])
         self._is_futures = "futures" in exchange_name
         self._currency = "USDT" if "binance" in exchange_name else "KRW"
         self._llm_client = None
@@ -88,7 +89,7 @@ class StrategyAdvisorAgent:
         cutoff = now - timedelta(days=90)
         result = await session.execute(
             select(Order).where(
-                Order.exchange == self._exchange_name,
+                Order.exchange.in_(self._exchange_list),
                 Order.side == "sell",
                 Order.status == "filled",
                 Order.filled_at >= cutoff,

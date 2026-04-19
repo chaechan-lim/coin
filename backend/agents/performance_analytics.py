@@ -80,8 +80,9 @@ class PerformanceAnalyticsAgent:
 
     WINDOWS = [7, 14, 30]
 
-    def __init__(self, exchange_name: str = "bithumb"):
+    def __init__(self, exchange_name: str = "bithumb", extra_exchanges: list[str] | None = None):
         self._exchange_name = exchange_name
+        self._exchange_list = [exchange_name] + (extra_exchanges or [])
         self._is_futures = "futures" in exchange_name
         self._currency = "USDT" if "binance" in exchange_name else "KRW"
         self._llm_client = None
@@ -119,7 +120,7 @@ class PerformanceAnalyticsAgent:
         cutoff_30d = now - timedelta(days=30)
         result = await session.execute(
             select(Order).where(
-                Order.exchange == self._exchange_name,
+                Order.exchange.in_(self._exchange_list),
                 Order.side == "sell",
                 Order.status == "filled",
                 Order.filled_at >= cutoff_30d,

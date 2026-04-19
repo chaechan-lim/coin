@@ -96,11 +96,22 @@ def _create_agent_stack(
     market_symbol: str = "BTC/KRW",
 ) -> AgentCoordinator:
     """AI 에이전트 5종 + Coordinator 생성."""
+    # R&D 엔진 exchange 목록 (에이전트가 R&D 주문도 분석하도록)
+    rnd_extras: list[str] = []
+    if exchange_name == "binance_futures":
+        rnd_extras = [
+            "binance_donchian_futures", "binance_pairs", "binance_momentum", "binance_hmm",
+            "binance_breakout_pb", "binance_vol_mom", "binance_btc_neutral", "binance_surge",
+        ]
+    elif exchange_name == "binance_spot":
+        rnd_extras = ["binance_donchian", "binance_fgdca"]
+
     market_agent = MarketAnalysisAgent(market_data, market_symbol=market_symbol, exchange_name=exchange_name)
     risk_agent = RiskManagementAgent(config.risk, market_data, exchange_name=exchange_name)
-    trade_review = TradeReviewAgent(review_window_hours=24, exchange_name=exchange_name)
-    perf_agent = PerformanceAnalyticsAgent(exchange_name=exchange_name)
-    strategy_advisor = StrategyAdvisorAgent(exchange_name=exchange_name)
+    trade_review = TradeReviewAgent(review_window_hours=24, exchange_name=exchange_name,
+                                    extra_exchanges=rnd_extras)
+    perf_agent = PerformanceAnalyticsAgent(exchange_name=exchange_name, extra_exchanges=rnd_extras)
+    strategy_advisor = StrategyAdvisorAgent(exchange_name=exchange_name, extra_exchanges=rnd_extras)
     min_sell_wt = 0.0
     if exchange_name == "binance_futures":
         min_sell_wt = config.binance_trading.min_sell_active_weight
@@ -479,6 +490,16 @@ async def lifespan(app: FastAPI):
                              leverage=config.binance.default_leverage)
         except Exception as e:
             logger.error("binance_futures_init_failed", error=str(e), exc_info=True)
+
+    # 메인 선물 엔진 없이도 R&D 에이전트용 coordinator 보장
+    if config.binance.enabled and not _binance_engine:
+        existing_coord = engine_registry.get_coordinator("binance_futures")
+        if not existing_coord and binance_market_data:
+            _rnd_combiner, _rnd_coordinator = _create_agent_stack(
+                binance_market_data, config, "binance_futures", market_symbol="BTC/USDT",
+            )
+            engine_registry.register("binance_futures", None, None, _rnd_combiner, _rnd_coordinator)
+            logger.info("rnd_agent_coordinator_created", exchange="binance_futures")
 
     # ── 7b. 바이낸스 현물 (조건부) ─────────────────────────────
     binance_spot_exchange = None
@@ -872,10 +893,10 @@ async def lifespan(app: FastAPI):
     # 바이낸스 스케줄 잡 추가
     from engine.scheduler import _wrap
     from agents.coordinator import MARKET_ANALYSIS_ENABLED
-    if config.binance.enabled and _binance_engine:
+    if config.binance.enabled:
         binance_coord = engine_registry.get_coordinator("binance_futures")
         binance_pm = engine_registry.get_portfolio_manager("binance_futures")
-        if binance_coord and binance_pm:
+        if binance_coord:
             # COIN-53: MarketAnalysisAgent 비활성화 — 에이전트 판정이 매매에 미사용
             if MARKET_ANALYSIS_ENABLED:
                 _scheduler.add_job(
@@ -884,26 +905,32 @@ async def lifespan(app: FastAPI):
                     seconds=900,
                 )
 
-            async def binance_risk_check():
-                await binance_coord.run_risk_evaluation(binance_pm.cash_balance)
+            if binance_pm:
+                async def binance_risk_check():
+                    await binance_coord.run_risk_evaluation(binance_pm.cash_balance)
+                _scheduler.add_job(
+                    _wrap(binance_risk_check),
+                    name="binance_risk_check",
+                    seconds=300,
+                )
+            # 매매 회고 (6시간마다)
             _scheduler.add_job(
-                _wrap(binance_risk_check),
-                name="binance_risk_check",
-                seconds=300,
+                _wrap(binance_coord.run_trade_review),
+                name="binance_futures_trade_review",
+                seconds=21600,  # 6h
             )
-            # 메인 엔진 성과 분석/전략 어드바이저 — V2 비활성이므로 스킵
-            # (R&D 성과 분석은 별도 rnd_performance_review 스케줄에서 처리)
-            if config.futures_v2.enabled:
-                _scheduler.add_cron_job(
-                    _wrap(binance_coord.run_performance_analysis),
-                    name="binance_futures_performance_analytics",
-                    hour=12, minute=30,
-                )
-                _scheduler.add_weekly_cron_job(
-                    _wrap(binance_coord.run_strategy_advice),
-                    name="binance_futures_strategy_advice",
-                    day_of_week="sun", hour=13, minute=0,
-                )
+            # 일일 성과 분석 (21:30 KST = 12:30 UTC)
+            _scheduler.add_cron_job(
+                _wrap(binance_coord.run_performance_analysis),
+                name="binance_futures_performance_analytics",
+                hour=12, minute=30,
+            )
+            # 주간 전략 어드바이저 (일요일 22:00 KST = 13:00 UTC)
+            _scheduler.add_weekly_cron_job(
+                _wrap(binance_coord.run_strategy_advice),
+                name="binance_futures_strategy_advice",
+                day_of_week="sun", hour=13, minute=0,
+            )
 
     # 바이낸스 현물 스케줄 잡 추가
     if config.binance.spot_enabled and _binance_spot_engine:
@@ -917,7 +944,7 @@ async def lifespan(app: FastAPI):
                     seconds=900,
                 )
 
-            # 메인 현물 엔진 — 비활성 시 risk/performance/strategy 모두 스킵
+            # 메인 현물 엔진 리스크 체크 — 메인 비활성이면 스킵
             if config.binance_spot_trading.enabled:
                 async def binance_spot_risk_check():
                     await spot_coord.run_risk_evaluation(spot_pm.cash_balance)
@@ -925,17 +952,6 @@ async def lifespan(app: FastAPI):
                     _wrap(binance_spot_risk_check),
                     name="binance_spot_risk_check",
                     seconds=300,
-                )
-            if config.binance_spot_trading.enabled:
-                _scheduler.add_cron_job(
-                    _wrap(spot_coord.run_performance_analysis),
-                    name="binance_spot_performance_analytics",
-                    hour=12, minute=30,
-                )
-                _scheduler.add_weekly_cron_job(
-                    _wrap(spot_coord.run_strategy_advice),
-                    name="binance_spot_strategy_advice",
-                    day_of_week="sun", hour=13, minute=0,
                 )
 
     # ── R&D 성과 분석 스케줄러 — 매일 22:00 KST (13:00 UTC) ──

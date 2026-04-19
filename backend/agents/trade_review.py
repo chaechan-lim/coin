@@ -43,9 +43,11 @@ class TradeReviewAgent:
     LLM 활성화 시 Claude API로 심층 분석.
     """
 
-    def __init__(self, review_window_hours: int = 24, exchange_name: str = "bithumb"):
+    def __init__(self, review_window_hours: int = 24, exchange_name: str = "bithumb",
+                 extra_exchanges: list[str] | None = None):
         self._review_window_hours = review_window_hours
         self._exchange_name = exchange_name
+        self._exchange_list = [exchange_name] + (extra_exchanges or [])
         self._is_futures = "futures" in exchange_name
         self._currency = "USDT" if self._is_futures else "KRW"
         self._last_review: TradeReview | None = None
@@ -89,14 +91,14 @@ class TradeReviewAgent:
         # 기간 내 모든 주문 조회 (체결된 것만)
         result = await session.execute(
             select(Order)
-            .where(Order.filled_at >= cutoff, Order.status == "filled", Order.exchange == self._exchange_name)
+            .where(Order.filled_at >= cutoff, Order.status == "filled", Order.exchange.in_(self._exchange_list))
             .order_by(Order.filled_at.asc())
         )
         orders = list(result.scalars().all())
 
         # 현재 포지션
         pos_result = await session.execute(
-            select(Position).where(Position.quantity > 0, Position.exchange == self._exchange_name)
+            select(Position).where(Position.quantity > 0, Position.exchange.in_(self._exchange_list))
         )
         positions = list(pos_result.scalars().all())
 
@@ -158,7 +160,7 @@ class TradeReviewAgent:
                     Order.symbol == symbol,
                     Order.side == side,
                     Order.status == "filled",
-                    Order.exchange == self._exchange_name,
+                    Order.exchange.in_(self._exchange_list),
                     Order.filled_at < cutoff,
                 )
                 .order_by(Order.filled_at.desc())
@@ -720,7 +722,7 @@ class TradeReviewAgent:
                     case((CapitalTransaction.tx_type == "withdrawal", CapitalTransaction.amount), else_=0)
                 ), 0),
             ).where(
-                CapitalTransaction.exchange == self._exchange_name,
+                CapitalTransaction.exchange.in_(self._exchange_list),
                 CapitalTransaction.confirmed == True,  # noqa: E712
             )
         )
@@ -731,7 +733,7 @@ class TradeReviewAgent:
         recent_result = await session.execute(
             select(CapitalTransaction)
             .where(
-                CapitalTransaction.exchange == self._exchange_name,
+                CapitalTransaction.exchange.in_(self._exchange_list),
                 CapitalTransaction.confirmed == True,  # noqa: E712
                 CapitalTransaction.created_at >= cutoff,
             )
