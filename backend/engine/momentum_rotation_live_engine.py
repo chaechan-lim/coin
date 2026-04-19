@@ -250,9 +250,11 @@ class MomentumRotationLiveEngine:
                                       exec_price, exec_qty,
                                       reason=f"momentum_{side}_entry")
             notional = exec_qty * exec_price
-            await emit_event("info", "engine",
+            await emit_event("info", "rnd_trade",
                              f"{'📈' if side=='long' else '📉'} Momentum {side}: {symbol} @ {exec_price:.2f}",
-                             detail=f"수량 {exec_qty:.6f} | 명목 {notional:.1f} USDT | 청산: 다음 주 리밸런싱")
+                             detail=f"수량 {exec_qty:.6f} | 명목 {notional:.1f} USDT | 청산: 다음 주 리밸런싱",
+                             metadata={"engine": "Momentum", "symbol": symbol, "direction": side,
+                                       "price": exec_price, "quantity": exec_qty, "leverage": self._leverage})
         except Exception as e:
             logger.error("momentum_open_error", symbol=symbol, side=side, error=str(e))
 
@@ -339,9 +341,12 @@ class MomentumRotationLiveEngine:
                                       exec_price, filled_qty,
                                       pnl=pnl, reason=f"momentum_{pos.side}_{reason}")
             emoji = "🛑" if pnl < 0 else "💰"
-            await emit_event("info", "engine",
+            await emit_event("info", "rnd_trade",
                              f"{emoji} Momentum {reason}: {symbol} PnL {pnl:+.2f}",
-                             detail=f"진입 {pos.entry_price:.2f} → 청산 {exec_price:.2f} | {pos.side}")
+                             detail=f"진입 {pos.entry_price:.2f} → 청산 {exec_price:.2f} | {pos.side}",
+                             metadata={"engine": "Momentum", "symbol": symbol, "direction": pos.side,
+                                       "price": exec_price, "entry_price": pos.entry_price,
+                                       "realized_pnl": pnl, "reason": reason})
             logger.info("momentum_sl_trailing_exit", symbol=symbol, reason=reason,
                         pnl=round(pnl, 2), exec_price=exec_price, filled=filled_qty)
             await self._check_loss_limits()
@@ -383,8 +388,11 @@ class MomentumRotationLiveEngine:
                                       exec_price, pos.quantity,
                                       pnl=pnl, reason=f"momentum_{pos.side}_exit")
             emoji = "💰" if pnl > 0 else "💸"
-            await emit_event("info", "engine",
-                             f"{emoji} Momentum exit {pos.side}: {symbol} PnL {pnl:+.2f}")
+            await emit_event("info", "rnd_trade",
+                             f"{emoji} Momentum exit {pos.side}: {symbol} PnL {pnl:+.2f}",
+                             metadata={"engine": "Momentum", "symbol": symbol, "direction": pos.side,
+                                       "price": exec_price, "entry_price": pos.entry_price,
+                                       "realized_pnl": pnl, "reason": "rebalance"})
         except Exception as e:
             logger.error("momentum_close_error", symbol=symbol, error=str(e))
 

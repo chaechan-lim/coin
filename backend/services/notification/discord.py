@@ -115,6 +115,10 @@ class DiscordAdapter(NotificationAdapter):
             return self._format_surge_trade(title, detail, meta)
         if category == "safe_order" and level == "critical":
             return self._format_safe_order(title, detail, meta)
+        if category in ("rnd_trade", "donchian_futures_trade", "pairs_trade") and level == "info":
+            return self._format_rnd_trade(title, detail, meta)
+        if category in ("rnd_trade", "donchian_futures_trade", "pairs_trade") and level in ("warning", "error"):
+            return self._format_rnd_trade_warning(title, detail, meta)
         return None
 
     # ── 포맷 함수들 ──────────────────────────────────────────
@@ -512,6 +516,61 @@ class DiscordAdapter(NotificationAdapter):
             fields.append({"name": "방향", "value": meta["side"].upper(), "inline": True})
         desc = detail[:500] if detail else None
         return {"title": f"🚨 {title}", "description": desc, "color": COLOR_RED, "fields": fields}
+
+    def _format_rnd_trade(self, title: str, detail: str | None, meta: dict) -> dict:
+        """R&D 엔진 거래 알림 (진입/청산/리밸런싱)."""
+        is_close = any(k in title for k in ("청산", "exit", "close", "매도"))
+        is_short = any(k in title for k in ("숏", "short", "SHORT"))
+        pnl = meta.get("pnl_pct") or meta.get("realized_pnl")
+        if is_close and pnl is not None:
+            color = COLOR_GREEN if pnl >= 0 else COLOR_RED
+        elif is_short:
+            color = COLOR_RED
+        else:
+            color = COLOR_GREEN
+        fields = []
+        if meta.get("symbol"):
+            fields.append({"name": "심볼", "value": meta["symbol"], "inline": True})
+        if meta.get("direction"):
+            fields.append({"name": "방향", "value": meta["direction"].upper(), "inline": True})
+        if meta.get("engine"):
+            fields.append({"name": "엔진", "value": meta["engine"], "inline": True})
+        if meta.get("price") is not None:
+            v = meta["price"]
+            fmt = f"{v:,.2f}" if v >= 10 else f"{v:,.4f}"
+            fields.append({"name": "가격", "value": f"{fmt} USDT", "inline": True})
+        if meta.get("entry_price") is not None:
+            v = meta["entry_price"]
+            fmt = f"{v:,.2f}" if v >= 10 else f"{v:,.4f}"
+            fields.append({"name": "진입가", "value": f"{fmt} USDT", "inline": True})
+        if meta.get("quantity") is not None:
+            fields.append({"name": "수량", "value": f"{meta['quantity']:.6f}", "inline": True})
+        if meta.get("leverage"):
+            fields.append({"name": "레버리지", "value": f"{meta['leverage']}x", "inline": True})
+        if meta.get("pnl_pct") is not None:
+            p = meta["pnl_pct"]
+            sign = "+" if p >= 0 else ""
+            fields.append({"name": "PnL", "value": f"{sign}{p:.2f}%", "inline": True})
+        if meta.get("realized_pnl") is not None:
+            p = meta["realized_pnl"]
+            sign = "+" if p >= 0 else ""
+            fields.append({"name": "손익", "value": f"{sign}{p:.2f} USDT", "inline": True})
+        if meta.get("reason"):
+            fields.append({"name": "사유", "value": meta["reason"], "inline": False})
+        desc = detail[:500] if detail else None
+        return {"title": f"🔬 {title}", "description": desc, "color": color, "fields": fields}
+
+    def _format_rnd_trade_warning(self, title: str, detail: str | None, meta: dict) -> dict:
+        """R&D 엔진 거래 경고 (손실 한도, 오류 등)."""
+        fields = []
+        if meta.get("engine"):
+            fields.append({"name": "엔진", "value": meta["engine"], "inline": True})
+        if meta.get("symbol"):
+            fields.append({"name": "심볼", "value": meta["symbol"], "inline": True})
+        if meta.get("reason"):
+            fields.append({"name": "사유", "value": meta["reason"], "inline": False})
+        desc = detail[:500] if detail else None
+        return {"title": f"⚠️ {title}", "description": desc, "color": COLOR_ORANGE, "fields": fields}
 
     # ── 전송 ───────────────────────────────────────────────────
 

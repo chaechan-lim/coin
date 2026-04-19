@@ -348,9 +348,11 @@ class BTCNeutralAltMREngine:
             coin_short = alt_symbol.split("/")[0]
             opposite_side = btc_side
             detail = f"{coin_short} z={z:.2f} | {coin_short} {alt_side} + BTC {opposite_side}"
-            await emit_event("info", "engine",
+            await emit_event("info", "rnd_trade",
                              f"🔄 BTCNeutral: {alt_symbol} {alt_side} @ {alt_exec_price:.2f}",
-                             detail=detail)
+                             detail=detail,
+                             metadata={"engine": "BTCNeutral", "symbol": alt_symbol, "direction": alt_side,
+                                       "price": alt_exec_price, "leverage": self._leverage})
         except Exception as e:
             logger.error("btc_neutral_open_error", symbol=alt_symbol, error=str(e))
 
@@ -417,8 +419,10 @@ class BTCNeutralAltMREngine:
                                      reason=f"btcneutral_{pos.btc_side}_btc_exit_{reason}")
 
             emoji = "💰" if total_pnl > 0 else "💸"
-            await emit_event("info", "engine",
-                             f"{emoji} BTCNeutral exit: {alt_symbol} PnL {total_pnl:+.2f} ({reason})")
+            await emit_event("info", "rnd_trade",
+                             f"{emoji} BTCNeutral exit: {alt_symbol} PnL {total_pnl:+.2f} ({reason})",
+                             metadata={"engine": "BTCNeutral", "symbol": alt_symbol,
+                                       "realized_pnl": total_pnl, "reason": reason})
         except Exception as e:
             logger.error("btc_neutral_close_error", symbol=alt_symbol, error=str(e))
 

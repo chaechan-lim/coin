@@ -331,10 +331,12 @@ class BreakoutPullbackEngine:
                 f"TP {tp_price:.2f} (+{self._tp_pct}%) | "
                 f"풀백 {self._pullback_pct}% 후 진입"
             )
-            await emit_event("info", "engine",
+            await emit_event("info", "rnd_trade",
                              f"{'📈' if side == 'long' else '📉'} BreakoutPB {side}: "
                              f"{symbol} @ {exec_price:.2f}",
-                             detail=detail)
+                             detail=detail,
+                             metadata={"engine": "BreakoutPB", "symbol": symbol, "direction": side,
+                                       "price": exec_price, "quantity": exec_qty, "leverage": self._leverage})
         except Exception as e:
             logger.error("breakout_pb_open_error", symbol=symbol, side=side, error=str(e))
 
@@ -369,8 +371,11 @@ class BreakoutPullbackEngine:
                                      exec_price, filled_qty,
                                      pnl=pnl, reason=f"breakout_pb_{pos.side}_exit_{reason}")
             emoji = "💰" if pnl > 0 else "💸"
-            await emit_event("info", "engine",
-                             f"{emoji} BreakoutPB exit {pos.side}: {symbol} PnL {pnl:+.2f} ({reason})")
+            await emit_event("info", "rnd_trade",
+                             f"{emoji} BreakoutPB exit {pos.side}: {symbol} PnL {pnl:+.2f} ({reason})",
+                             metadata={"engine": "BreakoutPB", "symbol": symbol, "direction": pos.side,
+                                       "price": exec_price, "entry_price": pos.entry_price,
+                                       "realized_pnl": pnl, "reason": reason})
         except Exception as e:
             logger.error("breakout_pb_close_error", symbol=symbol, error=str(e))
 

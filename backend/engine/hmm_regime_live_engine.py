@@ -297,9 +297,11 @@ class HMMRegimeLiveEngine:
                                       exec_price, filled_qty, reason=f"hmm_{side}_entry")
             notional = filled_qty * exec_price
             max_loss = self._initial_capital * MAX_TOTAL_LOSS_PCT
-            await emit_event("info", "engine",
+            await emit_event("info", "rnd_trade",
                              f"{'📈' if side=='long' else '📉'} HMM {side}: {self._symbol} @ {exec_price:.2f}",
-                             detail=f"수량 {exec_qty:.6f} | 명목 {notional:.1f} USDT | 청산: regime 전환 시 | 최대손실 한도 -{max_loss:.0f} USDT")
+                             detail=f"수량 {exec_qty:.6f} | 명목 {notional:.1f} USDT | 청산: regime 전환 시 | 최대손실 한도 -{max_loss:.0f} USDT",
+                             metadata={"engine": "HMM", "symbol": self._symbol, "direction": side,
+                                       "price": exec_price, "quantity": filled_qty, "leverage": self._leverage})
         except Exception as e:
             logger.error("hmm_open_error", side=side, error=str(e))
 
@@ -334,8 +336,11 @@ class HMMRegimeLiveEngine:
                                       exec_price, filled_qty, pnl=pnl,
                                       reason=f"hmm_{pos.side}_exit")
             emoji = "💰" if pnl > 0 else "💸"
-            await emit_event("info", "engine",
-                             f"{emoji} HMM exit {pos.side}: {self._symbol} PnL {pnl:+.2f}")
+            await emit_event("info", "rnd_trade",
+                             f"{emoji} HMM exit {pos.side}: {self._symbol} PnL {pnl:+.2f}",
+                             metadata={"engine": "HMM", "symbol": self._symbol, "direction": pos.side,
+                                       "price": exec_price, "entry_price": pos.entry_price,
+                                       "realized_pnl": pnl, "reason": "regime_change"})
         except Exception as e:
             logger.error("hmm_close_error", error=str(e))
 

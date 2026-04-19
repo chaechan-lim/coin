@@ -319,10 +319,12 @@ class VolumeMomentumEngine:
             await self._record_order(symbol, "buy" if side == "long" else "sell",
                                      exec_price, exec_qty,
                                      reason=f"vol_mom_{side}_entry")
-            await emit_event("info", "engine",
+            await emit_event("info", "rnd_trade",
                              f"{'📈' if side == 'long' else '📉'} VolMom {side}: "
                              f"{symbol} @ {exec_price:.2f}",
-                             detail=detail)
+                             detail=detail,
+                             metadata={"engine": "VolMom", "symbol": symbol, "direction": side,
+                                       "price": exec_price, "quantity": exec_qty, "leverage": self._leverage})
         except Exception as e:
             logger.error("vol_mom_open_error", symbol=symbol, side=side, error=str(e))
 
@@ -357,8 +359,11 @@ class VolumeMomentumEngine:
                                      exec_price, filled_qty,
                                      pnl=pnl, reason=f"vol_mom_{pos.side}_exit_{reason}")
             emoji = "💰" if pnl > 0 else "💸"
-            await emit_event("info", "engine",
-                             f"{emoji} VolMom exit {pos.side}: {symbol} PnL {pnl:+.2f} ({reason})")
+            await emit_event("info", "rnd_trade",
+                             f"{emoji} VolMom exit {pos.side}: {symbol} PnL {pnl:+.2f} ({reason})",
+                             metadata={"engine": "VolMom", "symbol": symbol, "direction": pos.side,
+                                       "price": exec_price, "entry_price": pos.entry_price,
+                                       "realized_pnl": pnl, "reason": reason})
         except Exception as e:
             logger.error("vol_mom_close_error", symbol=symbol, error=str(e))
 
