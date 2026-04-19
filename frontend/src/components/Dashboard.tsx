@@ -207,10 +207,8 @@ export function Dashboard() {
 
           {tab === 'assets' && (
             <>
-              <PortfolioSummary exchange={exchange} />
-              <PortfolioChart exchange={exchange} />
+              <RndOverview market={exchange === 'binance_spot' ? 'spot' : 'futures'} />
               <DailyPnLStats exchange={exchange} />
-              <TradingAccountOverview />
             </>
           )}
 
