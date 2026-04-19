@@ -36,8 +36,9 @@ MIN_NOTIONAL = 10
 TRAIN_HOURS = 24 * 90  # 90일 학습 (4h 기준 540 캔들, 안정적 공분산)
 REFIT_INTERVAL_HOURS = 24  # 매일 refit
 EVAL_INTERVAL_HOURS = 4  # 4시간마다 predict (1h→4h, 노이즈 감소)
-USE_4H_CANDLE = True  # 4h 캔들 기반 (백테스트: 360d +38.5%, 거래 23건)
+USE_4H_CANDLE = True  # 4h 캔들 기반
 MIN_STATE_PROB = 0.7  # state 확신도 70% 이상이어야 전환
+TP_PCT = 15.0  # 레버리지 적용 TP% (rolling refit 360d: +121%, baseline +110%)
 
 
 @dataclass
@@ -46,6 +47,7 @@ class HMMPosition:
     side: str  # "long" or "short"
     quantity: float
     entry_price: float
+    peak_price: float = 0.0
 
 
 class HMMRegimeLiveEngine:
@@ -243,6 +245,34 @@ class HMMRegimeLiveEngine:
                 current = 1 if self._position.side == "long" else -1
 
             price = float(df["close"].iloc[-1])
+            high = float(df["high"].iloc[-1]) if "high" in df.columns else price
+            low = float(df["low"].iloc[-1]) if "low" in df.columns else price
+
+            # TP 체크 (레버리지 적용)
+            if self._position and TP_PCT > 0:
+                pos = self._position
+                if pos.side == "long":
+                    tp_price = pos.entry_price * (1 + TP_PCT / 100 / self._leverage)
+                    if high >= tp_price:
+                        logger.info("hmm_tp_hit", side="long", entry=pos.entry_price,
+                                    tp_price=round(tp_price, 2), high=round(high, 2))
+                        await self._close_position(tp_price)
+                        await emit_event("info", "rnd_trade",
+                                         f"🎯 HMM TP: {self._symbol} long @ {tp_price:.2f}",
+                                         metadata={"engine": "HMM", "symbol": self._symbol,
+                                                   "reason": "tp_hit", "price": tp_price})
+                        desired = current = 0
+                else:
+                    tp_price = pos.entry_price * (1 - TP_PCT / 100 / self._leverage)
+                    if low <= tp_price:
+                        logger.info("hmm_tp_hit", side="short", entry=pos.entry_price,
+                                    tp_price=round(tp_price, 2), low=round(low, 2))
+                        await self._close_position(tp_price)
+                        await emit_event("info", "rnd_trade",
+                                         f"🎯 HMM TP: {self._symbol} short @ {tp_price:.2f}",
+                                         metadata={"engine": "HMM", "symbol": self._symbol,
+                                                   "reason": "tp_hit", "price": tp_price})
+                        desired = current = 0
 
             state_name = {self._bullish_state: "bullish", self._bearish_state: "bearish",
                           self._neutral_state: "neutral"}.get(state, f"unknown({state})")
