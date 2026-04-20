@@ -89,6 +89,7 @@ class MomentumRotationLiveEngine:
         self._last_eval_date: Optional[datetime] = None
         self._paused = False
         self._daily_paused = False
+        self._consecutive_close_failures = 0
         self._coordinator = None
         self._last_rebalance_date = None
 
@@ -323,9 +324,18 @@ class MomentumRotationLiveEngine:
             exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
 
             if status not in ('filled', 'closed') or filled_qty <= 0 or exec_price <= 0:
+                self._consecutive_close_failures += 1
                 logger.error("momentum_sl_close_not_filled",
-                             symbol=symbol, status=status, filled=filled_qty, price=exec_price)
+                             symbol=symbol, status=status, filled=filled_qty, price=exec_price,
+                             consecutive=self._consecutive_close_failures)
+                if self._consecutive_close_failures >= 3:
+                    self._paused = True
+                    await emit_event("error", "engine",
+                                     f"🚨 Momentum 청산 {self._consecutive_close_failures}회 연속 실패 — 자동 중지",
+                                     detail=f"포지션 {pos.side} {symbol} qty={pos.quantity} 수동 확인 필요")
                 return  # 체결 안 됨 → 포지션 유지, 다음 체크에서 재시도
+
+            self._consecutive_close_failures = 0
 
             # 실제 체결가 기준 PnL
             if pos.side == "long":
@@ -371,9 +381,18 @@ class MomentumRotationLiveEngine:
             exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
 
             if status not in ('filled', 'closed') or filled_qty <= 0 or exec_price <= 0:
+                self._consecutive_close_failures += 1
                 logger.error("momentum_close_not_filled",
-                             symbol=symbol, status=status, filled=filled_qty, price=exec_price)
+                             symbol=symbol, status=status, filled=filled_qty, price=exec_price,
+                             consecutive=self._consecutive_close_failures)
+                if self._consecutive_close_failures >= 3:
+                    self._paused = True
+                    await emit_event("error", "engine",
+                                     f"🚨 Momentum 청산 {self._consecutive_close_failures}회 연속 실패 — 자동 중지",
+                                     detail=f"포지션 {pos.side} {symbol} qty={pos.quantity} 수동 확인 필요")
                 return  # 체결 안 됨 → 포지션 유지
+
+            self._consecutive_close_failures = 0
 
             if pos.side == "long":
                 pnl = (exec_price - pos.entry_price) * filled_qty

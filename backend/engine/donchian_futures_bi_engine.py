@@ -86,6 +86,7 @@ class DonchianFuturesBiEngine:
         self._last_idle_reason: str = "다음 일봉 평가 대기 중"
         self._paused = False
         self._daily_paused = False
+        self._consecutive_close_failures = 0
 
     @property
     def is_running(self) -> bool:
@@ -571,13 +572,22 @@ class DonchianFuturesBiEngine:
         exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'price', None) or getattr(order, 'average', 0) or 0)
 
         if exit_status not in ('filled', 'closed') or exit_filled <= 0 or exec_price <= 0:
-            logger.error("donchian_futures_bi_exit_not_filled", symbol=symbol, direction=pos.direction, status=exit_status)
+            self._consecutive_close_failures += 1
+            logger.error("donchian_futures_bi_exit_not_filled", symbol=symbol, direction=pos.direction,
+                         status=exit_status, consecutive=self._consecutive_close_failures)
+            if self._consecutive_close_failures >= 3:
+                self._paused = True
+                await emit_event("error", "engine",
+                                 f"🚨 Donchian Futures Bi 청산 {self._consecutive_close_failures}회 연속 실패 — 자동 중지",
+                                 detail=f"포지션 {pos.direction} {symbol} qty={pos.quantity} 수동 확인 필요")
             await self._emit_trade_journal(
                 pos.trade_id, symbol, pos.direction, "exit_not_filled",
                 f"Donchian futures exit not filled: {symbol}",
                 detail=f"status={exit_status}", level="error",
             )
             return
+
+        self._consecutive_close_failures = 0
 
         fee = float(getattr(order, 'fee', None) or (exec_price * exit_filled * FEE_RATE))
         if pos.direction == "long":

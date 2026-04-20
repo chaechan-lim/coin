@@ -80,6 +80,7 @@ class HMMRegimeLiveEngine:
         self._paused = False
         self._daily_paused = False
         self._coordinator = None
+        self._consecutive_close_failures = 0
 
         # HMM 모델 상태
         self._model = None
@@ -350,8 +351,17 @@ class HMMRegimeLiveEngine:
             exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
 
             if status not in ('filled', 'closed') or filled_qty <= 0 or exec_price <= 0:
-                logger.error("hmm_close_not_filled", side=pos.side, symbol=self._symbol, status=status)
+                self._consecutive_close_failures += 1
+                logger.error("hmm_close_not_filled", side=pos.side, symbol=self._symbol,
+                             status=status, consecutive=self._consecutive_close_failures)
+                if self._consecutive_close_failures >= 3:
+                    self._paused = True
+                    await emit_event("error", "engine",
+                                     f"🚨 HMM 청산 {self._consecutive_close_failures}회 연속 실패 — 자동 중지",
+                                     detail=f"포지션 {pos.side} {self._symbol} qty={pos.quantity} 수동 확인 필요")
                 return
+
+            self._consecutive_close_failures = 0
 
             if pos.side == "long":
                 pnl = (exec_price - pos.entry_price) * filled_qty

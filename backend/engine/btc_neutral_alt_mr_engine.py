@@ -93,6 +93,7 @@ class BTCNeutralAltMREngine:
         self._last_eval_date: Optional[datetime] = None
         self._paused = False
         self._daily_paused = False
+        self._consecutive_close_failures = 0
         self._coordinator = None
 
     @property
@@ -374,7 +375,14 @@ class BTCNeutralAltMREngine:
             alt_exec_price = float(getattr(alt_order, 'executed_price', None) or getattr(alt_order, 'average', 0) or 0)
 
             if alt_status not in ('filled', 'closed') or alt_filled <= 0 or alt_exec_price <= 0:
-                logger.error("btc_neutral_alt_close_not_filled", symbol=alt_symbol, status=alt_status)
+                self._consecutive_close_failures += 1
+                logger.error("btc_neutral_alt_close_not_filled", symbol=alt_symbol, status=alt_status,
+                             consecutive=self._consecutive_close_failures)
+                if self._consecutive_close_failures >= 3:
+                    self._paused = True
+                    await emit_event("error", "engine",
+                                     f"🚨 BTCNeutral 청산 {self._consecutive_close_failures}회 연속 실패 — 자동 중지",
+                                     detail=f"포지션 {pos.alt_side} {alt_symbol} qty={pos.alt_qty} 수동 확인 필요")
                 return
 
             # BTC 청산
@@ -388,8 +396,17 @@ class BTCNeutralAltMREngine:
             btc_exec_price = float(getattr(btc_order, 'executed_price', None) or getattr(btc_order, 'average', 0) or 0)
 
             if btc_status not in ('filled', 'closed') or btc_filled <= 0 or btc_exec_price <= 0:
-                logger.error("btc_neutral_btc_close_not_filled", symbol=self.BTC_SYMBOL, status=btc_status)
+                self._consecutive_close_failures += 1
+                logger.error("btc_neutral_btc_close_not_filled", symbol=self.BTC_SYMBOL, status=btc_status,
+                             consecutive=self._consecutive_close_failures)
+                if self._consecutive_close_failures >= 3:
+                    self._paused = True
+                    await emit_event("error", "engine",
+                                     f"🚨 BTCNeutral 청산 {self._consecutive_close_failures}회 연속 실패 — 자동 중지",
+                                     detail=f"BTC 레그 청산 실패 {self.BTC_SYMBOL} qty={pos.btc_qty} 수동 확인 필요")
                 return
+
+            self._consecutive_close_failures = 0
 
             if pos.alt_side == "long":
                 alt_pnl = (alt_exec_price - pos.alt_entry) * alt_filled

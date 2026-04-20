@@ -94,6 +94,7 @@ class PairsTradingLiveEngine:
         self._last_idle_reason: str = "다음 시간대 평가 대기 중"
         self._paused = False
         self._daily_paused = False
+        self._consecutive_close_failures = 0
 
     @property
     def is_running(self) -> bool:
@@ -677,9 +678,15 @@ class PairsTradingLiveEngine:
 
         if (exit_status_a not in ('filled', 'closed') or exit_filled_a <= 0 or exec_price_a <= 0 or
                 exit_status_b not in ('filled', 'closed') or exit_filled_b <= 0 or exec_price_b <= 0):
+            self._consecutive_close_failures += 1
             logger.error("pairs_live_exit_not_filled",
                          status_a=exit_status_a, status_b=exit_status_b,
-                         trade_id=pos.trade_id)
+                         trade_id=pos.trade_id, consecutive=self._consecutive_close_failures)
+            if self._consecutive_close_failures >= 3:
+                self._paused = True
+                await emit_event("error", "engine",
+                                 f"🚨 PairsTrading 청산 {self._consecutive_close_failures}회 연속 실패 — 자동 중지",
+                                 detail=f"포지션 {pos.pair_direction} {self._coin_a}-{self._coin_b} 수동 확인 필요")
             await self._emit_pairs_journal(
                 pos.trade_id, pos.pair_direction, "exit_not_filled",
                 "Pairs exit not filled — position kept",
@@ -687,6 +694,8 @@ class PairsTradingLiveEngine:
                 level="error",
             )
             return
+
+        self._consecutive_close_failures = 0
 
         fee_a = float(getattr(order_a, 'fee', None) or (exec_price_a * exit_filled_a * TOTAL_COST_RATE))
         fee_b = float(getattr(order_b, 'fee', None) or (exec_price_b * exit_filled_b * TOTAL_COST_RATE))
