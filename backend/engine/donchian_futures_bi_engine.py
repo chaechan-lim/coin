@@ -564,7 +564,7 @@ class DonchianFuturesBiEngine:
             detail=f"direction={pos.direction}",
             extra={"stop_price": round(pos.stop_price, 6)},
         )
-        order = await (self._exchange.create_market_sell(symbol, pos.quantity) if close_side == "sell" else self._exchange.create_market_buy(symbol, pos.quantity))
+        order = await (self._exchange.create_market_sell(symbol, pos.quantity, reduce_only=True) if close_side == "sell" else self._exchange.create_market_buy(symbol, pos.quantity, reduce_only=True))
 
         exit_status = getattr(order, 'status', None)
         exit_filled = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)

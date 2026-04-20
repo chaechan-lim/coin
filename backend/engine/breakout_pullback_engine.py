@@ -346,9 +346,9 @@ class BreakoutPullbackEngine:
             return
         try:
             if pos.side == "long":
-                order = await self._exchange.create_market_sell(symbol, pos.quantity)
+                order = await self._exchange.create_market_sell(symbol, pos.quantity, reduce_only=True)
             else:
-                order = await self._exchange.create_market_buy(symbol, pos.quantity)
+                order = await self._exchange.create_market_buy(symbol, pos.quantity, reduce_only=True)
 
             status = getattr(order, 'status', None)
             filled_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)

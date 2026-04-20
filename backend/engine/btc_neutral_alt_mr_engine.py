@@ -365,9 +365,9 @@ class BTCNeutralAltMREngine:
         try:
             # Alt 청산
             if pos.alt_side == "long":
-                alt_order = await self._exchange.create_market_sell(alt_symbol, pos.alt_qty)
+                alt_order = await self._exchange.create_market_sell(alt_symbol, pos.alt_qty, reduce_only=True)
             else:
-                alt_order = await self._exchange.create_market_buy(alt_symbol, pos.alt_qty)
+                alt_order = await self._exchange.create_market_buy(alt_symbol, pos.alt_qty, reduce_only=True)
 
             alt_status = getattr(alt_order, 'status', None)
             alt_filled = float(getattr(alt_order, 'executed_quantity', None) or getattr(alt_order, 'filled', 0) or 0)
@@ -379,9 +379,9 @@ class BTCNeutralAltMREngine:
 
             # BTC 청산
             if pos.btc_side == "long":
-                btc_order = await self._exchange.create_market_sell(self.BTC_SYMBOL, pos.btc_qty)
+                btc_order = await self._exchange.create_market_sell(self.BTC_SYMBOL, pos.btc_qty, reduce_only=True)
             else:
-                btc_order = await self._exchange.create_market_buy(self.BTC_SYMBOL, pos.btc_qty)
+                btc_order = await self._exchange.create_market_buy(self.BTC_SYMBOL, pos.btc_qty, reduce_only=True)
 
             btc_status = getattr(btc_order, 'status', None)
             btc_filled = float(getattr(btc_order, 'executed_quantity', None) or getattr(btc_order, 'filled', 0) or 0)

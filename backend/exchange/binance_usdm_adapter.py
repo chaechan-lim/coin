@@ -249,14 +249,16 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         logger.info("futures_limit_sell", symbol=symbol, amount=amount, price=price)
         return self._parse_order(data)
 
-    async def create_market_buy(self, symbol: str, amount: float) -> OrderResult:
-        data = await self._call(self._exchange.create_market_buy_order, symbol, amount)
-        logger.info("futures_market_buy", symbol=symbol, amount=amount)
+    async def create_market_buy(self, symbol: str, amount: float, reduce_only: bool = False) -> OrderResult:
+        params = {"reduceOnly": True} if reduce_only else {}
+        data = await self._call(self._exchange.create_market_buy_order, symbol, amount, params=params)
+        logger.info("futures_market_buy", symbol=symbol, amount=amount, reduce_only=reduce_only)
         return self._parse_order(data)
 
-    async def create_market_sell(self, symbol: str, amount: float) -> OrderResult:
-        data = await self._call(self._exchange.create_market_sell_order, symbol, amount)
-        logger.info("futures_market_sell", symbol=symbol, amount=amount)
+    async def create_market_sell(self, symbol: str, amount: float, reduce_only: bool = False) -> OrderResult:
+        params = {"reduceOnly": True} if reduce_only else {}
+        data = await self._call(self._exchange.create_market_sell_order, symbol, amount, params=params)
+        logger.info("futures_market_sell", symbol=symbol, amount=amount, reduce_only=reduce_only)
         return self._parse_order(data)
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:

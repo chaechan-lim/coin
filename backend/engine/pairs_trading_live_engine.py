@@ -584,7 +584,7 @@ class PairsTradingLiveEngine:
         order_a = None
         order_b = None
         try:
-            order_a = await self._submit_order(self._coin_a, close_a_side, pos.qty_a)
+            order_a = await self._submit_order(self._coin_a, close_a_side, pos.qty_a, reduce_only=True)
             await self._emit_pairs_journal(
                 pos.trade_id,
                 pos.pair_direction,
@@ -593,7 +593,7 @@ class PairsTradingLiveEngine:
                 detail=f"side={close_a_side}, qty={pos.qty_a}",
                 extra={"leg": "a", "symbol": self._coin_a, "side": close_a_side},
             )
-            order_b = await self._submit_order(self._coin_b, close_b_side, pos.qty_b)
+            order_b = await self._submit_order(self._coin_b, close_b_side, pos.qty_b, reduce_only=True)
             await self._emit_pairs_journal(
                 pos.trade_id,
                 pos.pair_direction,
@@ -751,10 +751,10 @@ class PairsTradingLiveEngine:
             await self._rnd_coordinator.note_pnl(self.EXCHANGE_NAME, realized)
             await self._sync_rnd_coordinator_state()
 
-    async def _submit_order(self, symbol: str, side: str, qty: float):
+    async def _submit_order(self, symbol: str, side: str, qty: float, reduce_only: bool = False):
         if side == "buy":
-            return await self._exchange.create_market_buy(symbol, qty)
-        return await self._exchange.create_market_sell(symbol, qty)
+            return await self._exchange.create_market_buy(symbol, qty, reduce_only=reduce_only)
+        return await self._exchange.create_market_sell(symbol, qty, reduce_only=reduce_only)
 
     async def _normalize_quantity(self, symbol: str, raw_qty: float) -> float:
         try:

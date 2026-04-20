@@ -341,9 +341,9 @@ class HMMRegimeLiveEngine:
         pos = self._position
         try:
             if pos.side == "long":
-                order = await self._exchange.create_market_sell(self._symbol, pos.quantity)
+                order = await self._exchange.create_market_sell(self._symbol, pos.quantity, reduce_only=True)
             else:
-                order = await self._exchange.create_market_buy(self._symbol, pos.quantity)
+                order = await self._exchange.create_market_buy(self._symbol, pos.quantity, reduce_only=True)
 
             status = getattr(order, 'status', None)
             filled_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)

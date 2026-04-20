@@ -313,9 +313,9 @@ class MomentumRotationLiveEngine:
             return
         try:
             if pos.side == "long":
-                order = await self._exchange.create_market_sell(symbol, pos.quantity)
+                order = await self._exchange.create_market_sell(symbol, pos.quantity, reduce_only=True)
             else:
-                order = await self._exchange.create_market_buy(symbol, pos.quantity)
+                order = await self._exchange.create_market_buy(symbol, pos.quantity, reduce_only=True)
 
             # 체결 확인 — 체결 안 되면 포지션 유지
             status = getattr(order, 'status', None)
@@ -361,9 +361,9 @@ class MomentumRotationLiveEngine:
             return
         try:
             if pos.side == "long":
-                order = await self._exchange.create_market_sell(symbol, pos.quantity)
+                order = await self._exchange.create_market_sell(symbol, pos.quantity, reduce_only=True)
             else:
-                order = await self._exchange.create_market_buy(symbol, pos.quantity)
+                order = await self._exchange.create_market_buy(symbol, pos.quantity, reduce_only=True)
 
             # 체결 확인
             status = getattr(order, 'status', None)
