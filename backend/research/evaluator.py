@@ -727,12 +727,13 @@ async def _live_execution_review(candidate_key: str, exchange_name: str) -> Auto
         )
         orders = list(result.scalars().all())
 
-    sell_orders = [o for o in orders if o.side == "sell"]
+    # 청산 주문 = realized_pnl이 있는 주문 (롱 청산=sell, 숏 청산=buy)
+    exit_orders = [o for o in orders if (o.realized_pnl or 0) != 0]
     total_trades = len(orders)
-    sell_count = len(sell_orders)
+    sell_count = sum(1 for o in orders if o.side == "sell")
     buy_count = total_trades - sell_count
 
-    pnls = [float(o.realized_pnl or 0) for o in sell_orders]
+    pnls = [float(o.realized_pnl) for o in exit_orders]
     total_pnl = sum(pnls)
     wins = [p for p in pnls if p >= 0]
     losses = [p for p in pnls if p < 0]

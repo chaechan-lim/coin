@@ -422,10 +422,17 @@ class VolumeMomentumEngine:
                     cum_pnl += float(o.realized_pnl or 0)
             self._cumulative_pnl = cum_pnl
             for sym, info in net.items():
-                # SL/TP를 복원 시 재계산 (간략화: ATR 없이 기본값)
+                # SL/TP 복원: ATR 없이 entry 기반 고정 비율 (5%/10%)
+                ep = info["price"]
+                if info["side"] == "long":
+                    sl = ep * (1 - 0.05 / self._leverage) if ep > 0 else 0
+                    tp = ep * (1 + 0.10 / self._leverage) if ep > 0 else 0
+                else:
+                    sl = ep * (1 + 0.05 / self._leverage) if ep > 0 else 0
+                    tp = ep * (1 - 0.10 / self._leverage) if ep > 0 else 0
                 self._positions[sym] = VMPosition(
                     symbol=sym, side=info["side"], quantity=info["qty"],
-                    entry_price=info["price"], sl_price=0.0, tp_price=0.0,
+                    entry_price=ep, sl_price=sl, tp_price=tp,
                 )
             logger.info("vol_mom_restored", positions=len(self._positions),
                         pnl=round(cum_pnl, 2))

@@ -203,6 +203,11 @@ class MomentumRotationLiveEngine:
         for symbol in list(self._positions.keys()):
             await self._close_position(symbol)
 
+        # 청산 실패한 포지션이 남아있으면 신규 진입 중단
+        if self._positions:
+            logger.warning("momentum_rebalance_aborted", remaining=list(self._positions.keys()))
+            return
+
         # 3. 새 포지션 진입
         available = self._initial_capital + self._cumulative_pnl
         n_sides = TOP_N + BOTTOM_N
@@ -285,7 +290,7 @@ class MomentumRotationLiveEngine:
                     # Trailing
                     peak_pnl = (pos.peak - pos.entry_price) / pos.entry_price * 100 * self._leverage
                     if TRAIL_ACT_PCT > 0 and peak_pnl >= TRAIL_ACT_PCT:
-                        trail_price = peak * (1 - TRAIL_STOP_PCT / 100 / self._leverage)
+                        trail_price = pos.peak * (1 - TRAIL_STOP_PCT / 100 / self._leverage)
                         if low <= trail_price:
                             await self._close_position_at(symbol, trail_price, f"trailing ({peak_pnl:.1f}%→{TRAIL_STOP_PCT}% drop)")
                             continue
@@ -300,7 +305,7 @@ class MomentumRotationLiveEngine:
                         continue
                     peak_pnl = (pos.entry_price - pos.peak) / pos.entry_price * 100 * self._leverage
                     if TRAIL_ACT_PCT > 0 and peak_pnl >= TRAIL_ACT_PCT:
-                        trail_price = peak * (1 + TRAIL_STOP_PCT / 100 / self._leverage)
+                        trail_price = pos.peak * (1 + TRAIL_STOP_PCT / 100 / self._leverage)
                         if high >= trail_price:
                             await self._close_position_at(symbol, trail_price, f"trailing ({peak_pnl:.1f}%→{TRAIL_STOP_PCT}% rise)")
                             continue

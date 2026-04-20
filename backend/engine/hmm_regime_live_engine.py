@@ -288,8 +288,8 @@ class HMMRegimeLiveEngine:
                 # 기존 청산
                 if self._position:
                     await self._close_position(price)
-                # 신규 진입
-                if desired != 0:
+                # 신규 진입 — 기존 포지션 청산 성공한 경우만
+                if desired != 0 and self._position is None:
                     side = "long" if desired == 1 else "short"
                     await self._open_position(side, price)
 
@@ -330,7 +330,7 @@ class HMMRegimeLiveEngine:
             max_loss = self._initial_capital * MAX_TOTAL_LOSS_PCT
             await emit_event("info", "rnd_trade",
                              f"{'📈' if side=='long' else '📉'} HMM {side}: {self._symbol} @ {exec_price:.2f}",
-                             detail=f"수량 {exec_qty:.6f} | 명목 {notional:.1f} USDT | 청산: regime 전환 시 | 최대손실 한도 -{max_loss:.0f} USDT",
+                             detail=f"수량 {filled_qty:.6f} | 명목 {notional:.1f} USDT | 청산: regime 전환 시 | 최대손실 한도 -{max_loss:.0f} USDT",
                              metadata={"engine": "HMM", "symbol": self._symbol, "direction": side,
                                        "price": exec_price, "quantity": filled_qty, "leverage": self._leverage})
         except Exception as e:

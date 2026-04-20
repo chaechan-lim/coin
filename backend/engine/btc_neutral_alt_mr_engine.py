@@ -320,9 +320,9 @@ class BTCNeutralAltMREngine:
                 # Alt 주문은 체결됐으나 BTC 실패 → 롤백
                 try:
                     if alt_side == "long":
-                        await self._exchange.create_market_sell(alt_symbol, alt_exec_qty)
+                        await self._exchange.create_market_sell(alt_symbol, alt_exec_qty, reduce_only=True)
                     else:
-                        await self._exchange.create_market_buy(alt_symbol, alt_exec_qty)
+                        await self._exchange.create_market_buy(alt_symbol, alt_exec_qty, reduce_only=True)
                     logger.info("btc_neutral_alt_rollback_ok", symbol=alt_symbol)
                 except Exception as rb_err:
                     logger.error("btc_neutral_alt_rollback_failed", symbol=alt_symbol, error=str(rb_err))
