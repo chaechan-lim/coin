@@ -193,8 +193,8 @@ class FearGreedDCAEngine:
             order = await self._exchange.create_market_buy(symbol, qty)
 
             status = getattr(order, 'status', None)
-            exec_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
-            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+            exec_qty = float(order.filled or 0)
+            exec_price = float(order.price or 0)
 
             if status not in ('filled', 'closed') or exec_qty <= 0 or exec_price <= 0:
                 logger.error("fgdca_buy_not_filled", symbol=symbol, status=status)
@@ -235,8 +235,8 @@ class FearGreedDCAEngine:
             order = await self._exchange.create_market_sell(symbol, qty)
 
             status = getattr(order, 'status', None)
-            exec_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
-            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+            exec_qty = float(order.filled or 0)
+            exec_price = float(order.price or 0)
 
             if status not in ('filled', 'closed') or exec_qty <= 0 or exec_price <= 0:
                 logger.error("fgdca_sell_not_filled", symbol=symbol, status=status)

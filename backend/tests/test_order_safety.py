@@ -168,8 +168,7 @@ def _make_mock_exchange():
     """체결 실패 응답을 반환하는 mock exchange."""
     ex = MagicMock()
     failed_order = SimpleNamespace(
-        status="closed", executed_quantity=None, filled=0,
-        executed_price=None, average=0,
+        status="closed", filled=0, price=0,
     )
     ex.create_market_buy = AsyncMock(return_value=failed_order)
     ex.create_market_sell = AsyncMock(return_value=failed_order)
@@ -225,8 +224,7 @@ async def test_hmm_close_failure_counter_resets_on_success():
 
     # 성공 응답
     success_order = SimpleNamespace(
-        status="filled", executed_quantity=None, filled=0.01,
-        executed_price=None, average=75000,
+        status="filled", filled=0.01, price=75000,
     )
     exchange.create_market_buy = AsyncMock(return_value=success_order)
 

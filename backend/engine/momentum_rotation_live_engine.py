@@ -240,8 +240,8 @@ class MomentumRotationLiveEngine:
 
             # 체결 확인
             status = getattr(order, 'status', None)
-            exec_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
-            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+            exec_qty = float(order.filled or 0)
+            exec_price = float(order.price or 0)
 
             if status not in ('filled', 'closed') or exec_qty <= 0 or exec_price <= 0:
                 logger.error("momentum_open_not_filled",
@@ -325,8 +325,8 @@ class MomentumRotationLiveEngine:
 
             # 체결 확인 — 체결 안 되면 포지션 유지
             status = getattr(order, 'status', None)
-            filled_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
-            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+            filled_qty = float(order.filled or 0)
+            exec_price = float(order.price or 0)
 
             if status not in ('filled', 'closed') or filled_qty <= 0 or exec_price <= 0:
                 self._consecutive_close_failures += 1
@@ -382,8 +382,8 @@ class MomentumRotationLiveEngine:
 
             # 체결 확인
             status = getattr(order, 'status', None)
-            filled_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
-            exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'average', 0) or 0)
+            filled_qty = float(order.filled or 0)
+            exec_price = float(order.price or 0)
 
             if status not in ('filled', 'closed') or filled_qty <= 0 or exec_price <= 0:
                 self._consecutive_close_failures += 1

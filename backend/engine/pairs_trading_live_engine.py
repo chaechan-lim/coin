@@ -446,12 +446,12 @@ class PairsTradingLiveEngine:
             return
 
         status_a = getattr(order_a, 'status', None)
-        filled_a = float(getattr(order_a, 'executed_quantity', None) or getattr(order_a, 'filled', 0) or 0)
-        exec_price_a = float(getattr(order_a, 'executed_price', None) or getattr(order_a, 'price', None) or getattr(order_a, 'average', 0) or 0)
+        filled_a = float(order_a.filled or 0)
+        exec_price_a = float(order_a.price or 0)
 
         status_b = getattr(order_b, 'status', None)
-        filled_b = float(getattr(order_b, 'executed_quantity', None) or getattr(order_b, 'filled', 0) or 0)
-        exec_price_b = float(getattr(order_b, 'executed_price', None) or getattr(order_b, 'price', None) or getattr(order_b, 'average', 0) or 0)
+        filled_b = float(order_b.filled or 0)
+        exec_price_b = float(order_b.price or 0)
 
         if (status_a not in ('filled', 'closed') or filled_a <= 0 or exec_price_a <= 0 or
                 status_b not in ('filled', 'closed') or filled_b <= 0 or exec_price_b <= 0):
@@ -669,12 +669,12 @@ class PairsTradingLiveEngine:
             return
 
         exit_status_a = getattr(order_a, 'status', None)
-        exit_filled_a = float(getattr(order_a, 'executed_quantity', None) or getattr(order_a, 'filled', 0) or 0)
-        exec_price_a = float(getattr(order_a, 'executed_price', None) or getattr(order_a, 'price', None) or getattr(order_a, 'average', 0) or 0)
+        exit_filled_a = float(order_a.filled or 0)
+        exec_price_a = float(order_a.price or 0)
 
         exit_status_b = getattr(order_b, 'status', None)
-        exit_filled_b = float(getattr(order_b, 'executed_quantity', None) or getattr(order_b, 'filled', 0) or 0)
-        exec_price_b = float(getattr(order_b, 'executed_price', None) or getattr(order_b, 'price', None) or getattr(order_b, 'average', 0) or 0)
+        exit_filled_b = float(order_b.filled or 0)
+        exec_price_b = float(order_b.price or 0)
 
         if (exit_status_a not in ('filled', 'closed') or exit_filled_a <= 0 or exec_price_a <= 0 or
                 exit_status_b not in ('filled', 'closed') or exit_filled_b <= 0 or exec_price_b <= 0):

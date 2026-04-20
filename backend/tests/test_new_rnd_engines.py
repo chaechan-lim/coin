@@ -54,6 +54,16 @@ class FakeOrder:
     executed_price: float = 0.0
     executed_quantity: float = 0.0
     status: str = "filled"
+    filled: float = 0.0
+    price: float = 0.0
+    average: float = 0.0
+
+    def __post_init__(self):
+        if self.filled == 0 and self.executed_quantity > 0:
+            self.filled = self.executed_quantity
+        if self.price == 0 and self.executed_price > 0:
+            self.price = self.executed_price
+            self.average = self.executed_price
 
 
 def _make_ohlcv_df(n: int = 50, base_price: float = 100.0, timeframe: str = "1h",

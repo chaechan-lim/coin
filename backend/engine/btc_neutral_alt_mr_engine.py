@@ -298,8 +298,8 @@ class BTCNeutralAltMREngine:
                 alt_order = await self._exchange.create_market_sell(alt_symbol, alt_qty)
 
             alt_status = getattr(alt_order, 'status', None)
-            alt_exec_qty = float(getattr(alt_order, 'executed_quantity', None) or getattr(alt_order, 'filled', 0) or 0)
-            alt_exec_price = float(getattr(alt_order, 'executed_price', None) or getattr(alt_order, 'average', 0) or 0)
+            alt_exec_qty = float(alt_order.filled or 0)
+            alt_exec_price = float(alt_order.price or 0)
 
             if alt_status not in ('filled', 'closed') or alt_exec_qty <= 0 or alt_exec_price <= 0:
                 logger.error("btc_neutral_alt_order_not_filled", symbol=alt_symbol, status=alt_status)
@@ -312,8 +312,8 @@ class BTCNeutralAltMREngine:
                 btc_order = await self._exchange.create_market_sell(self.BTC_SYMBOL, btc_qty)
 
             btc_status = getattr(btc_order, 'status', None)
-            btc_exec_qty = float(getattr(btc_order, 'executed_quantity', None) or getattr(btc_order, 'filled', 0) or 0)
-            btc_exec_price = float(getattr(btc_order, 'executed_price', None) or getattr(btc_order, 'average', 0) or 0)
+            btc_exec_qty = float(btc_order.filled or 0)
+            btc_exec_price = float(btc_order.price or 0)
 
             if btc_status not in ('filled', 'closed') or btc_exec_qty <= 0 or btc_exec_price <= 0:
                 logger.error("btc_neutral_btc_order_not_filled", symbol=self.BTC_SYMBOL, status=btc_status)
@@ -371,8 +371,8 @@ class BTCNeutralAltMREngine:
                 alt_order = await self._exchange.create_market_buy(alt_symbol, pos.alt_qty, reduce_only=True)
 
             alt_status = getattr(alt_order, 'status', None)
-            alt_filled = float(getattr(alt_order, 'executed_quantity', None) or getattr(alt_order, 'filled', 0) or 0)
-            alt_exec_price = float(getattr(alt_order, 'executed_price', None) or getattr(alt_order, 'average', 0) or 0)
+            alt_filled = float(alt_order.filled or 0)
+            alt_exec_price = float(alt_order.price or 0)
 
             if alt_status not in ('filled', 'closed') or alt_filled <= 0 or alt_exec_price <= 0:
                 self._consecutive_close_failures += 1
@@ -392,8 +392,8 @@ class BTCNeutralAltMREngine:
                 btc_order = await self._exchange.create_market_buy(self.BTC_SYMBOL, pos.btc_qty, reduce_only=True)
 
             btc_status = getattr(btc_order, 'status', None)
-            btc_filled = float(getattr(btc_order, 'executed_quantity', None) or getattr(btc_order, 'filled', 0) or 0)
-            btc_exec_price = float(getattr(btc_order, 'executed_price', None) or getattr(btc_order, 'average', 0) or 0)
+            btc_filled = float(btc_order.filled or 0)
+            btc_exec_price = float(btc_order.price or 0)
 
             if btc_status not in ('filled', 'closed') or btc_filled <= 0 or btc_exec_price <= 0:
                 self._consecutive_close_failures += 1

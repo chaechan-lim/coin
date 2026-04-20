@@ -449,8 +449,8 @@ class DonchianFuturesBiEngine:
             side = "sell"
 
         status = getattr(order, 'status', None)
-        filled_qty = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
-        exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'price', None) or getattr(order, 'average', 0) or 0)
+        filled_qty = float(order.filled or 0)
+        exec_price = float(order.price or 0)
 
         if status not in ('filled', 'closed') or filled_qty <= 0 or exec_price <= 0:
             logger.error("donchian_futures_bi_entry_not_filled", symbol=symbol, direction=direction, status=status)
@@ -568,8 +568,8 @@ class DonchianFuturesBiEngine:
         order = await (self._exchange.create_market_sell(symbol, pos.quantity, reduce_only=True) if close_side == "sell" else self._exchange.create_market_buy(symbol, pos.quantity, reduce_only=True))
 
         exit_status = getattr(order, 'status', None)
-        exit_filled = float(getattr(order, 'executed_quantity', None) or getattr(order, 'filled', 0) or 0)
-        exec_price = float(getattr(order, 'executed_price', None) or getattr(order, 'price', None) or getattr(order, 'average', 0) or 0)
+        exit_filled = float(order.filled or 0)
+        exec_price = float(order.price or 0)
 
         if exit_status not in ('filled', 'closed') or exit_filled <= 0 or exec_price <= 0:
             self._consecutive_close_failures += 1
