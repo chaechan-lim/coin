@@ -214,15 +214,32 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         raw_fee = float((data.get("fee") or {}).get("cost", 0) or 0)
         fee = raw_fee if raw_fee > 0 else cost * self._DEFAULT_FEE_RATE
 
+        # filled: CCXT 필드가 0/None인 경우 info.executedQty 폴백
+        filled = float(data["filled"] or 0)
+        if filled <= 0:
+            info = data.get("info") or {}
+            filled = float(info.get("executedQty", 0) or 0)
+
+        # average: CCXT 필드가 없으면 info.avgPrice 폴백
+        avg_price = float(data.get("average") or data["price"] or 0)
+        if avg_price <= 0:
+            info = data.get("info") or {}
+            avg_price = float(info.get("avgPrice", 0) or 0)
+
+        # cost 재계산 (filled * avgPrice)
+        if cost <= 0 and filled > 0 and avg_price > 0:
+            cost = filled * avg_price
+            fee = cost * self._DEFAULT_FEE_RATE
+
         return OrderResult(
             order_id=str(data["id"]),
             symbol=data["symbol"],
             side=data["side"],
             order_type=data["type"],
             status=data["status"],
-            price=float(data["price"] or 0),
+            price=avg_price,
             amount=float(data["amount"] or 0),
-            filled=float(data["filled"] or 0),
+            filled=filled,
             remaining=float(data["remaining"] or 0),
             cost=cost,
             fee=fee,
