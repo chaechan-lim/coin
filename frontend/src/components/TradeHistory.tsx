@@ -98,11 +98,14 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
               <span className="text-xs text-gray-500 border border-gray-600 px-1 rounded">페이퍼</span>
             )}
           </div>
-          <div className="flex items-center gap-4 text-sm">
-            {isFutures && order.margin_used != null && (
-              <span className="text-gray-400 text-xs">{order.margin_used.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} USDT</span>
-            )}
+          <div className="flex items-center gap-3 text-sm">
+            <span className="text-gray-400 text-xs">{(order.executed_quantity ?? order.requested_quantity)?.toFixed(6)}</span>
             <span className="text-gray-300">{fmtPrice(price, isUsdt)}</span>
+            {hasPnl && order.realized_pnl != null && (
+              <span className={`text-xs font-medium ${order.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {order.realized_pnl >= 0 ? '+' : ''}{fmtPrice(order.realized_pnl, isUsdt)}
+              </span>
+            )}
             <span className="text-gray-500 text-xs">
               {formatTs(order.created_at, 'MM/dd HH:mm')}
             </span>
@@ -201,20 +204,12 @@ function OrderDetail({ order, isUsdt = false }: { order: Order; isUsdt?: boolean
               </>
             )}
             <div>
-              <span className="text-gray-500">신뢰도</span>
-              <div className="text-white font-medium">
-                {order.signal_confidence != null ? `${(order.signal_confidence * 100).toFixed(0)}%` : '-'}
-              </div>
+              <span className="text-gray-500">체결 수량</span>
+              <div className="text-white font-medium">{(order.executed_quantity ?? order.requested_quantity)?.toFixed(6) ?? '-'}</div>
             </div>
             <div>
-              <span className="text-gray-500">결합 점수</span>
-              <div className="text-white font-medium">
-                {order.combined_score != null ? `${(order.combined_score * 100).toFixed(0)}%` : '-'}
-              </div>
-            </div>
-            <div>
-              <span className="text-gray-500">요청 수량</span>
-              <div className="text-white font-medium">{order.requested_quantity.toFixed(6)}</div>
+              <span className="text-gray-500">체결 가격</span>
+              <div className="text-white font-medium">{fmtPrice(price, isUsdt)}</div>
             </div>
             <div>
               <span className="text-gray-500">수수료</span>

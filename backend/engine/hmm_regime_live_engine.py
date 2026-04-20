@@ -441,9 +441,16 @@ class HMMRegimeLiveEngine:
             "symbol": self._symbol,
             "leverage": self._leverage,
             "capital_usdt": self._initial_capital,
-            "position": {"symbol": self._symbol, "side": self._position.side,
-                          "entry": self._position.entry_price,
-                          "qty": self._position.quantity} if self._position else None,
+            "position": {
+                "symbol": self._symbol, "side": self._position.side,
+                "entry_price": self._position.entry_price,
+                "qty": self._position.quantity,
+                "tp_price": round(
+                    self._position.entry_price * (1 + TP_PCT / 100 / self._leverage)
+                    if self._position.side == "long"
+                    else self._position.entry_price * (1 - TP_PCT / 100 / self._leverage), 2
+                ) if TP_PCT > 0 else 0,
+            } if self._position else None,
             "cumulative_pnl": round(self._cumulative_pnl, 2),
             "daily_pnl": round(self._daily_pnl, 2),
             "paused": self._paused,

@@ -416,6 +416,8 @@ async def get_rnd_overview():
                     "current_price": round(current_price, 2),
                     "unrealized_pnl": round(unrealized, 2),
                     "pnl_pct": round(pnl_pct, 2),
+                    "sl_price": p.get("sl_price", 0),
+                    "tp_price": p.get("tp_price", 0),
                 })
         # holdings (DCA)
         holdings = status.get("holdings")

@@ -142,21 +142,30 @@ export function RndOverview({ market }: { market?: 'spot' | 'futures' | 'all' })
               </div>
 
               {eng.positions.length > 0 ? (
-                <div className="mt-2 space-y-1">
+                <div className="mt-2 space-y-1.5">
                   {eng.positions.map((p: any, i: number) => (
-                    <div key={i} className="flex items-center gap-2 text-xs">
-                      <span className={`font-medium ${p.side === 'long' ? 'text-green-400' : 'text-red-400'}`}>
-                        {p.side === 'long' ? 'L' : 'S'}
-                      </span>
-                      <span className="text-gray-300">{p.symbol?.replace('/USDT', '')}</span>
-                      {p.current_price > 0 && (
-                        <span className={`ml-auto font-medium ${p.pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                          {p.pnl_pct >= 0 ? '+' : ''}{p.pnl_pct?.toFixed(1)}%
-                          <span className="ml-1 font-normal text-gray-500">
-                            {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)}
-                          </span>
+                    <div key={i} className="rounded-lg bg-gray-900/50 px-2.5 py-1.5">
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className={`font-medium ${p.side === 'long' ? 'text-green-400' : 'text-red-400'}`}>
+                          {p.side === 'long' ? 'LONG' : 'SHORT'}
                         </span>
-                      )}
+                        <span className="text-gray-200">{p.symbol?.replace('/USDT', '')}</span>
+                        {p.current_price > 0 && (
+                          <span className={`ml-auto font-medium ${p.pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {p.pnl_pct >= 0 ? '+' : ''}{p.pnl_pct?.toFixed(2)}%
+                            <span className="ml-1.5 font-normal text-gray-500">
+                              {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)}
+                            </span>
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gray-500">
+                        <span>qty {p.qty?.toFixed(6) ?? '—'}</span>
+                        <span>entry {p.entry?.toFixed(2) ?? '—'}</span>
+                        {p.current_price > 0 && <span>now {p.current_price?.toFixed(2)}</span>}
+                        {p.sl_price > 0 && <span className="text-red-400/70">SL {p.sl_price?.toFixed(2)}</span>}
+                        {p.tp_price > 0 && <span className="text-green-400/70">TP {p.tp_price?.toFixed(2)}</span>}
+                      </div>
                     </div>
                   ))}
                 </div>
