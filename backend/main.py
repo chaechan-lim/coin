@@ -746,6 +746,7 @@ async def lifespan(app: FastAPI):
                 market_data=binance_market_data,
                 initial_capital_usdt=config.hmm_regime_live_capital_usdt,
                 leverage=config.hmm_regime_live_leverage,
+                symbols=["BTC/USDT", "ETH/USDT"],
             )
             if _futures_rnd_coordinator:
                 _hmm_engine.set_futures_rnd_coordinator(_futures_rnd_coordinator)

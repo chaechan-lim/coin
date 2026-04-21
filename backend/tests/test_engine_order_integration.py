@@ -122,12 +122,12 @@ async def test_hmm_open_with_real_order_result():
 
     with patch("engine.hmm_regime_live_engine.emit_event", new_callable=AsyncMock):
         with patch("engine.hmm_regime_live_engine.get_session_factory"):
-            await engine._open_position("long", 75000.0)
+            await engine._open_position("BTC/USDT", "long", 75000.0)
 
-    assert engine._position is not None
-    assert engine._position.side == "long"
-    assert engine._position.quantity == 0.005
-    assert engine._position.entry_price == 75000.0
+    assert len(engine._positions) > 0
+    assert engine._positions["BTC/USDT"].side == "long"
+    assert engine._positions["BTC/USDT"].quantity == 0.005
+    assert engine._positions["BTC/USDT"].entry_price == 75000.0
 
 
 @pytest.mark.asyncio
@@ -142,9 +142,9 @@ async def test_hmm_open_unfilled_no_position():
     engine = HMMRegimeLiveEngine(config, exchange, market_data, initial_capital_usdt=300)
 
     with patch("engine.hmm_regime_live_engine.emit_event", new_callable=AsyncMock):
-        await engine._open_position("short", 75000.0)
+        await engine._open_position("BTC/USDT", "short", 75000.0)
 
-    assert engine._position is None
+    assert len(engine._positions) == 0
 
 
 @pytest.mark.asyncio
@@ -157,13 +157,13 @@ async def test_hmm_close_with_real_order_result():
     market_data = MagicMock()
 
     engine = HMMRegimeLiveEngine(config, exchange, market_data, initial_capital_usdt=300)
-    engine._position = HMMPosition(symbol="BTC/USDT", side="long", quantity=0.005, entry_price=75000.0)
+    engine._positions["BTC/USDT"] = HMMPosition(symbol="BTC/USDT", side="long", quantity=0.005, entry_price=75000.0)
 
     with patch("engine.hmm_regime_live_engine.emit_event", new_callable=AsyncMock):
         with patch("engine.hmm_regime_live_engine.get_session_factory"):
-            await engine._close_position(76000.0)
+            await engine._close_position("BTC/USDT", 76000.0)
 
-    assert engine._position is None
+    assert len(engine._positions) == 0
     assert engine._cumulative_pnl > 0  # 75000→76000 롱 = 수익
 
 
@@ -177,12 +177,12 @@ async def test_hmm_close_unfilled_keeps_position():
     market_data = MagicMock()
 
     engine = HMMRegimeLiveEngine(config, exchange, market_data, initial_capital_usdt=300)
-    engine._position = HMMPosition(symbol="BTC/USDT", side="short", quantity=0.005, entry_price=77000.0)
+    engine._positions["BTC/USDT"] = HMMPosition(symbol="BTC/USDT", side="short", quantity=0.005, entry_price=77000.0)
 
     with patch("engine.hmm_regime_live_engine.emit_event", new_callable=AsyncMock):
-        await engine._close_position(75000.0)
+        await engine._close_position("BTC/USDT", 75000.0)
 
-    assert engine._position is not None  # 포지션 유지
+    assert len(engine._positions) > 0  # 포지션 유지
     assert engine._consecutive_close_failures == 1
 
 
@@ -196,18 +196,18 @@ async def test_hmm_no_open_after_failed_close():
     market_data = MagicMock()
 
     engine = HMMRegimeLiveEngine(config, exchange, market_data, initial_capital_usdt=300)
-    engine._position = HMMPosition(symbol="BTC/USDT", side="short", quantity=0.005, entry_price=77000.0)
+    engine._positions["BTC/USDT"] = HMMPosition(symbol="BTC/USDT", side="short", quantity=0.005, entry_price=77000.0)
 
     with patch("engine.hmm_regime_live_engine.emit_event", new_callable=AsyncMock):
         # 청산 실패
-        await engine._close_position(75000.0)
-        assert engine._position is not None
+        await engine._close_position("BTC/USDT", 75000.0)
+        assert len(engine._positions) > 0
 
         # 신규 진입 시도 — position이 남아있으므로 차단되어야 함
         # (실제 _evaluate에서 self._position is None 체크)
         # 직접 _open_position 호출하면 overwrite되므로 _evaluate 로직 테스트
         # position이 None이 아니면 open 안 함
-        assert engine._position is not None  # 기존 포지션 그대로
+        assert len(engine._positions) > 0  # 기존 포지션 그대로
 
 
 # ── Momentum 엔진 ──
@@ -318,11 +318,11 @@ async def test_hmm_auto_pause_with_real_unfilled_order():
     market_data = MagicMock()
 
     engine = HMMRegimeLiveEngine(config, exchange, market_data, initial_capital_usdt=300)
-    engine._position = HMMPosition(symbol="BTC/USDT", side="short", quantity=0.005, entry_price=77000)
+    engine._positions["BTC/USDT"] = HMMPosition(symbol="BTC/USDT", side="short", quantity=0.005, entry_price=77000)
 
     with patch("engine.hmm_regime_live_engine.emit_event", new_callable=AsyncMock) as mock_emit:
         for _ in range(3):
-            await engine._close_position(75000)
+            await engine._close_position("BTC/USDT", 75000)
 
     assert engine._paused is True
     assert engine._consecutive_close_failures == 3
@@ -366,11 +366,11 @@ async def test_hmm_close_calls_reduce_only():
     market_data = MagicMock()
 
     engine = HMMRegimeLiveEngine(config, exchange, market_data, initial_capital_usdt=300)
-    engine._position = HMMPosition(symbol="BTC/USDT", side="short", quantity=0.005, entry_price=77000)
+    engine._positions["BTC/USDT"] = HMMPosition(symbol="BTC/USDT", side="short", quantity=0.005, entry_price=77000)
 
     with patch("engine.hmm_regime_live_engine.emit_event", new_callable=AsyncMock):
         with patch("engine.hmm_regime_live_engine.get_session_factory"):
-            await engine._close_position(76000)
+            await engine._close_position("BTC/USDT", 76000)
 
     # 숏 청산 = buy with reduce_only
     exchange.create_market_buy.assert_called_once()
