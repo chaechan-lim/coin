@@ -47,7 +47,8 @@ class TradeReviewAgent:
                  extra_exchanges: list[str] | None = None):
         self._review_window_hours = review_window_hours
         self._exchange_name = exchange_name
-        self._exchange_list = [exchange_name] + (extra_exchanges or [])
+        # extra_exchanges가 있으면 R&D 전용 — 메인 exchange 제외
+        self._exchange_list = extra_exchanges if extra_exchanges else [exchange_name]
         self._is_futures = "futures" in exchange_name
         self._currency = "USDT" if self._is_futures else "KRW"
         self._last_review: TradeReview | None = None

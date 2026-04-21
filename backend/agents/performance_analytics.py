@@ -82,7 +82,7 @@ class PerformanceAnalyticsAgent:
 
     def __init__(self, exchange_name: str = "bithumb", extra_exchanges: list[str] | None = None):
         self._exchange_name = exchange_name
-        self._exchange_list = [exchange_name] + (extra_exchanges or [])
+        self._exchange_list = extra_exchanges if extra_exchanges else [exchange_name]
         self._is_futures = "futures" in exchange_name
         self._currency = "USDT" if "binance" in exchange_name else "KRW"
         self._llm_client = None

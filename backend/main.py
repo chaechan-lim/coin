@@ -96,13 +96,19 @@ def _create_agent_stack(
     market_symbol: str = "BTC/KRW",
 ) -> AgentCoordinator:
     """AI 에이전트 5종 + Coordinator 생성."""
-    # R&D 엔진 exchange 목록 (에이전트가 R&D 주문도 분석하도록)
+    # R&D 엔진 exchange 목록 (에이전트가 R&D 주문만 분석하도록)
+    # 메인 엔진 비활성 시 메인 exchange를 제외하여 잔재 데이터 오염 방지
     rnd_extras: list[str] = []
     if exchange_name == "binance_futures":
-        rnd_extras = [
+        rnd_only = [
             "binance_donchian_futures", "binance_pairs", "binance_momentum", "binance_hmm",
             "binance_breakout_pb", "binance_vol_mom", "binance_btc_neutral", "binance_surge",
         ]
+        # 메인 선물 엔진이 비활성이면 R&D만 분석 (메인 잔재 제외)
+        if not config.binance_trading.enabled and not config.futures_v2.enabled:
+            rnd_extras = rnd_only  # exchange_name은 여전히 binance_futures (DB 기록용)
+        else:
+            rnd_extras = rnd_only
     elif exchange_name == "binance_spot":
         rnd_extras = ["binance_donchian", "binance_fgdca"]
 
