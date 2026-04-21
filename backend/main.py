@@ -752,7 +752,7 @@ async def lifespan(app: FastAPI):
                 market_data=binance_market_data,
                 initial_capital_usdt=config.hmm_regime_live_capital_usdt,
                 leverage=config.hmm_regime_live_leverage,
-                symbols=["BTC/USDT", "ETH/USDT"],
+                symbols=["ETH/USDT"],  # BTC는 Pairs와 충돌, 백테스트에서도 ETH가 우월
             )
             if _futures_rnd_coordinator:
                 _hmm_engine.set_futures_rnd_coordinator(_futures_rnd_coordinator)

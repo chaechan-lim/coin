@@ -52,6 +52,7 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         self._exchange: Optional[ccxt.binanceusdm] = None
         self._ws_exchange: Optional[ccxtpro.binanceusdm] = None
         self._semaphore = asyncio.Semaphore(rate_limit)
+        self._hedge_mode = False  # initialize()에서 자동 감지
 
     async def initialize(self) -> None:
         config = {
@@ -72,10 +73,17 @@ class BinanceUSDMAdapter(ExchangeAdapter):
 
         try:
             await self._exchange.load_markets()
+            # Hedge Mode 자동 감지
+            try:
+                pos_mode = await self._call(self._exchange.fapiPrivateGetPositionSideDual)
+                self._hedge_mode = pos_mode.get("dualSidePosition", False)
+            except Exception:
+                self._hedge_mode = False
             logger.info(
                 "binance_usdm_connected",
                 markets=len(self._exchange.markets),
                 testnet=self._testnet,
+                hedge_mode=self._hedge_mode,
             )
         except Exception as e:
             raise ExchangeConnectionError(f"Failed to connect to Binance USDM: {e}")
@@ -266,16 +274,34 @@ class BinanceUSDMAdapter(ExchangeAdapter):
         logger.info("futures_limit_sell", symbol=symbol, amount=amount, price=price)
         return self._parse_order(data)
 
-    async def create_market_buy(self, symbol: str, amount: float, reduce_only: bool = False) -> OrderResult:
-        params = {"reduceOnly": True} if reduce_only else {}
+    async def create_market_buy(self, symbol: str, amount: float, reduce_only: bool = False,
+                               position_side: str | None = None) -> OrderResult:
+        params: dict = {}
+        if reduce_only:
+            params["reduceOnly"] = True
+        if position_side:
+            params["positionSide"] = position_side
+        elif self._hedge_mode:
+            # hedge mode: buy는 LONG 진입 또는 SHORT 청산
+            params["positionSide"] = "SHORT" if reduce_only else "LONG"
         data = await self._call(self._exchange.create_market_buy_order, symbol, amount, params=params)
-        logger.info("futures_market_buy", symbol=symbol, amount=amount, reduce_only=reduce_only)
+        logger.info("futures_market_buy", symbol=symbol, amount=amount,
+                     reduce_only=reduce_only, position_side=params.get("positionSide"))
         return self._parse_order(data)
 
-    async def create_market_sell(self, symbol: str, amount: float, reduce_only: bool = False) -> OrderResult:
-        params = {"reduceOnly": True} if reduce_only else {}
+    async def create_market_sell(self, symbol: str, amount: float, reduce_only: bool = False,
+                                 position_side: str | None = None) -> OrderResult:
+        params: dict = {}
+        if reduce_only:
+            params["reduceOnly"] = True
+        if position_side:
+            params["positionSide"] = position_side
+        elif self._hedge_mode:
+            # hedge mode: sell은 SHORT 진입 또는 LONG 청산
+            params["positionSide"] = "LONG" if reduce_only else "SHORT"
         data = await self._call(self._exchange.create_market_sell_order, symbol, amount, params=params)
-        logger.info("futures_market_sell", symbol=symbol, amount=amount, reduce_only=reduce_only)
+        logger.info("futures_market_sell", symbol=symbol, amount=amount,
+                     reduce_only=reduce_only, position_side=params.get("positionSide"))
         return self._parse_order(data)
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:

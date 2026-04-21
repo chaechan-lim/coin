@@ -122,6 +122,7 @@ def _make_adapter_with_mock():
     adapter._cb_failures = 0
     adapter._cb_open_until = 0
     adapter._CB_THRESHOLD = 5
+    adapter._hedge_mode = False
     return adapter
 
 
