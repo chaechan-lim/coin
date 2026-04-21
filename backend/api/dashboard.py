@@ -389,7 +389,21 @@ async def get_rnd_overview():
         raw_positions = status.get("positions") or []
         single = status.get("position")
         if single and isinstance(single, dict):
-            raw_positions = [single]
+            # Pairs Trading: pair_direction + qty_a/b → 2개 레그로 분리
+            if "pair_direction" in single:
+                coin_a = status.get("coin_a", "")
+                coin_b = status.get("coin_b", "")
+                pd_ = single.get("pair_direction", "long_a")
+                side_a = "long" if "long_a" in pd_ else "short"
+                side_b = "short" if "long_a" in pd_ else "long"
+                raw_positions = [
+                    {"symbol": coin_a, "side": side_a, "entry_price": single.get("entry_price_a", 0),
+                     "qty": single.get("qty_a", 0), "entry_z": single.get("entry_z", 0)},
+                    {"symbol": coin_b, "side": side_b, "entry_price": single.get("entry_price_b", 0),
+                     "qty": single.get("qty_b", 0), "entry_z": single.get("entry_z", 0)},
+                ]
+            else:
+                raw_positions = [single]
         leverage = status.get("leverage", 1)
         for p in raw_positions:
             if isinstance(p, dict):
@@ -418,6 +432,7 @@ async def get_rnd_overview():
                     "pnl_pct": round(pnl_pct, 2),
                     "sl_price": p.get("sl_price", 0),
                     "tp_price": p.get("tp_price", 0),
+                    "entry_z": p.get("entry_z", 0),
                 })
         # holdings (DCA)
         holdings = status.get("holdings")

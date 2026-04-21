@@ -165,6 +165,7 @@ export function RndOverview({ market }: { market?: 'spot' | 'futures' | 'all' })
                         {p.current_price > 0 && <span>now {p.current_price?.toFixed(2)}</span>}
                         {p.sl_price > 0 && <span className="text-red-400/70">SL {p.sl_price?.toFixed(2)}</span>}
                         {p.tp_price > 0 && <span className="text-green-400/70">TP {p.tp_price?.toFixed(2)}</span>}
+                        {p.entry_z != null && p.entry_z !== 0 && <span className="text-blue-400/70">z={p.entry_z?.toFixed(2)}</span>}
                       </div>
                     </div>
                   ))}
