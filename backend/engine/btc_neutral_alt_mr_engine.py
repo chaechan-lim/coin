@@ -400,6 +400,10 @@ class BTCNeutralAltMREngine:
                 self._consecutive_close_failures += 1
                 logger.error("btc_neutral_btc_close_not_filled", symbol=self.BTC_SYMBOL, status=btc_status,
                              consecutive=self._consecutive_close_failures)
+                # ALT 레그는 이미 청산됨 → 고아 포지션 경고
+                await emit_event("error", "engine",
+                                 f"⚠️ BTCNeutral 부분 청산 desync: {alt_symbol} ALT 레그 청산 완료, BTC 레그 미체결",
+                                 detail=f"BTC {pos.btc_side} qty={pos.btc_qty} 수동 청산 필요. ALT {pos.alt_side} {alt_symbol} 이미 청산됨.")
                 if self._consecutive_close_failures >= 3:
                     self._paused = True
                     await emit_event("error", "engine",
@@ -442,7 +446,14 @@ class BTCNeutralAltMREngine:
                              metadata={"engine": "BTCNeutral", "symbol": alt_symbol,
                                        "realized_pnl": total_pnl, "reason": reason})
         except Exception as e:
-            logger.error("btc_neutral_close_error", symbol=alt_symbol, error=str(e))
+            self._consecutive_close_failures += 1
+            logger.error("btc_neutral_close_error", symbol=alt_symbol, error=str(e),
+                         consecutive=self._consecutive_close_failures)
+            if self._consecutive_close_failures >= 3:
+                self._paused = True
+                await emit_event("error", "engine",
+                                 f"🚨 BTCNeutral 청산 예외 {self._consecutive_close_failures}회 — 자동 중지",
+                                 detail=f"{alt_symbol} {str(e)[:100]}")
 
     async def _check_loss_limits(self):
         if self._cumulative_pnl <= -self._initial_capital * MAX_TOTAL_LOSS_PCT:

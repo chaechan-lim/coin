@@ -223,8 +223,15 @@ class DonchianFuturesBiEngine:
         for symbol in list(self._positions.keys()):
             try:
                 await self._check_exit(symbol)
-            except Exception:
-                logger.error("donchian_futures_bi_exit_error", symbol=symbol, exc_info=True)
+            except Exception as e:
+                self._consecutive_close_failures += 1
+                logger.error("donchian_futures_bi_exit_error", symbol=symbol,
+                             consecutive=self._consecutive_close_failures, exc_info=True)
+                if self._consecutive_close_failures >= 3:
+                    self._paused = True
+                    await emit_event("error", "engine",
+                                     f"🚨 DonchianF 청산 예외 {self._consecutive_close_failures}회 — 자동 중지",
+                                     detail=f"{symbol} {str(e)[:100]}")
 
         await self._check_loss_limits()
         if self._paused or self._daily_paused:

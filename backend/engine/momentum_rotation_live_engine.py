@@ -367,7 +367,14 @@ class MomentumRotationLiveEngine:
             await self._check_loss_limits()
         except Exception as e:
             # 주문 실패 → 포지션 유지 (다음 체크에서 재시도)
-            logger.error("momentum_sl_close_error", symbol=symbol, error=str(e), exc_info=True)
+            self._consecutive_close_failures += 1
+            logger.error("momentum_sl_close_error", symbol=symbol, error=str(e),
+                         consecutive=self._consecutive_close_failures, exc_info=True)
+            if self._consecutive_close_failures >= 3:
+                self._paused = True
+                await emit_event("error", "engine",
+                                 f"🚨 Momentum 청산 예외 {self._consecutive_close_failures}회 — 자동 중지",
+                                 detail=f"{symbol} {str(e)[:100]}")
 
     async def _close_position(self, symbol: str):
         """리밸런싱 청산. 체결 확인 후에만 포지션 삭제."""
@@ -418,7 +425,14 @@ class MomentumRotationLiveEngine:
                                        "price": exec_price, "entry_price": pos.entry_price,
                                        "realized_pnl": pnl, "reason": "rebalance"})
         except Exception as e:
-            logger.error("momentum_close_error", symbol=symbol, error=str(e))
+            self._consecutive_close_failures += 1
+            logger.error("momentum_close_error", symbol=symbol, error=str(e),
+                         consecutive=self._consecutive_close_failures)
+            if self._consecutive_close_failures >= 3:
+                self._paused = True
+                await emit_event("error", "engine",
+                                 f"🚨 Momentum 청산 예외 {self._consecutive_close_failures}회 — 자동 중지",
+                                 detail=f"{symbol} {str(e)[:100]}")
 
     async def _check_loss_limits(self):
         if self._cumulative_pnl <= -self._initial_capital * MAX_TOTAL_LOSS_PCT:

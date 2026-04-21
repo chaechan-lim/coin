@@ -388,7 +388,14 @@ class BreakoutPullbackEngine:
                                        "price": exec_price, "entry_price": pos.entry_price,
                                        "realized_pnl": pnl, "reason": reason})
         except Exception as e:
-            logger.error("breakout_pb_close_error", symbol=symbol, error=str(e))
+            self._consecutive_close_failures += 1
+            logger.error("breakout_pb_close_error", symbol=symbol, error=str(e),
+                         consecutive=self._consecutive_close_failures)
+            if self._consecutive_close_failures >= 3:
+                self._paused = True
+                await emit_event("error", "engine",
+                                 f"🚨 BreakoutPB 청산 예외 {self._consecutive_close_failures}회 — 자동 중지",
+                                 detail=f"{symbol} {str(e)[:100]}")
 
     async def _check_loss_limits(self):
         if self._cumulative_pnl <= -self._initial_capital * MAX_TOTAL_LOSS_PCT:

@@ -398,7 +398,7 @@ class PairsTradingLiveEngine:
             if order_a is not None:
                 try:
                     rollback_side = "sell" if open_a_side == "buy" else "buy"
-                    await self._submit_order(self._coin_a, rollback_side, float(order_a.filled or qty_a))
+                    await self._submit_order(self._coin_a, rollback_side, float(order_a.filled or qty_a), reduce_only=True)
                     await self._emit_pairs_journal(
                         trade_id,
                         pair_direction,
@@ -460,13 +460,13 @@ class PairsTradingLiveEngine:
             if status_a in ('filled', 'closed') and filled_a > 0:
                 try:
                     rollback_side = "sell" if open_a_side == "buy" else "buy"
-                    await self._submit_order(self._coin_a, rollback_side, filled_a)
+                    await self._submit_order(self._coin_a, rollback_side, filled_a, reduce_only=True)
                 except Exception:
                     logger.error("pairs_live_entry_not_filled_rollback_a_failed", exc_info=True)
             if status_b in ('filled', 'closed') and filled_b > 0:
                 try:
                     rollback_side = "sell" if open_b_side == "buy" else "buy"
-                    await self._submit_order(self._coin_b, rollback_side, filled_b)
+                    await self._submit_order(self._coin_b, rollback_side, filled_b, reduce_only=True)
                 except Exception:
                     logger.error("pairs_live_entry_not_filled_rollback_b_failed", exc_info=True)
             if self._rnd_coordinator is not None:
@@ -603,8 +603,15 @@ class PairsTradingLiveEngine:
                 detail=f"side={close_b_side}, qty={pos.qty_b}",
                 extra={"leg": "b", "symbol": self._coin_b, "side": close_b_side},
             )
-        except Exception:
-            logger.error("pairs_live_exit_failed", trade_id=pos.trade_id, exc_info=True)
+        except Exception as e:
+            self._consecutive_close_failures += 1
+            logger.error("pairs_live_exit_failed", trade_id=pos.trade_id,
+                         consecutive=self._consecutive_close_failures, exc_info=True)
+            if self._consecutive_close_failures >= 3:
+                self._paused = True
+                await emit_event("error", "engine",
+                                 f"🚨 PairsTrading 청산 예외 {self._consecutive_close_failures}회 — 자동 중지",
+                                 detail=f"{self._coin_a}-{self._coin_b} {str(e)[:100]}")
             if order_a is not None:
                 rollback_qty_a = float(order_a.filled or pos.qty_a)
                 rollback_a_side = "buy" if close_a_side == "sell" else "sell"
