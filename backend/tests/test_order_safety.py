@@ -195,14 +195,14 @@ async def test_hmm_auto_pause_on_consecutive_close_failures():
     engine._positions["BTC/USDT"] = HMMPosition(symbol="BTC/USDT", side="short", quantity=0.01, entry_price=77000)
 
     assert not engine._paused
-    assert engine._consecutive_close_failures == 0
+    assert engine._consecutive_close_failures.get("BTC/USDT", 0) == 0
 
     # 3번 연속 실패
     with patch("engine.hmm_regime_live_engine.emit_event", new_callable=AsyncMock):
         for i in range(3):
             await engine._close_position("BTC/USDT", 75000)
 
-    assert engine._consecutive_close_failures == 3
+    assert engine._consecutive_close_failures.get("BTC/USDT", 0) == 3
     assert engine._paused is True
     # 포지션은 여전히 남아있어야 함 (청산 실패했으니)
     assert engine._position is not None
@@ -220,7 +220,7 @@ async def test_hmm_close_failure_counter_resets_on_success():
 
     engine = HMMRegimeLiveEngine(config, exchange, market_data, initial_capital_usdt=300)
     engine._positions["BTC/USDT"] = HMMPosition(symbol="BTC/USDT", side="short", quantity=0.01, entry_price=77000)
-    engine._consecutive_close_failures = 2
+    engine._consecutive_close_failures["BTC/USDT"] = 2
 
     # 성공 응답
     success_order = SimpleNamespace(
@@ -232,7 +232,7 @@ async def test_hmm_close_failure_counter_resets_on_success():
         with patch("engine.hmm_regime_live_engine.get_session_factory"):
             await engine._close_position("BTC/USDT", 75000)
 
-    assert engine._consecutive_close_failures == 0
+    assert engine._consecutive_close_failures.get("BTC/USDT", 0) == 0
     assert engine._position is None
 
 

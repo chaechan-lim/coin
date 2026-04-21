@@ -93,7 +93,7 @@ class HMMRegimeLiveEngine:
         self._paused = False
         self._daily_paused = False
         self._coordinator = None
-        self._consecutive_close_failures = 0
+        self._consecutive_close_failures: dict[str, int] = {}
 
     @property
     def is_running(self) -> bool:
@@ -268,19 +268,21 @@ class HMMRegimeLiveEngine:
                     if high >= tp_price:
                         logger.info("hmm_tp_hit", symbol=symbol, side="long", tp_price=round(tp_price, 2))
                         await self._close_position(symbol, tp_price)
-                        await emit_event("info", "rnd_trade",
-                                         f"🎯 HMM TP: {symbol} long @ {tp_price:.2f}",
-                                         metadata={"engine": "HMM", "symbol": symbol, "reason": "tp_hit", "price": tp_price})
-                        desired = current = 0
+                        if symbol not in self._positions:  # 청산 성공 확인
+                            await emit_event("info", "rnd_trade",
+                                             f"🎯 HMM TP: {symbol} long @ {tp_price:.2f}",
+                                             metadata={"engine": "HMM", "symbol": symbol, "reason": "tp_hit", "price": tp_price})
+                            desired = current = 0
                 else:
                     tp_price = pos.entry_price * (1 - TP_PCT / 100 / self._leverage)
                     if low <= tp_price:
                         logger.info("hmm_tp_hit", symbol=symbol, side="short", tp_price=round(tp_price, 2))
                         await self._close_position(symbol, tp_price)
-                        await emit_event("info", "rnd_trade",
-                                         f"🎯 HMM TP: {symbol} short @ {tp_price:.2f}",
-                                         metadata={"engine": "HMM", "symbol": symbol, "reason": "tp_hit", "price": tp_price})
-                        desired = current = 0
+                        if symbol not in self._positions:  # 청산 성공 확인
+                            await emit_event("info", "rnd_trade",
+                                             f"🎯 HMM TP: {symbol} short @ {tp_price:.2f}",
+                                             metadata={"engine": "HMM", "symbol": symbol, "reason": "tp_hit", "price": tp_price})
+                            desired = current = 0
 
             state_name = {ms.bullish_state: "bullish", ms.bearish_state: "bearish",
                           ms.neutral_state: "neutral"}.get(state, f"unknown({state})")
@@ -352,17 +354,17 @@ class HMMRegimeLiveEngine:
             exec_price = float(order.price or 0)
 
             if status not in ('filled', 'closed') or filled_qty <= 0 or exec_price <= 0:
-                self._consecutive_close_failures += 1
+                fails = self._consecutive_close_failures[symbol] = self._consecutive_close_failures.get(symbol, 0) + 1
                 logger.error("hmm_close_not_filled", side=pos.side, symbol=symbol,
-                             status=status, consecutive=self._consecutive_close_failures)
-                if self._consecutive_close_failures >= 3:
+                             status=status, consecutive=fails)
+                if fails >= 3:
                     self._paused = True
                     await emit_event("error", "engine",
-                                     f"🚨 HMM 청산 {self._consecutive_close_failures}회 연속 실패 — 자동 중지",
+                                     f"🚨 HMM 청산 {fails}회 연속 실패 — 자동 중지",
                                      detail=f"포지션 {pos.side} {symbol} qty={pos.quantity} 수동 확인 필요")
                 return
 
-            self._consecutive_close_failures = 0
+            self._consecutive_close_failures.pop(symbol, None)
 
             if pos.side == "long":
                 pnl = (exec_price - pos.entry_price) * filled_qty
@@ -383,7 +385,13 @@ class HMMRegimeLiveEngine:
                                        "price": exec_price, "entry_price": pos.entry_price,
                                        "realized_pnl": pnl, "reason": "regime_change"})
         except Exception as e:
-            logger.error("hmm_close_error", symbol=symbol, error=str(e))
+            fails = self._consecutive_close_failures[symbol] = self._consecutive_close_failures.get(symbol, 0) + 1
+            logger.error("hmm_close_error", symbol=symbol, error=str(e), consecutive=fails)
+            if fails >= 3:
+                self._paused = True
+                await emit_event("error", "engine",
+                                 f"🚨 HMM 청산 예외 {fails}회 — 자동 중지",
+                                 detail=f"{symbol} {str(e)[:100]}")
 
     async def _check_loss_limits(self):
         if self._cumulative_pnl <= -self._initial_capital * MAX_TOTAL_LOSS_PCT:
@@ -428,6 +436,9 @@ class HMMRegimeLiveEngine:
                     open_entries.pop(sym, None)
             self._cumulative_pnl = cum_pnl
             for sym, entry in open_entries.items():
+                if sym not in self._symbols:
+                    logger.warning("hmm_orphan_position_skipped", symbol=sym)
+                    continue
                 side = "long" if entry.side == "buy" else "short"
                 self._positions[sym] = HMMPosition(
                     symbol=sym, side=side,

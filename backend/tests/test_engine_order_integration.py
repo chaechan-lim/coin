@@ -183,7 +183,7 @@ async def test_hmm_close_unfilled_keeps_position():
         await engine._close_position("BTC/USDT", 75000.0)
 
     assert len(engine._positions) > 0  # 포지션 유지
-    assert engine._consecutive_close_failures == 1
+    assert engine._consecutive_close_failures.get("BTC/USDT", 0) == 1
 
 
 @pytest.mark.asyncio
@@ -325,7 +325,7 @@ async def test_hmm_auto_pause_with_real_unfilled_order():
             await engine._close_position("BTC/USDT", 75000)
 
     assert engine._paused is True
-    assert engine._consecutive_close_failures == 3
+    assert engine._consecutive_close_failures.get("BTC/USDT", 0) == 3
     # 에러 알림 발송 확인
     error_calls = [c for c in mock_emit.call_args_list if c.args[0] == "error"]
     assert len(error_calls) >= 1
