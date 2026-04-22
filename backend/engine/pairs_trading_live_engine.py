@@ -64,9 +64,9 @@ class PairsTradingLiveEngine:
         leverage: int = 2,
         coin_a: str = "BTC/USDT",
         coin_b: str = "ETH/USDT",
-        lookback_hours: int = 336,
-        z_entry: float = 2.0,
-        z_exit: float = 0.5,
+        lookback_hours: int = 168,  # 7일 (그리드서치 최적)
+        z_entry: float = 1.5,
+        z_exit: float = 0.3,
         z_stop: float = 5.0,
     ):
         self._config = config

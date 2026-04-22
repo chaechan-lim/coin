@@ -700,9 +700,9 @@ async def lifespan(app: FastAPI):
                 leverage=int(getattr(config, "pairs_trading_live_leverage", 2)),
                 coin_a=str(getattr(config, "pairs_trading_live_coin_a", "BTC/USDT")),
                 coin_b=str(getattr(config, "pairs_trading_live_coin_b", "ETH/USDT")),
-                lookback_hours=int(getattr(config, "pairs_trading_live_lookback_hours", 336)),
-                z_entry=float(getattr(config, "pairs_trading_live_z_entry", 2.0)),
-                z_exit=float(getattr(config, "pairs_trading_live_z_exit", 0.5)),
+                lookback_hours=int(getattr(config, "pairs_trading_live_lookback_hours", 168)),
+                z_entry=float(getattr(config, "pairs_trading_live_z_entry", 1.5)),
+                z_exit=float(getattr(config, "pairs_trading_live_z_exit", 0.3)),
                 z_stop=float(getattr(config, "pairs_trading_live_z_stop", 5.0)),
             )
             if _futures_rnd_coordinator is not None:
