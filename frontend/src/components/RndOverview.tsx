@@ -64,6 +64,8 @@ export function RndOverview({ market }: { market?: 'spot' | 'futures' | 'all' })
     const total_capital = engines.reduce((s, e) => s + e.capital, 0)
     const total_pnl = engines.reduce((s, e) => s + e.cumulative_pnl, 0)
     const total_positions = engines.reduce((s, e) => s + e.positions.length, 0)
+    const total_unrealized = engines.reduce((s, e) =>
+      s + e.positions.reduce((ps: number, p: any) => ps + (p.unrealized_pnl ?? 0), 0), 0)
     return {
       ...data,
       engines,
@@ -71,6 +73,7 @@ export function RndOverview({ market }: { market?: 'spot' | 'futures' | 'all' })
       total_cumulative_pnl: total_pnl,
       total_pnl_pct: total_capital > 0 ? (total_pnl / total_capital) * 100 : 0,
       total_positions,
+      total_unrealized,
     }
   }, [data, market])
 
@@ -85,18 +88,25 @@ export function RndOverview({ market }: { market?: 'spot' | 'futures' | 'all' })
   return (
     <div className="space-y-3">
       {/* 요약 */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <div className="rounded-xl bg-gray-800 p-3">
           <div className="text-[10px] font-medium uppercase tracking-widest text-gray-500">{label} 자본</div>
           <div className="mt-1 text-lg font-semibold text-white">{filtered.total_capital.toFixed(0)}</div>
           <div className="text-[10px] text-gray-600">USDT</div>
         </div>
         <div className="rounded-xl bg-gray-800 p-3">
-          <div className="text-[10px] font-medium uppercase tracking-widest text-gray-500">수익</div>
+          <div className="text-[10px] font-medium uppercase tracking-widest text-gray-500">실현 수익</div>
           <div className={`mt-1 text-lg font-semibold ${pnlColor(filtered.total_cumulative_pnl)}`}>
             {formatPnl(filtered.total_cumulative_pnl)}
           </div>
           <div className={`text-[10px] ${pnlColor(filtered.total_pnl_pct)}`}>{filtered.total_pnl_pct.toFixed(2)}%</div>
+        </div>
+        <div className="rounded-xl bg-gray-800 p-3">
+          <div className="text-[10px] font-medium uppercase tracking-widest text-gray-500">미실현</div>
+          <div className={`mt-1 text-lg font-semibold ${pnlColor(filtered.total_unrealized)}`}>
+            {formatPnl(filtered.total_unrealized)}
+          </div>
+          <div className="text-[10px] text-gray-600">보유 포지션</div>
         </div>
         <div className="rounded-xl bg-gray-800 p-3">
           <div className="text-[10px] font-medium uppercase tracking-widest text-gray-500">포지션</div>
@@ -117,6 +127,7 @@ export function RndOverview({ market }: { market?: 'spot' | 'futures' | 'all' })
       <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
         {filtered.engines.map((eng) => {
           const pnlPct = eng.capital > 0 ? (eng.cumulative_pnl / eng.capital) * 100 : 0
+          const unrealized = eng.positions.reduce((s: number, p: any) => s + (p.unrealized_pnl ?? 0), 0)
           return (
             <div
               key={eng.exchange}
@@ -139,6 +150,11 @@ export function RndOverview({ market }: { market?: 'spot' | 'futures' | 'all' })
                 <span className={`text-[11px] ${pnlColor(pnlPct)}`}>
                   {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
                 </span>
+                {unrealized !== 0 && (
+                  <span className={`text-[11px] ${pnlColor(unrealized)}`}>
+                    미실현 {formatPnl(unrealized)}
+                  </span>
+                )}
               </div>
 
               {eng.positions.length > 0 ? (
