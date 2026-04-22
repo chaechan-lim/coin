@@ -92,6 +92,7 @@ class PairsTradingLiveEngine:
         self._last_eval_date: Optional[datetime.date] = None
         self._last_evaluated_at: Optional[datetime] = None
         self._last_idle_reason: str = "다음 시간대 평가 대기 중"
+        self._last_z: float | None = None
         self._paused = False
         self._daily_paused = False
         self._consecutive_close_failures = 0
@@ -227,6 +228,7 @@ class PairsTradingLiveEngine:
         if signal is None:
             self._last_idle_reason = "스프레드 시그널 계산 대기 중 (데이터 부족 또는 분산 0)"
             return
+        self._last_z = float(signal["z_score"])
 
         if self._position is not None:
             await self._check_exit(signal)
@@ -1014,6 +1016,7 @@ class PairsTradingLiveEngine:
             "z_entry": self._z_entry,
             "z_exit": self._z_exit,
             "z_stop": self._z_stop,
+            "current_z": round(self._last_z, 3) if self._last_z is not None else None,
             "position": position,
             "daily_realized_pnl": round(self._daily_realized_pnl, 2),
             "cumulative_pnl": round(self._cumulative_pnl, 2),

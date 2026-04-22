@@ -453,6 +453,57 @@ async def get_rnd_overview():
                     "pnl_pct": round(pnl_pct, 2),
                 })
 
+        # 엔진별 고유 파라미터/상태 (프론트엔드에서 전략 판단에 활용)
+        params: dict = {}
+        if name == "binance_pairs":
+            params = {
+                "pair": f"{status.get('coin_a','?')}-{status.get('coin_b','?')}",
+                "z_entry": status.get("z_entry"),
+                "z_exit": status.get("z_exit"),
+                "z_stop": status.get("z_stop"),
+                "lookback_hours": status.get("lookback_hours"),
+                "current_z": status.get("current_z"),
+                "entry_z": single.get("entry_z") if single else None,
+            }
+        elif name == "binance_hmm":
+            params = {
+                "tp_pct": 15.0,
+                "min_state_prob": 0.7,
+                "states_fitted": status.get("models_fitted"),
+            }
+        elif name == "binance_donchian_futures":
+            params = {
+                "channels": "10/20/40/55/90",
+                "coins_watched": len(status.get("tracked_coins", [])),
+            }
+        elif name == "binance_breakout_pb":
+            params = {
+                "lookback": status.get("lookback"),
+                "pullback_pct": status.get("pullback_pct"),
+                "coins_watched": len(status.get("coins", [])),
+                "pending": len(status.get("pending_signals", [])),
+            }
+        elif name == "binance_vol_mom":
+            params = {
+                "vol_mult": status.get("vol_mult"),
+                "coins_watched": len(status.get("coins", [])),
+            }
+        elif name == "binance_momentum":
+            params = {
+                "rebalance_days": 5,
+                "lookback_days": 7,
+                "top_n": 3,
+                "bottom_n": 3,
+                "coins_watched": len(status.get("coins", [])),
+                "last_rebalance": status.get("last_rebalance_date"),
+            }
+        elif name == "binance_btc_neutral":
+            params = {
+                "z_entry": status.get("z_entry"),
+                "max_concurrent": status.get("max_concurrent"),
+                "coins_watched": len(status.get("coins", [])),
+            }
+
         engines_info.append({
             "name": label,
             "exchange": name,
@@ -463,9 +514,10 @@ async def get_rnd_overview():
             "daily_pnl": status.get("daily_pnl") or status.get("daily_realized_pnl", 0),
             "positions": positions,
             "leverage": status.get("leverage", 1),
-            "idle_reason": status.get("recent_idle_reason"),
+            "idle_reason": status.get("recent_idle_reason") or status.get("idle_reason"),
             "last_evaluated_at": status.get("last_evaluated_at"),
             "next_evaluation_at": status.get("next_evaluation_at"),
+            "params": params,
         })
 
     total_capital = sum(e["capital"] for e in engines_info)

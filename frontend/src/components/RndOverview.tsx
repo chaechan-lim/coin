@@ -20,6 +20,7 @@ interface RndEngine {
   leverage: number
   idle_reason?: string | null
   next_evaluation_at?: string | null
+  params?: Record<string, any> | null
 }
 
 interface RndOverviewData {
@@ -29,6 +30,64 @@ interface RndOverviewData {
   total_positions: number
   engines: RndEngine[]
 }
+
+function StrategyParams({ exchange, params }: { exchange: string; params: any }) {
+  const items: { label: string; value: string; tone?: string }[] = []
+  const add = (label: string, value: any, tone?: string) => {
+    if (value !== null && value !== undefined && value !== '') items.push({ label, value: String(value), tone })
+  }
+
+  if (exchange === 'binance_pairs') {
+    add('pair', params.pair)
+    if (params.current_z != null) {
+      const z = params.current_z
+      const absZ = Math.abs(z)
+      const tone = absZ >= params.z_stop ? 'text-red-400' : absZ >= params.z_entry ? 'text-green-400' : absZ <= params.z_exit ? 'text-blue-400' : 'text-gray-400'
+      add('z', z.toFixed(2), tone)
+    }
+    add('entry', `±${params.z_entry}`)
+    add('exit', `±${params.z_exit}`)
+    add('stop', `±${params.z_stop}`)
+    add('lookback', `${params.lookback_hours}h`)
+  } else if (exchange === 'binance_hmm') {
+    add('TP', `${params.tp_pct}%`)
+    add('state≥', `${(params.min_state_prob * 100).toFixed(0)}%`)
+  } else if (exchange === 'binance_donchian_futures') {
+    add('channels', params.channels)
+    add('watched', `${params.coins_watched}개`)
+  } else if (exchange === 'binance_breakout_pb') {
+    add('lookback', params.lookback)
+    add('pullback', `${params.pullback_pct}%`)
+    add('watched', `${params.coins_watched}개`)
+    if (params.pending > 0) add('pending', params.pending, 'text-amber-400')
+  } else if (exchange === 'binance_vol_mom') {
+    add('vol mult', `${params.vol_mult}x`)
+    add('watched', `${params.coins_watched}개`)
+  } else if (exchange === 'binance_momentum') {
+    add('rebalance', `${params.rebalance_days}d`)
+    add('lookback', `${params.lookback_days}d`)
+    add('top/bot', `${params.top_n}/${params.bottom_n}`)
+    add('watched', `${params.coins_watched}개`)
+    if (params.last_rebalance) add('last', params.last_rebalance)
+  } else if (exchange === 'binance_btc_neutral') {
+    add('z_entry', `±${params.z_entry}`)
+    add('max_concurrent', params.max_concurrent)
+    add('watched', `${params.coins_watched}개`)
+  }
+
+  if (items.length === 0) return null
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[11px]">
+      {items.map((it, i) => (
+        <span key={i} className="text-gray-500">
+          <span className="text-gray-600">{it.label}</span>
+          <span className={`ml-1 ${it.tone ?? 'text-gray-300'}`}>{it.value}</span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
 
 function StatusDot({ running, paused }: { running: boolean; paused: boolean }) {
   if (paused) return <span className="inline-block h-2 w-2 rounded-full bg-yellow-400" title="paused" />
@@ -156,6 +215,9 @@ export function RndOverview({ market }: { market?: 'spot' | 'futures' | 'all' })
                   </span>
                 )}
               </div>
+
+              {/* 전략별 파라미터/상태 */}
+              {eng.params && <StrategyParams exchange={eng.exchange} params={eng.params} />}
 
               {eng.positions.length > 0 ? (
                 <div className="mt-2 space-y-1.5">
