@@ -277,13 +277,15 @@ class BinanceUSDMAdapter(ExchangeAdapter):
     async def create_market_buy(self, symbol: str, amount: float, reduce_only: bool = False,
                                position_side: str | None = None) -> OrderResult:
         params: dict = {}
-        if reduce_only:
-            params["reduceOnly"] = True
-        if position_side:
-            params["positionSide"] = position_side
-        elif self._hedge_mode:
-            # hedge mode: buy는 LONG 진입 또는 SHORT 청산
-            params["positionSide"] = "SHORT" if reduce_only else "LONG"
+        if self._hedge_mode:
+            # hedge mode: positionSide로 방향 지정, reduceOnly 불필요
+            if position_side:
+                params["positionSide"] = position_side
+            else:
+                params["positionSide"] = "SHORT" if reduce_only else "LONG"
+        else:
+            if reduce_only:
+                params["reduceOnly"] = True
         data = await self._call(self._exchange.create_market_buy_order, symbol, amount, params=params)
         logger.info("futures_market_buy", symbol=symbol, amount=amount,
                      reduce_only=reduce_only, position_side=params.get("positionSide"))
@@ -292,13 +294,15 @@ class BinanceUSDMAdapter(ExchangeAdapter):
     async def create_market_sell(self, symbol: str, amount: float, reduce_only: bool = False,
                                  position_side: str | None = None) -> OrderResult:
         params: dict = {}
-        if reduce_only:
-            params["reduceOnly"] = True
-        if position_side:
-            params["positionSide"] = position_side
-        elif self._hedge_mode:
-            # hedge mode: sell은 SHORT 진입 또는 LONG 청산
-            params["positionSide"] = "LONG" if reduce_only else "SHORT"
+        if self._hedge_mode:
+            # hedge mode: positionSide로 방향 지정, reduceOnly 불필요
+            if position_side:
+                params["positionSide"] = position_side
+            else:
+                params["positionSide"] = "LONG" if reduce_only else "SHORT"
+        else:
+            if reduce_only:
+                params["reduceOnly"] = True
         data = await self._call(self._exchange.create_market_sell_order, symbol, amount, params=params)
         logger.info("futures_market_sell", symbol=symbol, amount=amount,
                      reduce_only=reduce_only, position_side=params.get("positionSide"))
