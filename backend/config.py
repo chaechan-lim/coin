@@ -383,9 +383,9 @@ class AppConfig(BaseSettings):
     pairs_trading_live_leverage: int = 2
     pairs_trading_live_coin_a: str = "BTC/USDT"
     pairs_trading_live_coin_b: str = "ETH/USDT"
-    pairs_trading_live_lookback_hours: int = 336
-    pairs_trading_live_z_entry: float = 2.0
-    pairs_trading_live_z_exit: float = 0.5
+    pairs_trading_live_lookback_hours: int = 168  # 7일 (grid search 최적)
+    pairs_trading_live_z_entry: float = 1.5
+    pairs_trading_live_z_exit: float = 0.3
     pairs_trading_live_z_stop: float = 5.0
     futures_rnd_global_capital_usdt: float = 150.0
     futures_rnd_daily_loss_limit_pct: float = 0.05
