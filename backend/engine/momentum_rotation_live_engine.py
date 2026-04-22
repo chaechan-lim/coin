@@ -35,8 +35,8 @@ COINS = [
     "OP/USDT", "NEAR/USDT", "SUI/USDT", "TIA/USDT", "SEI/USDT",
     "INJ/USDT", "AAVE/USDT", "LTC/USDT", "ETC/USDT",
 ]
-LOOKBACK_DAYS = 14
-REBALANCE_INTERVAL_HOURS = 168  # 7일
+LOOKBACK_DAYS = 7  # 백테스트: 5일 주기 + 7일 lookback = 360d +27%
+REBALANCE_INTERVAL_DAYS = 5
 TOP_N = 3
 BOTTOM_N = 3
 
@@ -129,7 +129,7 @@ class MomentumRotationLiveEngine:
         logger.info("momentum_rotation_stopped")
 
     async def _loop(self):
-        """매일 SL/trailing 체크 + 매주 수요일 리밸런싱."""
+        """매일 SL/trailing 체크 + 5일마다 리밸런싱."""
         while self._is_running:
             try:
                 now = datetime.now(timezone.utc)
@@ -138,10 +138,13 @@ class MomentumRotationLiveEngine:
                 if DAILY_SL_CHECK and self._positions:
                     await self._check_sl_trailing()
 
-                # 수요일이면 리밸런싱
-                if now.weekday() == 2 and now.hour >= 1:
-                    # 오늘 이미 리밸런싱했으면 스킵
-                    if not self._last_rebalance_date or self._last_rebalance_date != now.date():
+                # 5일 경과 시 리밸런싱 (UTC 01:00 이후)
+                if now.hour >= 1:
+                    due = (
+                        self._last_rebalance_date is None
+                        or (now.date() - self._last_rebalance_date).days >= REBALANCE_INTERVAL_DAYS
+                    )
+                    if due:
                         await self._rebalance()
                         self._last_rebalance_date = now.date()
 
@@ -480,12 +483,19 @@ class MomentumRotationLiveEngine:
                     net.pop(o.symbol, None)
                     cum_pnl += float(o.realized_pnl or 0)
             self._cumulative_pnl = cum_pnl
+            last_entry_date = None
+            for o in orders:
+                if "entry" in (o.signal_reason or ""):
+                    last_entry_date = o.created_at.date()
+            if last_entry_date:
+                self._last_rebalance_date = last_entry_date
             for sym, info in net.items():
                 self._positions[sym] = MomentumPosition(
                     symbol=sym, side=info["side"], quantity=info["qty"],
                     entry_price=info["price"], peak=info["price"],
                 )
-            logger.info("momentum_restored", positions=len(self._positions), pnl=round(cum_pnl, 2))
+            logger.info("momentum_restored", positions=len(self._positions), pnl=round(cum_pnl, 2),
+                        last_rebalance=self._last_rebalance_date.isoformat() if self._last_rebalance_date else None)
 
     def get_status(self) -> dict:
         return {
