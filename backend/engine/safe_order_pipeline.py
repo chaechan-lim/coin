@@ -193,6 +193,19 @@ class SafeOrderPipeline:
                 "critical", "safe_order",
                 f"DB 기록 실패 — 거래소 주문은 실행됨: {request.symbol} {side}",
                 detail=str(e),
+                metadata={
+                    "symbol": request.symbol,
+                    "side": side,
+                    "filled_qty": exec_result.filled,
+                    "exec_price": exec_result.price,
+                    "exec_cost": exec_result.filled * exec_result.price,
+                    "fee": exec_result.fee,
+                    "order_id": exec_result.order_id,
+                    "cash_before": cash_before,
+                    "cash_after": self._pm.cash_balance,
+                    "exchange": getattr(self._guard, "_exchange_name", None),
+                    "strategy": getattr(request, "strategy_name", None),
+                },
             )
             return OrderResponse(
                 success=False,

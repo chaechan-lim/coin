@@ -251,10 +251,30 @@ class DiscordAdapter(NotificationAdapter):
 
     def _format_risk(self, title: str, detail: str | None, meta: dict) -> dict:
         fields = []
+        if meta.get("exchange"):
+            fields.append({"name": "거래소", "value": meta["exchange"], "inline": True})
         if meta.get("drawdown_pct"):
             fields.append({"name": "드로다운", "value": f"{meta['drawdown_pct']:.2f}%", "inline": True})
         if meta.get("daily_loss_pct"):
             fields.append({"name": "일일 손실", "value": f"{meta['daily_loss_pct']:.2f}%", "inline": True})
+        if meta.get("reason"):
+            fields.append({"name": "사유", "value": meta["reason"], "inline": False})
+        if meta.get("resume_condition"):
+            fields.append({"name": "재개 조건", "value": meta["resume_condition"], "inline": False})
+        if meta.get("coins"):
+            coins = meta["coins"]
+            if isinstance(coins, list):
+                # 너무 길면 처음 10개만
+                shown = coins[:10]
+                more = f" 외 {len(coins)-10}개" if len(coins) > 10 else ""
+                fields.append({"name": f"영향 코인 ({len(coins)})", "value": ", ".join(shown) + more, "inline": False})
+        # 교차 포지션 전환
+        if meta.get("symbol"):
+            fields.append({"name": "심볼", "value": meta["symbol"], "inline": True})
+        if meta.get("confidence") is not None:
+            fields.append({"name": "신뢰도", "value": f"{meta['confidence']:.0%}", "inline": True})
+        if meta.get("cross_qty") is not None:
+            fields.append({"name": "교차 수량", "value": f"{meta['cross_qty']}", "inline": True})
         return {"title": f"🚨 {title}", "description": detail, "color": COLOR_ORANGE, "fields": fields}
 
     def _format_system(self, title: str, detail: str | None, meta: dict) -> dict:
@@ -765,12 +785,58 @@ class DiscordAdapter(NotificationAdapter):
         return {"title": f"⚡ {title}", "description": detail, "color": color, "fields": fields}
 
     def _format_safe_order(self, title: str, detail: str | None, meta: dict) -> dict:
-        """SafeOrder 치명적 오류 알림 (거래소 실행 후 DB 기록 실패)."""
+        """SafeOrder 치명적 오류 알림 (거래소 실행 후 DB 기록 실패).
+
+        자금이 위험한 상황 — 모든 가용 컨텍스트 표시.
+        """
+        is_usdt = "binance" in (meta.get("exchange") or "")
+        cur = "USDT" if is_usdt else "KRW"
+
+        def _fmt(n):
+            if n is None: return "-"
+            return f"{n:,.4f} {cur}" if is_usdt else f"{n:,.0f} {cur}"
+
         fields = []
         if meta.get("symbol"):
             fields.append({"name": "심볼", "value": meta["symbol"], "inline": True})
         if meta.get("side"):
             fields.append({"name": "방향", "value": meta["side"].upper(), "inline": True})
+        if meta.get("exchange"):
+            fields.append({"name": "거래소", "value": meta["exchange"], "inline": True})
+
+        if meta.get("filled_qty") is not None:
+            fields.append({"name": "체결 수량", "value": f"{meta['filled_qty']:.6f}", "inline": True})
+        if meta.get("exec_price") is not None:
+            fields.append({"name": "체결가", "value": _fmt(meta["exec_price"]), "inline": True})
+        if meta.get("exec_cost") is not None:
+            fields.append({"name": "체결 금액", "value": _fmt(meta["exec_cost"]), "inline": True})
+
+        if meta.get("fee") is not None:
+            fields.append({"name": "수수료", "value": _fmt(meta["fee"]), "inline": True})
+        if meta.get("order_id"):
+            fields.append({"name": "주문 ID", "value": str(meta["order_id"])[:32], "inline": True})
+        if meta.get("strategy"):
+            fields.append({"name": "전략", "value": meta["strategy"], "inline": True})
+
+        if meta.get("cash_before") is not None and meta.get("cash_after") is not None:
+            fields.append({
+                "name": "잔고 변화 (DB)",
+                "value": f"{_fmt(meta['cash_before'])} → {_fmt(meta['cash_after'])}",
+                "inline": False,
+            })
+
+        # 운영자 액션 가이드
+        fields.append({
+            "name": "🚨 즉시 조치",
+            "value": (
+                "1. 거래소에서 실제 포지션/잔고 확인\n"
+                "2. DB 수동 보정 또는 포지션 수동 청산\n"
+                "3. 동일 심볼 재진입 차단\n"
+                "4. 로그에서 root cause 확인"
+            ),
+            "inline": False,
+        })
+
         desc = detail[:500] if detail else None
         return {"title": f"🚨 {title}", "description": desc, "color": COLOR_RED, "fields": fields}
 

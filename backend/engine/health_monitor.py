@@ -68,6 +68,7 @@ class HealthMonitor:
         self._tracked_coins = tracked_coins
         self._api_fail_streak = 0
         self._api_paused = False
+        self._api_paused_at: datetime | None = None
 
     async def run_health_checks(self) -> list[HealthCheckResult]:
         """모든 건강 검진 실행. 스케줄러에서 120초 간격 호출."""
@@ -244,13 +245,24 @@ class HealthMonitor:
                 self._api_fail_streak = 0
                 if self._api_paused:
                     # API 복구 → 매수 재개
+                    pause_duration = (
+                        (datetime.now(timezone.utc) - self._api_paused_at).total_seconds() / 60
+                        if self._api_paused_at else 0
+                    )
                     self._engine.resume_buying()
                     self._api_paused = False
+                    self._api_paused_at = None
                     logger.info("api_health_restored", exchange=self._exchange_name)
                     await emit_event(
                         "info", "health",
                         f"API 복구 — 매수 재개 [{self._exchange_name}]",
-                        metadata={"exchange": self._exchange_name},
+                        detail=f"중지 시간 {pause_duration:.1f}분 / BTC 가격 정상 조회 (last={ticker.last:.2f})",
+                        metadata={
+                            "exchange": self._exchange_name,
+                            "auto_fixed": ["api_health"],
+                            "pause_duration_min": round(pause_duration, 1),
+                            "tracked_coins": list(self._tracked_coins),
+                        },
                     )
                 return HealthCheckResult(
                     name="api_health", healthy=True,
@@ -268,6 +280,7 @@ class HealthMonitor:
         if self._api_fail_streak >= 3 and not self._api_paused:
             self._engine.pause_buying(self._tracked_coins)
             self._api_paused = True
+            self._api_paused_at = datetime.now(timezone.utc)
             logger.critical(
                 "api_health_pause_buying",
                 streak=self._api_fail_streak,
@@ -276,9 +289,13 @@ class HealthMonitor:
             await emit_event(
                 "critical", "health",
                 f"API 3회 연속 실패 — 매수 일시중지 [{self._exchange_name}]",
+                detail=f"BTC 가격 조회 {self._api_fail_streak}회 연속 실패. API 복구 시 자동 재개됩니다.",
                 metadata={
                     "exchange": self._exchange_name,
                     "fail_streak": self._api_fail_streak,
+                    "issues": ["api_unreachable"],
+                    "tracked_coins": list(self._tracked_coins),
+                    "resume_condition": "API 호출 성공 시 자동 재개",
                 },
             )
 

@@ -633,10 +633,21 @@ class TradingEngine:
         logger.info("engine_stopping")
         await emit_event("info", "engine", f"{self._exchange_name} 엔진 중지", metadata={"exchange": self._exchange_name})
 
-    def pause_buying(self, coins: list[str]) -> None:
+    def pause_buying(self, coins: list[str], reason: str = "API 헬스체크 실패",
+                     resume_condition: str = "헬스체크 복구 시 자동 재개") -> None:
         self._paused_coins.update(coins)
-        logger.warning("buying_paused", coins=coins)
-        asyncio.ensure_future(emit_event("warning", "risk", "매수 일시중지", metadata={"coins": coins}))
+        logger.warning("buying_paused", coins=coins, reason=reason)
+        asyncio.ensure_future(emit_event(
+            "warning", "risk",
+            f"매수 일시중지 ({len(coins)}개 코인)",
+            detail=f"사유: {reason} / 재개: {resume_condition}",
+            metadata={
+                "exchange": self._exchange_name,
+                "coins": coins,
+                "reason": reason,
+                "resume_condition": resume_condition,
+            },
+        ))
 
     def suppress_buys(self, coins: list[str]) -> None:
         self._suppressed_coins.update(coins)
