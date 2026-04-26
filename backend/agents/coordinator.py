@@ -218,6 +218,13 @@ class AgentCoordinator:
                 review = await self._trade_review_agent.review(session)
                 self._last_trade_review = review
 
+                # 거래 0건이면 노티/DB 저장 스킵 (잡음 방지)
+                if review.total_trades == 0:
+                    logger.info("trade_review_skipped_no_trades",
+                                exchange=self._exchange_name,
+                                window_hours=review.period_hours)
+                    return review
+
                 # DB 저장
                 log = AgentAnalysisLog(
                     exchange=self._exchange_name,
@@ -286,6 +293,13 @@ class AgentCoordinator:
                 report = await self._performance_agent.analyze(session)
                 self._last_performance_report = report
 
+                # 30일 거래 0건이면 노티/DB 저장 스킵
+                w30 = report.windows.get("30d")
+                if w30 and w30.total_trades == 0:
+                    logger.info("performance_analysis_skipped_no_trades",
+                                exchange=self._exchange_name)
+                    return report
+
                 log = AgentAnalysisLog(
                     exchange=self._exchange_name,
                     agent_name="performance_analytics",
@@ -337,6 +351,12 @@ class AgentCoordinator:
                     session, self._last_performance_report
                 )
                 self._last_strategy_advice = advice
+
+                # 거래 데이터 없으면 노티/DB 저장 스킵
+                if not advice.suggestions and not advice.exit_analysis:
+                    logger.info("strategy_advice_skipped_no_data",
+                                exchange=self._exchange_name)
+                    return advice
 
                 log = AgentAnalysisLog(
                     exchange=self._exchange_name,
