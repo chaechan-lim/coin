@@ -310,7 +310,16 @@ class AgentCoordinator:
                 await emit_event(
                     "info", "strategy",
                     f"성과 분석 완료{pnl_str}{alert_str}",
-                    metadata={"exchange": self._exchange_name},
+                    metadata={
+                        "review_kind": "performance_analytics",
+                        "exchange": self._exchange_name,
+                        "windows": {k: vars(v) for k, v in report.windows.items()},
+                        "by_strategy": {k: vars(v) for k, v in report.by_strategy.items()},
+                        "by_symbol": {k: vars(v) for k, v in report.by_symbol.items()},
+                        "degradation_alerts": report.degradation_alerts,
+                        "insights": report.insights,
+                        "recommendations": report.recommendations,
+                    },
                 )
                 return report
         except Exception as e:
@@ -348,7 +357,15 @@ class AgentCoordinator:
                 await emit_event(
                     "info", "strategy",
                     f"전략 어드바이저: {n_suggestions}개 제안",
-                    metadata={"exchange": self._exchange_name},
+                    metadata={
+                        "review_kind": "strategy_advisor",
+                        "exchange": self._exchange_name,
+                        "exit_analysis": advice.exit_analysis,
+                        "param_sensitivities": [vars(p) for p in advice.param_sensitivities],
+                        "direction_analysis": advice.direction_analysis,
+                        "analysis_summary": advice.analysis_summary,
+                        "suggestions": advice.suggestions,
+                    },
                 )
                 return advice
         except Exception as e:

@@ -424,6 +424,10 @@ class DiscordAdapter(NotificationAdapter):
         # 매매 회고 — 풍부한 컨텍스트 포함
         if meta.get("review_kind") == "trade_review":
             return self._format_trade_review(title, meta)
+        if meta.get("review_kind") == "performance_analytics":
+            return self._format_performance_analytics(title, meta)
+        if meta.get("review_kind") == "strategy_advisor":
+            return self._format_strategy_advisor(title, meta)
 
         fields = []
         if meta.get("state"):
@@ -544,6 +548,159 @@ class DiscordAdapter(NotificationAdapter):
             fields.append({"name": "추천", "value": rec_text, "inline": False})
 
         return {"title": f"🧠 {title}", "color": color, "fields": fields}
+
+    def _format_performance_analytics(self, title: str, meta: dict) -> dict:
+        """일일 성과 분석 — 7d/14d/30d 윈도우, 전략별 성과, 알림."""
+        is_usdt = "binance" in meta.get("exchange", "")
+
+        def _fmt(n: float) -> str:
+            return f"{n:+,.2f} USDT" if is_usdt else f"{n:+,.0f} ₩"
+
+        fields = []
+        windows = meta.get("windows") or {}
+        # 윈도우 비교 (7d/14d/30d)
+        if windows:
+            lines = []
+            for key in ["7d", "14d", "30d"]:
+                w = windows.get(key)
+                if not w or w.get("total_trades", 0) == 0:
+                    continue
+                wr = (w.get("win_rate", 0) or 0) * 100
+                pf = w.get("profit_factor", 0) or 0
+                pf_str = f"{pf:.2f}x" if pf < 99 else "∞"
+                lines.append(
+                    f"**{key}** {w.get('total_trades',0)}건 · 승률 {wr:.0f}% · PF {pf_str} · {_fmt(w.get('total_pnl',0))}"
+                )
+            if lines:
+                fields.append({"name": "기간별 성과", "value": "\n".join(lines), "inline": False})
+
+        # 30d 추가 디테일
+        w30 = windows.get("30d") or {}
+        if w30 and w30.get("total_trades", 0) > 0:
+            extras = []
+            if w30.get("largest_win") is not None:
+                extras.append(f"최대 수익 {_fmt(w30['largest_win'])}")
+            if w30.get("largest_loss") is not None:
+                extras.append(f"최대 손실 {_fmt(w30['largest_loss'])}")
+            if extras:
+                fields.append({"name": "30일 극단치", "value": " · ".join(extras), "inline": False})
+
+        # 전략별 (PnL 기준 상위)
+        by_strat = meta.get("by_strategy") or {}
+        if by_strat:
+            sorted_strats = sorted(by_strat.items(), key=lambda x: x[1].get("pnl_30d", 0), reverse=True)
+            lines = []
+            for name, st in sorted_strats[:6]:
+                t30 = st.get("trades_30d", 0)
+                w30v = (st.get("win_rate_30d", 0) or 0) * 100
+                p30 = st.get("pnl_30d", 0) or 0
+                contrib = st.get("pnl_contribution_pct", 0) or 0
+                trend = st.get("trend", "stable")
+                trend_emoji = "📈" if trend == "improving" else "📉" if trend == "declining" else "➡️"
+                lines.append(f"{trend_emoji} **{name}** {t30}건 {w30v:.0f}% {_fmt(p30)} ({contrib:+.1f}%)")
+            if lines:
+                fields.append({"name": "전략별 30일", "value": "\n".join(lines), "inline": False})
+
+        # 코인별 (PnL 기준 상위)
+        by_sym = meta.get("by_symbol") or {}
+        if by_sym:
+            sorted_syms = sorted(by_sym.items(), key=lambda x: abs(x[1].get("pnl_30d", 0)), reverse=True)
+            lines = []
+            for sym, st in sorted_syms[:5]:
+                coin = sym.split("/")[0]
+                t = st.get("trades_30d", 0)
+                wr = (st.get("win_rate_30d", 0) or 0) * 100
+                p = st.get("pnl_30d", 0)
+                cl = st.get("consecutive_losses", 0)
+                cl_str = f" 🚨연패{cl}" if cl >= 3 else ""
+                lines.append(f"**{coin}** {t}건 {wr:.0f}% {_fmt(p)}{cl_str}")
+            if lines:
+                fields.append({"name": "코인별 30일 (상위 5)", "value": "\n".join(lines), "inline": False})
+
+        # 성과 저하 알림
+        alerts = meta.get("degradation_alerts") or []
+        if alerts:
+            lines = [f"⚠️ {a}" for a in alerts[:5]]
+            fields.append({"name": "성과 저하 경고", "value": "\n".join(lines), "inline": False})
+
+        # 인사이트 + 추천
+        insights = meta.get("insights") or []
+        if insights:
+            ins_text = "\n".join(f"• {s}" for s in insights[:3])
+            if len(ins_text) > 1024:
+                ins_text = ins_text[:1020] + "..."
+            fields.append({"name": "인사이트", "value": ins_text, "inline": False})
+        recs = meta.get("recommendations") or []
+        if recs:
+            rec_text = "\n".join(f"• {s}" for s in recs[:3])
+            if len(rec_text) > 1024:
+                rec_text = rec_text[:1020] + "..."
+            fields.append({"name": "추천", "value": rec_text, "inline": False})
+
+        # 색상: 30d 수익률 기준
+        pnl_30d = (windows.get("30d") or {}).get("total_pnl", 0) or 0
+        color = COLOR_GREEN if pnl_30d > 0 else COLOR_RED if pnl_30d < 0 else COLOR_GOLD
+        return {"title": f"📊 {title}", "color": color, "fields": fields}
+
+    def _format_strategy_advisor(self, title: str, meta: dict) -> dict:
+        """주간 전략 어드바이저 — 청산/방향/파라미터 분석 + LLM 제안."""
+        fields = []
+
+        # 분석 요약
+        summary = meta.get("analysis_summary")
+        if summary:
+            text = summary[:1024]
+            fields.append({"name": "분석 요약", "value": text, "inline": False})
+
+        # 청산 분석
+        exit_a = meta.get("exit_analysis") or {}
+        if exit_a:
+            lines = []
+            for k, v in list(exit_a.items())[:6]:
+                if isinstance(v, (int, float)):
+                    lines.append(f"**{k}**: {v:.2f}" if isinstance(v, float) else f"**{k}**: {v}")
+                else:
+                    lines.append(f"**{k}**: {str(v)[:80]}")
+            if lines:
+                fields.append({"name": "청산 분석", "value": "\n".join(lines), "inline": False})
+
+        # 방향 분석 (long/short)
+        dir_a = meta.get("direction_analysis") or {}
+        if dir_a:
+            lines = []
+            for direction in ["long", "short"]:
+                d = dir_a.get(direction)
+                if d and isinstance(d, dict):
+                    t = d.get("trades", 0)
+                    wr = (d.get("win_rate", 0) or 0) * 100
+                    pnl = d.get("total_pnl", 0) or 0
+                    sign = "+" if pnl >= 0 else ""
+                    lines.append(f"**{direction.upper()}** {t}건 · 승률 {wr:.0f}% · {sign}{pnl:.2f}")
+            if lines:
+                fields.append({"name": "방향별 성과", "value": "\n".join(lines), "inline": False})
+
+        # 파라미터 민감도 (top 3)
+        params = meta.get("param_sensitivities") or []
+        if params:
+            lines = []
+            for p in params[:3]:
+                name = p.get("param_name", "?")
+                current = p.get("current_value")
+                opt = p.get("optimal_value")
+                impact = p.get("expected_pnl_change", 0) or 0
+                lines.append(f"**{name}** 현재 {current} → 권장 {opt} (예상 영향 {impact:+.2f})")
+            if lines:
+                fields.append({"name": "파라미터 민감도", "value": "\n".join(lines), "inline": False})
+
+        # LLM 제안 (핵심)
+        suggestions = meta.get("suggestions") or []
+        if suggestions:
+            sug_text = "\n".join(f"• {s}" for s in suggestions[:5])
+            if len(sug_text) > 1024:
+                sug_text = sug_text[:1020] + "..."
+            fields.append({"name": "💡 제안", "value": sug_text, "inline": False})
+
+        return {"title": f"🎯 {title}", "color": COLOR_PURPLE, "fields": fields}
 
     def _format_balance_guard(self, level: str, title: str, detail: str | None, meta: dict) -> dict:
         """잔고 무결성 감시 알림 (잔고 괴리 경고, 자동 재동기화, 자동 재개)."""
