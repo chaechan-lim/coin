@@ -249,9 +249,26 @@ class AgentCoordinator:
 
                 await emit_event(
                     "info", "strategy",
-                    f"매매 회고: {review.total_trades}건, 승률 {review.win_rate:.0%}, PnL {review.total_realized_pnl:+,.0f}",
-                    metadata={"total_trades": review.total_trades, "win_rate": review.win_rate,
-                              "pnl": review.total_realized_pnl, "exchange": self._exchange_name},
+                    f"매매 회고: {review.total_trades}건, 승률 {review.win_rate:.0%}, PnL {review.total_realized_pnl:+,.2f}",
+                    metadata={
+                        "review_kind": "trade_review",
+                        "total_trades": review.total_trades,
+                        "buy_count": review.buy_count,
+                        "sell_count": review.sell_count,
+                        "win_count": review.win_count,
+                        "loss_count": review.loss_count,
+                        "win_rate": review.win_rate,
+                        "pnl": review.total_realized_pnl,
+                        "profit_factor": review.profit_factor,
+                        "largest_win": review.largest_win,
+                        "largest_loss": review.largest_loss,
+                        "by_strategy": review.by_strategy,
+                        "by_symbol": review.by_symbol,
+                        "open_positions": review.open_positions,
+                        "insights": review.insights,
+                        "recommendations": review.recommendations,
+                        "exchange": self._exchange_name,
+                    },
                 )
 
                 return review
