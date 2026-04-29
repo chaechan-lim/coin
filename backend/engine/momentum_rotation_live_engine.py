@@ -40,6 +40,11 @@ REBALANCE_INTERVAL_DAYS = 5
 TOP_N = 3
 BOTTOM_N = 3
 
+# 시장 체제 필터: BTC 30일 모멘텀 음수 시 롱 차단 (백테스트: 360d -24% → +72%)
+REGIME_FILTER_ENABLED = True
+REGIME_LOOKBACK_DAYS = 30
+REGIME_SYMBOL = "BTC/USDT"
+
 # SL/Trailing (백테스트: SL8+trail4/2 → 360d +173.8%)
 SL_PCT = 8.0          # 손절 8% (레버리지 반영)
 TRAIL_ACT_PCT = 4.0   # 수익 4% 이상 시 trailing 활성
@@ -198,9 +203,21 @@ class MomentumRotationLiveEngine:
         target_longs = [c for c, _ in sorted_coins[:TOP_N]]
         target_shorts = [c for c, _ in sorted_coins[-BOTTOM_N:]]
 
+        # 시장 체제 필터: BTC 30일 모멘텀 음수면 롱 차단
+        regime_status = "neutral"
+        if REGIME_FILTER_ENABLED:
+            btc_mom = await self._fetch_btc_regime_momentum()
+            if btc_mom is not None:
+                if btc_mom < 0:
+                    target_longs = []
+                    regime_status = f"bearish (BTC {btc_mom*100:+.1f}% / longs blocked)"
+                else:
+                    regime_status = f"bullish (BTC {btc_mom*100:+.1f}%)"
+
         logger.info("momentum_ranking",
-                     longs=[(c, f"{r*100:.1f}%") for c, r in sorted_coins[:TOP_N]],
-                     shorts=[(c, f"{r*100:.1f}%") for c, r in sorted_coins[-BOTTOM_N:]])
+                     longs=[(c, f"{r*100:.1f}%") for c, r in sorted_coins[:TOP_N]] if target_longs else "BLOCKED",
+                     shorts=[(c, f"{r*100:.1f}%") for c, r in sorted_coins[-BOTTOM_N:]],
+                     regime=regime_status)
 
         # 2. 기존 포지션 청산
         for symbol in list(self._positions.keys()):
@@ -213,8 +230,11 @@ class MomentumRotationLiveEngine:
 
         # 3. 새 포지션 진입
         available = self._initial_capital + self._cumulative_pnl
-        n_sides = TOP_N + BOTTOM_N
-        per_side = (available * self._leverage) / n_sides if n_sides > 0 else 0
+        n_sides = len(target_longs) + len(target_shorts)
+        if n_sides == 0:
+            logger.info("momentum_rebalance_no_targets", regime=regime_status)
+            return
+        per_side = (available * self._leverage) / n_sides
 
         for symbol in target_longs:
             await self._open_position(symbol, "long", per_side)
@@ -225,6 +245,21 @@ class MomentumRotationLiveEngine:
         logger.info("momentum_rebalance_complete",
                      positions=len(self._positions),
                      cumulative_pnl=round(self._cumulative_pnl, 2))
+
+    async def _fetch_btc_regime_momentum(self) -> float | None:
+        """BTC 30일 모멘텀 (체제 필터용). 실패 시 None."""
+        try:
+            df = await self._market_data.get_ohlcv_df(REGIME_SYMBOL, "1d", limit=REGIME_LOOKBACK_DAYS + 5)
+            if df is None or len(df) < REGIME_LOOKBACK_DAYS + 1:
+                return None
+            past = float(df["close"].iloc[-(REGIME_LOOKBACK_DAYS + 1)])
+            curr = float(df["close"].iloc[-1])
+            if past <= 0:
+                return None
+            return (curr - past) / past
+        except Exception as e:
+            logger.warning("momentum_regime_fetch_failed", error=str(e))
+            return None
 
     async def _open_position(self, symbol: str, side: str, notional: float):
         try:

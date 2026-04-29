@@ -60,6 +60,11 @@ def simulate_momentum_rotation(
     top_n: int = 2,
     bottom_n: int = 2,
     leverage: float = 2.0,
+    regime_filter: bool = False,           # A: BTC 30d momentum < 0이면 롱 차단
+    regime_lookback_days: int = 30,
+    short_only: bool = False,              # B: 롱 비활성
+    drawdown_pause_pct: float = 0.0,       # D: 자본 대비 -X% 도달 시 정지
+    drawdown_resume_recover_pct: float = 0.5,  # 정지 후 회복률 (drawdown 0.5x 회복 시 재개)
 ) -> MomentumRotationResult:
     """Long/Short Momentum Rotation.
 
@@ -89,6 +94,9 @@ def simulate_momentum_rotation(
     short_pnl = 0.0
     equity_curve = []
     last_rebalance_ts = None
+    paused = False
+    peak_equity = initial_capital
+    drawdown_threshold = initial_capital * (drawdown_pause_pct / 100.0) if drawdown_pause_pct > 0 else 0
 
     for ts in common:
         if ts < sim_start - pd.Timedelta(days=lookback_days + 10):
@@ -104,9 +112,36 @@ def simulate_momentum_rotation(
                 eq += (p["entry"] - price) * p["qty"]
         if ts >= sim_start:
             equity_curve.append((ts, eq))
+            peak_equity = max(peak_equity, eq)
 
         if ts < sim_start:
             continue
+
+        # D. drawdown pause / resume
+        if drawdown_threshold > 0:
+            current_dd = peak_equity - eq
+            if not paused and current_dd >= drawdown_threshold:
+                # 정지 — 모든 포지션 청산
+                for coin, p in positions.items():
+                    price = float(dfs[coin].loc[ts, "close"])
+                    pnl = (price - p["entry"]) * p["qty"] if p["side"] == "long" else (p["entry"] - price) * p["qty"]
+                    if p["side"] == "long":
+                        long_pnl += pnl
+                    else:
+                        short_pnl += pnl
+                    fee = p["qty"] * price * TOTAL_COST
+                    cash += pnl - fee
+                    total_fees += fee
+                positions.clear()
+                paused = True
+                continue
+            if paused:
+                # 회복 체크: drawdown이 (1 - resume_recover_pct)로 줄어들면 재개
+                if current_dd <= drawdown_threshold * (1 - drawdown_resume_recover_pct):
+                    paused = False
+                    last_rebalance_ts = None  # 즉시 리밸 가능하게
+                else:
+                    continue
 
         # 리밸런싱 주기
         if last_rebalance_ts is not None:
@@ -134,6 +169,22 @@ def simulate_momentum_rotation(
         target_longs = [c for c, _ in sorted_coins[:top_n]]
         target_shorts = [c for c, _ in sorted_coins[-bottom_n:]]
 
+        # A. regime filter — BTC 30일 모멘텀 음수면 롱 차단
+        if regime_filter and "BTC" in dfs:
+            btc_df = dfs["BTC"]
+            rg_start = ts - pd.Timedelta(days=regime_lookback_days)
+            rg_idx = btc_df.index.searchsorted(rg_start, side="left")
+            if rg_idx < len(btc_df):
+                btc_past = float(btc_df["close"].iloc[rg_idx])
+                btc_curr = float(btc_df.loc[ts, "close"])
+                btc_mom = (btc_curr - btc_past) / btc_past
+                if btc_mom < 0:
+                    target_longs = []  # 약세장 → 롱 차단
+
+        # B. short_only — 롱 비활성
+        if short_only:
+            target_longs = []
+
         # 2. 기존 포지션 청산
         for coin in list(positions.keys()):
             p = positions[coin]
@@ -150,8 +201,11 @@ def simulate_momentum_rotation(
         positions.clear()
 
         # 3. 새 포지션 진입
-        n_sides = top_n + bottom_n
-        per_side_notional = (cash * leverage) / n_sides if n_sides > 0 else 0
+        n_sides = len(target_longs) + len(target_shorts)
+        if n_sides == 0:
+            n_rebalances += 1
+            continue
+        per_side_notional = (cash * leverage) / n_sides
 
         for coin in target_longs:
             price = float(dfs[coin].loc[ts, "close"])
