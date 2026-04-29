@@ -970,6 +970,18 @@ async def lifespan(app: FastAPI):
     )
     logger.info("rnd_performance_review_scheduled", time="22:00 KST daily")
 
+    # ── R&D 포지션 감사 — 1시간마다 (거래소 vs 엔진 메모리 비교, 고아 감지) ──
+    if binance_adapter:
+        from services.rnd_position_audit import run_position_audit
+        async def _audit_job():
+            await run_position_audit(engine_registry, binance_adapter)
+        _scheduler.add_job(
+            _wrap(_audit_job),
+            name="rnd_position_audit",
+            seconds=3600,
+        )
+        logger.info("rnd_position_audit_scheduled", interval_min=60)
+
     # ── 입출금 자동 감지 스케줄러 ───────────────────────────────
     from engine.capital_sync import sync_binance_deposits, sync_binance_internal_transfers, detect_bithumb_balance_change
 
