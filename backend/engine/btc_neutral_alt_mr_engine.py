@@ -277,21 +277,40 @@ class BTCNeutralAltMREngine:
 
         half_notional = notional / 2  # half for alt, half for BTC
 
+        # Alt 가격 (사전 체크 — try 밖에서)
+        alt_df = await self._market_data.get_ohlcv_df(alt_symbol, "1h", limit=5)
+        btc_df = await self._market_data.get_ohlcv_df(self.BTC_SYMBOL, "1h", limit=5)
+        if alt_df is None or btc_df is None:
+            return
+
+        alt_price = float(alt_df["close"].iloc[-1])
+        btc_price = float(btc_df["close"].iloc[-1])
+        alt_qty = half_notional / alt_price
+        btc_qty = half_notional / btc_price
+        btc_side = "short" if alt_side == "long" else "long"
+
+        # 사전 가드: BTC 최소 정밀도 (0.001) 검사 — alt 진입 전에 차단
+        BTC_MIN_QTY = 0.001
+        if btc_qty < BTC_MIN_QTY:
+            logger.warning(
+                "btc_neutral_btc_qty_too_small",
+                symbol=alt_symbol, btc_qty=btc_qty, min=BTC_MIN_QTY,
+                half_notional=round(half_notional, 2),
+                hint="자본 부족 — max_concurrent 축소 또는 자본 증액 필요",
+            )
+            await emit_event(
+                "warning", "engine",
+                f"BTCNeutral 자본 부족 — {alt_symbol} 진입 스킵 (BTC qty {btc_qty:.5f} < {BTC_MIN_QTY})",
+                metadata={"engine": "BTCNeutral", "symbol": alt_symbol,
+                          "btc_qty": btc_qty, "min": BTC_MIN_QTY,
+                          "half_notional": round(half_notional, 2)},
+            )
+            return
+
+        # alt 주문 체결 여부 (롤백 시 참조)
+        alt_filled_qty = 0.0
+
         try:
-            # Alt 가격
-            alt_df = await self._market_data.get_ohlcv_df(alt_symbol, "1h", limit=5)
-            btc_df = await self._market_data.get_ohlcv_df(self.BTC_SYMBOL, "1h", limit=5)
-            if alt_df is None or btc_df is None:
-                return
-
-            alt_price = float(alt_df["close"].iloc[-1])
-            btc_price = float(btc_df["close"].iloc[-1])
-
-            alt_qty = half_notional / alt_price
-            btc_qty = half_notional / btc_price
-
-            btc_side = "short" if alt_side == "long" else "long"
-
             # Alt 주문
             if alt_side == "long":
                 alt_order = await self._exchange.create_market_buy(alt_symbol, alt_qty)
@@ -306,6 +325,8 @@ class BTCNeutralAltMREngine:
                 logger.error("btc_neutral_alt_order_not_filled", symbol=alt_symbol, status=alt_status)
                 return
 
+            alt_filled_qty = alt_exec_qty
+
             # BTC 주문
             if btc_side == "long":
                 btc_order = await self._exchange.create_market_buy(self.BTC_SYMBOL, btc_qty)
@@ -318,16 +339,8 @@ class BTCNeutralAltMREngine:
 
             if btc_status not in ('filled', 'closed') or btc_exec_qty <= 0 or btc_exec_price <= 0:
                 logger.error("btc_neutral_btc_order_not_filled", symbol=self.BTC_SYMBOL, status=btc_status)
-                # Alt 주문은 체결됐으나 BTC 실패 → 롤백
-                try:
-                    if alt_side == "long":
-                        await self._exchange.create_market_sell(alt_symbol, alt_exec_qty, reduce_only=True)
-                    else:
-                        await self._exchange.create_market_buy(alt_symbol, alt_exec_qty, reduce_only=True)
-                    logger.info("btc_neutral_alt_rollback_ok", symbol=alt_symbol)
-                except Exception as rb_err:
-                    logger.error("btc_neutral_alt_rollback_failed", symbol=alt_symbol, error=str(rb_err))
-                return
+                # 외부 finally 에서 처리되도록 raise
+                raise RuntimeError("BTC leg not filled, rolling back alt")
 
             self._positions[alt_symbol] = NeutralPosition(
                 alt_symbol=alt_symbol, alt_side=alt_side,
@@ -357,6 +370,35 @@ class BTCNeutralAltMREngine:
                                        "price": alt_exec_price, "leverage": self._leverage})
         except Exception as e:
             logger.error("btc_neutral_open_error", symbol=alt_symbol, error=str(e))
+            # alt 체결됐으면 무조건 롤백 (BTC leg 누락 방지)
+            if alt_filled_qty > 0:
+                try:
+                    if alt_side == "long":
+                        await self._exchange.create_market_sell(
+                            alt_symbol, alt_filled_qty, reduce_only=True
+                        )
+                    else:
+                        await self._exchange.create_market_buy(
+                            alt_symbol, alt_filled_qty, reduce_only=True
+                        )
+                    logger.info("btc_neutral_alt_rollback_ok",
+                                symbol=alt_symbol, qty=alt_filled_qty)
+                    await emit_event(
+                        "warning", "engine",
+                        f"BTCNeutral {alt_symbol} 진입 실패 — alt {alt_filled_qty} 롤백",
+                        metadata={"engine": "BTCNeutral", "symbol": alt_symbol,
+                                  "qty": alt_filled_qty, "error": str(e)[:100]},
+                    )
+                except Exception as rb_err:
+                    logger.critical("btc_neutral_alt_rollback_failed",
+                                    symbol=alt_symbol, qty=alt_filled_qty, error=str(rb_err))
+                    await emit_event(
+                        "critical", "engine",
+                        f"🚨 BTCNeutral {alt_symbol} 롤백 실패 — 고아 포지션 발생: {alt_filled_qty}",
+                        detail=f"수동 청산 필요. error={str(rb_err)[:200]}",
+                        metadata={"engine": "BTCNeutral", "symbol": alt_symbol,
+                                  "orphan_qty": alt_filled_qty, "side": alt_side},
+                    )
 
     async def _close_pair(self, alt_symbol: str, reason: str = ""):
         """Alt + BTC 동시 청산."""

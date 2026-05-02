@@ -189,6 +189,7 @@ async def test_audit_emits_orphan_alert():
     """고아 포지션 감지 시 critical 알림 발송."""
     reg = _registry({})
     exchange = MagicMock()
+    exchange._exchange = None  # MagicMock 자동 속성 차단
     exchange.fetch_positions = AsyncMock(return_value=[
         _ex_pos("LINK/USDT:USDT", 3.23, "LONG"),
     ])
@@ -213,6 +214,7 @@ async def test_audit_no_alert_when_clean():
         ])
     })
     exchange = MagicMock()
+    exchange._exchange = None  # MagicMock 자동 속성 차단
     exchange.fetch_positions = AsyncMock(return_value=[
         _ex_pos("BTC/USDT:USDT", 0.01, "LONG"),
     ])
@@ -228,6 +230,7 @@ async def test_audit_handles_fetch_failure():
     """거래소 API 실패 시 빈 리스트 + 예외 미전파."""
     reg = _registry({})
     exchange = MagicMock()
+    exchange._exchange = None
     exchange.fetch_positions = AsyncMock(side_effect=Exception("network"))
     deltas = await run_position_audit(reg, exchange)
     assert deltas == []

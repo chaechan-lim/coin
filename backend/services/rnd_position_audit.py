@@ -145,11 +145,17 @@ def diff_positions(
 
 
 async def run_position_audit(registry: EngineRegistry, exchange) -> list[PositionDelta]:
-    """포지션 감사 1회 실행. 불일치 발견 시 emit_event 알림."""
+    """포지션 감사 1회 실행. 불일치 발견 시 emit_event 알림.
+
+    exchange는 BinanceUSDMAdapter 또는 ccxt 인스턴스. adapter일 경우
+    내부 ccxt._exchange로 fallback.
+    """
     if exchange is None:
         return []
     try:
-        positions = await exchange.fetch_positions()
+        # ccxt 직접 노출 (binance_usdm_adapter는 _exchange 속성)
+        ccxt_ex = getattr(exchange, "_exchange", None) or exchange
+        positions = await ccxt_ex.fetch_positions()
     except Exception as e:
         logger.warning("audit_fetch_positions_failed", error=str(e))
         return []
