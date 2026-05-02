@@ -89,7 +89,8 @@ class MomentumRotationLiveEngine:
         self._is_running = False
         self._task: asyncio.Task | None = None
         self._positions: dict[str, MomentumPosition] = {}
-        self._cumulative_pnl = 0.0
+        self._cumulative_pnl = 0.0  # lifetime PnL (모든 주문 합산, 표시용)
+        self._session_pnl = 0.0     # epoch 이후 PnL (paused 판정용)
         self._daily_pnl = 0.0
         self._last_eval_date: Optional[datetime] = None
         self._paused = False
@@ -97,6 +98,16 @@ class MomentumRotationLiveEngine:
         self._consecutive_close_failures = 0
         self._coordinator = None
         self._last_rebalance_date = None
+        # epoch: 전략/자본 변경 시점 — 이후 주문만 손실 한도 판정에 반영
+        epoch_str = getattr(config, "momentum_rotation_epoch_started_at", "") or ""
+        self._epoch_started_at: Optional[datetime] = None
+        if epoch_str:
+            try:
+                self._epoch_started_at = datetime.fromisoformat(epoch_str.replace("Z", "+00:00"))
+                if self._epoch_started_at.tzinfo is None:
+                    self._epoch_started_at = self._epoch_started_at.replace(tzinfo=timezone.utc)
+            except Exception:
+                logger.warning("momentum_epoch_parse_failed", value=epoch_str)
 
     @property
     def is_running(self) -> bool:
@@ -387,6 +398,7 @@ class MomentumRotationLiveEngine:
                 pnl = (pos.entry_price - exec_price) * filled_qty
 
             self._cumulative_pnl += pnl
+            self._session_pnl += pnl
             self._daily_pnl += pnl
             del self._positions[symbol]
 
@@ -450,6 +462,7 @@ class MomentumRotationLiveEngine:
                 pnl = (pos.entry_price - exec_price) * filled_qty
 
             self._cumulative_pnl += pnl
+            self._session_pnl += pnl
             self._daily_pnl += pnl
             del self._positions[symbol]
 
@@ -473,10 +486,15 @@ class MomentumRotationLiveEngine:
                                  detail=f"{symbol} {str(e)[:100]}")
 
     async def _check_loss_limits(self):
-        if self._cumulative_pnl <= -self._initial_capital * MAX_TOTAL_LOSS_PCT:
+        # session_pnl: epoch 이후만 (자본/전략 변경 후 새로 카운트)
+        # epoch 미설정 시 cumulative_pnl 사용 (하위 호환)
+        check_pnl = self._session_pnl if self._epoch_started_at else self._cumulative_pnl
+        if check_pnl <= -self._initial_capital * MAX_TOTAL_LOSS_PCT:
             self._paused = True
-            await emit_event("error", "engine",
-                             f"🚨 Momentum 누적 손실 한도 ({self._cumulative_pnl:.2f}) — 자동 중지")
+            await emit_event(
+                "error", "engine",
+                f"🚨 Momentum 손실 한도 (session {check_pnl:+.2f} / lifetime {self._cumulative_pnl:+.2f}) — 자동 중지",
+            )
         if self._daily_pnl <= -self._initial_capital * MAX_DAILY_LOSS_PCT:
             self._daily_paused = True
 
@@ -506,7 +524,8 @@ class MomentumRotationLiveEngine:
             )
             orders = result.scalars().all()
             net = {}
-            cum_pnl = 0.0
+            cum_pnl = 0.0      # lifetime PnL (모든 주문)
+            session_pnl = 0.0  # epoch 이후 PnL (있을 때)
             for o in orders:
                 q = float(o.executed_quantity or 0)
                 p = float(o.executed_price or 0)
@@ -516,8 +535,12 @@ class MomentumRotationLiveEngine:
                     net[o.symbol] = {"side": side, "qty": q, "price": p}
                 elif "exit" in reason or "sl_hit" in reason or "trailing" in reason:
                     net.pop(o.symbol, None)
-                    cum_pnl += float(o.realized_pnl or 0)
+                    pnl = float(o.realized_pnl or 0)
+                    cum_pnl += pnl
+                    if self._epoch_started_at and o.created_at >= self._epoch_started_at:
+                        session_pnl += pnl
             self._cumulative_pnl = cum_pnl
+            self._session_pnl = session_pnl
             last_entry_date = None
             for o in orders:
                 if "entry" in (o.signal_reason or ""):
@@ -542,6 +565,8 @@ class MomentumRotationLiveEngine:
             "positions": [{"symbol": p.symbol, "side": p.side, "qty": p.quantity, "entry": p.entry_price}
                           for p in self._positions.values()],
             "cumulative_pnl": round(self._cumulative_pnl, 2),
+            "session_pnl": round(self._session_pnl, 2),
+            "epoch_started_at": self._epoch_started_at.isoformat() if self._epoch_started_at else None,
             "daily_pnl": round(self._daily_pnl, 2),
             "paused": self._paused,
         }

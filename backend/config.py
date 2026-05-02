@@ -395,6 +395,9 @@ class AppConfig(BaseSettings):
     momentum_rotation_live_enabled: bool = False
     momentum_rotation_live_capital_usdt: float = 100.0
     momentum_rotation_live_leverage: int = 2
+    # 손실 한도 판정에 사용할 PnL 시작 시점 (전략/자본 변경 시 ISO 시각 설정).
+    # lifetime PnL은 모든 주문 합산 (표시용), session PnL은 이 시각 이후만 (paused 판정).
+    momentum_rotation_epoch_started_at: str = ""
 
     # HMM Regime Detection (선물)
     hmm_regime_live_enabled: bool = False
