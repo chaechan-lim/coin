@@ -381,10 +381,12 @@ class AppConfig(BaseSettings):
     pairs_trading_live_enabled: bool = False
     pairs_trading_live_capital_usdt: float = 75.0
     pairs_trading_live_leverage: int = 2
-    pairs_trading_live_coin_a: str = "BTC/USDT"
-    pairs_trading_live_coin_b: str = "ETH/USDT"
-    pairs_trading_live_lookback_hours: int = 168  # 7일 (grid search 최적)
-    pairs_trading_live_z_entry: float = 1.5
+    # WF 검증 (2026-05-05): ADA-ARB lb=72 ze=2.0 zx=0.3 zs=5.0
+    # 3/3 winning windows, avg test +30.87%, MDD 13% — BTC-ETH는 540d -54.68%로 폐기
+    pairs_trading_live_coin_a: str = "ADA/USDT"
+    pairs_trading_live_coin_b: str = "ARB/USDT"
+    pairs_trading_live_lookback_hours: int = 72
+    pairs_trading_live_z_entry: float = 2.0
     pairs_trading_live_z_exit: float = 0.3
     pairs_trading_live_z_stop: float = 5.0
     futures_rnd_global_capital_usdt: float = 150.0
