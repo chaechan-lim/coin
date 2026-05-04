@@ -752,7 +752,10 @@ async def lifespan(app: FastAPI):
                 market_data=binance_market_data,
                 initial_capital_usdt=config.hmm_regime_live_capital_usdt,
                 leverage=config.hmm_regime_live_leverage,
-                symbols=["ETH/USDT"],  # BTC는 Pairs와 충돌, 백테스트에서도 ETH가 우월
+                # 매트릭스 (2026-05-04): BTC 4기간 모두 +5~83%, ETH 4기간 모두 -42~-88%
+                # ETH는 entry_blocked — 기존 포지션 자연 청산 후 BTC 단독 운영
+                symbols=["BTC/USDT", "ETH/USDT"],
+                entry_blocked=["ETH/USDT"],
             )
             if _futures_rnd_coordinator:
                 _hmm_engine.set_futures_rnd_coordinator(_futures_rnd_coordinator)

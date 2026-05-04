@@ -75,6 +75,7 @@ class HMMRegimeLiveEngine:
         leverage: int = 2,
         symbol: str = "BTC/USDT",  # 하위 호환
         symbols: list[str] | None = None,
+        entry_blocked: list[str] | None = None,
     ):
         self._config = config
         self._exchange = futures_exchange
@@ -82,6 +83,8 @@ class HMMRegimeLiveEngine:
         self._initial_capital = initial_capital_usdt
         self._leverage = leverage
         self._symbols = symbols or [symbol]
+        # 신규 진입 차단 — 기존 포지션 관리(SL/TP/regime exit)는 정상 동작
+        self._entry_blocked: set[str] = set(entry_blocked or [])
 
         self._is_running = False
         self._task: asyncio.Task | None = None
@@ -295,8 +298,12 @@ class HMMRegimeLiveEngine:
                 if self._positions.get(symbol):
                     await self._close_position(symbol, price)
                 if desired != 0 and symbol not in self._positions:
-                    side = "long" if desired == 1 else "short"
-                    await self._open_position(symbol, side, price)
+                    if symbol in self._entry_blocked:
+                        logger.info("hmm_entry_blocked", symbol=symbol,
+                                    reason="entry_blocked_list")
+                    else:
+                        side = "long" if desired == 1 else "short"
+                        await self._open_position(symbol, side, price)
                 await self._check_loss_limits()
         except Exception as e:
             logger.error("hmm_eval_error", symbol=symbol, error=str(e), exc_info=True)
