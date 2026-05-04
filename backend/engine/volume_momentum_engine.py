@@ -34,7 +34,7 @@ MIN_NOTIONAL = 10
 
 DEFAULT_COINS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT",
-    "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
+    "ADA/USDT", "LINK/USDT",
 ]
 
 
@@ -62,11 +62,11 @@ class VolumeMomentumEngine:
         initial_capital_usdt: float = 100.0,
         leverage: int = 2,
         coins: list[str] | None = None,
-        vol_mult: float = 2.0,
+        vol_mult: float = 3.0,
         rsi_long_max: float = 60.0,
         rsi_short_min: float = 40.0,
-        sl_atr_mult: float = 2.5,
-        tp_atr_mult: float = 5.0,
+        sl_atr_mult: float = 4.0,
+        tp_atr_mult: float = 8.0,
     ):
         self._config = config
         self._exchange = futures_exchange

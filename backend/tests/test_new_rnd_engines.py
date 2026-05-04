@@ -277,8 +277,9 @@ class TestBreakoutPullbackEngine:
     @pytest.mark.asyncio
     async def test_tracked_coins(self):
         engine = self._make_engine()
-        assert "BTC/USDT" in engine.tracked_coins
-        assert len(engine.tracked_coins) >= 5
+        # Tuned to XRP-only (sweep 결과 +24% PF 1.59) — multi-coin 손실
+        assert "XRP/USDT" in engine.tracked_coins
+        assert len(engine.tracked_coins) >= 1
 
     @pytest.mark.asyncio
     async def test_set_methods_no_op(self):
@@ -317,7 +318,7 @@ class TestVolumeMomentumEngine:
         assert status["cumulative_pnl"] == 0.0
         assert status["daily_pnl"] == 0.0
         assert status["paused"] is False
-        assert status["vol_mult"] == 2.0
+        assert status["vol_mult"] == 3.0  # tuned: vol=2.0 → 3.0 (sweep +154% PF 1.25)
         assert len(status["positions"]) == 0
 
     @pytest.mark.asyncio
@@ -439,6 +440,7 @@ class TestVolumeMomentumEngine:
     @pytest.mark.asyncio
     async def test_tracked_coins(self):
         engine = self._make_engine()
+        # Tuned: 7 coins (DOGE/DOT/AVAX 제외 — sweep 코인별 손실)
         assert "BTC/USDT" in engine.tracked_coins
         assert len(engine.tracked_coins) >= 3
 
@@ -472,7 +474,7 @@ class TestBTCNeutralAltMREngine:
         assert status["paused"] is False
         assert status["z_entry"] == 2.0
         assert status["z_exit"] == 0.3
-        assert status["max_hold_days"] == 7
+        assert status["max_hold_days"] == 21  # tuned: 7d → 21d (sweep +47% PF 1.52)
         assert status["max_concurrent"] == 3
         assert len(status["positions"]) == 0
 
@@ -617,7 +619,7 @@ class TestBTCNeutralAltMREngine:
         engine = self._make_engine()
         assert "BTC/USDT" in engine.tracked_coins
         assert "ETH/USDT" in engine.tracked_coins
-        assert len(engine.tracked_coins) >= 5  # 4 alts + BTC
+        assert len(engine.tracked_coins) >= 5  # 4 alts (ETH/SOL/LINK/BNB) + BTC
 
     @pytest.mark.asyncio
     async def test_set_methods_no_op(self):

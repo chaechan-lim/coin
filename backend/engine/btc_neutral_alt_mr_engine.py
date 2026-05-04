@@ -33,8 +33,7 @@ MAX_TOTAL_LOSS_PCT = 0.10
 MAX_DAILY_LOSS_PCT = 0.05
 MIN_NOTIONAL = 10
 
-DEFAULT_COINS = ["ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT",
-                  "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT"]
+DEFAULT_COINS = ["ETH/USDT", "SOL/USDT", "LINK/USDT", "BNB/USDT"]
 
 
 @dataclass
@@ -69,7 +68,7 @@ class BTCNeutralAltMREngine:
         lookback_days: int = 7,
         z_entry: float = 2.0,
         z_exit: float = 0.3,
-        max_hold_days: int = 7,
+        max_hold_days: int = 21,
         max_concurrent: int = 3,
         position_pct: float = 0.15,
     ):
