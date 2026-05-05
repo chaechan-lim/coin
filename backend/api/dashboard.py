@@ -404,6 +404,28 @@ async def get_rnd_overview():
                 ]
             else:
                 raw_positions = [single]
+        # BTC-Neutral MR: alt + BTC 2 레그 분리 (alt_symbol/alt_side/alt_qty/alt_entry 형식)
+        if name == "binance_btc_neutral" and raw_positions:
+            expanded = []
+            for p in raw_positions:
+                if not isinstance(p, dict) or "alt_symbol" not in p:
+                    expanded.append(p)
+                    continue
+                expanded.append({
+                    "symbol": p.get("alt_symbol", ""),
+                    "side": p.get("alt_side", ""),
+                    "entry_price": p.get("alt_entry", 0),
+                    "qty": p.get("alt_qty", 0),
+                    "entry_z": p.get("entry_z", 0),
+                })
+                expanded.append({
+                    "symbol": "BTC/USDT",
+                    "side": p.get("btc_side", ""),
+                    "entry_price": p.get("btc_entry", 0),
+                    "qty": p.get("btc_qty", 0),
+                    "entry_z": p.get("entry_z", 0),
+                })
+            raw_positions = expanded
         leverage = status.get("leverage", 1)
         for p in raw_positions:
             if isinstance(p, dict):
