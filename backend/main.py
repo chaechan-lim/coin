@@ -674,6 +674,9 @@ async def lifespan(app: FastAPI):
                 market_data=binance_market_data,
                 initial_capital_usdt=donchian_futures_capital,
                 leverage=donchian_futures_leverage,
+                # 540d 백테스트 (2026-05-05): XRP 단독 +39.54% PF 2.81 MDD 13.6%
+                # 다른 9코인 모두 break-even 또는 손실 → 분산 시 알파 희석 (4코인 +0.30%)
+                coins=["XRP/USDT"],
             )
             if _futures_rnd_coordinator is not None:
                 _donchian_futures_engine.set_futures_rnd_coordinator(_futures_rnd_coordinator)
