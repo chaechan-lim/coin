@@ -286,12 +286,15 @@ class PairsTradingLiveEngine:
             return None
 
         common = df_a.index.intersection(df_b.index).sort_values()
-        if len(common) < self._lookback_hours + 10:
+        if len(common) < self._lookback_hours + 11:
             return None
         df_a = df_a.loc[common]
         df_b = df_b.loc[common]
-        log_a = np.log(df_a["close"].astype(float).values)
-        log_b = np.log(df_b["close"].astype(float).values)
+        # in-progress 1h 제외 (eval xx:05 → 5분치 close vs 168h 평균 = 노이즈)
+        df_a_eval = df_a.iloc[:-1]
+        df_b_eval = df_b.iloc[:-1]
+        log_a = np.log(df_a_eval["close"].astype(float).values)
+        log_b = np.log(df_b_eval["close"].astype(float).values)
         win_a = log_a[-self._lookback_hours:]
         win_b = log_b[-self._lookback_hours:]
         hedge = self._calculate_hedge_ratio(pd.Series(win_a), pd.Series(win_b))
@@ -301,12 +304,15 @@ class PairsTradingLiveEngine:
         if spread_std <= 0:
             return None
 
+        # signal z 는 완성 캔들 기준, 실행가는 라이브 (iloc[-1])
         price_a = float(df_a["close"].iloc[-1])
         price_b = float(df_b["close"].iloc[-1])
-        current_spread = float(np.log(price_b) - hedge * np.log(price_a))
+        signal_a = float(df_a_eval["close"].iloc[-1])
+        signal_b = float(df_b_eval["close"].iloc[-1])
+        current_spread = float(np.log(signal_b) - hedge * np.log(signal_a))
         z = (current_spread - spread_mean) / spread_std
         return {
-            "timestamp": common[-1],
+            "timestamp": df_a_eval.index[-1],
             "price_a": price_a,
             "price_b": price_b,
             "hedge_ratio": hedge,

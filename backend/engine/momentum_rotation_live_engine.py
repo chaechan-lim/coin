@@ -194,14 +194,15 @@ class MomentumRotationLiveEngine:
         logger.info("momentum_rebalance_start")
 
         # 1. 코인별 14일 수익률 계산
+        # eval 01:05 → 마지막 일봉이 1h05m 짜리 in-progress → 직전 완성 일봉 사용
         coin_returns = {}
         for symbol in self._coins:
             try:
                 df = await self._market_data.get_ohlcv_df(symbol, "1d", limit=30)
-                if df is None or len(df) < LOOKBACK_DAYS + 2:
+                if df is None or len(df) < LOOKBACK_DAYS + 3:
                     continue
-                current = float(df["close"].iloc[-1])
-                past = float(df["close"].iloc[-(LOOKBACK_DAYS + 1)])
+                current = float(df["close"].iloc[-2])  # 직전 완성 일봉
+                past = float(df["close"].iloc[-(LOOKBACK_DAYS + 2)])
                 coin_returns[symbol] = (current - past) / past
             except Exception as e:
                 logger.warning("momentum_fetch_failed", symbol=symbol, error=str(e))
@@ -258,13 +259,14 @@ class MomentumRotationLiveEngine:
                      cumulative_pnl=round(self._cumulative_pnl, 2))
 
     async def _fetch_btc_regime_momentum(self) -> float | None:
-        """BTC 30일 모멘텀 (체제 필터용). 실패 시 None."""
+        """BTC 30일 모멘텀 (체제 필터용). 실패 시 None.
+        in-progress 일봉 제외 — 직전 완성 일봉 기준."""
         try:
             df = await self._market_data.get_ohlcv_df(REGIME_SYMBOL, "1d", limit=REGIME_LOOKBACK_DAYS + 5)
-            if df is None or len(df) < REGIME_LOOKBACK_DAYS + 1:
+            if df is None or len(df) < REGIME_LOOKBACK_DAYS + 2:
                 return None
-            past = float(df["close"].iloc[-(REGIME_LOOKBACK_DAYS + 1)])
-            curr = float(df["close"].iloc[-1])
+            past = float(df["close"].iloc[-(REGIME_LOOKBACK_DAYS + 2)])
+            curr = float(df["close"].iloc[-2])
             if past <= 0:
                 return None
             return (curr - past) / past

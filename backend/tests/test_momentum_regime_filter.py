@@ -82,7 +82,8 @@ async def test_regime_momentum_zero_past_price():
     engine = _make_engine()
     df = _make_btc_df(0.0, 100.0, days=REGIME_LOOKBACK_DAYS + 5)
     df.iloc[0, df.columns.get_loc("close")] = 0.0
-    df.iloc[-(REGIME_LOOKBACK_DAYS + 1), df.columns.get_loc("close")] = 0.0
+    # in-progress 제외 fix 후: past = iloc[-(LOOKBACK + 2)]
+    df.iloc[-(REGIME_LOOKBACK_DAYS + 2), df.columns.get_loc("close")] = 0.0
     engine._market_data.get_ohlcv_df = AsyncMock(return_value=df)
 
     mom = await engine._fetch_btc_regime_momentum()

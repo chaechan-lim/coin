@@ -186,16 +186,20 @@ class BreakoutPullbackEngine:
 
     async def _evaluate_symbol(self, symbol: str):
         df = await self._market_data.get_ohlcv_df(symbol, "1d", limit=self._lookback + 5)
-        if df is None or len(df) < self._lookback + 1:
+        if df is None or len(df) < self._lookback + 2:
             return
+
+        # 마지막 in-progress 일봉 제외 (eval 00:45 → 45분치로 N일 돌파 거의 불가)
+        # SL/TP 체크도 같은 df 사용 (ATR-based stop, 일봉 close 기준)
+        df_eval = df.iloc[:-1]
 
         # 현재 포지션 SL/TP 체크
         if symbol in self._positions:
-            await self._check_sl_tp(symbol, df)
+            await self._check_sl_tp(symbol, df_eval)
             return
 
-        current_close = float(df["close"].iloc[-1])
-        lookback_data = df.iloc[-(self._lookback + 1):-1]  # 최근 N일 (오늘 제외)
+        current_close = float(df_eval["close"].iloc[-1])
+        lookback_data = df_eval.iloc[-(self._lookback + 1):-1]  # 최근 N일 (오늘 제외)
         high_n = float(lookback_data["high"].max())
         low_n = float(lookback_data["low"].min())
 

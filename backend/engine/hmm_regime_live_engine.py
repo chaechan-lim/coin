@@ -240,7 +240,11 @@ class HMMRegimeLiveEngine:
             df["vol_24"] = df["log_return"].rolling(vol_window).std().fillna(0.0)
             df["mom_24"] = df["close"].pct_change(mom_window).fillna(0.0)
 
-            X = df[["log_return", "vol_24", "mom_24"]].values[-1:]
+            # state 예측은 마지막 완성 캔들 기준 (in-progress 제외)
+            # 라이브 가격 (iloc[-1]) 은 TP 체크/실행에만 사용
+            if len(df) < 2:
+                return
+            X = df[["log_return", "vol_24", "mom_24"]].values[-2:-1]
             state = int(ms.model.predict(X)[0])
             state_prob = float(ms.model.predict_proba(X)[0][state])
 

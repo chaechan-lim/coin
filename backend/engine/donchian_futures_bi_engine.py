@@ -339,7 +339,10 @@ class DonchianFuturesBiEngine:
         df = await self._fetch_daily_df(symbol)
         if df is None:
             return
-        last = df.iloc[-1]
+        # 마지막 in-progress 일봉 제외 (eval 시점 00:35 → 35분치 데이터로 N일 high/low 돌파 불가)
+        if len(df) < 2:
+            return
+        last = df.iloc[-2]
         high = float(last["high"])
         low = float(last["low"])
         close = float(last["close"])
@@ -527,7 +530,11 @@ class DonchianFuturesBiEngine:
         df = await self._fetch_daily_df(symbol)
         if df is None:
             return
-        last = df.iloc[-1]
+        # 마지막 in-progress 일봉 제외 (entry와 일관성)
+        # SL은 close-based 이라 일봉 close 후 평가가 정확
+        if len(df) < 2:
+            return
+        last = df.iloc[-2]
         high = float(last["high"])
         low = float(last["low"])
         close = float(last["close"])

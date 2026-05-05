@@ -182,10 +182,10 @@ class BTCNeutralAltMREngine:
         """각 알트코인에 대해 z-score 계산 후 진입 조건 확인."""
         btc_df = await self._market_data.get_ohlcv_df(self.BTC_SYMBOL, "1h",
                                                        limit=self._lookback_days * 24 + 10)
-        if btc_df is None or len(btc_df) < self._lookback_days * 24:
+        if btc_df is None or len(btc_df) < self._lookback_days * 24 + 1:
             return
 
-        btc_closes = btc_df["close"].values
+        btc_closes = btc_df["close"].values[:-1]  # in-progress 제외
 
         for symbol in self._coins:
             if symbol in self._positions:
@@ -208,20 +208,20 @@ class BTCNeutralAltMREngine:
                 logger.error("btc_neutral_scan_error", symbol=symbol, error=str(e))
 
     async def _compute_z_score(self, alt_symbol: str, btc_closes=None) -> Optional[float]:
-        """ALT/BTC 비율의 z-score 계산."""
+        """ALT/BTC 비율의 z-score 계산. in-progress 1h 캔들 제외."""
         alt_df = await self._market_data.get_ohlcv_df(alt_symbol, "1h",
                                                        limit=self._lookback_days * 24 + 10)
-        if alt_df is None or len(alt_df) < self._lookback_days * 24:
+        if alt_df is None or len(alt_df) < self._lookback_days * 24 + 1:
             return None
 
         if btc_closes is None:
             btc_df = await self._market_data.get_ohlcv_df(self.BTC_SYMBOL, "1h",
                                                            limit=self._lookback_days * 24 + 10)
-            if btc_df is None or len(btc_df) < self._lookback_days * 24:
+            if btc_df is None or len(btc_df) < self._lookback_days * 24 + 1:
                 return None
-            btc_closes = btc_df["close"].values
+            btc_closes = btc_df["close"].values[:-1]  # in-progress 제외
 
-        alt_closes = alt_df["close"].values
+        alt_closes = alt_df["close"].values[:-1]  # in-progress 제외
         n = self._lookback_days * 24
         btc_window = btc_closes[-n:]
         alt_window = alt_closes[-n:]

@@ -101,13 +101,18 @@ def _make_daily_df_with_breakout(n: int = 30, base_price: float = 100.0,
     opens = closes * 1.001
     volumes = np.full(n, 1000.0)
 
+    # 라이브 엔진은 in-progress 마지막 캔들 제외 → 직전 캔들(-2)에 돌파 배치.
+    # 마지막 캔들(-1)은 in-progress 신규 캔들 (close 거의 변동 없음).
     if breakout_high:
-        # Last candle breaks above all previous highs
-        closes[-1] = float(highs[:-1].max()) + base_price * 0.03
-        highs[-1] = closes[-1] * 1.01
+        closes[-2] = float(highs[:-2].max()) + base_price * 0.03
+        highs[-2] = closes[-2] * 1.01
+        closes[-1] = closes[-2]  # in-progress 캔들 — 직전 close 그대로
+        highs[-1] = closes[-1] * 1.001
     if breakout_low:
-        closes[-1] = float(lows[:-1].min()) - base_price * 0.03
-        lows[-1] = closes[-1] * 0.99
+        closes[-2] = float(lows[:-2].min()) - base_price * 0.03
+        lows[-2] = closes[-2] * 0.99
+        closes[-1] = closes[-2]
+        lows[-1] = closes[-1] * 0.999
 
     return pd.DataFrame({
         "timestamp": dates,
@@ -533,8 +538,8 @@ class TestBTCNeutralAltMREngine:
         btc_closes = np.full(n_hours, 50000.0)
         alt_closes = np.full(n_hours, 3000.0)
 
-        # Make the last point deviate significantly
-        alt_closes[-1] = 3000.0 * 1.10  # 10% up vs BTC (should give positive z)
+        # 라이브 엔진은 in-progress (-1) 제외 → -2가 마지막 완성. deviation을 -2에 배치.
+        alt_closes[-2] = 3000.0 * 1.10  # 10% up vs BTC (should give positive z)
 
         # Build dataframes
         dates = pd.date_range("2026-01-01", periods=n_hours, freq="1h")
