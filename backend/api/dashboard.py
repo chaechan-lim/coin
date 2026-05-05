@@ -511,11 +511,17 @@ async def get_rnd_overview():
                 "coins_watched": len(status.get("coins", [])),
             }
         elif name == "binance_momentum":
+            from engine.momentum_rotation_live_engine import (
+                LOOKBACK_DAYS as _MOM_LB,
+                REBALANCE_INTERVAL_DAYS as _MOM_REB,
+                TOP_N as _MOM_TOP,
+                BOTTOM_N as _MOM_BOT,
+            )
             params = {
-                "rebalance_days": 5,
-                "lookback_days": 7,
-                "top_n": 3,
-                "bottom_n": 3,
+                "rebalance_days": _MOM_REB,
+                "lookback_days": _MOM_LB,
+                "top_n": _MOM_TOP,
+                "bottom_n": _MOM_BOT,
                 "coins_watched": len(status.get("coins", [])),
                 "last_rebalance": status.get("last_rebalance_date"),
             }
