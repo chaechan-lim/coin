@@ -76,6 +76,21 @@ def _collect_engine_positions(registry: EngineRegistry) -> dict[tuple[str, str],
                     out.setdefault((coin_b, side_b), []).append((ex, qb))
                 continue
 
+            # BTC-Neutral MR: alt + BTC 2 레그 분리 (alt_symbol/alt_side/alt_qty + btc_side/btc_qty)
+            if "alt_symbol" in p:
+                alt_sym = p.get("alt_symbol")
+                alt_side = (p.get("alt_side") or "").lower()
+                alt_qty = float(p.get("alt_qty", 0) or 0)
+                btc_side = (p.get("btc_side") or "").lower()
+                btc_qty = float(p.get("btc_qty", 0) or 0)
+                alt_ps = "LONG" if alt_side == "long" else "SHORT" if alt_side == "short" else None
+                btc_ps = "LONG" if btc_side == "long" else "SHORT" if btc_side == "short" else None
+                if alt_sym and alt_ps and alt_qty > 0:
+                    out.setdefault((alt_sym, alt_ps), []).append((ex, alt_qty))
+                if btc_ps and btc_qty > 0:
+                    out.setdefault(("BTC/USDT", btc_ps), []).append((ex, btc_qty))
+                continue
+
             sym = p.get("symbol")
             if not sym:
                 continue
