@@ -51,7 +51,8 @@ class Order(Base):
     )
 
     id = Column(Integer, primary_key=True)
-    exchange = Column(String(20), nullable=False, default="bithumb", server_default="bithumb")
+    # exchange VARCHAR(50): R&D 엔진 이름 길이 수용 (예: binance_donchian_futures 24자)
+    exchange = Column(String(50), nullable=False, default="bithumb", server_default="bithumb")
     exchange_order_id = Column(String(100), nullable=True)
     symbol = Column(String(20), nullable=False)
     side = Column(String(4), nullable=False)  # "buy" / "sell"
@@ -321,7 +322,8 @@ class ServerEvent(Base):
 
     id = Column(Integer, primary_key=True)
     level = Column(String(10), nullable=False, default="info")
-    category = Column(String(20), nullable=False, default="system")
+    # category VARCHAR(40): R&D 엔진 카테고리 길이 수용 (예: donchian_futures_trade 24자)
+    category = Column(String(40), nullable=False, default="system")
     title = Column(String(200), nullable=False)
     detail = Column(Text, nullable=True)
     metadata_ = Column("metadata", JSON, nullable=True)
