@@ -9,24 +9,27 @@
 R&D 기반 멀티 전략 암호화폐 자동 매매 시스템.
 Python 3.12 (FastAPI) + React 18 (TypeScript) + PostgreSQL 16.
 
-**현재 상태 (2026-04-13)**: 메인 엔진(4전략/V2/서지) 비활성 → 6개 R&D 전략 라이브 운영 중.
+**현재 상태 (2026-05-05)**: 메인 엔진(4전략/V2/서지) 비활성 → 7개 R&D 전략 라이브 (모두 백테스트/WF 검증 통과).
 
-### R&D 엔진 (활성)
-| 엔진 | 거래소 | 시장 | 전략 | 자금 |
-|------|--------|------|------|------|
-| DonchianDailyEngine | 현물 | long-only | 일봉 Donchian 앙상블 (10/20/40/55/90) | 200 USDT |
-| DonchianFuturesBiEngine | 선물 2x | long+short | 양방향 Donchian | 200 USDT |
-| PairsTradingLiveEngine | 선물 2x | delta-neutral | BTC-ETH z-score | 150 USDT |
-| MomentumRotationLiveEngine | 선물 2x | long+short | 주간 상대강약 top2/bottom2 | 200 USDT |
-| HMMRegimeLiveEngine | 선물 2x | long/short/flat | 1h HMM 3-state 체제전환 | 200 USDT |
-| FearGreedDCAEngine | 현물 | long-only DCA | RSI+30일변동 기반 분할매수 | 200 USDT |
+### R&D 엔진 (활성, 자본 2,300 USDT / walletBalance ~3,460)
+| 엔진 | 거래소 | 코인/페어 | 자본 | WF 검증 |
+|------|--------|----------|------|---------|
+| HMMRegimeLiveEngine | binance_hmm | BTC + ETH(entry_blocked, 자연청산 대기) | 600 | BTC 270d +103% |
+| DonchianFuturesBiEngine | binance_donchian_futures | XRP 단독 | 100 | 540d +45%, 최근 약화 |
+| PairsTradingLiveEngine | binance_pairs | ADA-ARB (lb=72h, z_e=2.0) | 300 | WF 3/3 +30.87% |
+| MomentumRotationLiveEngine | binance_momentum | 24 alts (lb=7d, **reb=14d**, top/bot=3) | 200 | WF 3/4 평균 +264% |
+| VolumeMomentumEngine | binance_vol_mom | 7 alts (DOGE/DOT/AVAX 제외, vol=3, ATR SL/TP=4/8) | 200 | WF 4/4 +59~+228% |
+| BTCNeutralAltMREngine | binance_btc_neutral | SOL+ETH+ADA (max_hold=21d) | 800 | WF 4/4 평균 +7.37% |
+| BreakoutPullbackEngine | binance_breakout_pb | XRP 단독 (PB=4%, SL=5%, TP=8%) | 100 | WF 4/4 +11~+27% |
 
-### 비활성 (메인 엔진)
+### 비활성
 | 엔진 | 사유 |
 |------|------|
-| TradingEngine (4전략) | 백테스트 look-ahead bias 발견, alpha 없음 확인 |
-| FuturesEngineV2 (레짐) | 동일 — 모든 V2 결과 무효화 |
+| TradingEngine (4전략) | 백테스트 look-ahead bias, alpha 없음 |
+| FuturesEngineV2 (레짐) | V2 결과 무효화 |
 | SurgeEngine | 선물 V2와 함께 비활성 |
+| DonchianDailyEngine | .env 비활성 (검증된 백테스트는 있음, 라이브 미사용) |
+| FearGreedDCAEngine | .env 비활성 |
 
 ---
 
@@ -246,6 +249,32 @@ cash = wallet - total_margin
 # 라이브 (MarketDataService): sma_20, rsi_14, atr_14
 # 전략에서 df['sma_20'] 사용 — 백테스트에서는 rename 필요
 ```
+
+### ⚠️ in-progress 캔들 (2026-05-05 중요 fix)
+ccxt `fetch_ohlcv` 는 **현재 진행 중인 캔들을 마지막 row 로 반환**.
+xx:05 평가 시 마지막 1h 캔들은 5분치 거래 데이터만 (volume 작음, close 미확정).
+
+**라이브 엔진 6개 모두 영향**: 시그널 평가에 in-progress 사용하면 백테스트와 다른 결과.
+대표 사례: Volume Momentum vol_ratio = 5분치 / 1h 평균 → 항상 < 1.0 → 19일간 진입 0건.
+
+**수정 패턴 (이미 적용)**:
+```python
+# 시그널 평가는 마지막 완성 캔들 사용
+df_eval = df.iloc[:-1]
+# 또는 인덱스 명시적
+last_completed = df.iloc[-2]
+# SL/TP 체크는 in-progress 그대로 (실시간 가격 반응)
+sl_check_high = float(df["high"].iloc[-1])
+```
+**적용된 엔진**: volume_momentum, donchian_futures_bi, breakout_pullback,
+momentum_rotation (regime_momentum 포함), hmm_regime, pairs_trading, btc_neutral_alt_mr.
+**미래 R&D 엔진 추가 시 동일 패턴 적용 필수**.
+
+### orders.exchange / server_events.category 컬럼 길이 (2026-05-05 fix)
+- `orders.exchange` VARCHAR(50) — 라이브 24자 한도 ('binance_donchian_futures' 24자)
+- `server_events.category` VARCHAR(40) — 알림 카테고리 한도
+- 이전 VARCHAR(20) 시 InsertError → DB 미기록 → 재시작 시 좀비 발생.
+- 테이블 변경: `ALTER TABLE ... ALTER COLUMN ... TYPE VARCHAR(N)`
 
 ### DB 마이그레이션
 - 새 컬럼: `db/migrate.py`에 `add_column_if_not_exists()` 추가
