@@ -173,31 +173,36 @@ class VolumeMomentumEngine:
 
     async def _evaluate_symbol(self, symbol: str):
         df = await self._market_data.get_ohlcv_df(symbol, "1h", limit=50)
-        if df is None or len(df) < 20:
+        if df is None or len(df) < 21:
             return
 
-        # 현재 포지션 SL/TP 체크 (intra-candle: high/low)
+        # 현재 포지션 SL/TP 체크는 in-progress 캔들 high/low 그대로 사용
+        # (intra-candle SL/TP 발동은 실시간 가격 반영 필요)
         if symbol in self._positions:
             await self._check_sl_tp(symbol, df)
             return
 
+        # 신규 진입 시그널 평가는 마지막 in-progress 캔들 제외 — 백테스트와 일치
+        # (xx:05 평가 시 마지막 행이 막 시작한 새 1h 캔들 → vol/RSI/ATR 부정확)
+        df_eval = df.iloc[:-1]
+
         # 거래량 급증 감지
-        vol_ratio = self._compute_vol_ratio(df)
+        vol_ratio = self._compute_vol_ratio(df_eval)
         if vol_ratio < self._vol_mult:
             return
 
         # 6h 모멘텀 방향
-        close_now = float(df["close"].iloc[-1])
-        close_6h_ago = float(df["close"].iloc[-7]) if len(df) >= 7 else float(df["close"].iloc[0])
+        close_now = float(df_eval["close"].iloc[-1])
+        close_6h_ago = float(df_eval["close"].iloc[-7]) if len(df_eval) >= 7 else float(df_eval["close"].iloc[0])
         momentum = close_now - close_6h_ago
 
         # RSI 계산
-        rsi = self._compute_rsi(df)
+        rsi = self._compute_rsi(df_eval)
         if rsi is None:
             return
 
         # ATR 계산
-        atr = self._compute_atr(df)
+        atr = self._compute_atr(df_eval)
         if atr is None or atr <= 0:
             return
 
