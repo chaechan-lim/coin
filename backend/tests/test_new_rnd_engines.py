@@ -624,7 +624,8 @@ class TestBTCNeutralAltMREngine:
         engine = self._make_engine()
         assert "BTC/USDT" in engine.tracked_coins
         assert "ETH/USDT" in engine.tracked_coins
-        assert len(engine.tracked_coins) >= 5  # 4 alts (ETH/SOL/LINK/BNB) + BTC
+        # WF 검증 후 (2026-05-05): SOL/ETH/ADA 3 alts + BTC (4/4 windows positive)
+        assert len(engine.tracked_coins) >= 4
 
     @pytest.mark.asyncio
     async def test_set_methods_no_op(self):
